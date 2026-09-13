@@ -69,15 +69,19 @@ async function runFirstPaint(storage = {}) {
 const minHeight = (css) => /#pending\{min-height:([^}]+)\}/.exec(css)?.[1];
 
 test("the pre-paint honours the stored pin (and actually reads it)", async () => {
-  // The connected pin, as popup.ts writes it after a paired render.
-  const { reads, css } = await runFirstPaint({ "lop:pin-hint": "86px" });
+  // The connected pin, as popup.ts writes it after a paired render. 148px, not
+  // the 86px this test shipped with: the Connected card reserves the update
+  // advisory's slot (popup.css), which grew the card 207.16 -> 269.16px, and the
+  // pin moved with it. The number is the one popup.ts writes and first-paint.js
+  // pre-paints — see PIN_CONNECTED in each.
+  const { reads, css } = await runFirstPaint({ "lop:pin-hint": "148px" });
   assert.ok(
     reads.includes("lop:pin-hint"),
     `the script must READ the hint key; it read ${JSON.stringify(reads)} — an undeclared KEY throws before getItem is called and the catch swallows it`,
   );
   assert.equal(
     minHeight(css),
-    "86px",
+    "148px",
     "a browser pinned to the connected card must pre-paint at that height, not the pairing card's",
   );
 });
@@ -102,7 +106,7 @@ test("the legacy boolean key still pre-paints the connected card", async () => {
   // the primary hint was.
   const { reads, css } = await runFirstPaint({ "lop:paired-hint": "1" });
   assert.ok(reads.includes("lop:paired-hint"), `legacy key not read: ${JSON.stringify(reads)}`);
-  assert.equal(minHeight(css), "86px");
+  assert.equal(minHeight(css), "148px");
 });
 
 test("no hint at all is the pairing pin, and storage that throws is survived", async () => {

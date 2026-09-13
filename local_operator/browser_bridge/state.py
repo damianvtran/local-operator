@@ -52,6 +52,22 @@ class BridgeState(BaseModel):
     #: reads as "no latch" — the conservative answer, since a false positive here
     #: would claim a wedge the daemon never reported.
     extension_unresponsive: bool = False
+    #: The attached extension's OWN reported version, as the daemon last saw it
+    #: in `hello`, and its protocol version. Published because the session-side
+    #: decision they drive — whether this link can use the `owner_*` lifecycle
+    #: at all (see `browser_bridge/resources.py`) — must not cost a socket
+    #: round-trip, and because the file is the only surface a session between
+    #: dials can read. Blank/0 when no link is proven, so a stamp outliving its
+    #: socket can never drive that decision.
+    extension_version: str = ""
+    extension_proto: int = 0
+    #: Whether a KNOWN extension version is strictly below the one this runtime
+    #: ships with (`protocol.EXPECTED_EXTENSION_VERSION`). The predicate lives
+    #: in the daemon (see `BridgeService.publish`) and is published rather than
+    #: recomputed here, so there is exactly one spelling of "an update is
+    #: available". Defaults false, so a file written by an older daemon never
+    #: nags.
+    extension_update_available: bool = False
     heartbeat_at: float = Field(default_factory=time.time)
     started_at: float = Field(default_factory=time.time)
 

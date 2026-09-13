@@ -2076,6 +2076,24 @@ def browser_command(args: argparse.Namespace) -> int:
                     break_long_words=False,
                 ):
                     print(line)
+                if row.get("ownership") == "unavailable":
+                    # The record's own statement that the connected extension had
+                    # no `owner_*` lifecycle, so this scope was driven
+                    # capability-only. Printed because "it worked in legacy mode"
+                    # and "its ownership is proven" need opposite next steps when
+                    # a tab is stranded, and the two are otherwise identical on
+                    # this screen. Redacted by construction: the marker names the
+                    # MODE, never a capability.
+                    for line in textwrap.wrap(
+                        "ownership: unavailable — driven in legacy mode (the connected "
+                        "browser extension has no ownership lifecycle); no tab was "
+                        "reconciled or adopted",
+                        width=76,
+                        initial_indent="  ",
+                        subsequent_indent="    ",
+                        break_long_words=False,
+                    ):
+                        print(line)
                 if not row.get("cleanup_candidate") and row.get("blocked_reason"):
                     # Wrapped: the reasons name a recovery command, and a line
                     # running past the terminal width is where that command
@@ -2162,6 +2180,23 @@ def browser_command(args: argparse.Namespace) -> int:
         connected = bool(health.get("extension_connected"))
         unresponsive = bool(health.get("extension_unresponsive"))
         print(f"extension connected: {'yes' if connected else 'no'}")
+        # The extension-update advisory, immediately under the line it is about.
+        # Deliberately a NOTE and not a fault: nothing is refused for an older
+        # extension any more (see MIN_SUPPORTED_PROTO), and the extension line
+        # above already answers the question the reader came for. The store's
+        # live version is unknowable from here, so the contingency is on the
+        # store and the sentence never says "requires" or "must".
+        if health.get("extension_update_available"):
+            from local_operator.browser_bridge.protocol import (
+                EXPECTED_EXTENSION_VERSION,
+                extension_update_note,
+            )
+
+            note = extension_update_note(
+                str(health.get("extension_version", "")),
+                str(health.get("extension_expected_version") or EXPECTED_EXTENSION_VERSION),
+            )
+            print(f"                     {note} (fixes and security patches)")
         print(f"paired:              {'yes' if result['paired'] else 'no'}")
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
