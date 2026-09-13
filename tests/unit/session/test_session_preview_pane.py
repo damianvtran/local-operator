@@ -18,6 +18,7 @@ import pytest
 
 from local_operator.session.preview import (
     CHECKPOINT_CUSTOM_TYPE,
+    GAP_ROLE,
     PREVIEW_TAIL_BYTES,
     SessionPreviews,
     condense_entries,
@@ -195,10 +196,12 @@ def test_a_session_without_a_checkpoint_omits_the_model_line_entirely(tmp_path: 
     assert previews.checkpoint("bb22cc33dd44") == {}
 
 
-def test_the_tail_read_is_bounded_by_the_window_not_the_file(tmp_path: Path) -> None:
+def test_the_read_is_bounded_by_the_windows_not_the_file(tmp_path: Path) -> None:
     """Bytes read are counted through a wrapper, so this asserts the BOUND
     rather than a wall-clock proxy. The cost of a first preview is independent
-    of file size: one ``stat``, one ``seek``, one 256 KB read.
+    of file size: one ``stat`` plus at most the HEAD window and the TAIL window
+    (``2 * PREVIEW_TAIL_BYTES``), never the file — the pane reads both ends now
+    so that a middle slice cannot pass for a beginning (QA round 1, Q2).
     """
     filler = "x" * 4_000
     entries = [_message("user", f"{index} {filler}", ts=float(index)) for index in range(200)]
@@ -230,10 +233,42 @@ def test_the_tail_read_is_bounded_by_the_window_not_the_file(tmp_path: Path) -> 
     finally:
         Path.open = real_open  # type: ignore[method-assign]
 
-    assert read_bytes <= PREVIEW_TAIL_BYTES
+    assert read_bytes <= 2 * PREVIEW_TAIL_BYTES
     assert read_bytes < transcript.stat().st_size
     assert turns[-1].text.endswith("THE TAIL MARKER")
-    assert not any(turn.text.startswith("0 ") for turn in turns)
+    # BOTH ends are present, and in order: the pane opens on the session's real
+    # first turn (turn 0) instead of on the window's, which is the whole point
+    # of reading the head as well (QA round 1, Q2 — the 557 KB repro opened on
+    # ``burst 22`` and drew it exactly like a beginning).
+    assert turns[0].text.startswith("0 ")
+    # ...with the unread middle STATED between them, not silently absent.
+    assert [turn.role for turn in turns].count(GAP_ROLE) == 1
+    gap = next(index for index, turn in enumerate(turns) if turn.role == GAP_ROLE)
+    # The head ends BEFORE the tail begins, and the marker is the only thing
+    # between them: nothing is drawn twice and nothing is drawn out of order.
+    before = int(turns[gap - 1].text.split(" ")[0])
+    after = int(turns[gap + 1].text.split(" ")[0])
+    assert before < after, (before, after)
+    assert turns[gap + 1 :][-1].text.endswith("THE TAIL MARKER")
+
+
+def test_a_file_inside_two_windows_is_read_whole_with_no_gap_marker(tmp_path: Path) -> None:
+    """The band where the head and tail windows would OVERLAP.
+
+    Concatenating them there draws the overlap twice — the same turn above and
+    below the marker — so that band is read once instead, and with the whole
+    file in hand there is nothing missing to mark.
+    """
+    filler = "x" * 4_000
+    entries = [_message("user", f"{index} {filler}", ts=float(index)) for index in range(70)]
+    session = _write(tmp_path, "dd44ee55ff66", entries)
+    size = (session / "transcript.jsonl").stat().st_size
+    assert PREVIEW_TAIL_BYTES < size <= 2 * PREVIEW_TAIL_BYTES, size
+
+    turns = SessionPreviews(tmp_path / "sessions").condensed("dd44ee55ff66")
+    assert not any(turn.role == GAP_ROLE for turn in turns)
+    # In order, from the true start to the true end, each turn exactly once.
+    assert [turn.text.split(" ")[0] for turn in turns] == [str(index) for index in range(70)]
 
 
 def test_grep_context_is_centred_on_the_hit_at_the_width_requested() -> None:

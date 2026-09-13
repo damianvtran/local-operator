@@ -12524,7 +12524,7 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
         assert band_for(("github", "connected")).failed is False
 
 
-# --- QA probe: picker enter -> real resume boot (UNCOMMITTED, for the coder) --
+# --- picker enter -> real resume boot ----------------------------------------
 
 
 def _stamp(tmp_path: Path, session_id: str, mtime: float) -> None:
