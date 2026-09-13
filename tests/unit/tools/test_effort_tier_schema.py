@@ -676,7 +676,11 @@ def test_operator_mode_tells_the_model_not_to_pass_effort(config_dir, tmp_path) 
     (task,) = create_tools(_context(tmp_path), enabled=["task"])
     assert "do not pass 'effort'" in task.description
     assert "values.subagents.model_choice=operator" in task.description
-    assert "A role may pin its own model." in task.description
+    # The clip is asserted, not the architect's fuller sentence: the wording was
+    # shortened to fit the start-context ratchet (``scripts/bench_context_budget.py``),
+    # so what this pins is the CONTENT a delegating model needs — a pin is still
+    # available to a role — not the phrasing.
+    assert "a role may pin its own" in task.description
 
 
 def test_operator_mode_leaves_the_agent_tool_only_the_sentinel(config_dir, tmp_path) -> None:

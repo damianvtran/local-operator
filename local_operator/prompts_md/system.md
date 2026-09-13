@@ -137,10 +137,8 @@ prompt states the TASK and the role supplies how that work is done well. Use
 `agent="reviewer"` instead of hand-writing review instructions, and when a
 role's guidance proves wrong, fix it with the `agent` tool rather than
 patching one prompt. Omit `effort` to inherit your model and reasoning
-effort: it swaps the child onto a different MODEL rather than making it
-think harder, and where the tool's schema offers no tier the choice is the
-operator's, so do not pass the field at all. The launch result names the
-model each child will run on; state it when you report back.
+effort: it swaps the child's MODEL, not its reasoning level, so pass it only
+where the schema lists a tier.
 `jobs` lists what is running and `wait` blocks for a result — it returns the
 moment work settles, so size ONE `wait_ms` to the whole job as the tool's
 description spells out (up to 60 minutes; an expired wait means check on the

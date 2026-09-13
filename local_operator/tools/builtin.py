@@ -10193,8 +10193,7 @@ def _effort_tier_field_description() -> str:
 #: a model asked to explain the refusal) can find the switch that changes it.
 _OPERATOR_CHOICE_EFFORT_SENTENCE = (
     "No effort tiers are yours to choose (values.subagents.model_choice=operator): "
-    "every child inherits this session's model and reasoning effort, so do not pass "
-    "'effort'. A role may pin its own model."
+    "children inherit this session's model — do not pass 'effort'; a role may pin its own."
 )
 
 
@@ -10238,14 +10237,21 @@ class TaskItem(BaseModel):
     """One slice of a task batch. ``agent`` names the ROLE the child runs as —
     a registered profile or a packaged starter (reviewer, coder, architect,
     manager, designer, scout); the role supplies standing guidance and may
-    restrict the child's tools.
+    restrict the child's tools."""
 
-    What ``effort`` does is left to the FIELD's description and to the tool's
-    own description, which are the two places that know which mode they are
-    rendering for: this docstring becomes the ``$defs.TaskItem`` description on
-    every build, including the ones where the property is deleted because the
-    operator owns the choice, and a sentence here would be a claim about a
-    field that is not present."""
+    # What ``effort`` does is deliberately NOT stated in the docstring above,
+    # and the sentence that used to state it ("``effort`` routes to a
+    # configured model tier") is gone rather than reworded. That docstring
+    # becomes the ``$defs.TaskItem`` description on EVERY build — including the
+    # builds where the property is deleted because the operator owns the
+    # choice — so any sentence here is a claim about a field that may not be
+    # present. The field's own description and the tool's description are the
+    # two places that know which mode they render for.
+    #
+    # It lives here, as a comment, because the docstring above is prompt text:
+    # it rides every request and is charged to the context-budget ratchet
+    # (``scripts/bench_context_budget.py``), which is why the explanation of a
+    # missing field must not itself cost tokens.
 
     model_config = ConfigDict(extra="forbid")
 
