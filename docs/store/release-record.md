@@ -52,15 +52,15 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
-## v0.1.13 — landed on `main`, NOT submitted (deferred behind the pending 0.1.12 review)
+## v0.1.14 — landed on `main`, NOT submitted (deferred behind the pending 0.1.12 review)
 
 | Field | Value |
 | --- | --- |
-| Extension version | 0.1.13 |
+| Extension version | 0.1.14 |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | *filled in below once this lands* |
-| `extension/` tree hash | *filled in below once this lands* (the deterministic input pin — see the audit note above) |
+| Source commit | the bump commit on `fix/extension-version-skew-does-not-break-bridge` (SHA in the PR thread). Recording it inside the commit that creates it is impossible, which is why the field that actually pins the input — the tree hash below — is computed from the staged tree and is stable across the doc-only edits that carry this entry |
+| `extension/` tree hash | `2c8363f2589fd2f608a1eb920670f299d36552cf` (staged tree, `git rev-parse <commit>:extension`) |
 | Artifact SHA-256 | *not applicable — never uploaded* |
 | Artifact size | *not applicable — never built for upload* |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged); the runtime now accepts the WINDOW `MIN_SUPPORTED_PROTO..PROTO_VERSION` |
@@ -78,10 +78,21 @@ this release — the update advisory now renders in the popup's Connected card �
 has to carry a bump in the same commit, or the version stops pinning exactly one
 tree (the 0.1.9 lesson).
 
+**Why 0.1.14 and not 0.1.13.** 0.1.13 was bumped on `main` by #1038
+(`ced1828f4`, `feat(bridge): pair several extension identities at once`) and, like
+this one, never submitted — it has no entry of its own above, and its `extension/`
+tree differs from this one's in the multi-identity worker, popup and pairing
+code. Two different trees reading `0.1.13` is exactly the ambiguity AGENTS.md
+forbids (the 0.1.9 lesson), so this branch moved the number off 0.1.13 rather
+than share it: `0.1.13` therefore means #1038's tree as merged
+(`ced1828f4`), and this tree is `0.1.14`. The next submission window covers
+whichever of the two is promoted last — record that dispatch here, with its own
+workflow run and tree hash, before promoting it.
+
 **The store dispatch is deliberately withheld.** The store refuses uploads while
 an item is in review (`HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE`), and the
 recorded rule is never to cancel a pending review to force a submission. So
-0.1.13 is queued for the NEXT submission window, after 0.1.12 is promoted, and
+0.1.14 is queued for the NEXT submission window, after 0.1.12 is promoted, and
 nothing here claims it is live. When that dispatch happens, append the workflow
 run URL, the exact API response, the source commit and the tree hash to this
 entry.

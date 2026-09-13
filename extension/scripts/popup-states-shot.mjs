@@ -233,7 +233,7 @@ const STATES = {
     extension_connected: true,
     protocol_version: 1,
     extension_version: "0.1.10",
-    extension_expected_version: "0.1.13",
+    extension_expected_version: "0.1.14",
     extension_update_available: true,
   },
   // The LONGEST realistic pair the sentence can hold, so the wrap assertion
