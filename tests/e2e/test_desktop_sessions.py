@@ -805,3 +805,180 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
             await runtime.aclose()
         if handle is not None:
             await handle.dispose()
+
+
+class RepeatingTextStream:
+    """Serves the same text turn to every provider call, and records the calls.
+
+    ``ScriptedStream`` indexes its script by call number and raises past the
+    end, which is right where the test owns the parent's whole turn sequence.
+    The child launched below is built by PRODUCTION code and the test does not
+    own its call count (a naming errand or a continuation is one more call), so
+    this double answers any number of calls instead of pinning a sequence it
+    cannot know.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.requests: list[Any] = []
+
+    def __call__(self, request, signal=None):  # noqa: ANN001
+        self.requests.append(request)
+
+        async def gen():
+            for event in text_turn(self.text):
+                yield event
+
+        return gen()
+
+
+@pytest.mark.asyncio
+async def test_a_real_child_transcript_is_readable_through_the_parent_route(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """The sidebar's child reader against the ASSEMBLED application (§ 9.1).
+
+    Everything here is production: uvicorn, the bearer/origin gate, the route,
+    the adapter, a real parent `Session`, and a real child launched by
+    `Session._launch_subagent` — the production path that writes the child's
+    transcript, stamps its `origin.json` as a subagent, and persists the
+    parent's roster SIDECAR. The only double is the provider stream, as
+    everywhere in this stage.
+
+    What the route must do on those real artifacts: return the child's rows
+    verbatim in the parent's envelope with `state: "ready"`, page backwards on
+    the child's own file, answer 404 `child_not_found` for a pair the parent
+    never named, and answer the derived `gone` as an ANSWER once the child's
+    directory is removed — a reader cannot tell those two absences apart from
+    the roster row, which is why the backend derives it at all.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server, serving = await serve_app(listener, token)
+
+    from local_operator.resume import ORIGIN_SUBAGENT, session_origin
+    from local_operator.session.restored_rows import record_field, roster_records
+    from local_operator.session.session import (
+        SUBAGENT_ROSTER_SIDECAR,
+        _read_roster_sidecar,
+    )
+    from local_operator.session.transcript import read_transcript_page
+
+    parent_id = "abcdefabcdef"
+    parent_dir = root / "sessions" / parent_id
+    parent = build_session(parent_dir, RepeatingTextStream("child did the work"), cwd=workspace)
+    job_id: str | None = None
+
+    def named_child() -> Path | None:
+        """The first child the parent's OWN persisted roster names, or None.
+
+        Reading the sidecar rather than a private accessor keeps the test on
+        the same artifact the route's containment proof consumes.
+        """
+        payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
+        for record in roster_records(payload):
+            raw = record_field(record, "session_dir")
+            if raw:
+                return Path(str(raw))
+        return None
+
+    async def settled() -> Path:
+        """The child's directory once the child has STOPPED writing.
+
+        A running child appends as it goes, so a test that reads its file twice
+        and demands equality would assert something the design does not promise
+        — the route returns what was on disk at ITS read instant, and a
+        half-written line degrades to "not there yet" (that is the whole reason
+        the reader is a fresh `Transcript` per call). Quiescence is what makes
+        the comparison meaningful: the launched job reaches `completed` and the
+        file's size and mtime stop moving.
+        """
+        async with asyncio.timeout(90):
+            while True:
+                child = named_child()
+                job = parent.jobs.get(job_id) if job_id else None
+                if child is not None and job is not None and job.status == "completed":
+                    transcript = child / "transcript.jsonl"
+                    if transcript.is_file():
+                        before = transcript.stat()
+                        await asyncio.sleep(0.3)
+                        after = transcript.stat()
+                        if (before.st_size, before.st_mtime) == (after.st_size, after.st_mtime):
+                            return child
+                await asyncio.sleep(0.05)
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            client.headers["Authorization"] = f"Bearer {token}"
+            capabilities = (await client.get("/v1/capabilities")).json()["result"]
+            assert capabilities["features"]["subagent_transcript"] == 1
+
+            await parent.async_init()
+            job_id = parent._launch_subagent(label="audit", prompt="audit the config")
+            child_dir = await settled()
+            child_id = child_dir.name
+            assert session_origin(child_dir) == ORIGIN_SUBAGENT
+            assert len(child_id) == 12 and child_id == child_id.lower()
+
+            url = f"/v1/desktop/sessions/{parent_id}/children/{child_id}/transcript"
+            response = await client.get(url)
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            expected = [
+                json.loads(row.to_json())
+                for row in read_transcript_page(child_dir, limit=500).entries
+            ]
+            assert expected, "the real child wrote no transcript rows"
+            assert result == {
+                "entries": expected,
+                "has_more": False,
+                "cursor_missing": False,
+                "state": "ready",
+            }
+            assert response.headers["cache-control"] == "no-store"
+
+            # Paging runs on the CHILD's file, and `has_more` is the child's.
+            if len(expected) >= 2:
+                tail = (await client.get(url + "?limit=1")).json()["result"]
+                assert [row["id"] for row in tail["entries"]] == [expected[-1]["id"]]
+                assert tail["has_more"] is True
+                older = (await client.get(url + f"?before_id={expected[-1]['id']}&limit=1")).json()
+                assert [row["id"] for row in older["result"]["entries"]] == [expected[-2]["id"]]
+
+            # A conversation this parent never launched is not its child, and
+            # the refusal is the contract's coded 404 rather than a bare one.
+            refused = await client.get(
+                f"/v1/desktop/sessions/{parent_id}/children/{'fedcba987654'}/transcript"
+            )
+            assert refused.status_code == 404
+            assert refused.json()["detail"]["code"] == "child_not_found"
+
+            # `gone` is an ANSWER: the roster still names the child, so the
+            # read is legal and only the filesystem says the rows are final.
+            child_dir.rename(root / "retired-child")
+            gone = (await client.get(url)).json()["result"]
+            assert gone == {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": False,
+                "state": "gone",
+            }
+            print(
+                f"child route over real HTTP: {len(expected)} verbatim rows ready, "
+                "paging cursor on the child's file, unnamed pair 404 child_not_found, "
+                "removed directory 200 gone"
+            )
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, 30)
+        listener.close()
+        await parent.dispose()
