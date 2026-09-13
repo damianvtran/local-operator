@@ -11,9 +11,10 @@ incident written hours after the last turn restamped the file
 
 These tests pin the write-side behaviour at the seam that implements it:
 ``Transcript._write_entries`` restores the pre-append mtime when, and only
-when, its caller asked for it. The opt-in default is as load-bearing as the
-restore — a flag that leaked into ordinary appends would freeze the clock
-instead of ignoring one kind of write.
+when, the whole batch is :data:`BOOKKEEPING_CUSTOM_TYPES`. The invariant is
+held by that classification gate, not by the flag's default: the flag is a
+request the writer validates, so a default that leaked to ``True`` would still
+advance the clock on an ordinary append. ``False`` is defence-in-depth.
 """
 
 from __future__ import annotations
@@ -193,6 +194,30 @@ async def test_the_flag_refuses_a_batch_carrying_real_work(tmp_path):
         "a batch carrying a real user message was clock-frozen: the append "
         "claims to honour BOOKKEEPING_CUSTOM_TYPES but never reads it"
     )
+
+
+def test_a_message_row_forged_with_a_bookkeeping_custom_type_is_not_bookkeeping():
+    """The ``kind == CUSTOM_KIND_CUSTOM`` clause, pinned rather than trusted.
+
+    No ``Message`` payload carries ``custom_type`` today, so the clause cannot
+    change an answer in this tree — deleting it leaves every other test in this
+    module green. It is still what keeps a hand-built (or future) envelope of
+    that shape out of the bookkeeping class, and a row wrongly admitted there
+    freezes the clock over real work, so it gets its own case.
+    """
+    from local_operator.session.transcript import (
+        CUSTOM_KIND_MESSAGE,
+        ENTRY_MESSAGE,
+        _is_bookkeeping_batch,
+    )
+
+    forged = TranscriptEntry(
+        "forged",
+        PAST,
+        ENTRY_MESSAGE,
+        {"kind": CUSTOM_KIND_MESSAGE, "custom_type": SESSION_INCIDENT_MESSAGE_TYPE},
+    )
+    assert _is_bookkeeping_batch([forged]) is False
 
 
 @pytest.mark.asyncio
