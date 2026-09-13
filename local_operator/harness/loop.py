@@ -136,6 +136,19 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
+# What the model is told about a call the OUTPUT LIMIT cut in half, kept distinct
+# from ``ABORTED_RESULT_TEXT`` on purpose rather than for style: "aborted" says a
+# turn stopped and explains nothing about the argument fragment the model now
+# sees replayed in its own history. Measured on a real provider, a model handed
+# that bare "aborted" reported that its call "came through empty and was
+# aborted", declined to retry, and the large file it was asked to write was
+# never written and nothing said so (QA round 1, Q2: base wrote 110,703 chars,
+# the truncated branch produced ``tool_executions: []``). The remedy is the
+# model's to take, so the result has to name it.
+TRUNCATED_RESULT_TEXT = (
+    "cut off at the output limit before the arguments finished; nothing ran -- "
+    "re-emit this call with a smaller payload"
+)
 
 # Why a tool call did not run cleanly, classified WHERE THE REASON IS KNOWN and
 # carried on ``ToolResult.details["__fault"]`` to the one place that reports it
@@ -604,7 +617,13 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
         return None
     digest = hashlib.sha256()
     for call, result in zip(calls, results):
-        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
+        # The two synthetic texts below are the loop's own statement that the
+        # call never ran, so they break the streak rather than counting as
+        # evidence of the model repeating itself. ``TRUNCATED_RESULT_TEXT``
+        # belongs here for exactly the same reason: a model re-emitting a call
+        # the output limit cut is not a model floundering, and without this it
+        # would be stopped by the no-progress guard on its second attempt.
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT, TRUNCATED_RESULT_TEXT):
             return None
         args = {key: value for key, value in call.arguments.items() if key != INTENT_FIELD}
         digest.update(
@@ -1305,9 +1324,48 @@ class AgentLoop:
                                 ),
                                 kind="warning",
                             )
+                        elif assistant.tool_calls:
+                            # Visible truncation with a call in flight: the call was
+                            # cut mid-arguments and will NOT be executed (the batch
+                            # below pairs placeholders instead). Nothing else said so
+                            # -- the loop's only length notice was the silent arm
+                            # above, no surface had a length arm at all, and the
+                            # result the model got back read just "aborted" -- so a
+                            # model asked to write a large file reported that the
+                            # call "came through empty", declined to retry, and the
+                            # file was never written (QA round 1, Q2). Say which
+                            # limit it was and that the loop is re-asking.
+                            yield NoticeEvent(
+                                text=(
+                                    "the model hit the output limit mid tool call "
+                                    "-- nothing was executed; re-asking it to "
+                                    "re-emit the call in smaller pieces"
+                                ),
+                                kind="warning",
+                            )
+                        elif assistant.text:
+                            # A partial ANSWER, which is the case the missing
+                            # signal hid best: the prose that arrived reads as a
+                            # complete short reply, and neither the TUI nor the
+                            # phone folded the stop into a notice (review round 1,
+                            # B1; reproduced by QA Q1 against a live provider).
+                            yield NoticeEvent(
+                                text=(
+                                    "the model hit the output limit -- this answer "
+                                    "is cut off, and the rest was never sent"
+                                ),
+                                kind="warning",
+                            )
                         # Truncated: pair placeholders, do NOT execute.
+                        #
+                        # ``TRUNCATED_RESULT_TEXT`` rather than the bare
+                        # ``ABORTED_RESULT_TEXT``: the model sees this as the result
+                        # of the call it watched itself emit, and the actionable
+                        # fact is that the OUTPUT LIMIT cut it, not that some turn
+                        # ended. Same distinction, and same measured cost, as the
+                        # constant's own comment.
                         placeholders = [
-                            self._synthetic_result(call, ABORTED_RESULT_TEXT)
+                            self._synthetic_result(call, TRUNCATED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
                         self._append_results(
@@ -1621,10 +1679,13 @@ class AgentLoop:
             # ``max_tokens`` is deliberately NOT set here. The generation bound
             # is part of the request contract (``harness/types.py``,
             # ``DEFAULT_TURN_OUTPUT_TOKENS``) and every request is filled from
-            # that one policy as it is built, so a turn cannot go out unbounded
-            # because a call site forgot -- which is how a single response once
-            # ran to 97,189 output tokens. A host that wants a different bound
-            # names ``max_tokens`` explicitly.
+            # that one policy as it is built, so a host cannot go out with a bound
+            # that no call site remembered to impose. The number this replaces was
+            # not an absent ask but the opposite one: a request that named nothing
+            # carried the model's ADVERTISED capability verbatim, which on a 1M
+            # aggregate model is 943,718 and is what let a single decision run to
+            # 97,189 output tokens (95,098 of them reasoning). A host that wants a
+            # different bound names ``max_tokens`` explicitly.
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,

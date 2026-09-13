@@ -5267,25 +5267,26 @@ def test_output_cap_clamped_so_prompt_plus_output_fits_window(wire: str, key: st
 def test_the_policy_ceiling_survives_the_clamp_at_every_occupancy(
     wire: str, key: str, prompt_tokens: int
 ) -> None:
-    """A healthy session asks for the POLICY ceiling, unshaved, at every
-    occupancy real sessions actually occupy -- not just against a 2-token prompt.
+    """A healthy session asks for the bound the contract NAMED, unshaved, at
+    every occupancy real sessions actually occupy -- not just against a 2-token
+    prompt.
 
     This is the test that let the round-1 defect ship: it made this exact claim
     against ``Message.user("hi")``, the one input where a 4-18x over-estimate
     cannot bite. At 48,000 tokens (24% of Sonnet's window) the previous revision
     sent 512 instead of a usable ask and truncated a real answer mid-sentence.
 
-    The number it asserts moved from the spec's 64,000 when the per-turn policy
-    landed (``harness/types.DEFAULT_TURN_OUTPUT_TOKENS``): the spec's figure is
-    the model's CAPABILITY, and a request built from it asked for a quarter of a
-    1M window on every call. What this test still protects is unchanged -- that
-    the clamp does not shave a healthy ask below the bound the request contract
-    named -- so it now pins the policy ceiling instead of the advertised one.
+    What it protects is unchanged -- that the clamp does not shave a healthy ask
+    below the bound the request contract named -- and the bound it names is now
+    the contract's, not the spec's raw capability. For this spec the two coincide
+    at 64,000, because a published ceiling BELOW the policy is a real provider
+    limit and the narrowing direction keeps it.
     """
     spec = _sonnet_spec()
     request = ChatRequest(model=spec, messages=[Message.user(_prose(prompt_tokens))])
 
-    assert _bodies(request)[wire][key] == DEFAULT_TURN_OUTPUT_TOKENS
+    assert request.max_tokens == spec.max_output_tokens
+    assert _bodies(request)[wire][key] == request.max_tokens
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
@@ -5309,15 +5310,22 @@ def test_output_budget_does_not_depend_on_non_ascii_characters(wire: str, key: s
     A byte-length bound charges ``4 * len(text)`` for any block that is not
     ``str.isascii()``, so one ``\u2019`` — or an em dash, an emoji, an accented
     name, any non-English text — used to cut the same conversation's budget from
-    64,000 to 512. The two asks must now agree.
+    64,000 to 512. The two asks must now agree, and the figure they agree on is
+    the contract's fill for this spec (its published 64,000, below the policy
+    ceiling, which the narrowing direction keeps).
     """
     spec = _sonnet_spec()
-    ascii_body = _bodies(ChatRequest(model=spec, messages=[Message.user(_prose(30_000))]))
-    unicode_body = _bodies(
-        ChatRequest(model=spec, messages=[Message.user(_prose(30_000, non_ascii=True))])
+    ascii_request = ChatRequest(model=spec, messages=[Message.user(_prose(30_000))])
+    unicode_request = ChatRequest(
+        model=spec, messages=[Message.user(_prose(30_000, non_ascii=True))]
     )
 
-    assert ascii_body[wire][key] == unicode_body[wire][key] == DEFAULT_TURN_OUTPUT_TOKENS
+    assert ascii_request.max_tokens == unicode_request.max_tokens == spec.max_output_tokens
+    assert (
+        _bodies(ascii_request)[wire][key]
+        == _bodies(unicode_request)[wire][key]
+        == ascii_request.max_tokens
+    )
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
@@ -5381,15 +5389,17 @@ def test_system_blocks_and_tools_are_charged_against_the_window() -> None:
     tools are a real term. A clamp that counted only ``messages`` would leave
     exactly that much of the overflow in place.
 
-    The window is narrowed to 160k deliberately. With the per-turn policy in
-    place the ask is the policy ceiling rather than the window minus the prompt,
-    so the clamp only binds close to the window -- and the band where the extras
-    are the whole difference between the ceiling and a shaved ask is where the
-    property has to be asserted. At 160k against a ~125k-token prompt the bare
-    request still gets the ceiling and the one carrying the tool schema and
-    system block does not, which is exactly the charge this pins.
+    The window and the ask are both narrowed deliberately. The ask is a model's
+    own published 16,384 -- the policy's narrowing arm, and a real shape -- since
+    the charge has to be visible against a modest ask: at 160k against a
+    ~125k-token prompt the bare request still gets its full 16,384 while the one
+    carrying the tool schema and system block does not, which is exactly the
+    charge this pins. (Against the policy's own 131,072 the bare request would be
+    shaved at that window too, and the test would pin nothing.)
     """
-    spec = _muse_spark_spec().model_copy(update={"context_window": 160_000})
+    spec = _muse_spark_spec().model_copy(
+        update={"context_window": 160_000, "max_output_tokens": 16_384}
+    )
     tool = AgentTool(
         name="write",
         description="x" * 40_000,
@@ -5408,7 +5418,7 @@ def test_system_blocks_and_tools_are_charged_against_the_window() -> None:
         )
     )["openai-completions"]
 
-    assert bare["max_tokens"] == DEFAULT_TURN_OUTPUT_TOKENS
+    assert bare["max_tokens"] == spec.max_output_tokens
     assert with_extras["max_tokens"] < bare["max_tokens"]
 
 
@@ -5417,28 +5427,34 @@ def test_a_spec_with_no_published_cap_is_still_bounded() -> None:
 
     This test used to assert the opposite -- that such a spec left the key off
     the wire entirely -- on the argument that capping a model nobody had
-    published a limit for is worse than sending nothing. That was the DEFECT in
-    the one state where it matters: silence is what let a single decision run to
-    97,189 output tokens (``reasoning_tokens=95098``), so the absence of a
-    published limit is now filled by the policy ceiling instead.
+    published a limit for is worse than sending nothing. That was the wrong
+    reading of the one state where it matters: the absence of a published limit
+    is now filled by the policy ceiling instead.
 
-    The wire-level behaviour the old test existed for is still reachable and
-    still pinned here: an explicit ``max_tokens=0`` means "ask the provider for
-    no cap" and omits the key on every wire.
+    What is asserted is the bound, not a particular number: this spec's window is
+    100,000, so the clamp legitimately lowers the 131,072 fill to what the window
+    can fund. The omit-the-key arm is still pinned below, through the one input
+    that can still reach it.
     """
     spec = ModelSpec(
         provider="openrouter", model_id="x", context_window=100_000, max_output_tokens=0
     )
 
     bounded = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))
-    assert bounded["openai-completions"]["max_tokens"] == DEFAULT_TURN_OUTPUT_TOKENS
-    assert bounded["openai-responses"]["max_output_tokens"] == DEFAULT_TURN_OUTPUT_TOKENS
-    assert bounded["google"]["maxOutputTokens"] == DEFAULT_TURN_OUTPUT_TOKENS
+    assert 0 < bounded["openai-completions"]["max_tokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
+    assert 0 < bounded["openai-responses"]["max_output_tokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
+    assert 0 < bounded["google"]["maxOutputTokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
 
-    uncapped = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")], max_tokens=0))
-    assert "max_tokens" not in uncapped["openai-completions"]
-    assert "max_output_tokens" not in uncapped["openai-responses"]
-    assert "maxOutputTokens" not in uncapped["google"]
+    # The wire's "no cap of ours" arm survives for a request assembled WITHOUT
+    # the validator -- ``model_construct`` is the only way to reach it now, since
+    # the contract fills every constructed request and ``max_tokens`` is ``ge=1``.
+    # Pinned here because the four body builders still have to agree about an
+    # absent ask, and that agreement is what the old test was really protecting.
+    hand_assembled = ChatRequest.model_construct(model=spec, messages=[Message.user("hi")])
+    omitted = _bodies(hand_assembled)
+    assert "max_tokens" not in omitted["openai-completions"]
+    assert "max_output_tokens" not in omitted["openai-responses"]
+    assert "maxOutputTokens" not in omitted["google"]
 
 
 # --- the clamp's safety properties, not just its arithmetic --------------------
@@ -5576,11 +5592,11 @@ def test_a_hint_larger_than_the_window_is_not_believed() -> None:
     )
     request = ChatRequest(model=spec, messages=[Message.user("hi")], context_tokens_hint=600_000)
 
-    # The policy ceiling, not ``spec.max_output_tokens`` (32,000): the request
-    # names no ask of its own, so the contract's bound is what it carries -- and
-    # the point of this test is that the stale hint neither refuses it nor
-    # inflates the ask, not which of the two ceilings is larger.
-    assert _effective_max_tokens(request) == DEFAULT_TURN_OUTPUT_TOKENS
+    # The contract's fill, which for THIS spec is its published 32,000: the
+    # policy ceiling (131,072) is larger, so the provider limit wins in the
+    # narrowing direction. The point of this test is that the stale hint neither
+    # refuses the request nor inflates the ask above what the contract named.
+    assert _effective_max_tokens(request) == request.max_tokens == spec.max_output_tokens
 
 
 @pytest.mark.parametrize(
@@ -5714,16 +5730,16 @@ def test_a_healthy_session_keeps_its_full_ask_without_a_hint(occupancy: float) -
     the prompt plus a full reply genuinely approaches the window. What this pins
     is the band where main answers in full and the branch must too.
 
-    The ask it pins is the per-turn policy ceiling rather than the spec's 64,000
-    since the bound moved into the request contract; that is the number a
-    request which names no ask of its own now carries.
+    The ask it pins is the contract's fill rather than the spec's 64,000 as such:
+    they coincide here, and the property under test is that the hint-less path
+    does not quietly shave whichever bound the request carries.
     """
     spec = _sonnet_spec()
     request = ChatRequest(
         model=spec, messages=[Message.user(_prose(int(spec.context_window * occupancy)))]
     )
 
-    assert _bodies(request)["anthropic"]["max_tokens"] == DEFAULT_TURN_OUTPUT_TOKENS
+    assert _bodies(request)["anthropic"]["max_tokens"] == request.max_tokens
 
 
 @pytest.mark.parametrize("window", [8_192, 32_768, 200_000])

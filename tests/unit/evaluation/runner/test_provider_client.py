@@ -47,6 +47,7 @@ from local_operator.evaluation.runner.provider_client import (
 from local_operator.evaluation.runner.public_reply import decode_public_reply
 from local_operator.harness.reply_channel import REPLY_CHANNEL_TOOL_NAME
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     ImageContent,
     ModelSpec,
     StreamEndEvent,
@@ -1715,15 +1716,20 @@ async def test_the_provider_count_rides_the_next_decision_as_a_context_hint(
 
 @pytest.mark.asyncio
 async def test_every_decision_request_is_bounded_before_it_is_sent(tmp_path: Path) -> None:
-    """The benchmark's decision call carries a generation bound too.
+    """The benchmark's decision call declares its OWN ceiling, and it is small.
 
-    It never set ``max_tokens``, so the wire fell back to the model's advertised
+    It never set ``max_tokens``, so the wire carried the model's advertised
     capability and one measured decision returned ``output_tokens=97189`` with
-    ``reasoning_tokens=95098``. The bound now rides the request CONTRACT, which
-    is why this asserts it on the request the client builds rather than on a
-    constant this client passes.
+    ``reasoning_tokens=95098`` (35 of 410 calls above 16K, mean ~52 s). The
+    number is declared HERE rather than inherited from the contract, because
+    16,384 is the reference agent's ceiling and a statement about this arm's
+    requests: applied harness-wide it truncated ordinary turns, 300 calls
+    across 127 sessions having already emitted more than that (agent review
+    round 1, B1).
     """
-    from local_operator.harness.types import DEFAULT_TURN_OUTPUT_TOKENS
+    from local_operator.evaluation.runner.provider_client import (
+        DECISION_MAX_OUTPUT_TOKENS,
+    )
 
     # The arm's own shape: a 1M window advertising 943,718 output tokens.
     spec = ModelSpec(
@@ -1737,7 +1743,8 @@ async def test_every_decision_request_is_bounded_before_it_is_sent(tmp_path: Pat
 
     await _drive(client, tmp_path, 2)
 
-    assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
+    assert [r.max_tokens for r in stream.requests] == [DECISION_MAX_OUTPUT_TOKENS] * 2
+    assert DECISION_MAX_OUTPUT_TOKENS < DEFAULT_TURN_OUTPUT_TOKENS
 
 
 @pytest.mark.asyncio

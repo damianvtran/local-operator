@@ -660,6 +660,54 @@ def test_a_wake_receipt_strips_the_model_facing_envelope() -> None:
         assert row.text == "w-9 (1, every 6h) — Check the deploy pipeline"
 
 
+def test_a_length_stop_is_announced_on_both_surfaces() -> None:
+    """Agent review round 1 (B1): nothing folded ``stop_reason == "length"`` into
+    a notice, so a reply cut by the generation bound replayed as a complete one.
+
+    Both variants are asserted because they need opposite treatment: the turn
+    WITH prose is the one whose text lies (it reads as a finished, oddly short
+    answer), and the turn with NOTHING still needs a line because there is no
+    text to explain the silence. The tier is ``warning`` on both, matching the
+    live loop's own truncation notices, so one event is never described in two
+    voices by the two surfaces that render it.
+    """
+    cut = assistant_stop_notice(
+        text="1, 2, 3, 4", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert cut == ("answer cut off at the output limit", "warning")
+
+    empty = assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert empty is not None and empty[1] == "warning"
+
+    # A truncated TOOL CALL produced something, so it takes the content arm too:
+    # the model is told separately that the call was cut (the loop's
+    # ``TRUNCATED_RESULT_TEXT``), and the user is told here.
+    with_call = assistant_stop_notice(
+        text="", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert with_call is not None and with_call[1] == "warning"
+
+    # An ordinary stop still needs nothing, which is what keeps the notice
+    # meaningful rather than decorative.
+    assert (
+        assistant_stop_notice(
+            text="done", has_tool_calls=False, stop_reason="stop", provider_payload=None
+        )
+        is None
+    )
+
+    # And the phone's fold actually renders it, on the same history the TUI
+    # would replay: the defect was invisible on BOTH surfaces, so the helper
+    # being right is not on its own the claim.
+    history = [Message.user("count to a million"), _assistant("1, 2, 3", stop="length")]
+    page = [row.kind for row in _page_rows(history)]
+    assert page == ["user", "assistant", "notice"]
+    notice_row = _page_rows(history)[-1]
+    assert "output limit" in notice_row.text
+
+
 def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
     """Review round 1: the two hosts fed the shared helpers differently.
 

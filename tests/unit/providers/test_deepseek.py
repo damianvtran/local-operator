@@ -14,7 +14,6 @@ import httpx
 import pytest
 
 from local_operator.harness.types import (
-    DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
     ImageContent,
     Message,
@@ -254,30 +253,30 @@ def test_documented_fallbacks_and_provider_effort(monkeypatch, model, images):
     "effort,budget", [("none", 8192), ("low", 65536), ("high", 65536), ("max", 131072)]
 )
 def test_native_effort_and_budget(effort, budget):
-    """The ladder is a mirror of DeepSeek's OWN defaults, and the per-turn
-    policy ceiling outranks it.
+    """The ladder is the ask for a request that names none, and the provider's
+    own published defaults are the point of it.
 
     ``none/low/high/max`` map to DeepSeek's server-side 8K/64K/64K/128K output
-    defaults, which is what this provider does when a request names no ask. A
-    turn that names none now carries the harness's policy ceiling instead, and
-    that is deliberate rather than collateral: this provider's thinking budget
-    is a DEFAULT, not a published ceiling (it advertises 393,216), and a single
-    response allowed to spend it is exactly the pathology the policy exists to
-    bound -- the measured arm spent 95,098 of its 97,189 output tokens reasoning
-    on one call.
+    defaults. A request that names no ask now carries the harness's policy bound,
+    and this ladder is what that bound sits ABOVE -- it is a provider-native ask,
+    not a second policy, so it stays in force for exactly the request that named
+    nothing. An earlier revision of this test accepted the opposite: because the
+    contract fills ``max_tokens``, its ``request.max_tokens or ladder`` spelling
+    took the left branch on every rung, so all four asked the same number and
+    ``max`` silently stopped buying its 128K on a shipped provider (review m1 /
+    QA round 1, Q3). The ladder is not dead, and the "escape hatch" that used to
+    be offered for reaching it (``max_tokens=0``) is gone on purpose: it did not
+    mean "no cap" on any wire that requires one, and on a capped model it fell
+    back to the advertised capability.
 
-    The ladder is still reachable and still pinned: an explicit ``max_tokens=0``
-    means "do not cap me, use your own default", which is the branch that keeps
-    this provider's native ladder alive. An explicit small ask and an explicit
-    ask above the advertised maximum behave as before either way.
+    An explicit small ask and an explicit ask above the advertised maximum behave
+    as before either way.
     """
     client = OpenAICompatClient("https://api.deepseek.com/v1")
     body = client._build_body(request(effort=effort))
     assert body["thinking"] == {"type": "disabled" if effort == "none" else "enabled"}
     assert body.get("reasoning_effort") == (None if effort == "none" else effort)
-    assert body["max_tokens"] == DEFAULT_TURN_OUTPUT_TOKENS
-    uncapped = client._build_body(request(effort=effort, max_tokens=0))
-    assert uncapped["max_tokens"] == budget
+    assert body["max_tokens"] == budget
     assert client._build_body(request(effort=effort, max_tokens=24))["max_tokens"] == 24
     assert client._build_body(request(effort=effort, max_tokens=500_000))["max_tokens"] == 393_216
 

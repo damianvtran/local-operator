@@ -1351,14 +1351,37 @@ def _effective_max_tokens(request: ChatRequest) -> int:
             :data:`MIN_OUTPUT_TOKENS` of output. See below for why this refuses
             rather than sending a doomed cap.
     """
-    requested = request.max_tokens or request.model.max_output_tokens
+    # ``is None``, and never ``or``: the falsy form read an ask of ``0`` as
+    # "nobody asked" and fell through to the ADVERTISED CAPABILITY, putting
+    # 943,718 back on the wire on exactly the model shape this clamp exists for
+    # (QA round 1, Q4). ``0`` can no longer arrive -- ``ChatRequest.max_tokens``
+    # is ``ge=1`` -- but the ``None`` arm stays, because a request assembled
+    # without the validator (``model_construct``, a test double) must still not
+    # be read as a request for the whole capability.
+    named = request.max_tokens
+    requested = request.model.max_output_tokens if named is None else named
     if request.model.provider == "deepseek":
         # The documented 384K maximum is a capability, not a default budget.
         # Match native defaults (8K disabled, 64K thinking, 128K max) while
         # respecting explicit small errands and the advertised maximum.
+        #
+        # This ladder is a provider-native ASK, not a second policy, and the
+        # distinction is load-bearing: the contract fills ``max_tokens`` from
+        # ``DEFAULT_TURN_OUTPUT_TOKENS``, so ``request.max_tokens or ladder``
+        # took the left branch on every rung and left the ladder unreachable in
+        # production -- every rung asking the same number and ``max`` no longer
+        # buying its 128K (review m1 / QA Q3). A bound the contract FILLED is an
+        # upper limit for the provider's own default to sit under; an ask the
+        # caller NAMED (an errand's 1024, a host's larger one) still wins
+        # outright, which is what the ladder never overrode and still does not.
         effort = _reasoning_effort(request)
         default_budget = 8192 if effort == "none" else 131072 if effort == "max" else 65536
-        requested = request.max_tokens or default_budget
+        if request.max_tokens_from_policy:
+            requested = min(requested, default_budget)
+        elif named is None:
+            requested = default_budget
+        else:
+            requested = named
         if request.model.max_output_tokens > 0:
             requested = min(requested, request.model.max_output_tokens)
     if not requested or requested <= 0:
@@ -2437,7 +2460,8 @@ class OpenAICompatClient:
             # cosmetic (review round 1, blocker-1). The pin rides on the
             # ChatRequest so a retry keeps it, but that is also what the
             # failover driver CLONES for a fallback to another model
-            # (`model_copy(update={"model": spec})`), and the clone keeps the
+            # (`ChatRequest.with_model`, which also re-derives the generation
+            # bound for the new spec), and the clone keeps the
             # affinity fields while swapping in a direct-DeepSeek/Z.AI spec.
             # Without this check an OpenRouter host name is stamped onto a
             # direct provider's body as `provider.order`, which is a field

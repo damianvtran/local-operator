@@ -515,13 +515,22 @@ def assistant_stop_notice(
 ) -> tuple[str, NoticeSeverity] | None:
     """The notice an assistant turn's ``stop_reason`` demands, or ``None``.
 
-    Three turns end in a way the prose alone does not explain, and a surface
+    Four turns end in a way the prose alone does not explain, and a surface
     that omits the notice tells the user something false:
 
     - **refusal** — the provider cut the answer off. Fires EVEN WHEN the
       model streamed prose first (Gemini safety stops often cut a partial
       answer): the prose alone reads as a complete, oddly short reply, and
       the user re-reading the session needs to know why it ends there.
+    - **length** — the provider cut the answer off at the OUTPUT limit. Fires
+      for the same reason as a refusal and more urgently: a reply stopped by
+      the generation bound is the one case where the visible text is not merely
+      short but INCOMPLETE BY CONSTRUCTION, and it used to reach no surface at
+      all. The live loop's own notice covered only the silent case (a turn that
+      thought away its whole budget and produced nothing), so a partial answer
+      replayed as a whole one on every surface — which is the failure a lower
+      generation bound makes reachable more often, not less (review round 1,
+      B1; QA round 1, Q1 measured it on a live provider).
     - **error** with nothing produced — the turn FAILED. Without the notice
       the user sees their prompt followed by silence and reads it as the
       agent having ignored them.
@@ -529,7 +538,10 @@ def assistant_stop_notice(
 
     The error/aborted arms are guarded on there being neither prose nor a
     call because a turn that produced either already shows the user what
-    happened; the notice exists for the turn that shows nothing at all.
+    happened; the notice exists for the turn that shows nothing at all. The
+    length arm is deliberately NOT guarded that way — it is the one whose
+    prose misleads most, and the empty variant of it still needs a line, since
+    "spent the whole budget and said nothing" has no text to explain it.
 
     Returning ``None`` means "this turn needs no notice", which is the
     ordinary case. Every surface must call this — the phone had no
@@ -554,6 +566,15 @@ def assistant_stop_notice(
             "model refused the request (no details recorded)"
         )
         return refusal, "error"
+    if stop_reason == "length":
+        # Tier `warning`, not `error`: the turn produced what it produced and
+        # stopped where the limit sits, which is a statement about the reply's
+        # completeness rather than a diagnosis of anything failing -- the same
+        # tier the live loop's own truncation notices take, so the two
+        # surfaces cannot describe one event in two voices.
+        if text or has_tool_calls:
+            return "answer cut off at the output limit", "warning"
+        return "no answer: the model spent its whole output budget", "warning"
     if not text and not has_tool_calls and stop_reason in ("error", "aborted"):
         return ("turn failed" if stop_reason == "error" else "interrupted"), "error"
     return None

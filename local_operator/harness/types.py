@@ -45,7 +45,7 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -2156,40 +2156,60 @@ class ModelSpec(BaseModel):
 #:
 #: ``ModelSpec.max_output_tokens`` is the ceiling a PROVIDER publishes, which is
 #: a model capability and not the budget of a single turn: an aggregator states
-#: "this model can emit 943,718 tokens" for a 1M-window model, and a request
-#: built from that number asks for a quarter of the window on every call. Nobody
-#: was asking for anything smaller, so the ask bounded nothing in practice:
-#: measured on the OSWorld arm, ONE decision returned ``output_tokens=97189``
-#: with ``reasoning_tokens=95098`` and ``stop=stop``, 35 of 410 calls exceeded
-#: 16K, and the mean call took ~52 s. The TUI shares the defect -- same request
-#: contract, same absent bound -- which is why this is fixed in the contract
-#: rather than at the call sites that happened to be caught with it.
+#: "this model can emit 943,718 tokens" for a 1M-window model -- 90% of that
+#: window -- and a request that named no ask of its own carried that capability
+#: verbatim, so every call asked for it. Measured on the OSWorld arm, ONE
+#: decision returned ``output_tokens=97189`` with ``reasoning_tokens=95098`` and
+#: ``stop=stop``, 35 of 410 calls exceeded 16K, and the mean call took ~52 s. The
+#: TUI shared the defect -- same request contract, same capability-shaped ask --
+#: which is why the bound belongs in the contract rather than at the two call
+#: sites that happened to be measured.
 #:
-#: 16,384 is the ceiling the OSWorld reference agent runs at, adopted here as a
-#: statement about OUR requests rather than as a benchmark rule: one turn of an
-#: agent loop is a tool call plus a short rationale, and a single response that
-#: spends five figures of tokens is looping rather than thinking. It is a POLICY,
-#: not a wire limit -- ``providers.clients._effective_max_tokens`` still lowers
-#: the ask to whatever the window can actually fund, and it still refuses a
-#: prompt that leaves no room for a usable reply.
+#: The NUMBER is chosen so that a normal turn cannot become more truncatable than
+#: it was before the bound existed, and the operator's own ledger
+#: (``~/.local-operator/analytics.db``, 876,719 recorded calls) is what says
+#: where that line is: 430 calls ever emitted more than 16,384 output tokens, and
+#: 300 of those are ordinary sessions across 127 conversations -- which is why a
+#: benchmark-sized ceiling was the wrong number for every other interface; 2
+#: ordinary calls exceeded 65,536, both ``anthropic/claude-opus-5`` at exactly its
+#: own 128,000 published ceiling, i.e. already truncated by the provider; NONE
+#: exceeded 131,072. So 131,072 is the smallest round ceiling no ordinary turn
+#: has ever crossed, while the capability-shaped asks that ARE the defect are cut
+#: 4-8x (943,718 -> 131,072 on muse-spark, 1,041,903 -> 131,072 on gpt-4.1,
+#: 524,288 -> 131,072 on kimi-k3).
 #:
-#: Raising it is a deliberate act, not a default: name a larger
-#: ``ChatRequest.max_tokens`` (a host raising it for a model or a workflow that
-#: genuinely needs a longer answer) or pass ``ceiling`` to
-#: :func:`turn_output_budget`.
-DEFAULT_TURN_OUTPUT_TOKENS = 16_384
+#: This is a POLICY, not a wire limit, and not a benchmark rule: the OSWorld arm
+#: declares its own, much smaller, ceiling at its decision call
+#: (``evaluation/runner/provider_client.py``), because 16,384 is the reference
+#: agent's cap and a statement about THAT arm's requests. The wire clamp in
+#: ``providers.clients._effective_max_tokens`` is untouched by all of this: it
+#: still lowers the ask to whatever the window can actually fund, and it still
+#: refuses a prompt that leaves no room for a usable reply.
+#:
+#: Lowering it is a deliberate act, not a default: name a
+#: ``ChatRequest.max_tokens`` (a host bounding a model or a workflow that does
+#: not need a long answer) or pass ``ceiling`` to :func:`turn_output_budget`.
+DEFAULT_TURN_OUTPUT_TOKENS = 131_072
 
 
 def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
-    """The ``max_tokens`` a request carries. ONE policy, decided in ONE place.
+    """The ``max_tokens`` a request carries when its caller names none.
+
+    ONE number, decided in ONE place -- with one exception, stated here rather
+    than left implicit: for a request that names nothing of its own,
+    ``providers.clients._effective_max_tokens`` prefers a provider's OWN
+    published default where it documents one (DeepSeek's effort ladder of
+    8K/64K/64K/128K) over this ceiling. That is a provider-native ASK and not a
+    second policy: it only ever lowers the ask, it applies only to the request
+    that named nothing, and an ask the caller named is untouched by both.
 
     Model-aware only in the NARROWING direction. A model that publishes a
     smaller ceiling (MiniMax M3's 8K) keeps it, because that is a real provider
     limit; a model that publishes a LARGER one is NOT raised back to it, because
-    raising the ask to an advertised capability is exactly what put the
-    97k-token call on the wire. A spec that publishes no cap at all (``0`` is
-    "no data", not "unlimited") gets the policy ceiling: a turn with no bound is
-    the defect this exists to remove.
+    raising the ask to an advertised capability is what let a single DeepSeek
+    decision run to 97,189 output tokens (95,098 of them reasoning). A spec that
+    publishes no cap at all (``0`` is "no data", not "unlimited") gets the
+    policy ceiling: a turn with no bound is the defect this exists to remove.
 
     ``ceiling`` is the override -- ``None`` or a non-positive value means
     :data:`DEFAULT_TURN_OUTPUT_TOKENS`. It is the hook a configuration key would
@@ -2213,13 +2233,22 @@ class ChatRequest(BaseModel):
     # The generation bound for THIS call. Left ``None`` it is filled from
     # :func:`turn_output_budget` by the validator at the end of this class, so a
     # request built anywhere in the harness is bounded without the caller having
-    # to remember -- see :data:`DEFAULT_TURN_OUTPUT_TOKENS` for why the contract
-    # rather than the call site owns it. An explicit value WINS: errands name a
+    # to remember -- see :data:`DEFAULT_TURN_OUTPUT_TOKENS` for the number and
+    # the measurement behind it. An explicit value WINS: errands name a
     # deliberate small one (``Session.ERRAND_MAX_TOKENS``, 1024 for titling) and
-    # the compaction summariser names its own. ``0`` still means "ask the
-    # provider for no cap" and omits the key, which is now only ever reached on
-    # purpose rather than by omission.
-    max_tokens: int | None = None
+    # the compaction summariser names its own.
+    #
+    # ``0`` is REJECTED (``ge=1``), and that is a correction rather than a
+    # tightening. It used to mean "ask the provider for no cap", but the four
+    # wire builders never agreed on what an absent cap is -- the OpenAI-shaped
+    # and Google bodies omit the key, while Anthropic's API REQUIRES one -- and
+    # on a model that advertises a cap it did not mean "no cap" at all: the
+    # clamp fell back to the advertised capability and put 943,718 back on the
+    # wire, re-creating the very ask this contract exists to remove (QA round 1,
+    # Q4). A caller that wants the provider's own default gets it by naming
+    # nothing, which is also what keeps DeepSeek's published effort ladder
+    # reachable (review m1 / QA Q3).
+    max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = None
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
@@ -2405,10 +2434,10 @@ class ChatRequest(BaseModel):
 
         Here rather than at the loop's construction and the benchmark's, because
         those are two of N interfaces that build a ``ChatRequest`` and the defect
-        is the absence of a bound, not a mistake in either of them: whichever
+        is a request that carried the provider's capability as its own ask, not a
+        mistake in either of them: whichever
         site is missed next re-opens it silently. Filling it at the contract makes
-        a turn without a cap unrepresentable unless the caller explicitly asks
-        for one (``max_tokens=0``).
+        a turn without a cap unrepresentable.
 
         The loop's construction (``harness/loop.py``, ``_model_turn``) and the
         benchmark's (``evaluation/runner/provider_client.py``, ``decide``) are
@@ -2417,7 +2446,51 @@ class ChatRequest(BaseModel):
         """
         if self.max_tokens is None:
             self.max_tokens = turn_output_budget(self.model)
+            self._max_tokens_from_policy = True
         return self
+
+    def with_model(self, spec: "ModelSpec") -> "ChatRequest":
+        """This request aimed at a DIFFERENT model, with its bound re-derived.
+
+        The one production path that changes the model under an already-built
+        request is failover (``providers/failover.py``), and it did
+        ``model_copy(update={"model": spec})`` -- which cannot re-run the
+        validator, by design. So the bound did not follow the swap: a 131,072
+        bound copied onto a fallback publishing 4,096 asked above that model's
+        published ceiling (a 400 from the provider where main re-read the spec),
+        and a request built against a small model kept the small ask on a large
+        fallback where a fresh request would carry the contract's own. Both
+        directions are wrong for the same reason, and this is the fix for both:
+        a policy FILLED bound is re-derived against the new spec, an ask the
+        caller NAMED is carried untouched.
+
+        The marker survives the copy (pydantic copies private attributes), so a
+        request that has been through two hops is still recognisably
+        policy-bounded on the third rather than silently becoming a named ask.
+        """
+        update: dict[str, Any] = {"model": spec}
+        if self._max_tokens_from_policy:
+            update["max_tokens"] = turn_output_budget(spec)
+        return self.model_copy(update=update)
+
+    #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
+    #: because the caller named nothing, False when a caller named a value --
+    #: including the errands' deliberate small asks. It is what
+    #: :meth:`with_model` needs to tell a bound that must follow the model from
+    #: an ask that must not be touched, and what
+    #: ``providers.clients._effective_max_tokens`` needs to tell "nobody asked"
+    #: from "the harness bounded it" when it prefers a provider's own default.
+    _max_tokens_from_policy: bool = PrivateAttr(default=False)
+
+    @property
+    def max_tokens_from_policy(self) -> bool:
+        """Whether ``max_tokens`` is the harness's bound rather than an ask.
+
+        A read-only view of the private marker above, for the wire clamp, which
+        lives in another module and must not reach into a private attribute to
+        answer a question the contract can answer itself.
+        """
+        return self._max_tokens_from_policy
 
 
 class StreamStartEvent(BaseModel):

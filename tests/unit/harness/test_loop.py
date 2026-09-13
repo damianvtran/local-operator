@@ -19,6 +19,7 @@ from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
+    TRUNCATED_RESULT_TEXT,
     AgentLoop,
     LoopContext,
     _consume_claim,
@@ -444,6 +445,18 @@ async def test_length_pairs_but_does_not_execute():
     assert end.aborted is False
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert len(tool_messages) == 1 and tool_messages[0].is_error
+    # The model is told WHY the call did not run, not just that something ended.
+    # A bare "aborted" read as an unexplained failure and a model that had just
+    # emitted a large `write` declined to retry it, so the file was never written
+    # (QA round 1, Q2).
+    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+    # And the user is told the limit was hit, on the surface that renders the
+    # loop's own events.
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit mid tool call "
+        "-- nothing was executed; re-asking it to "
+        "re-emit the call in smaller pieces"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1557,9 +1570,9 @@ class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
     """Every ``ChatRequest`` the loop builds carries a ``max_tokens``.
 
     The loop is where the TUI's turns go out, so it is the interface that
-    shared the benchmark's defect: nothing named a bound, the wire fell back to
-    the model's advertised CAPABILITY (943,718 tokens on a 1M window), and one
-    measured decision returned ``output_tokens=97189`` with
+    shared the benchmark's defect: no request named a bound of its own, so the
+    wire carried the model's advertised CAPABILITY (943,718 tokens on a 1M
+    window) and one measured decision returned ``output_tokens=97189`` with
     ``reasoning_tokens=95098``. The bound is filled by the request contract
     (``harness/types.DEFAULT_TURN_OUTPUT_TOKENS``) rather than set at this call
     site, so this asserts the loop's requests ARE bounded by it -- including a
@@ -1600,9 +1613,9 @@ class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
 
     @pytest.mark.asyncio
     async def test_a_model_advertising_a_huge_cap_is_capped_at_the_policy(self):
-        """The muse-spark shape: 1M window, 943,718 advertised. Before the bound
-        rode the contract, this is the request that asked for a quarter of the
-        window on every call."""
+        """The muse-spark shape: 1M window, 943,718 advertised -- which is 90%
+        of that window. Before the bound rode the contract, this is the request
+        that asked for the advertised capability on every call."""
         spec = ModelSpec(
             provider="openrouter",
             model_id="meta/muse-spark-1.3",
@@ -2880,9 +2893,15 @@ async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
 
 
 @pytest.mark.asyncio
-async def test_text_only_length_truncation_is_not_retried():
+async def test_text_only_length_truncation_is_announced_but_not_retried():
     """A truncation that DID produce visible text is an ordinary truncation:
-    the turn ends, no effort step, no retry."""
+    the turn ends, no effort step, no retry -- and it is ANNOUNCED.
+
+    The announcement is the half this test used to assert the absence of, and
+    that absence was the defect (agent review round 1, B1): the prose that
+    arrived reads as a complete short reply, so a cut answer was
+    indistinguishable from a finished one in the transcript and on the phone.
+    """
     stream = ScriptedStream(
         [
             [StreamTextDelta(delta="partial"), StreamEndEvent(stop_reason="length")],
@@ -2898,7 +2917,15 @@ async def test_text_only_length_truncation_is_not_retried():
         events.append(event)
 
     assert len(stream.requests) == 1
-    assert not [e for e in events if isinstance(e, NoticeEvent)]
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    assert "output limit" in notices[0].text
+    assert notices[0].kind == "warning"
+    # The partial answer is still delivered as the turn's text -- the notice is
+    # added beside it, not instead of it.
+    assert "partial" in "".join(
+        getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
+    )
 
 
 @pytest.mark.asyncio
