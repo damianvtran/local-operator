@@ -535,7 +535,7 @@ def search_spend_section(
         read_note = search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")[0]
         return tuple(f"{note} · {read_note}" for note in base)
 
-    def session_notes() -> tuple[str, ...]:
+    def session_notes(scope: SearchSpendSnapshot) -> tuple[str, ...]:
         """This session's own counts and its share of the process total.
 
         Built here rather than inline at the row so the bar policy can measure
@@ -545,9 +545,9 @@ def search_spend_section(
         still orphaned its count (round-3 MAJOR-2).
         """
         share = (
-            format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
+            format_percent(scope.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
         )
-        counted = _counted_kinds(session)
+        counted = _counted_kinds(scope)
         return (
             f"{counted} · {share} of search spend",
             # The compact rung keeps a referent: a bare ``· 100%`` says a
@@ -569,7 +569,7 @@ def search_spend_section(
     ]
     _notes_to_fit.append(len(total_notes()[0]))
     if session is not None and session.count:
-        _notes_to_fit.append(len(session_notes()[0]))
+        _notes_to_fit.append(len(session_notes(session)[0]))
     bar_cells = 8 if width >= _base_cells + 2 + 8 + 2 + max(_notes_to_fit, default=0) else 0
 
     lines.append(
@@ -591,7 +591,7 @@ def search_spend_section(
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # reads has a share worth showing, and the guard dropped the row for it.
     if session is not None and session.count:
-        row("This session", session, session_notes())
+        row("This session", session, session_notes(session))
     # A dim sub-label rather than a section header: the rows under it PARTITION
     # the total above, which is the same relationship the Totals block's tree
     # rows (`` ├ Fresh (uncached)``) already express with one level less chrome.
