@@ -223,6 +223,30 @@
           <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
         </section>
 
+        <!-- Paired and connected, but NOT driving: another authorised install of
+             this same extension holds the wheel. Deliberately not an error state
+             — nothing here needs fixing — and deliberately not the connected
+             card, which would claim the agent can drive a browser it is
+             receiving no commands for.
+
+             The second line names the other install when /health reports a
+             label for it, because "so which browser IS it driving?" is the
+             question this card exists to answer and with two installs loaded it
+             is not guessable from here. It also states the failover COST rather
+             than hiding it: the session loses the tab it was using, because a
+             surface handle is minted by the install that opened it and cannot
+             be transferred (design §5.3), so a new tab appears after a
+             handover. Users otherwise file that as a bug. -->
+        <section id="standby" class="state hidden" role="status">
+          <h1 class="title">Standing by.</h1>
+          <p class="sub">
+            This browser is paired, but another Local Operator install is driving the agent right
+            now. This one takes over if that one disconnects — and the agent opens a fresh tab when
+            it does, because a tab handle belongs to the install that opened it.
+          </p>
+          <p class="sub" id="standby-driver"></p>
+        </section>
+
         <!-- Origin-decision acknowledgement, shown from the click alone
              (popup.ts): session storage and /health echo the prompt until the
              worker round-trip lands, and a prompt left up with live buttons
