@@ -38,9 +38,9 @@ from collections.abc import Iterator
 import pytest
 
 from tests.e2e.test_terminal_close_survives_e2e import (
-    _Pty,
     _await_interface_death,
     _kill_interface,
+    _Pty,
     _reaped,
 )
 
