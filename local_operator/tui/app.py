@@ -8539,8 +8539,9 @@ class OperatorApp(App[None]):
                 if cost is not None
                 else (
                     # Model money unpriceable, search money real: the cell can
-                    # only show the half it knows, so it says `+`. Showing a
-                    # partial figure as if it were the total is the lie
+                    # only show the half it knows, so it carries the band's
+                    # floor mark (``≥``). Showing a partial figure as if it were
+                    # the total is the lie
                     # ``_spend_text``'s docstring calls the more expensive one.
                     self._spend_text(search_usd, floor=True)
                     if search_usd
@@ -9268,7 +9269,13 @@ class OperatorApp(App[None]):
             # reload double-recording them, not to let reads through.
             if SEARCH_SPEND.session(session_id).operations:
                 return
-            for row in restore() or ():
+            # ``isinstance`` rather than a bare iteration: ``restore`` is
+            # duck-typed (a reduced host may expose anything), and the check is
+            # also what tells the type checker this is iterable at all.
+            restored = restore()
+            if not isinstance(restored, (list, tuple)):
+                return
+            for row in restored:
                 if not isinstance(row, dict):
                     continue
                 usd = row.get("usd")
@@ -37265,7 +37272,13 @@ class OperatorApp(App[None]):
         unpriced row.
         """
         snapshot = self._session_search_spend()
-        return snapshot.cost_is_partial or (snapshot.usd > 0 and not snapshot.cost_is_known)
+        # ``cost_is_partial`` alone. The model-money-unknown case this used to
+        # spell out here is unreachable -- ``usd`` only accrues for priced
+        # operations, which are exactly the ones that do not raise the unpriced
+        # count -- and the real case (a search-only figure against an
+        # unpriceable model) is marked at the call site that knows it is showing
+        # half a session.
+        return snapshot.cost_is_partial
 
     def _spend_text(self, total: float | None = None, *, floor: bool | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.

@@ -1032,3 +1032,46 @@ async def test_a_pruned_search_row_keeps_its_cost(tmp_path, transcript):
     assert rows and rows[0]["provider"] == "tavily"
     assert rows[0]["usd"] == pytest.approx(0.0080)
     assert "a page of snippets" not in transcript.path.read_text()
+
+
+@pytest.mark.asyncio
+async def test_a_reads_cost_row_is_recovered_with_its_own_ledger_key(tmp_path, transcript):
+    """Resume recovery must find ``read_cost`` rows, and key them as the tool did.
+
+    Round 1's review found the recovery reading only ``search_cost``, so a
+    read-heavy conversation came back with its searches and none of its reads.
+    Round 2's found the replacement deriving the key from a ``provider`` field a
+    read result does not carry, so the restored row landed under ``:read``
+    instead of the live ``deepseek:read`` -- one kind of spend split across two
+    rows on resume.
+
+    Driven through the real persistence path, like the search-row test beside it:
+    what can break is whether ``ToolResult.details`` reaches the row.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_read",
+        content=[TextContent(text="Answer.")],
+        details={
+            "pages": 4,
+            "read_cost": {
+                "ledger_provider": "deepseek:read",
+                "usd": 0.002,
+                "basis": "tokens at list price",
+                "session_usd": 0.002,
+                "session_searches": 0,
+                "session_reads": 1,
+                "reads": 1,
+            },
+        },
+    )
+    await transcript.append_message(Message.tool_result(result))
+    transcript.flush()
+
+    resumed = Transcript(tmp_path / "sess")
+    rows = resumed.search_spend_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "deepseek:read"
+    assert rows[0]["kind"] == "read"
+    assert rows[0]["usd"] == pytest.approx(0.002)

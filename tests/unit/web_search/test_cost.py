@@ -63,6 +63,7 @@ def test_anthropic_wire_cache_reads_are_added_not_subtracted() -> None:
 
     assert cost.usd == pytest.approx(200 * 0.30e-6 + 10_000 * 0.006e-6, abs=1e-9)
     # Both buckets are charged: a subtraction would bill only the reads.
+    assert cost.usd is not None
     assert cost.usd > 10_000 * 0.006e-6
 
 

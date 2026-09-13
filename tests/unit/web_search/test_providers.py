@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -282,10 +283,10 @@ async def test_perplexity_anonymous_sse_yields_answer_and_sources(tmp_path) -> N
 
 def _deepseek_payload(
     *,
-    items: list[dict] | None = None,
+    items: list[dict[str, Any]] | None = None,
     answer: str = "Synthesized answer",
-    citations: list[dict] | None = None,
-) -> dict:
+    citations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """One Messages response in the shape DeepSeek actually returns."""
     return {
         "id": "msg_1",
@@ -520,7 +521,7 @@ async def test_deepseek_transport_requires_a_key(tmp_path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _deepseek_blocks_payload() -> dict:
+def _deepseek_blocks_payload() -> dict[str, Any]:
     return _deepseek_payload()
 
 
@@ -580,7 +581,7 @@ async def test_deepseek_evidence_pass_runs_a_second_turn_and_replays_blocks(tmp_
     from local_operator.web_search import providers as module
 
     module.reset_deepseek_balance_cache_for_tests()
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -713,3 +714,58 @@ async def test_deepseek_evidence_failure_is_reported_not_swallowed(tmp_path) -> 
 
     assert len(response.sources) == 2
     assert any("evidence pass" in note for note in response.failures)
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_evidence_pass_is_reported_not_passed_off_as_complete(
+    tmp_path,
+) -> None:
+    """A capped pass must say so, not silently drop the pages it never reached.
+
+    ``evidence_failure`` used to be set only when zero rows came back, so a
+    payload cut off at ``DEEPSEEK_EVIDENCE_MAX_TOKENS`` looked exactly like a
+    complete one as long as the first row parsed -- and the rows it lost are the
+    later, lower-ranked pages the pass exists to triage. ``stop_reason`` is in
+    the same payload and was unused.
+    """
+    from local_operator.web_search import providers as module
+
+    module.reset_deepseek_balance_cache_for_tests()
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(200, json=_deepseek_blocks_payload())
+        return httpx.Response(
+            200,
+            json={
+                "stop_reason": "max_tokens",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"url": "https://example.com/b", "relevance": 91, "quote": "B"}\n',
+                    }
+                ],
+                "usage": {"input_tokens": 240, "output_tokens": 300},
+            },
+        )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["deepseek"].search(
+            client,
+            credentials,
+            WebSearchSettings(deepseek_evidence=True),
+            "latest python",
+            5,
+        )
+
+    # The rows it DID parse are applied -- the enrichment is partial, not lost.
+    assert response.sources[0].url == "https://example.com/b"
+    assert response.evidence_applied is True
+    # ...and the truncation is on the record rather than invisible.
+    assert any("token cap" in failure for failure in response.failures), response.failures
