@@ -428,6 +428,21 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
             payload: Any = json.loads(response.read().decode())
     except urllib.error.HTTPError as error:
         if error.code == 404:
+            # TWO different 404s arrive here, and conflating them would send the
+            # operator to restart a daemon that is perfectly current. The daemon's
+            # own miss answers with a JSON `unknown_extension` body naming the ids
+            # that ARE connected; a daemon with no /driver route at all answers
+            # Starlette's plain-text 404.
+            body_text = ""
+            with suppress(Exception):
+                body_text = error.read().decode()
+            named = _ids_from_payload(body_text)
+            if named or "unknown_extension" in body_text:
+                return {
+                    "ok": False,
+                    "error": f"no connected extension matches '{target}'.",
+                    "authorized_extension_ids": named,
+                }
             # An older daemon answers /health but has no /driver. Saying so beats
             # reporting a generic failure the user would read as "my id is wrong".
             return {
@@ -453,7 +468,10 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
                 "run 'lop browser restart'."
             ),
         }
-    return {"ok": bool(payload.get("ok")), "driver_extension_id": payload.get("driver_extension_id", "")}
+    return {
+        "ok": bool(payload.get("ok")),
+        "driver_extension_id": payload.get("driver_extension_id", ""),
+    }
 
 
 def _ids_from_payload(body_text: str) -> list[str]:

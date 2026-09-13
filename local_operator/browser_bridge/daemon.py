@@ -305,9 +305,7 @@ def _pending_entries(root: Path | None = None) -> dict[str, dict[str, Any]]:
     entries = saved.get("pending")
     if isinstance(entries, dict):
         return {
-            str(key): value
-            for key, value in entries.items()
-            if isinstance(value, dict) and key
+            str(key): value for key, value in entries.items() if isinstance(value, dict) and key
         }
     # Schema 1: the record was the single waiting identity's entry.
     extension_id = str(saved.get("extension_id", ""))
@@ -855,9 +853,10 @@ class BridgeService:
         """
         if self.link.dropped_unproven():
             return True
-        return self._drop_latch_at > 0.0 and (
-            time.monotonic() - self._drop_latch_at
-        ) <= LINK_DROP_TTL_S
+        return (
+            self._drop_latch_at > 0.0
+            and (time.monotonic() - self._drop_latch_at) <= LINK_DROP_TTL_S
+        )
 
     def drop_silence_value(self) -> float:
         """Seconds the peer had been quiet when it was severed (0.0 if never)."""
@@ -884,17 +883,20 @@ class BridgeService:
         attachment age is a fact the operator can reason about ("the one that
         was already there keeps the wheel").
 
-        "Surviving" means PROVEN. Promoting a mute standby would hand the wheel
-        to a peer the daemon already believes is unresponsive, which is the
-        wedge this whole link layer exists to avoid; leaving it as a standby
-        costs nothing, because a re-dial from that identity finds
-        ``driver_generation`` pointing at nothing and takes the wheel itself
-        (see `extension`).
+        "Surviving" means PROVEN **and PAIRED**. Promoting a mute standby
+        would hand the wheel to a peer the daemon already believes is
+        unresponsive, and promoting an UNPAIRED one hands it to a peer that
+        cannot serve a single command — every session then reads `not_paired`
+        for as long as it drives. Both were measured on the real rig; neither
+        is a hypothetical. Leaving such a link as a standby costs nothing: a
+        re-dial from its identity finds the wheel free and takes it, and a
+        standby that PAIRS while the wheel is idle takes it at that moment (see
+        `_take_free_wheel`).
 
         Decides and publishes with NO await in between (audit A1's discipline):
         the caller may only await the role frame AFTER this returns.
         """
-        candidates = [link for link in self.standby_links() if link.proven]
+        candidates = [link for link in self.standby_links() if link.proven and link.paired]
         if not candidates:
             return None
         promoted = max(candidates, key=lambda link: link.attached_at)
@@ -918,6 +920,23 @@ class BridgeService:
         payload = {"event": "role", "role": link.role}
         with suppress(Exception):
             await link.send(payload)
+
+    def _take_free_wheel(self, link: ExtensionLink) -> ExtensionLink | None:
+        """Give a newly PAIRED link the wheel when nothing else holds it.
+
+        A link can become paired while standing by — the second install pairing
+        through its own socket, or re-pairing after a revoke — and the wheel can
+        be idle at that moment, because the driver went away and the only
+        surviving standby was unpaired (which `_promote_standby` deliberately
+        will not promote). Without this the install would sit paired and
+        stationary while the daemon answered `extension_disconnected` to every
+        session: reachable by doing exactly what the popup tells the user to do.
+        """
+        if self.link.websocket is not None:
+            return None
+        link.role = "driver"
+        self.driver_generation = link.generation
+        return link
 
     def _retire_link(self, link: ExtensionLink) -> ExtensionLink | None:
         """Retire a link whose socket has ended; promote a standby if it drove.
@@ -1336,7 +1355,9 @@ class BridgeService:
         """Whether the on-disk pairing still authorises the DRIVING link."""
         return self._identity_listed(self.link.extension_id)
 
-    async def _sever_identity(self, extension_id: str, *, link: ExtensionLink | None = None) -> None:
+    async def _sever_identity(
+        self, extension_id: str, *, link: ExtensionLink | None = None
+    ) -> None:
         """Remove ONE identity from the allow-list and sever only ITS sockets.
 
         Flipping ``paired`` false is not enough on its own: an open socket the
@@ -1377,9 +1398,7 @@ class BridgeService:
                 with suppress(Exception):
                     # 4003 = unpaired, the same code the handshake uses so the
                     # popup renders "waiting to pair" rather than a mystery drop.
-                    await asyncio.wait_for(
-                        websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S
-                    )
+                    await asyncio.wait_for(websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S)
                 if not target.is_authoritative(websocket, generation):
                     # A handshake installed itself while that close was in flight.
                     # The revoke must NOT clear the link it did not close: doing
@@ -1550,9 +1569,7 @@ class BridgeService:
         extension_id = link.extension_id
         entry = _pending_entries(self.root).get(extension_id)
         if entry is None:
-            self._ensure_pending(
-                extension_id, _browser_label(link.browser, link.extension_version)
-            )
+            self._ensure_pending(extension_id, _browser_label(link.browser, link.extension_version))
             return PairResult(ok=False, message="No live pairing code. Run lop browser pair again.")
         attempts = int(entry.get("attempts", 0)) + 1
         expired = float(entry.get("expires_at", 0)) <= time.time()
@@ -1570,9 +1587,7 @@ class BridgeService:
                 # install in `lop browser pair`, and dropping it here would
                 # leave a waiting install anonymous exactly after a lockout,
                 # when the user most needs to know which popup to re-open.
-                self._rotate_pending(
-                    extension_id, str(entry.get("label", ""))
-                )
+                self._rotate_pending(extension_id, str(entry.get("label", "")))
                 message = (
                     "Too many attempts. That code is now dead — run 'lop browser "
                     "pair' for a fresh one."
@@ -1604,7 +1619,10 @@ class BridgeService:
         )
         self._drop_pending(extension_id)
         link.paired = True
+        promoted = self._take_free_wheel(link)
         self.publish_safely()
+        if promoted is not None:
+            await self._tell_role(promoted)
         return PairResult(ok=True, token=token)
 
     def _set_pending_attempts(self, extension_id: str, attempts: int) -> None:
@@ -1937,11 +1955,24 @@ class BridgeService:
                 {
                     "error": "unknown_extension",
                     "authorized_extension_ids": sorted(_identity_ids(self.root)),
-                    "standby_extension_ids": [
-                        entry.extension_id for entry in self.standby_links()
-                    ],
+                    "standby_extension_ids": [entry.extension_id for entry in self.standby_links()],
                 },
                 status_code=404,
+            )
+        if not link.paired:
+            # Checked BEFORE the already-driving shortcut, because an unpaired
+            # link CAN be the driver: the handshake gives the wheel to whoever
+            # dials when nothing holds it. Same rule the automatic promotion path
+            # applies — the wheel only goes to a link that can serve a command.
+            return JSONResponse(
+                {
+                    "error": "not_paired",
+                    "message": (
+                        "that install is connected but not paired yet; run "
+                        "'lop browser pair' and enter its code first"
+                    ),
+                },
+                status_code=409,
             )
         if link.generation == self.driver_generation and link.role == "driver":
             # Already driving: report success rather than churning the link, so
@@ -1998,9 +2029,7 @@ class BridgeService:
         if exact:
             return exact[0]
         labels = _identities(self.root)
-        by_prefix = [
-            entry for entry in candidates if entry.extension_id.lower().startswith(wanted)
-        ]
+        by_prefix = [entry for entry in candidates if entry.extension_id.lower().startswith(wanted)]
         if len(by_prefix) == 1:
             return by_prefix[0]
         by_label = []
