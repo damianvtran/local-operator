@@ -109,6 +109,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     ATTACHMENT_KEY,
     ATTACHMENT_MISSING,
@@ -902,6 +903,13 @@ class AttachedSession:
         #: entries the suffix read already had; there is no second parse and no
         #: second read of a file that is 103 MB at the top end.
         self._cold_seed_usage: Usage | None = None
+        #: The durable per-session spend record, stashed during the SAME suffix
+        #: read (the reader was widened to serve both custom types in one pass).
+        #: This is the cold surface's money: without it the cold path prices one
+        #: receipt as a FLOOR and keeps the 92.3% behaviour the owner path no
+        #: longer has — the classic "fixed one end, left the mirror" defect
+        #: (design R5).
+        self._cold_spend: dict[str, Any] | None = None
         #: The conversation's own journalled model selection, as read while
         #: synthesising cold state. Held so the seeding can attribute a receipt
         #: that predates the serving-identity stamp (``usage_seed.reading_
@@ -1329,6 +1337,10 @@ class AttachedSession:
         state = self._restore_cold_details(state)
         self._cold_checkpoint = None
         self._cold_seed_usage = None
+        # NOT cleared, unlike its two neighbours: the spend details row is ~200
+        # bytes (not a parsed transcript), and ``/session`` reads it through
+        # ``restored_spend`` for the exact micro-USD figure long after the cold
+        # open. Freeing it would trade nothing for a missing number.
         self._cold_selection = None
         self._install_frontend(state)
         self._finish_sync()
@@ -1461,6 +1473,13 @@ class AttachedSession:
         holds those readings; ``_cold_seed_usage`` is the one the suffix read
         stashed (``_read_transcript._replay``).
 
+        For MONEY the order is: the checkpoint's accumulator, then the durable
+        ``session_spend.v1`` record (the same suffix read, the same O(1) lookup
+        the owner path gets), and only then the one-receipt floor. The record
+        exists precisely so a cold surface does not have to reconstruct a total
+        from a point-in-time reading — and it is durable without a UI attached,
+        which is the property the checkpoint lacks (design §2.3, R5).
+
         FILLS ONLY, field by field, and that order is the contract: a checkpoint
         that carried accounting wins, because it is the conversation's LAST
         turn-end state whereas a receipt is one point in time. EVERY write below
@@ -1493,15 +1512,22 @@ class AttachedSession:
         ``refresh_frontend_usage`` on a viewer — the seed happens at open.
         """
         seed = self._cold_seed_usage
-        if seed is None:
-            return state
+        record = self._cold_spend
+        spend = SessionSpend.from_details(record) if record else None
+        changes: dict[str, Any] = {}
+        # Money first, and independent of the model spec below: the record is a
+        # total, not a reading that has to be attributed to a model.
+        if state.cumulative_parent_cost is None and spend is not None and spend.calls:
+            changes["cumulative_parent_cost"] = spend.usd
+            changes["cost_knowledge"] = spend.knowledge()
         spec = state.effective_model or state.selected_model
         if spec is None:
-            return state
+            return state.model_copy(update=changes) if changes else state
+        if seed is None:
+            return state.model_copy(update=changes) if changes else state
         # ONE attribution for both the numerator and the price, so a reading the
         # receipt cannot be attributed to gets neither.
         identity = reading_identity(seed, fallback=self._cold_selection)
-        changes: dict[str, Any] = {}
         if state.last_usage is None:
             # Through the wire form and back, as every other writer of this
             # field does: ``model_copy`` does not validate, so the receipt has
@@ -1520,7 +1546,11 @@ class AttachedSession:
         # A checkpoint that carried no window still gets one.
         if window is not None and state.context_window is None:
             changes["context_window"] = window
-        if state.cumulative_parent_cost is None and identity is not None:
+        if (
+            state.cumulative_parent_cost is None
+            and "cumulative_parent_cost" not in changes
+            and identity is not None
+        ):
             from local_operator.session.frontend_state import CostKnowledge
             from local_operator.tui.costs import turn_cost
 
@@ -3789,7 +3819,14 @@ class AttachedSession:
             suffix = read_replay_suffix(
                 directory,
                 through_id=through_id,
-                checkpoint_type=FRONTEND_CHECKPOINT_CUSTOM_TYPE if want_checkpoint else None,
+                # TWO types out of ONE pass: the frontend checkpoint and the spend
+                # record. Asking twice would re-read a 100 MB journal for a row
+                # the same backward scan already passed.
+                checkpoint_types=(
+                    (FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
+                    if want_checkpoint
+                    else ()
+                ),
             )
             cut = through_id
             if cut is not None and not suffix.through_present and not strict_cut:
@@ -3801,6 +3838,7 @@ class AttachedSession:
                 cut = None
             if want_checkpoint:
                 self._cold_checkpoint = suffix.checkpoint
+                self._cold_spend = suffix.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE)
                 # The accounting fallback rides the SAME read, from the rows
                 # already in hand: the suffix reader stops only once the newest
                 # shrink and its kept window are buffered, so every post-shrink
@@ -6684,6 +6722,23 @@ class AttachedSession:
         # Copying path: `Usage` is accumulated in place elsewhere in the
         # harness, so a shared instance is one `+=` from corrupting state.
         return self.frontend_state.last_usage
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable spend record this viewer read out of the journal.
+
+        Scope, stated because the absence is a deliberate one: a COLD open
+        reads the record from the suffix it already fetched, which is this
+        surface's only access to the owner's money (there is no runtime to ask
+        and no `Transcript` to index). A WARM attach adopts the owner's
+        canonical state instead, whose ``cumulative_parent_cost`` and
+        ``cost_knowledge`` are the same number one wire hop away — so
+        ``None`` here means "ask the owner's state", never "this session has
+        no spend".
+        """
+        details = getattr(self, "_cold_spend", None)
+        if not details:
+            return None
+        return SessionSpend.from_details(details)
 
     def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
         """No rows recovered on a VIEWER: the transcript is the runtime's.

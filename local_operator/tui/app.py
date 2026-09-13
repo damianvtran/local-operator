@@ -125,6 +125,7 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
+from local_operator.session.frontend_state import CostKnowledge
 
 # Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
@@ -9488,6 +9489,25 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
 
+        # Cost: the durable RECORD when the session has one, recalled in O(1) —
+        # that is the whole point of the ledger. Only a session with no record
+        # falls back to pricing the one restored reading, and that fallback is
+        # marked FLOOR exactly as before.
+        #
+        # The context figure above stays independent of this: ``restored_usage``
+        # keeps meaning the NEWEST provider reading, because the compaction gate
+        # consumes it and a sum there would be the same lie in the other
+        # direction (design R1).
+        restored_spend = getattr(session, "restored_spend", None)
+        spend: Any = restored_spend() if callable(restored_spend) else None
+        if spend is not None and spend.calls:
+            self._total_cost = spend.usd
+            self._spend_is_floor = spend.knowledge() in {
+                CostKnowledge.FLOOR,
+                CostKnowledge.PARTIAL,
+            }
+            self._status.update(cost=self._spend_text())
+            return
         # Priced through the same `_cost_for` every live turn uses, so a
         # restored figure and an accrued one cannot disagree about what the same
         # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
