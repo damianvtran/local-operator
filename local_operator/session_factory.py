@@ -2205,24 +2205,40 @@ def _collapse_sdk_missing_failures(
 
 
 def _fire_mcp_sink(session: Session) -> None:
-    """Hand the just-recorded ``mcp_startup`` outcome to the front-end sink.
+    """Tell the front end that ``mcp_startup`` moved.
 
     Shared by the wiring's three completion points — the two degradation
     arms (no MCP layer; discovery raised) and the gate snapshot — because a
     deferred-boot TUI learns about ALL of them the same way: it installed
     its sink while the manager was still absent and needs exactly one
-    nudge per outcome to re-run its wiring and report. Guarded like the
-    settle callback's own lookup: a session without a sink (headless, an
-    unadopted session) is the normal case, and a sink that raises must
-    never take the wiring down with it.
+    nudge per outcome to re-run its wiring and report.
+
+    A VIEWER is a front end too, and it is told through the frontend-state
+    push rather than through a sink: a runtime child has no in-process app to
+    call (``_on_mcp_startup_settled`` is None there), so this is the only hop
+    the outcome has toward the screen. It has to happen in the arms WITHOUT a
+    manager as well — when discovery raises or the MCP layer cannot import, the
+    function returns before ``attach_mcp_dispose`` (which is what normally
+    refreshes the store for the manager arm), so a viewer bound before the
+    wiring keeps the empty outcome it was seeded with and never learns a round
+    ran at all. Measured on the deferred path with discovery raising: 0 pushes
+    carrying ``mcp_startup`` in the 3 s after the wiring, against a viewer told
+    correctly by the same code on the eager path.
+
+    Guarded like the settle path's own lookup: a session without a sink
+    (headless, an unadopted session) is the normal case, and a sink that raises
+    must never take the wiring down with it.
     """
     sink = getattr(session, "_on_mcp_startup_settled", None)
-    if sink is None:
-        return
-    try:
-        sink(getattr(session, "mcp_startup", None))
-    except Exception:  # noqa: BLE001 — a UI hook must never break the wiring
-        logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
+    if sink is not None:
+        try:
+            sink(getattr(session, "mcp_startup", None))
+        except Exception:  # noqa: BLE001 — a UI hook must never break the wiring
+            logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
+    # The store is the other front end, and the one a bound viewer reads. Same
+    # call the settle path makes, for the same reason.
+    if hasattr(session, "_frontend_state_store"):
+        session.refresh_frontend_state()
 
 
 async def wire_mcp_into_session(

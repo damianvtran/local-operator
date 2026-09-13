@@ -3909,9 +3909,48 @@ class AttachedSession:
                 tool_count=int(startup.get("tool_count", 0) or 0),
                 settling=bool(startup.get("settling", False)),
             )
+        previous_startup = self.mcp_startup
         self.mcp_startup = startup
+        self._fire_mcp_startup_sink(startup, previous_startup)
         self._name_state.set(state.conversation_title, user_set=state.conversation_title_user_set)
         self._apply_pending_gate(_pending_request(state.pending_gate))
+
+    def _fire_mcp_startup_sink(self, startup: Any, previous: Any) -> None:
+        """Hand a CHANGED ``mcp_startup`` to whatever front end adopted this facade.
+
+        The owner records an MCP round's outcome and pushes it through the
+        frontend state; before this hop, that was where a viewer's copy of the
+        news stopped. The TUI installs its settle/wiring sink on the session it
+        adopts (``OperatorApp._wire_mcp_status``), and on the in-process
+        ``Session`` that sink is how the boot toast and the durable failure
+        notice get raised — but the facade assigned it to an attribute nothing
+        on this class ever read, so on the viewer path a failed server reached
+        ``mcp_startup`` and no screen at all: no toast, no notice, only ``/mcp``.
+        That is the operator's "instead of throwing up the toast that some MCPs
+        failed to load", and it is why the deferred-wiring change (which makes
+        the report land AFTER the bind) had to be paired with this.
+
+        Fired only on a CHANGE, and only for a non-empty outcome. The owner
+        pushes the same snapshot repeatedly (every canonical refresh carries it),
+        and a per-attach re-announce is the noise the TUI's own per-session
+        sentence record exists to suppress. An EMPTY outcome is the machine with
+        no ``.mcp.json``: ``McpStartupOutcome.reportable`` already answers False
+        for it, so passing it on would be harmless, but not passing it keeps the
+        app's painters off the path entirely for the feature-not-used case.
+
+        Guarded like every other UI hop on this class: a host that installed no
+        sink (tests, embedders, a reduced facade) is the normal case, and a sink
+        that raises must never take an incoming frame down with it.
+        """
+        if startup is None or startup == previous:
+            return
+        sink = getattr(self, "_on_mcp_startup_settled", None)
+        if not callable(sink):
+            return
+        try:
+            sink(startup)
+        except Exception:  # noqa: BLE001 — a UI hook must never break the transport
+            logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
 
     def _on_wire_event(self, data: dict[str, Any]) -> None:
         event = deserialize_event(data)
