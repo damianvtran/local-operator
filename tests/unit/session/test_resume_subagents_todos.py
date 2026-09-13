@@ -38,6 +38,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session import session as session_module
 from local_operator.session.session import (
+    _SUBAGENT_ROSTER_VERSION,
     SUBAGENT_ROSTER_CUSTOM_TYPE,
     SUBAGENT_ROSTER_SIDECAR,
     TODO_SNAPSHOT_CUSTOM_TYPE,
@@ -856,17 +857,29 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     """A launched child writes a roster snapshot custom entry to the
     transcript — the durable record the resume reads."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    parent = _session(tmp_path, OneShotStream())
+    stream = OneShotStream()
+    parent = _session(tmp_path, stream)
     await parent.async_init()
     job_id = parent._launch_subagent(label="x", prompt="p")
     await wait_for(lambda: _status(parent, job_id) == "completed")
-    # The settle that paints the child's terminal row is what schedules the
-    # roster persist carrying it, and ``AsyncJobManager._run_job`` flips the
-    # status BEFORE notifying — so the write can still be pending here. Drain the
-    # one writer instead of spending a sleep on it: a fixed budget is a bet on
-    # machine load, and this baseline is the bet's stake. When it lost on CI the
-    # baseline was the RUNNING roster (no ``settled_at``, no record ``outcome``)
-    # and the settle write landing later read as the sidecar growing 53 B.
+    # THE PARENT MUST BE GENUINELY IDLE BEFORE THE BASELINE IS TAKEN, and the
+    # child's ``completed`` status is a PROXY for that which does not hold: the
+    # settle also runs ``Session._on_job_completed``, which spawns a background
+    # parent turn feeding the child's result back into the conversation. That
+    # turn is what this test used to catch by accident — its entries (job_result,
+    # the reply, the attention customs) landed between the two measurements and
+    # read as the transcript growing (``assert 2379 == 2072``). Waiting on the
+    # delivery turn removes the race AND is what makes the transcript-wide
+    # assertion below legitimate again: with the parent idle, nothing may append
+    # to either file, which is strictly more than the roster-typed check it
+    # replaces (a roster re-appended under a SECOND custom type would have passed
+    # that one).
+    await wait_for_settled_delivery(parent, stream)
+    # A roster write can still be in flight here: ``AsyncJobManager._run_job``
+    # flips the status BEFORE notifying, and the write then hops to a worker
+    # thread, so a fixed sleep expires mid-write and leaves the baseline on the
+    # RUNNING roster — when that lost on CI the settle payload landing later read
+    # as the sidecar growing 53 B. Drain the one writer instead.
     await parent._await_subagent_roster_writer()
     entries = [
         e
@@ -880,29 +893,21 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     # the sidecar is ONE atomically replaced JSON document — a second roster
     # appended into it would not parse — holding this child's row and no other.
     sidecar_text = sidecar.read_text(encoding="utf-8")
+    transcript_bytes = parent._transcript.path.read_bytes()
     document = json.loads(sidecar_text)
-    assert document["version"] == 1
+    assert document["version"] == _SUBAGENT_ROSTER_VERSION
     assert [job_row["id"] for job_row in document["jobs"]] == [job_id]
     for heavy in _UNBOUNDED_ROSTER_FIELDS:
         assert heavy not in document["jobs"][0], f"{heavy} must not be in the roster sidecar"
-    roster_entry_ids = [entry.id for entry in entries]
     for _ in range(25):
         parent._schedule_subagent_persist()
     await parent._await_subagent_roster_writer()
-    # Repeated transitions replace that one bounded file and never append another
-    # full roster to the transcript. The window is asserted on the ROSTER's own
-    # footprint — the sidecar bytes and the transcript's roster-entry ids — not
-    # on the transcript's total size, which was never a roster fact: the
-    # auto-delivered child-result turn (job_result / assistant / attention
-    # entries) lands in the same window and is legitimate, which is how this test
-    # flaked with ``2379 == 2072``.
+    # Repeated transitions replace that one bounded file and append NOTHING. Both
+    # files are compared byte-for-byte, which is the invariant the old comment
+    # claimed and the byte WINDOW only approximated: a second roster appended to
+    # the transcript — under any custom type — moves these bytes.
     assert sidecar.read_text(encoding="utf-8") == sidecar_text
-    assert [
-        entry.id
-        for entry in parent._transcript.entries()
-        if entry.type == "custom"
-        and entry.payload.get("custom_type") == SUBAGENT_ROSTER_CUSTOM_TYPE
-    ] == roster_entry_ids
+    assert parent._transcript.path.read_bytes() == transcript_bytes
     latest = entries[-1].payload["details"]
     # Job rows carry the manager's own ``id`` key; comms records carry job_id.
     row = next(r for r in latest["jobs"] if r["id"] == job_id)
