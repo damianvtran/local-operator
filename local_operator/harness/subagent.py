@@ -240,6 +240,111 @@ def read_effort_tier_selectors() -> dict[str, Any]:
     }
 
 
+#: Whose choice a subagent's model is, as ``values.subagents.model_choice``
+#: spells it. ``operator`` is the shipped default: a child inherits the
+#: launching session's model unless an OPERATOR-authored role pin or launcher
+#: argument moves it, which is the contract ``run_subagent``'s module docstring
+#: states. ``model`` additionally lets a DELEGATING MODEL pick a configured
+#: ``subagents.models`` tier from the ``task`` tool's schema.
+#:
+#: Why this key exists, since the default is the behaviour the harness already
+#: had: the ``task`` schema advertised an ``effort`` enum whose members are
+#: provider/model SWAPS while its name is this harness's REASONING-effort
+#: vocabulary, so a delegating model read "pick your child's effort" and bought
+#: itself an ``anthropic/claude-opus-5`` child. Measured over the last 500
+#: session transcripts of this machine: a ``deepseek/deepseek-v4.1-flash``
+#: parent pinned ``hi`` 157 times and ``med`` 46 times against 365 inherits.
+#: One ``~/.local-operator/sessions/61f378649fbc`` run spent $0.083 on parent
+#: calls against $13.05 across its three opus children. The key is therefore
+#: the OPERATOR's switch: with the default in place no delegating model may
+#: spend on a different model at all, and an operator who WANTS the delegation
+#: keeps it by choosing ``model``.
+MODEL_CHOICE_OPERATOR = "operator"
+MODEL_CHOICE_MODEL = "model"
+
+#: The default :func:`read_model_choice` falls back to for every unrecognised
+#: shape, and the value the ``subagents.model_choice`` registry row ships with.
+#: Named once so the reader, the registry and the tests cannot disagree about
+#: which member is the safe one.
+DEFAULT_MODEL_CHOICE = MODEL_CHOICE_OPERATOR
+
+#: Values :func:`read_model_choice` has already warned about, so a config file
+#: holding ``modle`` warns once per distinct value per process rather than on
+#: every tool build, every spawn and every schema read.
+_WARNED_MODEL_CHOICES: set[str] = set()
+
+
+def _warn_unrecognised_model_choice(shown: str) -> None:
+    """Warn once per distinct unrecognised value. See :func:`read_model_choice`."""
+    if shown in _WARNED_MODEL_CHOICES:
+        return
+    _WARNED_MODEL_CHOICES.add(shown)
+    logger.warning(
+        "subagents.model_choice=%s is neither %r nor %r; treating it as %r",
+        shown,
+        MODEL_CHOICE_MODEL,
+        MODEL_CHOICE_OPERATOR,
+        DEFAULT_MODEL_CHOICE,
+    )
+
+
+def read_model_choice() -> str:
+    """``values.subagents.model_choice``, coerced to the two values it may take.
+
+    The one place the key is read, shared by the tool schemas
+    (:func:`model_may_choose_tier`) and by the tool-argument refusal, so the
+    surface that advertises the field and the surface that validates it cannot
+    disagree about who owns the choice.
+
+    **Fails CLOSED, and that direction is the whole point.** Only a ``str``
+    whose ``strip().lower()`` is exactly ``"model"`` enables model choice;
+    absent, blank, wrongly typed (YAML's ``true``/``1``, a list) and misspelled
+    all mean :data:`DEFAULT_MODEL_CHOICE`. A reader that failed OPEN on an
+    unrecognised value would re-authorise exactly the spend this key was added
+    to stop, on nothing worse than a typo — silently, in a way that looks like
+    the key working. A value that is PRESENT but unrecognised still warns once,
+    because gating an operator who typed ``modle`` with no clue why is the other
+    way to be wrong.
+
+    Never raises, deliberately: this is read while the tool schemas are being
+    built, and a corrupt ``config.yml`` must cost the operator a delegating
+    model's tier picker — which is the fail-closed answer anyway — rather than a
+    session. :func:`configured_effort_tiers` takes the same position on the
+    same read path.
+    """
+    from local_operator.config import ConfigManager
+
+    try:
+        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+    except Exception as exc:  # noqa: BLE001 — schema construction must never fail a turn
+        _warn_unrecognised_model_choice(f"<unreadable: {exc}>")
+        return DEFAULT_MODEL_CHOICE
+    choice = raw.get("model_choice") if isinstance(raw, dict) else None
+    if isinstance(choice, str):
+        normalised = choice.strip().lower()
+        if normalised in (MODEL_CHOICE_MODEL, MODEL_CHOICE_OPERATOR):
+            return normalised
+        _warn_unrecognised_model_choice(choice)
+        return DEFAULT_MODEL_CHOICE
+    if choice is not None:
+        # A non-string is a shape YAML produced (``true``, ``1``, ``[]``), so the
+        # warning shows it as the repr an operator can find in the file.
+        _warn_unrecognised_model_choice(repr(choice))
+    return DEFAULT_MODEL_CHOICE
+
+
+def model_may_choose_tier() -> bool:
+    """May a DELEGATING MODEL pick the model a child runs on?
+
+    The policy half of the ``task``/``agent`` schemas: when this is ``False``
+    (the default) no tier is advertised on any model-facing surface, and asking
+    for one anyway is refused at the tool-argument boundary with a message that
+    says what to do instead. See :func:`read_model_choice` for why the default
+    is the restrictive one.
+    """
+    return read_model_choice() == MODEL_CHOICE_MODEL
+
+
 def configured_effort_tiers() -> dict[str, str]:
     """``{tier: "provider/model"}`` for every tier a launch could honour.
 

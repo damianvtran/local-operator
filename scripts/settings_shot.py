@@ -61,6 +61,22 @@ STATE selects what the page is showing:
     fork-open  the same, with `fork.mode` expanded into its choices
     fork-placement       the cmux placement row, scrolled into view
     fork-placement-open  the same, expanded into workspace/surface
+    subagents  the Subagents section scrolled into view. Named by its SECTION
+               rather than by one of its keys on purpose: this is the state the
+               before/after pair around `subagents.model_choice` is captured
+               in, and the before side is a tree where that key does not exist
+               yet. _select() raises for an unknown key, so a state that names
+               it could not frame the base commit at all — and a pair captured
+               with two different scripts is not a pair
+    model-choice  the `subagents.model_choice` row highlighted, the section
+               around it on screen
+    model-choice-open  the same, expanded into its two members with their
+               descriptions — the whole value space of the policy, which is
+               only on screen while the row is activated
+    model-choice-set  the row expanded and the cursor moved onto `model` (the
+               NON-default member), which is the state that shows browsing
+               writes nothing: the value column still reads the stored one
+               until `enter`
     theme      the Theme row highlighted (OUT.svg) and activated (OUT.open.svg),
                which is the affordance review round 1 m1 changed: TEXT opened a
                free-text editor, ENUM expands the registry's themes as choices
@@ -335,6 +351,30 @@ async def main() -> None:
         elif state in ("teams", "agents"):
             while view._pane != state:
                 view.action_pane(1)
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "subagents":
+            _select_section(view, "subagents")
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "model-choice":
+            _select(view, "subagents.model_choice")
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "model-choice-open":
+            _select(view, "subagents.model_choice")
+            await pilot.pause()
+            view.action_activate()
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "model-choice-set":
+            _select(view, "subagents.model_choice")
+            view.action_activate()
+            await pilot.pause()
+            # One row down: the stored (default) member is `operator`, so this
+            # frames the cursor on `model` while the VALUE column still shows
+            # what is actually stored.
+            view.action_move(1)
             await pilot.pause()
             save_capture(app, out)
         elif state == "theme":
@@ -644,6 +684,45 @@ def _select(view: SettingsView, key: str) -> None:
             view._scroll_to_selection()
             return
     raise SystemExit(f"no row for {key}")
+
+
+def _select_section(view: SettingsView, name: str) -> None:
+    """Frame a WHOLE section: header, its rows, and the pane under them.
+
+    For the before/after pair around a key that does not exist on the before
+    side: ``_select`` raises for an unknown key, so a state that named
+    ``subagents.model_choice`` could not frame the base commit at all — and a
+    pair photographed with two different scripts is not a pair.
+
+    Selecting the header row directly does not work: a header is not a
+    selectable row, so ``_repaint`` snaps the cursor back to the row ABOVE it
+    and the scroll then leaves the header — the thing this state exists to
+    show — one line below the fold. So the cursor goes on the section's LAST
+    row and the viewport is lifted to the header afterwards, which is only
+    correct when the block fits; that is checked rather than assumed.
+    """
+    header = next(
+        (
+            index
+            for index, row in enumerate(view._rows)
+            if row.kind == "header" and row.section is not None and row.section.name == name
+        ),
+        None,
+    )
+    if header is None:
+        raise SystemExit(f"no section {name}")
+    last = header
+    for index in range(header + 1, len(view._rows)):
+        if view._rows[index].kind == "header":
+            break
+        last = index
+    height = view._body.size.height
+    if last - header + 1 > height:
+        raise SystemExit(f"section {name} ({last - header + 1} rows) does not fit {height}")
+    view._selected = last
+    view._repaint()
+    view._scroll_to_selection()
+    view._body.scroll_to(y=header, animate=False)
 
 
 def _select_chain(view: SettingsView, chain: str) -> None:

@@ -12103,12 +12103,22 @@ class Session:
           keeps its spawn inventory: re-adding would mean re-running the
           role allowlist and network-floor filtering for a short-lived run,
           and the per-call gate already makes "disabled" true for it.
-        * ``subagents.models.*`` — the launch path reads these per spawn, but
-          the ``task``/``agent`` tool SCHEMAS bake the configured tiers in at
-          build time (the enum the model picks from, and the description
-          naming what each tier resolves to). Rebuilt here so an operator who
-          configures a tier mid-session gets a tool that offers it, and one
-          who removes a tier gets a tool that stops offering it.
+        * ``subagents.models.*`` / ``subagents.model_choice`` — the launch path
+          reads the tiers per spawn, but the ``task``/``agent`` tool SCHEMAS
+          bake the configured tiers in at build time (the enum the model picks
+          from, and the description naming what each tier resolves to) AND
+          bake in whether a delegating model may pick one at all
+          (``subagents.model_choice``, which decides whether the field exists).
+          Rebuilt here so an operator who configures a tier mid-session gets a
+          tool that offers it, one who removes a tier gets a tool that stops
+          offering it, and one who hands the choice back to themselves gets a
+          tool with no tier field on it at all. ``model_choice`` is named
+          explicitly rather than covered by the ``models.`` prefix: the watcher
+          diffs REGISTRY keys, so a key that is not in ``settings_io.SETTINGS``
+          never appears in ``changed`` and its edits would be unreachable until
+          the next session — the same boundary the comment on
+          :data:`~local_operator.harness.subagent.CANONICAL_EFFORT_TIERS`
+          documents for a hand-added tier.
 
         Everything else the registry calls LIVE is already read per use
         (``fork.*``, ``web_*`` knobs, ``bash.shell``) and needs no apply here.
@@ -12185,7 +12195,10 @@ class Session:
                 self.jobs.set_max_running(cap)
             except ValueError:
                 logger.warning("subagents.max_running=%r rejected by the job manager", cap)
-        if any(key.startswith("subagents.models.") for key in changed):
+        if any(
+            key.startswith("subagents.models.") or key == "subagents.model_choice"
+            for key in changed
+        ):
             self._rebuild_effort_tier_tools()
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
