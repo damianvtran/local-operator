@@ -52,6 +52,46 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.13 — landed on `main`, NOT submitted (deferred behind the pending 0.1.12 review)
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.13 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | *filled in below once this lands* |
+| `extension/` tree hash | *filled in below once this lands* (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not applicable — never uploaded* |
+| Artifact size | *not applicable — never built for upload* |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged); the runtime now accepts the WINDOW `MIN_SUPPORTED_PROTO..PROTO_VERSION` |
+| Submission route | **None.** Deliberately NOT dispatched — see below |
+| Promotion route | **None.** Deliberately NOT dispatched |
+| Store state | **Not submitted.** The live listing is still `v0.1.10`; `v0.1.12` is `PENDING_REVIEW` |
+| State last checked | 2026-09-13 |
+| Approval timestamp | *not applicable* |
+| Previously published | v0.1.10 (0.1.12 still in review) |
+
+**This entry exists because the version moved on `main`, not because anything
+was submitted.** `extension/manifest.json` and `extension/package.json` track
+the extension CODE, not the review queue (AGENTS.md), so the behaviour change in
+this release — the update advisory now renders in the popup's Connected card —
+has to carry a bump in the same commit, or the version stops pinning exactly one
+tree (the 0.1.9 lesson).
+
+**The store dispatch is deliberately withheld.** The store refuses uploads while
+an item is in review (`HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE`), and the
+recorded rule is never to cancel a pending review to force a submission. So
+0.1.13 is queued for the NEXT submission window, after 0.1.12 is promoted, and
+nothing here claims it is live. When that dispatch happens, append the workflow
+run URL, the exact API response, the source commit and the tree hash to this
+entry.
+
+**Nothing about this version is required for the fix to work.** The version-skew
+defect it accompanies was fixed on the RUNTIME side (an older extension is
+driven, not refused), and the advisory only reads the version the extension
+reports — so the live 0.1.10 build benefits from the fix without any upload at
+all.
+
 ## v0.1.12 — submitted 2026-09-13, pending review as of 2026-09-13
 
 | Field | Value |

@@ -21,7 +21,13 @@ import {
   shouldArmFastPath,
   shouldDialOnAlarm,
 } from "./reconnect";
-import { ErrorCode, type DaemonMessage, type ExtensionEvent, type Response } from "./protocol.gen";
+import {
+  ErrorCode,
+  PROTO_VERSION,
+  type DaemonMessage,
+  type ExtensionEvent,
+  type Response,
+} from "./protocol.gen";
 
 const HANDLERS: Record<
   string,
@@ -464,7 +470,7 @@ async function connect(): Promise<void> {
     connected = true;
     connecting = false;
     attempt = 0;
-    const hello: ExtensionEvent = { event: "hello", proto: 1, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
+    const hello: ExtensionEvent = { event: "hello", proto: PROTO_VERSION, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
     wire.send(JSON.stringify(hello));
   };
   wire.onmessage = (message) => {

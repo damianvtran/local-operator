@@ -41,6 +41,13 @@
         <section id="connected" class="state hidden">
           <h1 class="title">Connected.</h1>
           <p class="sub">Local Operator can use this browser.</p>
+          <!-- The extension-update advisory. A FIXED RESERVED SLOT, the same
+               treatment the pairing form's error line uses (#pair-error): the
+               slot's height is paid whether or not there is anything to say, so
+               the line appearing cannot resize the popup WINDOW under the user's
+               cursor. It is a note, never a fault: an older extension is driven
+               normally, and the copy says nothing is blocked. -->
+          <p class="advisory hidden" id="connected-advisory"></p>
           <!-- Shown only while the Settings-page "allow all websites" switch is
                on: the one state where no prompt will ever appear, so the popup
                must say so instead of looking merely idle. -->

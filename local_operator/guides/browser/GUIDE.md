@@ -138,10 +138,19 @@ discovery; it is not an ownership takeover command.
 Worker/bridge restarts preserve owner recovery. A full browser restart may
 remove the extension's authority records; diagnostics then say **unresolved**.
 No restored tab is adopted merely because its numeric ID or URL matches.
-New runtimes require the ownership-capable extension and fail before allocation
-with an update instruction when an older extension is connected. Older runtimes
-continue their capability-only legacy path; their tabs are never automatically
-claimed by the new owner protocol.
+An older extension keeps working: the bridge drives any protocol version in
+`MIN_SUPPORTED_PROTO..PROTO_VERSION`, and when the connected extension predates
+the ownership lifecycle the runtime degrades to a capability-only **legacy
+mode** instead of failing before allocation. In legacy mode the record carries a
+redacted `ownership: unavailable` marker (`lop browser tabs` prints it as such),
+`close` settles the scope directly, and `retain`/`release` are recorded locally
+only — that extension cannot enforce a retention. Older runtimes continue their
+capability-only path; their tabs are never automatically claimed by the new
+owner protocol. A newer extension VERSION is driven too and gets an advisory
+note rather than an error — `lop browser status`, the popup's Connected card,
+and one line in the agent's context say that a newer extension exists and that
+nothing is blocked. Only a protocol version OUTSIDE the supported window is
+refused (close 4001, the popup's "Update needed" card).
 
 ## When the `browser` tool is missing: set the extension up
 
