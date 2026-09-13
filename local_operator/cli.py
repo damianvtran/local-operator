@@ -1744,8 +1744,8 @@ def _print_identities(pairing: dict[str, Any], health: dict[str, Any] | None) ->
         return
     driver = str((health or {}).get("driver_extension_id") or "")
     standby = {str(item) for item in (health or {}).get("standby_extension_ids") or []}
-    kind = "authorised" if len(identities) == 1 else "authorised"
-    print(f"identities:          {len(identities)} {kind}")
+    count = len(identities)
+    print(f"identities:          {count} authorised")
     for entry in identities:
         extension_id = str(entry.get("extension_id", ""))
         label = str(entry.get("label", "")) or "unnamed install"
@@ -1759,6 +1759,19 @@ def _print_identities(pairing: dict[str, Any], health: dict[str, Any] | None) ->
         else:
             role = "paired, not connected"
         print(f"                     - {label} ({_short_extension_id(extension_id)}) {role}")
+    if standby:
+        # The rollout cost, stated where it is felt (design §10 risk 2, review
+        # round 1 m3). An install whose build PREDATES the role event cannot act
+        # on being told `standby`: it keeps its debugger attachments and its
+        # surface map, so it leaves "Local Operator is debugging this browser"
+        # banners on tabs only it can release, while its popup still reads as
+        # connected. No daemon-side fix exists for a build that cannot hear the
+        # role frame, so the honest thing is to say so at the moment an operator
+        # looks at two installs and wonders why one is not driving.
+        print(
+            "note:                a standby install built before 0.1.13 cannot release its"
+            " own tabs; close those tabs (or remove that build) if it stops driving"
+        )
 
 
 def browser_command(args: argparse.Namespace) -> int:

@@ -896,6 +896,19 @@ one of them DRIVES at a time — the other is a **standby** that receives no
 command, holds no tab, and is promoted if the driver goes away. Everything that
 changed here is described in `docs/design/browser-multi-identity-pairing.md`.
 
+**The one rollout cost, stated rather than discovered.** Two installs can be
+paired at once and exactly one drives; the other is told `standby` with a
+`{event: "role"}` frame. A build that PREDATES this change (the released 0.1.10
+store build, which cannot be side-loaded and will be on real profiles for
+weeks) does not know that event: told to stand by, it keeps its
+`chrome.debugger` attachments and its surface map, so it leaves "Local Operator
+is debugging this browser" banners on tabs only it can release, and its popup
+still reads as connected while the daemon routes commands to the other install.
+No daemon-side fix exists for a build that cannot hear the frame. So: the
+disclosure is in `lop browser status` (printed whenever a standby is listed),
+in the PR body, and here. If an operator sees banners on tabs after loading a
+second build, removing that build (or closing those tabs) releases them.
+
 What that means when you are working on the extension:
 
 - **`lop browser pair`** shows one line per WAITING install, named by the label
