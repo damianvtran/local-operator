@@ -1618,6 +1618,13 @@ class AgentLoop:
                     and ladder.index(current) > ladder.index(effort_ceiling)
                 ):
                     model = model.model_copy(update={"reasoning_effort": effort_ceiling})
+            # ``max_tokens`` is deliberately NOT set here. The generation bound
+            # is part of the request contract (``harness/types.py``,
+            # ``DEFAULT_TURN_OUTPUT_TOKENS``) and every request is filled from
+            # that one policy as it is built, so a turn cannot go out unbounded
+            # because a call site forgot -- which is how a single response once
+            # ran to 97,189 output tokens. A host that wants a different bound
+            # names ``max_tokens`` explicitly.
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,

@@ -1683,6 +1683,64 @@ async def test_provider_client_sends_frames_and_replays_its_own_batches(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_provider_count_rides_the_next_decision_as_a_context_hint(
+    tmp_path: Path,
+) -> None:
+    """The figure the provider reported for the PREVIOUS request is carried into
+    the next one, exactly as ``AgentLoop`` carries its own last count.
+
+    Without it this path left ``ChatRequest.context_tokens_hint`` unset, so the
+    one number measured on the provider's own ruler reached the compaction
+    trigger but never rode the request. What this pins is the contract every
+    other host keeps: the request that follows a measured call carries that
+    measurement, rather than depending on a downstream reconciliation to
+    reconstruct it.
+    """
+    from local_operator.compaction.tokens import estimate_messages_tokens
+
+    stream = RecordingStream(_wait_reply, report_context=True)
+    client = _client(stream, tmp_path, keep_recent_frames=3, rebuild_every_frames=8)
+
+    await _drive(client, tmp_path, 2)
+
+    first, second = stream.requests[:2]
+    # Nothing has been measured before the first call, so there is no hint to
+    # carry -- and a placeholder here would be a lie about a prefix nobody read.
+    assert first.context_tokens_hint is None
+    # The fake reports exactly this count for the request it served.
+    reported = int(estimate_messages_tokens(first.messages))
+    assert reported > 0
+    assert second.context_tokens_hint == reported
+
+
+@pytest.mark.asyncio
+async def test_every_decision_request_is_bounded_before_it_is_sent(tmp_path: Path) -> None:
+    """The benchmark's decision call carries a generation bound too.
+
+    It never set ``max_tokens``, so the wire fell back to the model's advertised
+    capability and one measured decision returned ``output_tokens=97189`` with
+    ``reasoning_tokens=95098``. The bound now rides the request CONTRACT, which
+    is why this asserts it on the request the client builds rather than on a
+    constant this client passes.
+    """
+    from local_operator.harness.types import DEFAULT_TURN_OUTPUT_TOKENS
+
+    # The arm's own shape: a 1M window advertising 943,718 output tokens.
+    spec = ModelSpec(
+        provider="openrouter",
+        model_id="meta/muse-spark-1.3",
+        context_window=1_048_576,
+        max_output_tokens=943_718,
+    )
+    stream = RecordingStream(_wait_reply)
+    client = _client(stream, tmp_path, model_spec=spec)
+
+    await _drive(client, tmp_path, 2)
+
+    assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
+
+
+@pytest.mark.asyncio
 async def test_provider_client_history_is_append_only_between_rebuilds(tmp_path: Path) -> None:
     """Every request's prefix is the previous request's messages BY IDENTITY,
     except at the one rebuild the frame budget schedules.

@@ -11,11 +11,16 @@ import pytest
 from pydantic import ValidationError
 
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     AskOption,
     AskQuestion,
+    ChatRequest,
+    Message,
+    ModelSpec,
     TextContent,
     ToolExecutionEndEvent,
     ToolResult,
+    turn_output_budget,
 )
 
 
@@ -172,3 +177,69 @@ def test_a_secret_question_still_refuses_a_recommendation_after_the_hoist_landed
     with pytest.raises(ValidationError) as excinfo:
         AskQuestion(id="GITHUB_TOKEN", question="Paste it.", options=[], secret=True, recommended=0)
     assert "no options to recommend" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The generation bound a request carries (Step 1 of the runtime convergence)
+# ---------------------------------------------------------------------------
+#
+# The defect these pin is an ABSENCE: no request named a bound, so the wire fell
+# back to whatever the provider published as a capability and a single decision
+# ran to 97,189 output tokens (95,098 of them reasoning). The bound therefore
+# lives on the request CONTRACT rather than at one call site, so a new interface
+# cannot reintroduce the absence by forgetting.
+
+
+def _spec(max_output_tokens: int) -> ModelSpec:
+    return ModelSpec(
+        provider="openrouter",
+        model_id="meta/muse-spark-1.3",
+        context_window=1_048_576,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def test_a_request_with_no_ask_carries_the_policy_ceiling() -> None:
+    """The measured case: a 1M-window model advertising 943,718 output tokens.
+
+    Built from the advertised figure the request asked for a quarter of the
+    window on EVERY call, which is what let one response reason for 95,098
+    tokens before answering.
+    """
+    request = ChatRequest(model=_spec(943_718), messages=[Message.user("hi")])
+
+    assert request.max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+    assert request.max_tokens < 943_718
+
+
+def test_a_smaller_published_ceiling_wins_over_the_policy() -> None:
+    """Model-aware in the narrowing direction only: a provider limit below the
+    policy is a real limit and is kept, while a larger advertisement is not."""
+    assert ChatRequest(model=_spec(4_096), messages=[]).max_tokens == 4_096
+    assert ChatRequest(model=_spec(64_000), messages=[]).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+
+
+def test_a_spec_with_no_published_ceiling_is_still_bounded() -> None:
+    """``0`` is "no data", not "unlimited" -- and that silence is what let the
+    97k-token response go out unbounded."""
+    assert ChatRequest(model=_spec(0), messages=[]).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+
+
+def test_an_explicit_ask_is_never_overridden() -> None:
+    """``Session.ERRAND_MAX_TOKENS`` (1024, titling) and the compaction
+    summariser name their own budget, and an explicit ``0`` still means "ask the
+    provider for no cap" -- which is now reachable only on purpose."""
+    assert ChatRequest(model=_spec(943_718), messages=[], max_tokens=1_024).max_tokens == 1_024
+    assert ChatRequest(model=_spec(943_718), messages=[], max_tokens=0).max_tokens == 0
+
+
+def test_the_policy_ceiling_is_configurable() -> None:
+    """The bound is a default a host can raise, not a constant baked into every
+    caller: the policy takes the ceiling explicitly, and a host that needs a
+    longer answer names one on the request (pinned above)."""
+    assert turn_output_budget(_spec(943_718), ceiling=32_000) == 32_000
+    assert turn_output_budget(_spec(943_718)) == DEFAULT_TURN_OUTPUT_TOKENS
+    # ``None``/``0`` mean "the default", not "no bound" -- a non-positive
+    # override must not silently uncap a turn.
+    assert turn_output_budget(_spec(943_718), ceiling=None) == DEFAULT_TURN_OUTPUT_TOKENS
+    assert turn_output_budget(_spec(943_718), ceiling=0) == DEFAULT_TURN_OUTPUT_TOKENS

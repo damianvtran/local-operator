@@ -1697,6 +1697,18 @@ class ProviderModelClient:
             # exact contradiction that produced the rejections.
             tool_choice="auto" if self._model_spec.supports_tools else "none",
             prompt_cache_key=self._prompt_cache_key,
+            # The figure the provider reported for the PREVIOUS request in this
+            # episode, passed exactly as ``AgentLoop`` passes its own last count
+            # (``loop.py``, the ``run_context_tokens`` argument). Both paths reach
+            # the wire through the same ``SessionStreamFn``, which reconciles a
+            # tracked turn against the conversation it owns -- so where that
+            # tracker has a counted baseline this scalar is redundant, and where
+            # it does not (the episode's first call, a prefix the builder just
+            # rebuilt, a served model other than the one the tracker measured)
+            # the request's scalar is the only figure that survives. This path
+            # simply never sent one, so the two interfaces disagreed about the
+            # same conversation for no reason.
+            context_tokens_hint=self._last_provider_context_tokens,
         )
         # Named rather than positional: the outcome carries a shape record
         # beside nine fields, and a tuple unpack would put two same-typed

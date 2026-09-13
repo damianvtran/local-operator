@@ -27,6 +27,7 @@ from local_operator.harness.loop import (
 )
 from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     AbortSignal,
     AgentEndEvent,
     AgentTool,
@@ -55,6 +56,7 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    turn_output_budget,
 )
 from local_operator.providers.failover import (
     ProviderError,
@@ -1549,6 +1551,69 @@ class TestTheContextHintIsStampedPerRequestByTheLoop:
         await self._run(stream, get_context_tokens_hint=lambda: None)
 
         assert self._hints(stream) == [None, 160_000, 160_000]
+
+
+class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
+    """Every ``ChatRequest`` the loop builds carries a ``max_tokens``.
+
+    The loop is where the TUI's turns go out, so it is the interface that
+    shared the benchmark's defect: nothing named a bound, the wire fell back to
+    the model's advertised CAPABILITY (943,718 tokens on a 1M window), and one
+    measured decision returned ``output_tokens=97189`` with
+    ``reasoning_tokens=95098``. The bound is filled by the request contract
+    (``harness/types.DEFAULT_TURN_OUTPUT_TOKENS``) rather than set at this call
+    site, so this asserts the loop's requests ARE bounded by it -- including a
+    tool loop, where the second call is built by the same code path as the
+    first.
+    """
+
+    @staticmethod
+    async def _run(stream: ScriptedStream, **kwargs: Any) -> None:
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool([])])
+        async for _ in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, **kwargs), None
+        ):
+            pass
+
+    @staticmethod
+    def _two_calls() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_no_cap_is_bounded_by_the_policy(self):
+        """The default ``ModelSpec`` advertises 8,192; the run must ask for
+        something, not nothing."""
+        stream = self._two_calls()
+
+        await self._run(stream)
+
+        assert [r.max_tokens for r in stream.requests] == [turn_output_budget(MODEL)] * 2
+        assert all(r.max_tokens and r.max_tokens > 0 for r in stream.requests)
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_a_huge_cap_is_capped_at_the_policy(self):
+        """The muse-spark shape: 1M window, 943,718 advertised. Before the bound
+        rode the contract, this is the request that asked for a quarter of the
+        window on every call."""
+        spec = ModelSpec(
+            provider="openrouter",
+            model_id="meta/muse-spark-1.3",
+            context_window=1_048_576,
+            max_output_tokens=943_718,
+        )
+        stream = self._two_calls()
+
+        await self._run(stream, model=spec)
+
+        assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
 
 
 # ---------------------------------------------------------------------------

@@ -2152,6 +2152,55 @@ class ModelSpec(BaseModel):
     display_name: str = ""
 
 
+#: The most tokens ONE model call may generate, reasoning included.
+#:
+#: ``ModelSpec.max_output_tokens`` is the ceiling a PROVIDER publishes, which is
+#: a model capability and not the budget of a single turn: an aggregator states
+#: "this model can emit 943,718 tokens" for a 1M-window model, and a request
+#: built from that number asks for a quarter of the window on every call. Nobody
+#: was asking for anything smaller, so the ask bounded nothing in practice:
+#: measured on the OSWorld arm, ONE decision returned ``output_tokens=97189``
+#: with ``reasoning_tokens=95098`` and ``stop=stop``, 35 of 410 calls exceeded
+#: 16K, and the mean call took ~52 s. The TUI shares the defect -- same request
+#: contract, same absent bound -- which is why this is fixed in the contract
+#: rather than at the call sites that happened to be caught with it.
+#:
+#: 16,384 is the ceiling the OSWorld reference agent runs at, adopted here as a
+#: statement about OUR requests rather than as a benchmark rule: one turn of an
+#: agent loop is a tool call plus a short rationale, and a single response that
+#: spends five figures of tokens is looping rather than thinking. It is a POLICY,
+#: not a wire limit -- ``providers.clients._effective_max_tokens`` still lowers
+#: the ask to whatever the window can actually fund, and it still refuses a
+#: prompt that leaves no room for a usable reply.
+#:
+#: Raising it is a deliberate act, not a default: name a larger
+#: ``ChatRequest.max_tokens`` (a host raising it for a model or a workflow that
+#: genuinely needs a longer answer) or pass ``ceiling`` to
+#: :func:`turn_output_budget`.
+DEFAULT_TURN_OUTPUT_TOKENS = 16_384
+
+
+def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
+    """The ``max_tokens`` a request carries. ONE policy, decided in ONE place.
+
+    Model-aware only in the NARROWING direction. A model that publishes a
+    smaller ceiling (MiniMax M3's 8K) keeps it, because that is a real provider
+    limit; a model that publishes a LARGER one is NOT raised back to it, because
+    raising the ask to an advertised capability is exactly what put the
+    97k-token call on the wire. A spec that publishes no cap at all (``0`` is
+    "no data", not "unlimited") gets the policy ceiling: a turn with no bound is
+    the defect this exists to remove.
+
+    ``ceiling`` is the override -- ``None`` or a non-positive value means
+    :data:`DEFAULT_TURN_OUTPUT_TOKENS`. It is the hook a configuration key would
+    feed, but see AGENTS.md ("Adding a configuration key") before wiring one:
+    a key that only exists in the code that reads it is invisible to /settings.
+    """
+    limit = DEFAULT_TURN_OUTPUT_TOKENS if ceiling is None or ceiling <= 0 else int(ceiling)
+    advertised = int(getattr(model, "max_output_tokens", 0) or 0)
+    return min(limit, advertised) if advertised > 0 else limit
+
+
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
     place cache breakpoints per block (stable instruction block first,
@@ -2161,6 +2210,15 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
+    # The generation bound for THIS call. Left ``None`` it is filled from
+    # :func:`turn_output_budget` by the validator at the end of this class, so a
+    # request built anywhere in the harness is bounded without the caller having
+    # to remember -- see :data:`DEFAULT_TURN_OUTPUT_TOKENS` for why the contract
+    # rather than the call site owns it. An explicit value WINS: errands name a
+    # deliberate small one (``Session.ERRAND_MAX_TOKENS``, 1024 for titling) and
+    # the compaction summariser names its own. ``0`` still means "ask the
+    # provider for no cap" and omits the key, which is now only ever reached on
+    # purpose rather than by omission.
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -2340,6 +2398,26 @@ class ChatRequest(BaseModel):
     #: the read-only resolve (6). That the naming call actually SETS this flag
     #: is tested separately, over a real ``Session`` and a capturing stream fn.
     isolated: bool = False
+
+    @model_validator(mode="after")
+    def _bound_generation(self) -> "ChatRequest":
+        """Give every request a generation bound, from the one policy.
+
+        Here rather than at the loop's construction and the benchmark's, because
+        those are two of N interfaces that build a ``ChatRequest`` and the defect
+        is the absence of a bound, not a mistake in either of them: whichever
+        site is missed next re-opens it silently. Filling it at the contract makes
+        a turn without a cap unrepresentable unless the caller explicitly asks
+        for one (``max_tokens=0``).
+
+        The loop's construction (``harness/loop.py``, ``_model_turn``) and the
+        benchmark's (``evaluation/runner/provider_client.py``, ``decide``) are
+        the two that matter today; this covers both and the subset of hosts,
+        errands and side channels that build their own.
+        """
+        if self.max_tokens is None:
+            self.max_tokens = turn_output_budget(self.model)
+        return self
 
 
 class StreamStartEvent(BaseModel):
