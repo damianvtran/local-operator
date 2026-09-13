@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from local_operator.credentials import CredentialManager
-from local_operator.web_search.models import WebSearchSettings
+from local_operator.web_search.models import SearchResponse, WebSearchSettings
 from local_operator.web_search.providers import PROVIDERS, parse_duckduckgo_html
 
 
@@ -769,3 +769,118 @@ async def test_a_truncated_evidence_pass_is_reported_not_passed_off_as_complete(
     assert response.evidence_applied is True
     # ...and the truncation is on the record rather than invisible.
     assert any("token cap" in failure for failure in response.failures), response.failures
+
+
+@pytest.mark.asyncio
+async def test_perplexity_anonymous_wall_is_a_refusal_not_a_result(tmp_path) -> None:
+    """A sign-in wall must not be served as the search the model asked for.
+
+    The anonymous endpoint refuses with a normally completed stream: HTTP 200,
+    ``status: COMPLETED``, and ``text`` asking the reader to sign up. Because the
+    chain accepts an empty-source response when its answer is non-empty (a
+    provider may legitimately answer without citations), that sentence was
+    returned as a successful search -- observed five times in one real session,
+    each one a search that returned nothing while looking like one that worked.
+    The refusal is marked structurally by ``upsell_information``.
+    """
+    wall_event = {
+        "uuid": "pplx-wall",
+        "status": "COMPLETED",
+        "final": True,
+        "text": "Sign up and repeat your request.",
+        "upsell_information": {
+            "name": "fraud_authwall_upsell",
+            "upsell_type": "LOGIN",
+            "cta": "SIGN_UP_OR_LOGIN",
+        },
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = "data: " + json.dumps(wall_event) + "\n\ndata: [DONE]\n"
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError) as caught:
+            await PROVIDERS["perplexity"].search(
+                client,
+                _credentials(tmp_path),
+                WebSearchSettings(),
+                "query",
+                3,
+            )
+
+    message = str(caught.value)
+    # The reason names the wall and says what to do about it.
+    assert "fraud_authwall_upsell" in message
+    assert "PERPLEXITY_API_KEY" in message or "another provider" in message
+    # ...and never the invitation itself, which is what used to be returned.
+    assert "Sign up and repeat your request." not in message
+
+
+@pytest.mark.asyncio
+async def test_perplexity_keeps_sources_returned_alongside_a_wall(tmp_path) -> None:
+    """Some pages plus an upsell is still a result: never discard real sources."""
+    source_event = {
+        "uuid": "pplx-2",
+        "blocks": [
+            {
+                "intended_usage": "web_results",
+                "web_result_block": {
+                    "web_results": [
+                        {"name": "Source", "url": "https://example.com", "snippet": "E"}
+                    ]
+                },
+            }
+        ],
+        "upsell_information": {"name": "fraud_authwall_upsell", "upsell_type": "LOGIN"},
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = "data: " + json.dumps(source_event) + "\n\ndata: [DONE]\n"
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["perplexity"].search(
+            client,
+            _credentials(tmp_path),
+            WebSearchSettings(),
+            "query",
+            3,
+        )
+
+    assert response.sources[0].url == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_chain_of_empty_providers_fails_loudly(tmp_path, monkeypatch) -> None:
+    """When every enabled provider comes back empty, the search says so.
+
+    The alternative -- returning the last provider's empty response -- is what
+    made a real session's five empty searches look successful.
+    """
+    from local_operator.web_search import service as service_module
+    from local_operator.web_search.service import WebSearchService
+
+    def empty(*_args, **_kwargs):
+        return SearchResponse(provider="duckduckgo", auth_mode="free", sources=[], answer=None)
+
+    def walled(*_args, **_kwargs):
+        raise RuntimeError("anonymous tier walled this request (fraud_authwall_upsell/LOGIN)")
+
+    class _Table(dict[str, Any]):
+        def __getitem__(self, key):
+            return _Entry(empty if key == "duckduckgo" else walled)
+
+    class _Entry:
+        def __init__(self, fn):
+            self.search = fn
+
+    monkeypatch.setattr(service_module, "PROVIDERS", _Table())
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"])
+    service = WebSearchService(settings, _credentials(tmp_path))
+
+    with pytest.raises(RuntimeError) as caught:
+        await service.search("query")
+
+    message = str(caught.value)
+    assert "duckduckgo" in message and "perplexity" in message
