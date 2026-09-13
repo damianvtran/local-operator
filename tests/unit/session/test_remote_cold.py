@@ -112,6 +112,150 @@ async def test_a_cold_viewer_renders_durable_history_without_an_owner(
 
 
 @pytest.mark.asyncio
+async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An externalized image must replay with its BYTES, not an empty block.
+
+    The cold replay used to resolve attachment digests against a per-session
+    store (``<config>/sessions/<id>``) that nothing ever writes to, so a user
+    screenshot that is on disk and intact replayed as the "image unavailable —
+    no longer in the transcript" receipt. The journal's own config dir is where
+    the write path externalizes to, and that is the only root a replay can
+    resolve against.
+
+    Asserted through ``AttachedSession.cold`` — the real cold seam that boots a
+    viewer over a seeded journal — rather than ``replay_entries`` directly.
+
+    The reader's ENVIRONMENT deliberately differs from the owning config dir:
+    ``LOCAL_OPERATOR_CONFIG_DIR`` points at a second, empty directory while the
+    session is read with ``config_dir=<owner>``. A regression that resolved the
+    replay against ``AttachmentStore()`` (the env default) would therefore
+    resolve nothing and fail here, which is the wiring this pins — the bug's own
+    shape was a root that looked plausible and was not the writer's.
+    """
+    owner_cfg = tmp_path / "owner"
+    reader_env = tmp_path / "reader-env"
+    directory = _seed_transcript(owner_cfg, SESSION_ID)
+
+    import base64
+    import json
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.session.attachments import (
+        AttachmentStore,
+        store_for_transcript_dir,
+    )
+    from local_operator.session.transcript import Transcript
+
+    # Write under the OWNING config dir, so the bytes land in
+    # <owner>/attachments — the store derived from the session directory.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(owner_cfg))
+
+    # Above the 1 KB externalization floor, so the row references the store
+    # rather than carrying the bytes inline — an inline row resolves with no
+    # store at all and would pass on the buggy tree.
+    image = ImageContent(
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096).decode("ascii"),
+        mime_type="image/png",
+    )
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("look at this [Image #1]", images=[image]))
+
+    rows = [
+        json.loads(line)
+        for line in (directory / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert any(
+        block.get("attachment")
+        for row in rows
+        for block in (row.get("payload", {}).get("content") or [])
+        if isinstance(block, dict)
+    ), "precondition: the image row must be externalized to the store"
+
+    # Now hand the reader a DIFFERENT env config dir than the one that owns the
+    # journal. The roots must disagree, or the test cannot see a rewire.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(reader_env))
+    assert store_for_transcript_dir(directory).root == owner_cfg / "attachments"
+    assert AttachmentStore().root == reader_env / "attachments"
+    assert store_for_transcript_dir(directory).root != AttachmentStore().root
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=owner_cfg, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        blocks = [
+            block
+            for message in viewer.history()
+            for block in (getattr(message, "content", None) or [])
+            if isinstance(block, ImageContent)
+        ]
+        assert len(blocks) == 1
+        # NON-EMPTY and byte-identical to the paste: a block that merely
+        # EXISTS is exactly what the bug produced.
+        assert blocks[0].data == image.data
+        assert len(blocks[0].data) > 0
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_viewer_degrades_when_the_store_sidecar_is_not_an_object(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A damaged sidecar must degrade into the viewer, never raise.
+
+    ``AttachmentStore.get`` promises "degrade to a placeholder, never raise" —
+    and so does ``transcript._resolve_attachments``, which is the only caller on
+    this path. A sidecar that parses as JSON but is not an object (``[]``,
+    ``null``, a bare number) has no ``mime_type`` key, so an unguarded
+    ``meta.get`` raised AttributeError straight through the cold replay. It
+    needs a damaged or hand-edited store, which is why this is the guard rather
+    than a live defect: the property under test is that the replay survives the
+    same class of damage as a truncated sidecar already did.
+    """
+    import base64
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.session.transcript import Transcript
+
+    owner_cfg = tmp_path / "owner"
+    directory = _seed_transcript(owner_cfg, SESSION_ID)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(owner_cfg))
+
+    image = ImageContent(
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096).decode("ascii"),
+        mime_type="image/png",
+    )
+    await Transcript(directory).append_message(
+        Message.user("look at this [Image #1]", images=[image])
+    )
+
+    sidecars = list((owner_cfg / "attachments").glob("*.json"))
+    assert len(sidecars) == 1, "precondition: the write path stored one sidecar"
+    sidecars[0].write_text("[]", encoding="utf-8")
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=owner_cfg, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        history = viewer.history()
+        blocks = [
+            block
+            for message in history
+            for block in (getattr(message, "content", None) or [])
+            if isinstance(block, ImageContent)
+        ]
+        assert len(blocks) == 1
+        # The honest receipt, not a raise and not a blanked transcript.
+        assert blocks[0].data == ""
+        assert any("look at this [Image #1]" in getattr(m, "text", "") for m in history)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_cold_viewer_shows_scheduled_wakes_from_the_index(
     tmp_path: Path, monkeypatch
 ) -> None:

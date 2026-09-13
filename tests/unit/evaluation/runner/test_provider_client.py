@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Callable
 
 import pytest
 
+from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
 from local_operator.evaluation.adapters.api import observation_content_id
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import (
@@ -31,6 +32,7 @@ from local_operator.evaluation.protocol import (
     Observation,
     TypeAction,
 )
+from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     MAX_REJECTED_REPLY_CHARS,
@@ -46,6 +48,7 @@ from local_operator.harness.types import (
     ImageContent,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamUsageEvent,
     TextContent,
@@ -114,6 +117,7 @@ class ScriptedStream:
         chunk: int = 7,
         provider_payload: dict[str, Any] | None = None,
         error: str | None = None,
+        reasoning: tuple[str, ...] = (),
     ) -> None:
         self.text = text
         self.usage = usage
@@ -125,6 +129,11 @@ class ScriptedStream:
         # marker, so a fake that cannot carry one cannot exercise the refusal
         # path at all -- which is how that path shipped unhandled.
         self.error = error
+        # The private reasoning channel, delivered before the visible one.
+        # Scripted for the same reason as ``error``: a turn that spent its
+        # whole output budget thinking produces NO visible text, and a fake that
+        # cannot carry reasoning cannot tell that apart from an empty stream.
+        self.reasoning = reasoning
         self.requests: list[Any] = []
 
     def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
@@ -132,6 +141,8 @@ class ScriptedStream:
         return self._events()
 
     async def _events(self) -> AsyncIterator[Any]:
+        for fragment in self.reasoning:
+            yield StreamReasoningDelta(delta=fragment)
         # Delivered in fragments because a provider streams text in pieces; a
         # client that reads only the first delta would still pass a whole-string
         # fake and then fail against every real provider.
@@ -811,6 +822,242 @@ async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> N
 
     assert info.value.stop_reason == "stop"
     assert info.value.diagnostic.startswith("Your previous reply was rejected:")
+
+
+# ---------------------------------------------------------------------------
+# The provider reasoning-boundary marker
+# ---------------------------------------------------------------------------
+#
+# MiniMax M3 served through OpenRouter splits one model turn across two wire
+# channels -- ``reasoning_content`` for the thinking, ``content`` for the answer
+# -- and the closing half of the template's boundary token is emitted at the
+# joint, so the reply the harness assembles begins with ``</mm:think>`` welded
+# to an otherwise byte-perfect action batch. The strict decoder refuses a reply
+# that does not START with a JSON value (by design: hunting forward for the
+# first ``{`` can execute a batch the model never sent), so the whole billed
+# turn was discarded as ``malformed-json`` -- 15 of the sealed corpus's 40
+# published replies, all 15 recoverable.
+#
+# The tests below pin four things: the DECLARATION decides (never the reply's
+# text), only the HEAD is touched, a strip is counted and reported rather than
+# silent, and the decoder's own tolerances are unchanged on the path where
+# stripping is active.
+
+#: The token as the provider emits it: the CLOSING half only. Zero opening tags
+#: appear anywhere in the sealed corpus, and that asymmetry is the authorship
+#: proof -- see ``ModelSpec.reasoning_boundary_markers``.
+BOUNDARY_MARKER = "</mm:think>"
+
+
+def _minimax_spec(*markers: str) -> ModelSpec:
+    """A spec that DECLARES ``markers``, without consulting the real table.
+
+    Built by hand rather than through ``build_model_spec("openrouter",
+    "minimax/minimax-m3")`` so these tests measure the reply path and not the
+    table: the table has its own tests in ``tests/unit/model``, and a client
+    test that needed it would be asserting two things and pinning neither.
+    """
+
+    return ModelSpec(
+        provider="openrouter",
+        model_id="minimax/minimax-m3",
+        reasoning_boundary_markers=markers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_declared_boundary_marker_is_absorbed_and_the_batch_is_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """The tagged reply and the untagged one are the SAME decision.
+
+    Not "both accepted" -- BYTE-IDENTICAL, asserted on the canonical bytes the
+    harness would execute, because that is the whole safety argument for
+    removing bytes the model sent: the strip may not be a repair, an
+    interpretation or a salvage. If the two differ by one byte, the strip is
+    changing what the model decided and has no business running.
+    """
+
+    current = observation()
+    untagged = finish_payload(current)
+    stream = ScriptedStream(BOUNDARY_MARKER + untagged, reasoning=("thinking...",))
+    client = _client(stream, tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER))
+
+    decision = await client.decide(current, _turns(current))
+
+    reference = parse_decision(untagged, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
+    # And both are executable against the observation they answer.
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_spec_that_declares_no_marker_still_refuses_the_tagged_reply() -> None:
+    """The strip is DECLARATION-driven, not a licence to rewrite any reply.
+
+    The same bytes, the same model id, the same request -- only the spec's
+    declaration differs. A build that stripped this token unconditionally would
+    pass the test above and fail this one, and would silently mangle the first
+    model whose prose legitimately opens with that text.
+    """
+
+    current = observation()
+    stream = ScriptedStream(BOUNDARY_MARKER + finish_payload(current))
+    client = _client(stream, model_spec=_minimax_spec())
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+
+    assert info.value.class_key == "leading-delimiter"
+    assert info.value.stripped_reply_markers == 0
+    # The reply is judged on its ORIGINAL bytes, and the evidence keeps them.
+    assert info.value.evidence_reply == BOUNDARY_MARKER + finish_payload(current)
+
+
+@pytest.mark.asyncio
+async def test_a_marker_inside_the_reply_is_never_surgery(tmp_path: Path) -> None:
+    """A token that is not at the head is not a boundary token.
+
+    Both seeds are real: a model quoting the token inside its visible notes (its
+    ``public_observations`` string) and a model discussing it in prose. Neither
+    is the template joint, so neither may be touched -- and the reply that
+    carries one must decode to the bytes the model wrote. This is the property
+    that keeps the tolerance from becoming the substring surgery the decoder
+    refuses to do.
+    """
+
+    from local_operator.evaluation.runner.provider_client import (
+        strip_reasoning_boundary_markers,
+    )
+
+    current = observation()
+    quoted = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {"actions": json.loads(finish_payload(current))["actions"]},
+            "public_observations": f"the template emits {BOUNDARY_MARKER} between turns",
+        }
+    )
+
+    decision = await _client(
+        ScriptedStream(quoted), tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER)
+    ).decide(current, _turns(current))
+
+    assert BOUNDARY_MARKER in (decision.public_reply or "")
+    # The helper itself: only a head match moves, and a doubled boundary token
+    # (two channels, one after the other) is absorbed whole.
+    assert strip_reasoning_boundary_markers(quoted, (BOUNDARY_MARKER,)) == (quoted, ())
+    assert strip_reasoning_boundary_markers(" " + BOUNDARY_MARKER + quoted, (BOUNDARY_MARKER,)) == (
+        quoted,
+        (BOUNDARY_MARKER,),
+    )
+    assert strip_reasoning_boundary_markers(BOUNDARY_MARKER * 2 + quoted, (BOUNDARY_MARKER,)) == (
+        quoted,
+        (BOUNDARY_MARKER, BOUNDARY_MARKER),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tagged_reply_that_is_still_broken_names_both_halves() -> None:
+    """The residual class: something was removed AND the object was incomplete.
+
+    The reply the model sees in its own history is the version it WROTE, the
+    delimiter included, so a hint that named only truncation would send it
+    looking for a mistake it cannot find in what it sent. The class must be the
+    residual one, not the leading one: the decode did start.
+    """
+
+    current = observation()
+    truncated = BOUNDARY_MARKER + '{"action_batch": {"actions": ['
+    stream = ScriptedStream(truncated)
+    client = _client(stream, model_spec=_minimax_spec(BOUNDARY_MARKER))
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+
+    assert info.value.class_key == "incomplete-json"
+    assert info.value.stripped_reply_markers == 1
+    assert "reasoning delimiter was removed" in info.value.diagnostic
+    assert "incomplete" in info.value.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_a_strip_leaves_the_decoders_own_tolerances_untouched(tmp_path: Path) -> None:
+    """The two tolerances are independent, and both survive the strip.
+
+    Trailing noise is tolerated after a complete value and a second batch for
+    the same observation is refused wherever it sits -- through a spec that is
+    actively stripping, i.e. on the one path where a mistake in the assembler
+    could plausibly disturb the decoder downstream of it.
+    """
+
+    current = observation()
+    client = _client(
+        ScriptedStream(BOUNDARY_MARKER + type_payload(current) + " Hope that helps!"),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    )
+    decision = await client.decide(current, _turns(current))
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    assert action.text == "hello"
+
+    competing = _client(
+        ScriptedStream(BOUNDARY_MARKER + type_payload(current) + finish_payload(current)),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    )
+    with pytest.raises(DecisionRejected) as info:
+        await competing.decide(current, _turns(current))
+    assert info.value.class_key == "second-batch"
+
+
+@pytest.mark.asyncio
+async def test_every_attempt_records_its_strip_count_including_a_zero(tmp_path: Path) -> None:
+    """A tolerance nobody can see is indistinguishable from mangling a reply.
+
+    The count is recorded on the ACCEPTED path, which is the only place the
+    tolerance working is visible at all, and it is recorded as zero on an
+    ordinary attempt -- a run of zeros is how a provider changing its chat
+    template becomes visible from here, and a field that only appeared when
+    something was stripped could never express that.
+    """
+
+    current = observation()
+    stripped = await _client(
+        ScriptedStream(BOUNDARY_MARKER + finish_payload(current)),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    ).decide(current, _turns(current))
+    plain = await _client(
+        ScriptedStream(finish_payload(current)), tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER)
+    ).decide(current, _turns(current))
+
+    assert stripped.stripped_reply_markers == 1
+    assert plain.stripped_reply_markers == 0
+
+
+@pytest.mark.asyncio
+async def test_the_strip_is_reported_rather_than_silent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same rule as the trailing-junk tolerance: tolerated is not silent.
+
+    The strip removes bytes the model sent, so the log line is the one place a
+    reader can reconstruct that it happened, which marker, and how many bytes.
+    """
+
+    current = observation()
+    with caplog.at_level(logging.WARNING):
+        await _client(
+            ScriptedStream(BOUNDARY_MARKER + finish_payload(current)),
+            tmp_path,
+            model_spec=_minimax_spec(BOUNDARY_MARKER),
+        ).decide(current, _turns(current))
+
+    assert BOUNDARY_MARKER in caplog.text
+    assert "minimax/minimax-m3" in caplog.text
+    assert str(len(BOUNDARY_MARKER)) in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -2045,6 +2292,432 @@ async def test_an_over_long_rejected_reply_is_bounded_on_the_exception(
 
     assert info.value.reply is not None
     assert len(info.value.reply) == MAX_REJECTED_REPLY_CHARS
+
+
+def _screen_observation(
+    root: Path, sequence: int = 0, *, width: int = 1280, height: int = 720
+) -> Observation:
+    """A framed observation whose model-visible size is a real screen's.
+
+    ``_framed_observation`` publishes a 1x1 frame, which is all the frame-id
+    contract needs and useless for a coordinate bound: a hint derived from it
+    would say "0..0" and a test asserting that would pin nothing. The frame
+    BYTES are reused from that helper (so ``verify_artifact`` still accepts
+    them); only the geometry the model is told about changes.
+    """
+
+    from local_operator.evaluation.protocol import FrameGeometry, FrameSize
+
+    base = _framed_observation(root, sequence)
+    frame = base.frames[0].model_copy(
+        update={
+            "frame_id": "screen",
+            "geometry": FrameGeometry(
+                native=FrameSize(width=width, height=height),
+                model_visible=FrameSize(width=width, height=height),
+            ),
+        }
+    )
+    provisional = base.model_copy(update={"frames": (frame,), "observation_id": "provisional"})
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+def _defective_reply(case: str, current: Observation) -> str:
+    """One reply per refusal class, shaped like the sealed corpus it comes from.
+
+    Every payload here is a shape a real model produced (the MiniMax campaign's
+    sealed rejections, or the episodes named beside the parser that refused
+    them), so this table measures the hint against the traffic it exists for
+    rather than against invented edge cases.
+    """
+
+    observation_id = current.observation_id
+    if case == "leading-delimiter":
+        # A preamble before the object: the offset-0 half of the class, and the
+        # one shape of it the harness deliberately does NOT absorb (hunting
+        # forward for the first ``{`` can execute a batch the model never sent).
+        return "Sure, here you go: {"
+    if case == "incomplete-json":
+        # The other half: the decode STARTED and the object broke inside. Verbatim
+        # the shape of a sealed MiniMax reply whose action was cut mid-object.
+        return '{"actions": [{"kind": "type", "text": "hello"'
+    if case == "fenced-json":
+        return '```json\n{"actions": [{"kind": "finish"}]}\n```'
+    if case == "unsupported-reply-version":
+        return json.dumps(
+            {
+                "reply_version": "2.0",
+                "action_batch": {"actions": []},
+                "public_observations": "",
+            }
+        )
+    if case == "envelope-shape":
+        return json.dumps({"reply_version": "1.0", "action_batch": {"actions": []}})
+    if case == "extra-action-key":
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "wait",
+                        "observation_id": observation_id,
+                        "frame_id": "screen",
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        )
+    if case == "unknown-key":
+        return json.dumps(
+            {
+                "actions": [
+                    {"kind": "key", "observation_id": observation_id, "keys": ["ctrl", "Return"]}
+                ]
+            }
+        )
+    if case == "keys-not-array":
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "key",
+                        "observation_id": observation_id,
+                        "keys": {"item": ["ctrl", "alt", "t"]},
+                    }
+                ]
+            }
+        )
+    if case == "unknown-action-kind":
+        return json.dumps(
+            {"actions": [{"kind": "right_click", "observation_id": observation_id, "x": 1, "y": 1}]}
+        )
+    if case == "coordinate":
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "click",
+                        "observation_id": observation_id,
+                        "frame_id": "screen",
+                        "x": 17752,
+                        "y": 900,
+                    }
+                ]
+            }
+        )
+    if case == "unknown-frame-id":
+        return _click_payload(current, "1")
+    if case == "field-invalid":
+        return json.dumps(
+            {"actions": [{"kind": "type", "observation_id": observation_id, "text": ""}]}
+        )
+    if case == "second-batch":
+        return _click_payload(current, "screen") + _click_payload(current, "screen")
+    if case == "observation-binding":
+        # A batch whose action names ANOTHER observation. The defect arrives
+        # through Pydantic's model validator, which is the case that must not
+        # keep its rendering: it carries ``input_value=<the whole batch>``.
+        return finish_payload(observation(1))
+    raise AssertionError(f"unknown case {case}")
+
+
+# The model-facing message per class: the class it is bucketed into, and the
+# thing it MUST say. A hint that only reported "something was wrong" would
+# satisfy the class assert and fail the model it is written for, so both are
+# pinned here, and the hygiene rule (no ``input_value=``, no docs URL) is
+# asserted for every row rather than for a representative one.
+_REJECTION_HINT_CASES = [
+    # The two halves of the old ``malformed-json`` class, split so the offset-0
+    # failures -- which is what a provider reasoning boundary token and a code
+    # fence both produce, and one of them is now absorbed before the decoder
+    # sees it -- are countable apart from the replies that broke mid-object.
+    (
+        "leading-delimiter",
+        "leading-delimiter",
+        ["did not begin with the JSON object", "beginning with '{'", '"reply_version": "1.0"'],
+    ),
+    (
+        "incomplete-json",
+        "incomplete-json",
+        ['"reply_version": "1.0"', '"action_batch"', "incomplete"],
+    ),
+    ("fenced-json", "leading-delimiter", ["did not begin with the JSON object", "code fence"]),
+    (
+        "unsupported-reply-version",
+        "unsupported-reply-version",
+        ['The only accepted value is "1.0"'],
+    ),
+    ("envelope-shape", "envelope-shape", ["omitted 'public_observations'"]),
+    ("extra-action-key", "extra-action-key", ['"frame_id"', '"wait"', '"duration_ms"']),
+    ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
+    ("keys-not-array", "keys-not-array", ['["ctrl", "alt", "t"]', "not an object"]),
+    ("unknown-action-kind", "unknown-action-kind", ['"right_click"', 'Did you mean "click"?']),
+    ("coordinate", "out-of-frame-coordinate", ['"x" 0..1279', '"y" 0..719']),
+    ("unknown-frame-id", "unknown-frame-id", ["unknown frame_id '1'", "only accepted frame ids"]),
+    ("field-invalid", "field-invalid", ['"text" in a "type" action', "non-empty string"]),
+    ("second-batch", "second-batch", ["second action batch"]),
+    (
+        "observation-binding",
+        "observation-binding",
+        ['"observation_id" of the observation being answered'],
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "class_key", "expected"),
+    _REJECTION_HINT_CASES,
+    ids=[row[0] for row in _REJECTION_HINT_CASES],
+)
+async def test_a_refused_reply_is_told_what_to_send_instead(
+    tmp_path: Path, case: str, class_key: str, expected: list[str]
+) -> None:
+    """The model-facing correction names the defect AND the accepted shape.
+
+    What it must never carry is the validator's own rendering: a Pydantic
+    ``str()`` embeds ``input_value=<the value it refused>`` and a docs URL, and
+    on the one path where a value can be a resolved secret that is the value
+    quoted into the next request. ``_diagnostic`` strips both for the episode
+    outcome; this is the same rule at the boundary the MODEL reads.
+    """
+
+    current = _screen_observation(tmp_path, 0)
+    stream = RecordingStream(lambda _message: _defective_reply(case, current))
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    rejected = info.value
+    assert rejected.diagnostic.startswith("Your previous reply was rejected:")
+    assert rejected.class_key == class_key
+    for fragment in expected:
+        assert fragment in rejected.diagnostic, fragment
+    assert "input_value=" not in rejected.diagnostic
+    assert "errors.pydantic.dev" not in rejected.diagnostic
+    assert "[type=" not in rejected.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_records_the_shape_of_the_stream_that_produced_it(
+    tmp_path: Path,
+) -> None:
+    """An empty reply and a discarded one are different failures.
+
+    A turn that spent its whole budget on the reasoning channel arrives as an
+    empty reply; a client that dropped what the provider sent arrives as the
+    same empty reply. The counts are the only thing in the bundle that tells
+    them apart -- and ``reasoning_deltas`` is the number the wire clients never
+    used to emit at all.
+    """
+
+    current = _screen_observation(tmp_path, 0)
+    stream = ScriptedStream("", reasoning=("weighing ", "the options"))
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    shape = info.value.stream_shape
+    assert shape is not None
+    assert shape.content_deltas == 0
+    assert shape.reasoning_deltas == 2
+    assert shape.tool_call_deltas == 0
+    assert shape.stop == "stop"
+    assert info.value.class_key == "empty-reply"
+
+
+def test_the_example_the_hint_hands_the_model_actually_parses(tmp_path: Path) -> None:
+    """An example that does not parse is the defect, restated.
+
+    The whole point of showing the accepted shape is that the model can copy it,
+    so the example is generated from the enforced schema and then FED BACK
+    THROUGH the real decoder here. A hand-written example would drift out of the
+    protocol silently; a drifted generated one fails this test instead -- the
+    same argument ``_action_schema_lines`` makes for the system prompt.
+    """
+
+    from local_operator.evaluation.runner.provider_client import _example_json
+
+    current = _screen_observation(tmp_path, 0)
+    example = _example_json(LEGACY_ACTION_SURFACE, current)
+
+    decision = parse_decision(example, current, route=ROUTE)
+
+    assert decision.action_batch.actions[0].observation_id == current.observation_id
+    assert decision.public_reply == example
+
+
+def test_the_key_example_in_the_hint_is_an_accepted_chord() -> None:
+    """The keys example is admissible, not merely illustrative.
+
+    ``["ctrl", "alt", "t"]`` is what the hint shows for the field a model most
+    often wraps in an object. It is built from the surface's own vocabulary, and
+    asserted here through the validator that will judge the model's next reply:
+    an example the parser refuses would teach the model the very rejection this
+    hint exists to end.
+    """
+
+    from local_operator.evaluation.protocol import KeyAction
+    from local_operator.evaluation.runner.provider_client import _keys_example
+
+    keys = _keys_example(LEGACY_ACTION_SURFACE)
+    action = KeyAction(observation_id="obs-1", keys=tuple(keys))
+
+    assert list(action.keys) == ["CTRL", "ALT", "t"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("marker", "recorded"),
+    [("function_call", "function_call"), ("x" * 200, "x" * 64)],
+    ids=["vendor-vocabulary", "unbounded-marker"],
+)
+async def test_an_unusual_stop_marker_is_recorded_rather_than_rejected(
+    tmp_path: Path, marker: str, recorded: str
+) -> None:
+    """The terminal marker is the PROVIDER's vocabulary, not ours.
+
+    Recording it must not be able to fail the record: a marker our identifier
+    rules would refuse, or one far longer than any real one, has to land in the
+    bundle as-is (truncated) rather than raising out of the rejection path --
+    that path exists to describe a refusal, and turning it into a crash would be
+    strictly worse than the missing field it replaces.
+    """
+
+    current = _screen_observation(tmp_path, 0)
+    stream = ScriptedStream("not json at all", stop_reason=marker)
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    assert info.value.stream_shape is not None
+    assert info.value.stream_shape.stop == recorded
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_envelope_is_published_but_not_replayed(tmp_path: Path) -> None:
+    """The two boundaries differ, and both are load-bearing.
+
+    History must keep the placeholder: an envelope reply's notes are
+    unvalidated text that may carry a credential, and replaying it re-opens the
+    F1 channel. Evidence must keep the REPLY: withholding it made 273 of the
+    MiniMax campaign's 280 rejection artifacts unreadable, which is how a
+    reader got the class distribution wrong. So the same rejection carries both.
+    """
+
+    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.public_reply import REJECTED_PUBLIC_REPLY
+
+    current = _screen_observation(tmp_path, 0)
+    reply = _defective_reply("unsupported-reply-version", current)
+    # The second reply is what makes the placeholder observable: the corrective
+    # history is what the NEXT request carries, so the client has to be asked
+    # again before anything can be read off the wire.
+    replies = iter([reply, _click_payload(current, "screen")])
+    stream = RecordingStream(lambda _message: next(replies))
+    client = _client(stream, tmp_path)
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+    await client.decide(current, _turns(current))
+
+    rejected = info.value
+    # The history boundary: the placeholder, and the reply is NOT in it.
+    replay = "\n".join(message.text for message in stream.requests[-1].messages)
+    assert REJECTED_PUBLIC_REPLY in replay
+    assert reply not in replay
+    assert rejected.reply == REJECTED_PUBLIC_REPLY
+    # The evidence boundary: the reply itself, with the class that was recorded
+    # for it and the shape of the stream that carried it.
+    artifact = _rejection_detail(rejected, RedactionSet.from_resolved_values([]))
+    assert reply in artifact
+    assert "class: unsupported-reply-version" in artifact
+    assert "stream: content_deltas=" in artifact
+
+
+@pytest.mark.asyncio
+async def test_the_published_rejected_reply_is_bounded(tmp_path: Path) -> None:
+    """A provider's max-token wall of prose must not reach the bundle whole.
+
+    The bound is asserted on the ARTIFACT, not on the exception: the exception
+    carries the reply raw so that the publisher can scan it before cutting it.
+    """
+
+    from local_operator.evaluation.runner.episode import _rejection_detail
+    from local_operator.evaluation.runner.public_reply import REJECTED_REPLY_TRUNCATED
+
+    current = _screen_observation(tmp_path, 0)
+    stream = RecordingStream("x" * (MAX_REJECTED_REPLY_CHARS * 3))
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    artifact = _rejection_detail(info.value, RedactionSet.from_resolved_values([]))
+    section = artifact.split("--- rejected reply ---\n", 1)[1]
+    assert section.endswith(REJECTED_REPLY_TRUNCATED)
+    assert len(section) <= MAX_REJECTED_REPLY_CHARS + len(REJECTED_REPLY_TRUNCATED)
+
+
+@pytest.mark.asyncio
+async def test_recording_a_rejection_does_not_change_the_decision_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence recording is a pure function of data the attempt already has.
+
+    The reply, the class and the stream shape are all collected from an attempt
+    that has already been billed and refused, so capturing them cannot change
+    which decisions the model is asked for. Run twice over the same scripted
+    defective-then-corrected pair -- the second time with the recorder stubbed
+    to keep nothing -- the accept/reject sequence and every request byte must be
+    identical. What differs is the artifact ''content'', never the conversation.
+    """
+
+    import local_operator.evaluation.runner.provider_client as client_module
+
+    real_recorder = client_module.rejection_evidence
+
+    def recorder_off(*args: Any, **kwargs: Any) -> Any:
+        recorded = real_recorder(*args, **kwargs)
+        return type(recorded)(
+            class_key=recorded.class_key,
+            hint=recorded.hint,
+            evidence_reply=None,
+            stream_shape=None,
+        )
+
+    def rendered(request: Any) -> dict[str, Any]:
+        """One request as bytes, minus the per-construction message UUIDs.
+
+        ``Message`` defaults its ``id`` to a fresh UUID, so two identical runs
+        differ there and nowhere else. Normalising it to the message's index
+        keeps the comparison a byte comparison of everything the provider
+        would read -- content, roles, tools, system blocks, sampling fields.
+        """
+
+        payload = json.loads(request.model_dump_json())
+        for index, message in enumerate(payload["messages"]):
+            message["id"] = str(index)
+        return payload
+
+    async def scripted_sequence() -> tuple[list[str], list[dict[str, Any]]]:
+        current = _screen_observation(tmp_path, 0)
+        replies = iter([_click_payload(current, "1"), _click_payload(current, "screen")])
+        stream = RecordingStream(lambda _message: next(replies))
+        client = _client(stream, tmp_path)
+        with pytest.raises(DecisionRejected):
+            await client.decide(current, _turns(current))
+        sequence = ["rejected"]
+        decision = await client.decide(current, _turns(current))
+        assert decision.action_batch.actions[0].frame_id == "screen"  # type: ignore[union-attr]
+        sequence.append("accepted")
+        return sequence, [rendered(request) for request in stream.requests]
+
+    recorded_sequence, recorded_requests = await scripted_sequence()
+    monkeypatch.setattr(client_module, "rejection_evidence", recorder_off)
+    unrecorded_sequence, unrecorded_requests = await scripted_sequence()
+
+    assert recorded_sequence == ["rejected", "accepted"]
+    assert unrecorded_sequence == recorded_sequence
+    assert unrecorded_requests == recorded_requests
 
 
 def test_prompt_teaches_how_to_type_and_how_to_press_keys() -> None:

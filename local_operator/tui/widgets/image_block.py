@@ -140,10 +140,16 @@ class ImageBlock(TranscriptBlock):
         *,
         label: str = "",
         navigation_visible: bool = True,
+        fold_width: int = 0,
     ) -> None:
         super().__init__()
         self.add_class("image-block")
         self._navigation_visible = navigation_visible
+        # Before the first `_build`/`_grid`: the grid is chosen from the width
+        # (see `UserBlock.__init__` for why a hint supplied later is a width
+        # nothing reads). Zero keeps construction's 80-column guess, which
+        # `on_mount` corrects.
+        self.set_fold_hint(fold_width)
         #: Short human name for the unavailable receipt (marker text or file
         #: name). Never rendered while the image itself is on screen — the
         #: caption already lives on the tool card or in the prompt text.
@@ -193,7 +199,7 @@ class ImageBlock(TranscriptBlock):
         (possibly downscaled) copy: the fit's job is the true aspect ratio
         and the no-upscale rule, both properties of the source image.
         """
-        width = self.size.width or 80
+        width = self.fold_width(80)
         avail = max(8, width - SPINE_INDENT)
         return images_mod.fit_cells(
             self._px_width,
@@ -428,7 +434,7 @@ class ImageBlock(TranscriptBlock):
 
         style = Style(color=theme_mod.semantic_color("muted"))
         lead = f"{glyph} "
-        room = max(8, (self.size.width or 80) - SPINE_INDENT - cell_len(lead))
+        room = max(8, self.fold_width(80) - SPINE_INDENT - cell_len(lead))
         if cell_len(message) > room:
             from rich.cells import set_cell_size
 

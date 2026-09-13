@@ -40,7 +40,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+from scripts.visual_capture import (  # noqa: E402
+    isolate_capture,
+    save_capture,
+    settle_status_line,
+)
 
 isolate_capture()
 
@@ -224,8 +228,11 @@ async def main() -> None:
 
         # A second settled frame: a first paint that differs from this one is a
         # reflow the user sees as motion (AGENTS.md, "Animation and multi-frame
-        # changes").
+        # changes"). The status band is waited on too, so a capture of this
+        # tree differs from another capture of the same tree in the ledger and
+        # nothing else (QA round 1, Q2).
         await pilot.pause()
+        await settle_status_line(pilot, app)
         screen = app.screen
         print(
             f"size={screen.size} virtual={screen.virtual_size} "

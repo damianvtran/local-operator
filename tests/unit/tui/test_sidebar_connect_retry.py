@@ -41,12 +41,14 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from rich.text import Text
 
 from local_operator.session.attached import COLD_FALLBACK_S, AttachedSession
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
-from local_operator.tui.session_navigation import SurfaceNotReady
+from local_operator.tui.session_navigation import OwnerWentCold, SurfaceNotReady
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: The shipped schedule, captured at import BEFORE any test patches it for
@@ -240,6 +242,26 @@ def _instant_backoff(monkeypatch, *, attempts: int | None = None) -> None:
         monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", attempts)
 
 
+def _notice_rows(app: OperatorApp) -> list[str]:
+    """What the notices on screen actually PAINT, one entry per row.
+
+    `NoticeBlock.text()` is the authored string; `_build()` is what the surface
+    shows. The claim these tests make is about the surface — a row that still
+    promises a dial is a rendered sentence, and a restate that changed nothing
+    on screen would pass a check on the authored list and fail the user.
+    """
+    rows: list[str] = []
+    for view in app.query(TranscriptView):
+        for block in view.blocks():
+            if not isinstance(block, NoticeBlock):
+                continue
+            # `_build` is typed as any renderable; these blocks build `Text`,
+            # and `plain` is the string the surface shows.
+            built = block._build()
+            rows.extend((built if isinstance(built, Text) else Text(str(built))).plain.split("\n"))
+    return rows
+
+
 @pytest.mark.asyncio
 async def test_a_bind_that_did_not_bind_is_not_committed(monkeypatch):
     """THE ROOT CAUSE, in one assertion: a cold session is never published.
@@ -364,7 +386,7 @@ async def test_the_status_stays_on_connecting_while_the_retry_is_live(monkeypatc
     """Mid-retry the app has not given up, so it must not tell the user it has.
 
     ``connection_error`` is what flips the status from ``Saved · Connecting…``
-    to ``Saved · Connection unavailable · Reselect to retry``. Asking the user
+    to ``Saved · Reconnect failed · Select again to retry``. Asking the user
     to act while the app is still working asks them to fix something that is
     fixing itself.
     """
@@ -443,6 +465,217 @@ def test_the_retry_budget_outlasts_the_recovery_give_up_bound():
     # One attempt fewer must NOT clear the bound, which is what makes the
     # derived count minimal rather than an arbitrary large number.
     assert sum(schedule[:-1]) <= COLD_FALLBACK_S * 1.5
+
+
+class BindsThenLosesItsOwner(RecoveringRemote):
+    """A viewer that BINDS, then loses its owner before its frame paints.
+
+    The window the defect lives in, in one object: the bind postcondition
+    passes and the owner disappears in the gap between that check and the first
+    painted frame — which is where a real ``ATTACH_MAX_CLIENTS`` LRU eviction
+    landed for the user (the architect's rig reproduced it at 15.1 s with 1,820
+    refusals).
+
+    ``heals_after`` is deliberately unused: this double never comes back, so
+    the arms under test are the refusal and the BOUND, not the heal. The heal
+    is asserted against real runtimes in
+    ``tests/e2e/test_sidebar_reconnect_e2e.py``.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id, heals_after=None)
+        self._cold = False
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+
+    def go_cold(self) -> None:
+        self._cold = True
+
+
+async def _drain_with_paints(app: OperatorApp, pilot: Any, source: SessionInteraction) -> None:
+    """``_drain_retries``, but pumping the pilot so the app actually PAINTS.
+
+    A cold pending frame is decided by ``post_display_hook``, and that only runs
+    when Textual renders. A drain that merely awaits the task leaves the
+    compositor idle, so the readiness gate's own 15 s timer becomes the only
+    thing that can settle the frame — which IS the pre-fix behaviour, and the
+    reason every assertion below is on the exception TYPE and the counters
+    rather than on how long anything took.
+
+    ``wait_for`` is a runaway backstop, never an assertion: a chain that has
+    settled breaks out immediately.
+    """
+    for _ in range(40):
+        task = source.connection_task
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 30)
+        except asyncio.CancelledError:
+            return
+        await pilot.pause()
+        if source.connection_task is task or source.connection_task is None:
+            return
+    raise AssertionError("the retry chain never settled")
+
+
+def _cold_frame_rig(
+    app: OperatorApp,
+    source: SessionInteraction,
+    session: Any,
+    monkeypatch: Any,
+    *,
+    deferred: bool = True,
+):
+    """Arm a REAL frame, then lose the owner before it can paint.
+
+    Returned as the recorder for what the frame finally settled with.
+
+    ``deferred`` selects WHICH HALF of the window is exercised, and the two are
+    not interchangeable — they are the two places this PR closes it:
+
+    * ``True`` (the hook's half): the loss is scheduled with ``call_soon``, so
+      it lands while the connect body is suspended on ``await ready`` and the
+      next paint is what notices. Inline would be caught by the belt instead,
+      because the belt is SYNCHRONOUS between ``_commit_sidebar_session``
+      returning and its ``is_cold`` read — the test would then prove nothing
+      about the hook.
+    * ``False`` (the belt's half): the loss is applied inline, i.e. before the
+      commit returns, which is what an owner lost during preparation looks
+      like. The belt refuses it before the body ever waits.
+    """
+    outcomes: list[BaseException | None] = []
+    loop = asyncio.get_running_loop()
+
+    def commit(*_args: Any, **_kwargs: Any) -> Any:
+        future = app._await_sidebar_frame(source, app._sidebar_navigation.generation)
+        future.add_done_callback(lambda settled: outcomes.append(settled.exception()))
+        if deferred:
+            loop.call_soon(session.go_cold)
+        else:
+            session.go_cold()
+        return future
+
+    monkeypatch.setattr(app, "_commit_sidebar_session", commit)
+    prepared: Any = (source, object())
+    monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+    return outcomes
+
+
+@pytest.mark.asyncio
+async def test_a_cold_frame_does_not_wait_out_the_readiness_gate(monkeypatch):
+    """THE CORE FIX: a cold committed frame fails at once, and spends the budget.
+
+    ``_sidebar_gate_surface_ready``'s first check is ``is_cold``, so for as long
+    as the owner is gone the gate's verdict is already known. Waiting it out is
+    not a longer check — it is 15 s of refusals, each buying a forced
+    full-screen relayout (measured pre-fix: 1,820 of them, ~127/s), ending in
+    ``SurfaceNotReady``, which #883 made terminal-on-first for the good reason
+    that a PAINT failure should not be retried. That latched a TRANSIENT owner
+    loss and told the user to reselect the session the reselect healed in 0.17 s.
+
+    Asserted as the exception the frame settled with plus a COUNT of attempts —
+    the defect is "the wrong arm decided this: the timer instead of the cold
+    check, and no retry", which is a fact about types and counts, not durations.
+    """
+    monkeypatch_setup = monkeypatch
+    session = BindsThenLosesItsOwner("cold-at-paint")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        outcomes = _cold_frame_rig(app, source, session, monkeypatch_setup)
+        # A SHORT budget: the property is that this arm SPENDS it and latches
+        # only on exhaustion, not the shipped length of it.
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert outcomes, "no frame was ever armed"
+        assert isinstance(outcomes[0], OwnerWentCold), (
+            f"the cold frame settled as {outcomes[0]!r}: a SurfaceNotReady means the "
+            "gate's 15 s timer decided it, not the cold branch"
+        )
+        # THE BOUND HOLDS: attempts are spent per round, and only exhaustion
+        # latches — one bind that succeeded, then one per refusing round.
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        assert source.display_only is True
+        assert source.connection_error == "the runtime is not responding"
+        # Surrendering hands the user a full budget for their reselect.
+        assert source.connect_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_loss_during_preparation_is_refused_before_the_wait(monkeypatch):
+    """THE BELT: an owner lost between the bind check and the commit.
+
+    The commit->paint half is the hook's; this is the other half, and it is
+    closed by re-reading ``is_cold`` once between the commit and the ``await``.
+    Without it the frame is armed against a session that is already cold, and
+    the only thing that can settle it is the gate's 15 s timer.
+
+    Its signature is DISTINCT from the hook's, which is why both are pinned:
+    the gate is consulted ZERO times here, because nothing was ever painted
+    before the refusal, where the hook's half consults it exactly once.
+    """
+    session = BindsThenLosesItsOwner("cold-at-commit")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        outcomes = _cold_frame_rig(app, source, session, monkeypatch, deferred=False)
+        _instant_backoff(monkeypatch, attempts=3)
+        reached_before = app._sidebar_gate_reached
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert outcomes, "no frame was ever armed"
+        assert isinstance(outcomes[0], OwnerWentCold), (
+            f"the cold commit settled as {outcomes[0]!r}: the frame was waited on "
+            "instead of refused"
+        )
+        assert (
+            app._sidebar_gate_reached - reached_before == 0
+        ), "the gate was consulted for a commit the belt can already refuse"
+        # Spends the budget like every other transient arm, and latches only on
+        # exhaustion — the whole reason it is not routed at the terminal one.
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        assert source.display_only is True
+        assert source.connection_error == "the runtime is not responding"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_frame_buys_no_relayout(monkeypatch):
+    """NO GATE SPIN, for the commit->paint window this time.
+
+    #856's counters are the sharpest instrument here: ``_sidebar_gate_reached``
+    "reached the gate" and ``_sidebar_gate_recoveries`` "bought a full-screen
+    relayout chasing it". A cold frame that waits can only ever produce the
+    second — the gate refuses on ``is_cold`` before it can pass — so the fix's
+    signature is one consultation and ZERO recoveries, against 1,820 before it.
+
+    Counts, not rates: a busy machine changes how long the frames take, not how
+    many the gate refuses.
+    """
+    session = BindsThenLosesItsOwner("cold-at-paint")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _cold_frame_rig(app, source, session, monkeypatch)
+        _instant_backoff(monkeypatch, attempts=3)
+        reached_before = app._sidebar_gate_reached
+        recoveries_before = app._sidebar_gate_recoveries
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert (
+            app._sidebar_gate_reached - reached_before == 1
+        ), "the gate was consulted for a frame that was already refused"
+        assert (
+            app._sidebar_gate_recoveries - recoveries_before == 0
+        ), "a relayout was bought for a verdict the gate had already reached"
 
 
 @pytest.mark.asyncio
@@ -817,38 +1050,58 @@ async def test_guidance_answers_wait_or_act_in_every_disconnected_state(monkeypa
     async with app.run_test(size=(100, 30)) as pilot:
         source = await _current_source(app, pilot, session)
         source.display_only = True
-        notices: list[str] = []
-        monkeypatch.setattr(app, "_notice", lambda text, kind="info": notices.append(text))
+
+        def composer_notice() -> str:
+            """The text of the row a refused Enter is speaking through.
+
+            The composer's refusal OWNS its row now — one block per state,
+            restated in place and retired when the state ends (UX U1) — so this
+            reads the block it holds rather than the last block in the view:
+            the slash-command refusal below appends its own row AFTER it, and a
+            restated row is not the newest one on screen. `latest_notice` is the
+            probe for that second path.
+            """
+            notice = app._composer_refusal_notice
+            assert notice is not None and notice.is_attached, "the refused Enter said nothing"
+            return notice.text()
+
+        def latest_notice() -> str:
+            """The text of the LAST notice in the transcript."""
+            views = list(app.query(TranscriptView))
+            blocks = [b for b in views[0].blocks() if isinstance(b, NoticeBlock)]
+            assert blocks, "nothing was said at all"
+            return blocks[-1].text()
 
         # Mid-retry: the app is working and the user need not act.
         source.connect_attempts = 2
         source.connection_error = ""
         app.composer_submission_refused()
-        assert "Reconnecting" in notices[-1]
-        assert "Select this session again" not in notices[-1]
+        assert "Reconnecting" in composer_notice()
+        assert "Select this session again" not in composer_notice()
         # The SLASH-COMMAND refusal carries the same three-state guidance. It is
         # a second caller of `_unavailable_hint` with eight call sites of its
         # own, and it reads the hint through a different guard — so the composer
         # assertions above do not cover it, and the inverted-guidance bug was
         # fixed here separately.
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert "Reconnecting" in notices[-1]
-        assert "Select this session again" not in notices[-1]
+        assert "Reconnecting" in latest_notice()
+        assert "Select this session again" not in latest_notice()
 
         # Exhausted: the app has stopped, and reselecting is the right advice.
         source.connection_error = "the runtime is not responding"
         app.composer_submission_refused()
-        assert "Select this session again to retry." in notices[-1]
+        assert "Select this session again to retry." in composer_notice()
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert "Select this session again to retry." in notices[-1]
+        assert "Select this session again to retry." in latest_notice()
 
-        # Never-attempted: nothing to say beyond the refusal itself.
+        # NEVER-ATTEMPTED: the composer's row is RESTATED, not stacked, so the
+        # second refusal leaves one row where it had one before (UX U1).
         source.connect_attempts = 0
         source.connection_error = ""
         app.composer_submission_refused()
-        assert notices[-1] == "Send unavailable until connected."
+        assert composer_notice() == "Send unavailable until connected."
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert notices[-1] == "Commands unavailable until connected."
+        assert latest_notice() == "Commands unavailable until connected."
 
 
 def test_the_derivation_refuses_a_backoff_it_cannot_solve(monkeypatch):
@@ -883,3 +1136,201 @@ def _always(value: Any) -> Any:
         return value
 
     return prepare
+
+
+class _LostDuringPreparation(RecoveringRemote):
+    """Binds cleanly, then loses its owner inside the prepare→commit window.
+
+    The state the belt's unconditional form exists for: the bind postcondition
+    sees a reachable owner, the owner is gone by the time the commit returns, and
+    the commit returned ``None`` (no frame to fail and no ``post_display_hook`` to
+    notice) — see `test_a_cold_session_whose_commit_returns_no_frame_is_still_refused`.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self._cold = False
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+
+    async def ensure_display_current(self) -> None:
+        # The loss lands HERE, between the bind postcondition and the commit.
+        self._cold = True
+
+
+@pytest.mark.asyncio
+async def test_a_cold_session_whose_commit_returns_no_frame_is_still_refused(monkeypatch):
+    """F/m2: the postcondition is not conditional on there being a frame.
+
+    ``ready is None`` is ``_commit_sidebar_session``'s early return for a
+    prepared replay that already IS the current transcript view. With the belt
+    gated on ``ready is not None`` the body fell straight through it having
+    already set ``display_only = False``, so an owner lost in this window was
+    published live with no frame to refuse and no hook left to notice — the
+    ``connect_attempts`` reset below then credited the round with a connect it
+    never made.
+    """
+    session = _LostDuringPreparation("lost")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        # Observed rather than allowed to run, so this test sees ONE refusal
+        # rather than the whole chain (the chain is pinned elsewhere).
+        rearmed = Mock()
+        monkeypatch.setattr(app, "_start_sidebar_connection", rearmed)
+        _instant_backoff(monkeypatch, attempts=2)
+
+        await app._connect_sidebar_source(source)
+        await asyncio.sleep(0)  # the re-arm is a `call_soon` callback
+
+        assert session.is_cold is True
+        assert source.display_only is True, "a cold session was published with no frame to refuse"
+        assert source.connect_attempts == 1, "the cold commit was counted as a completed connect"
+        rearmed.assert_called_once_with(source, continues_retry=True)
+
+
+@pytest.mark.asyncio
+async def test_the_connect_prepares_with_refresh_so_no_frame_return_is_unreachable(monkeypatch):
+    """F/m2: WHY that return cannot be reached from the sidebar connect path.
+
+    Two things together, rather than a prose claim. (1) The trigger that return
+    compares against is a presentation whose replay view already IS the current
+    transcript — demonstrated below on the real helper, so the premise is
+    executed rather than asserted. (2) The ONLY way to be handed that
+    presentation is `_prepare_sidebar_session`'s two shortcuts, and both are
+    guarded on ``not refresh``; the connect body passes ``refresh=True``, which
+    is what this pins. So the belt's extension above is defensive on this path —
+    it is kept because one property read is cheaper than a silent hole in the
+    postcondition this whole file exists for.
+    """
+    session = RecoveringRemote("fresh", heals_after=1)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        seen: list[dict[str, Any]] = []
+
+        async def prepare(*_args: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs)
+            return prepared
+
+        monkeypatch.setattr(app, "_prepare_sidebar_session", prepare)
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+
+        await app._connect_sidebar_source(source)
+        await asyncio.sleep(0)
+
+        # (1) the trigger, on the real helper.
+        assert app._capture_sidebar_presentation().replay.view is app._transcript_view()
+        # (2) the connect never asks for it.
+        assert seen == [{"refresh": True}], (
+            "the connect prepared without `refresh`, which re-opens the "
+            "current-view shortcuts `_commit_sidebar_session`'s early return needs"
+        )
+        # And a bound, cold-free connect with no frame still settles as connected.
+        assert source.display_only is False
+        assert session.is_cold is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_stops_speaking_once_the_connect_lands(monkeypatch):
+    """UX U1's other half: the refusal row ends when the state it describes does.
+
+    `Send unavailable until connected.` is present-progressive about a state the
+    app owns, so it may not survive the connect that ended it — a durable row
+    would have the transcript say "until connected" directly above a session that
+    IS connected, and it accumulated one row per refused Enter while the wait
+    lasted. Retired on the COMPLETED connect only (same condition as the budget
+    refill): an attempt that returned early proved nothing about the owner.
+    """
+    session = UnreachableRemote("blipping", heals_after=3)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        _instant_backoff(monkeypatch)
+
+        app._start_sidebar_connection(source)
+        # Mid-connect, the state the composer refuses to send in.
+        assert source.display_only is True
+        app.composer_submission_refused()
+        app.composer_submission_refused()
+        assert app._composer_refusal_notice is not None, "the refusal said nothing"
+        assert app._composer_refusal_notice.is_attached
+
+        await _drain_retries(app, source)
+
+        assert source.connect_attempts == 0, "the connect did not land"
+        assert app._composer_refusal_notice is None, "the refusal outlived the connect"
+        views = list(app.query(TranscriptView))
+        rows = [b for b in views[0].blocks() if isinstance(b, NoticeBlock)]
+        assert [b.text() for b in rows if b.text().startswith("Send unavailable")] == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_does_not_survive_the_latch(monkeypatch):
+    """UX U1's third exit: the LATCH is a state end too (round 3).
+
+    The row ends on the redial's exits and on a COMPLETED connect, but a
+    sidebar connect that LATCHES left it speaking in the present tense under the
+    band's own verdict — measured on the round-3 head at 14.23s:
+
+        LATCHED: status='Saved · Reconnect failed · Select again to retry'
+        notices at the latch: ['Send unavailable until connected. Reconnecting —
+                              it will keep trying for a few more seconds.']
+
+    The band had retracted the retry while the transcript still promised one,
+    in exactly the state the original bug report was about. Restated into the
+    register the user's next Enter already produced, so the two surfaces agree
+    whether or not they press it — and asserted on the PAINTED rows, because
+    the defect is what the user reads.
+    """
+    session = RecoveringRemote("gone")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        # NOT the collapsed backoff here: the Enter has to land in the mid-retry
+        # register ("Reconnecting — it will keep trying …"), which only exists
+        # while a round is PARKED. With a zeroed backoff the whole chain latches
+        # inside one `pilot.pause()` and the row is written in the
+        # pre-first-dial register instead — which would make this test pass on
+        # the very defect it exists to catch.
+        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 3)
+        monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", lambda _attempt: 0.2)
+
+        app._start_sidebar_connection(source)
+        assert source.display_only is True
+        # Pump until the first attempt has failed, so the Enter lands in the
+        # register the user actually sees mid-retry (the `connect_attempts`
+        # hint) rather than in the pre-first-dial state.
+        for _ in range(400):
+            await pilot.pause()
+            if source.connect_attempts >= 1:
+                break
+        assert source.connect_attempts >= 1, "the connect never attempted a dial"
+        app.composer_submission_refused()
+        assert app._composer_refusal_notice is not None, "the refusal said nothing"
+        # The state the row describes, while it is still true.
+        assert any("will keep trying" in row for row in _notice_rows(app))
+
+        await _drain_retries(app, source)
+
+        assert source.connect_attempts == 0, "the connect did not latch"
+        assert app._status is not None
+        status = app._status.render_text(120).plain
+        assert "Reconnect failed" in status
+        assert "Select again to retry" in status
+
+        rows = _notice_rows(app)
+        assert "will keep trying" not in " ".join(
+            rows
+        ), "the refusal row outlived the latch and kept promising a dial"
+        assert any("Select this session again to retry." in row for row in rows)
+        # One row, not two: the restate replaces rather than stacks.
+        assert sum(1 for row in rows if "Send unavailable" in row) == 1

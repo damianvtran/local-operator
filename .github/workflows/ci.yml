@@ -452,7 +452,7 @@ jobs:
           python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
       - name: Upload shard coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}
           path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
@@ -497,7 +497,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report-${{ matrix.python-version }}
           path: htmlcov

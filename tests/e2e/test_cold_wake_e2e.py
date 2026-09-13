@@ -135,3 +135,71 @@ def test_a_cold_wake_runs_its_turn_with_no_terminal_open(tmp_path: Path) -> None
     finally:
         child.kill()
         child.wait(timeout=10)
+
+
+def test_the_real_supervisor_process_fires_a_cold_wake(tmp_path: Path) -> None:
+    """The WHOLE chain, with the supervisor as a real process.
+
+    The test above drives the runtime child directly, which proves the child
+    end. This one starts at the other end: a real
+    ``python -m local_operator.wakes.supervisor --once`` reads the index,
+    decides the wake is due, engages a runtime itself, and the turn must land
+    in the durable transcript. Nothing in this path is patched — it is the
+    same argv the LaunchAgent runs.
+
+    ``HOME`` is redirected alongside ``LOCAL_OPERATOR_CONFIG_DIR`` because the
+    config variable alone does not redirect the cache root (AGENTS.md,
+    "Isolating a run"), and the supervisor's install hook refuses a config dir
+    outside the real home, so no launchd domain is addressed either.
+    """
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import write_entry
+
+    _seed(tmp_path, "supwake00001")
+    now = int(time.time() * 1000)
+    schedule = {
+        "id": "w1",
+        "message": "supervised cold wake",
+        "next_due_at": now - 5_000,
+        "created_at": now - 60_000,
+    }
+    transcript = Transcript(tmp_path / "sessions" / "supwake00001")
+    asyncio.run(transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": [schedule]}))
+    write_entry(tmp_path, "supwake00001", cwd=str(tmp_path), schedules=[schedule])
+
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path),
+    }
+    # Every inherited CMUX_* variable is stripped: a forked runtime that
+    # inherits a real CMUX_WORKSPACE_ID renames the operator's live cmux
+    # workspaces.
+    for name in [key for key in env if key.startswith("CMUX_")]:
+        del env[name]
+
+    supervisor = subprocess.run(
+        [sys.executable, "-m", "local_operator.wakes.supervisor", "--once"],
+        env=env,
+        capture_output=True,
+        text=True,
+        # A HANG BACKSTOP ONLY, never an assertion: nothing on the success
+        # path compares elapsed time.
+        timeout=300,
+    )
+    assert supervisor.returncode == 0, f"{supervisor.stdout}\n{supervisor.stderr}"
+    assert "started a runtime for supwake00001" in supervisor.stderr, supervisor.stderr
+
+    transcript_path = tmp_path / "sessions" / "supwake00001" / "transcript.jsonl"
+    deadline = time.monotonic() + 90
+    text = ""
+    while time.monotonic() < deadline:
+        text = transcript_path.read_text(encoding="utf-8")
+        if "Hello from the mock provider!" in text and "wake_prompt" in text:
+            break
+        time.sleep(0.5)
+    else:
+        raise AssertionError(f"the supervised cold wake never ran its turn; transcript:\n{text}")

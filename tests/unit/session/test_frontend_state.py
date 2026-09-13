@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import time
 from collections import deque, namedtuple
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -18,10 +19,15 @@ from local_operator.harness.types import (
     AgentEvent,
     AgentStartEvent,
     Message,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
     SubagentProgressEvent,
     ToolCallComposeEvent,
+    ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolResult,
     Usage,
 )
 from local_operator.session.frontend_state import (
@@ -37,6 +43,7 @@ from local_operator.session.frontend_state import (
     TodoItemState,
     TodoPhaseState,
     WakeState,
+    sync_wire_payload,
 )
 
 
@@ -1148,7 +1155,7 @@ def test_seed_fold_is_unchanged_when_an_older_runtime_omits_the_field() -> None:
     dump is the old payload byte for byte rather than a null-valued imitation.
     """
     store = FrontendStateStore(_state())
-    session = SimpleNamespace(effective_model=_spec())
+    session = _live_session()
     store.observe_event(session, AgentStartEvent(generation=1))
 
     for call_id in ("compose:0", "compose:1"):
@@ -1210,3 +1217,289 @@ def test_a_repeated_supersession_is_idempotent_in_the_seed() -> None:
     assert live[0]["tool_call_id"] == "real_0"
     # The newest frame wins, so the size the viewer reads is the current one.
     assert live[0]["argument_bytes"] == 30
+
+
+# ---------------------------------------------------------------------------
+# The live-call clock anchors.
+#
+# A frontend that ATTACHES to work already in flight — a sidebar switch back to
+# a conversation whose tool is still running, a re-attach, a `/resume` onto a
+# live turn — paints its rows at the moment it arrives, so every widget it owns
+# counts from zero unless the session hands it the producer's own start
+# instants. Two folds supply them, and both are asserted here rather than on a
+# widget, because a widget test can only observe what these already published:
+#
+# * ``live_tool_started_at`` — one epoch per call executing now, for the row.
+# * ``activity_phase``/``activity_phase_started_at`` — the phase edge, for the
+#   band's ``thinking``/``responding``/``composing`` arm, which has no call
+#   behind it at all.
+#
+# The rule they share, and the one worth stating before the assertions: a
+# MISSING epoch is never filled in with the fold's own ``now``. For an attached
+# viewer that value is its arrival instant wearing the call's name, and it
+# would print a plausible wrong age where the widget's blank column is the
+# truth. The tests below pin that refusal as hard as they pin the fold.
+# ---------------------------------------------------------------------------
+
+
+def _live_session() -> SimpleNamespace:
+    """A session in the MIDDLE of a turn, which is the only state these drive.
+
+    ``is_streaming`` is not decoration: ``observe_event`` calls
+    ``refresh_from_session`` at tool and message boundaries, and that method's
+    non-streaming gate is the documented way a settled session publishes no
+    phase and no live anchors at all. A fake without the flag therefore blanks
+    both fields on the first ``tool_execution_end`` — which is correct
+    behaviour being exercised by the wrong fixture.
+    """
+    return SimpleNamespace(effective_model=_spec(), is_streaming=True)
+
+
+def test_live_tool_starts_fold_per_call_and_pop_on_their_own_end() -> None:
+    """One anchor per LIVE call, keyed by id, released by that call's end.
+
+    Keyed rather than scalar because a batch has several: the operator's report
+    was a row and a band disagreeing about one call's age, and only a per-call
+    map can tell both surfaces which call's start they are counting from.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    assert store.live_tool_start_epochs() == {}
+
+    started = time.time() - 27.0
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="call-bash", tool_name="bash", args={}, started_at_epoch=started
+        ),
+    )
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="call-read",
+            tool_name="read",
+            args={},
+            started_at_epoch=started + 1.0,
+        ),
+    )
+    assert store.live_tool_start_epochs() == {"call-bash": started, "call-read": started + 1.0}
+
+    # One call of the batch finishes; the survivor keeps ITS own zero, so the
+    # band's floor cannot move because a sibling settled.
+    store.observe_event(
+        session,
+        ToolExecutionEndEvent(
+            tool_call_id="call-read",
+            tool_name="read",
+            result=ToolResult(tool_call_id="call-read", tool_name="read", content=[]),
+        ),
+    )
+    assert store.live_tool_start_epochs() == {"call-bash": started}
+
+
+def test_a_start_without_an_epoch_contributes_no_anchor() -> None:
+    """The refusal, asserted directly: no epoch means no entry, never a stamp.
+
+    An older runtime's events carry no ``started_at_epoch``, and an attached
+    viewer that substituted its own fold instant would be inventing the age the
+    whole change exists to stop inventing. Absence here is what makes the
+    widget withhold the clock instead — which is why this is the failure mode
+    worth pinning rather than an edge case.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    store.observe_event(
+        session, ToolExecutionStartEvent(tool_call_id="call-legacy", tool_name="bash", args={})
+    )
+    assert store.live_tool_start_epochs() == {}
+    # And the phase is still folded: the SEQ is knowable even when the instant
+    # is not, and the two answers are independent on purpose.
+    assert store.state.activity_phase == "running"
+
+
+def test_both_ends_of_a_turn_clear_the_live_anchors() -> None:
+    """Stale anchors are worse than none, so the turn boundary clears them all.
+
+    Not left to the individual ends: a turn that dies without emitting every
+    ``tool_execution_end`` — an abort, a killed provider stream — would leave
+    an entry behind, and a later turn's row seeding from it would wear a
+    previous turn's age.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="call-1", tool_name="bash", args={}, started_at_epoch=time.time() - 5.0
+        ),
+    )
+    assert store.live_tool_start_epochs() != {}
+
+    store.observe_event(session, AgentEndEvent(messages=[Message.assistant("done")]))
+    assert store.live_tool_start_epochs() == {}
+
+    # A NEW turn starts clean too, so an anchor that somehow survived a turn end
+    # still cannot seed the next turn's rows.
+    store.observe_event(session, AgentStartEvent(generation=2))
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="call-2", tool_name="bash", args={}, started_at_epoch=time.time()
+        ),
+    )
+    store.observe_event(session, AgentStartEvent(generation=3))
+    assert store.live_tool_start_epochs() == {}
+
+
+def test_live_tool_start_epochs_hands_out_a_copy() -> None:
+    """The map is the store's own object, so callers must not be able to reach it."""
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="call-1", tool_name="bash", args={}, started_at_epoch=1_700_000_000.0
+        ),
+    )
+    handed_out = store.live_tool_start_epochs()
+    handed_out["call-evil"] = 1.0
+    assert store.live_tool_start_epochs() == {"call-1": 1_700_000_000.0}
+
+
+def test_the_phase_fold_restarts_only_when_the_kind_of_work_changes() -> None:
+    """The band's zero, folded from the events that BEGIN a phase.
+
+    Every case here is the phone projection's rule, which is the same row on
+    another screen: a phase restarts the zero when it begins a KIND of work,
+    never when it merely relabels one. The composed batch is the case that shows
+    the difference — three calls announced in one dictation are one zero, and
+    restarting per announcement would show "still composing" counting from zero
+    three times over.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+
+    def seen() -> tuple[str, float | None]:
+        return store.activity_phase_clock()
+
+    store.observe_event(session, AgentStartEvent(generation=1))
+    phase, first = seen()
+    assert phase == "thinking" and first is not None
+
+    # A second compose event of the SAME dictation: no restart.
+    store.observe_event(
+        session, ToolCallComposeEvent(tool_call_id="c1", tool_name="bash", argument_bytes=10)
+    )
+    composing, composed_at = seen()
+    assert composing == "composing"
+    store.observe_event(
+        session, ToolCallComposeEvent(tool_call_id="c2", tool_name="read", argument_bytes=10)
+    )
+    assert seen() == (composing, composed_at), "one dictation, one zero"
+
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="c1", tool_name="bash", args={}, started_at_epoch=time.time()
+        ),
+    )
+    store.observe_event(
+        session,
+        ToolExecutionStartEvent(
+            tool_call_id="c2", tool_name="read", args={}, started_at_epoch=time.time()
+        ),
+    )
+    running, running_at = seen()
+    assert running == "running"
+
+    # A SIBLING is still executing, so the batch has not gone back to waiting on
+    # the model: restarting here would reset the number the surviving row's
+    # label still claims.
+    store.observe_event(
+        session,
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", tool_name="bash", content=[]),
+        ),
+    )
+    assert seen() == (running, running_at), "a batch with a live call is still running"
+
+    # The LAST call of the batch: now the turn is waiting on the model again,
+    # and the zero belongs to that wait.
+    store.observe_event(
+        session,
+        ToolExecutionEndEvent(
+            tool_call_id="c2",
+            tool_name="read",
+            result=ToolResult(tool_call_id="c2", tool_name="read", content=[]),
+        ),
+    )
+    thinking, waited_at = seen()
+    assert thinking == "thinking" and waited_at != running_at
+
+    # A model call OPENING is its own phase edge, and the placeholder it yields
+    # before the first token is the edge rather than the first token itself:
+    # waiting on the model is what the turn is doing while nothing streams.
+    store.observe_event(session, MessageStartEvent(message=Message.assistant("")))
+    model_call, calling_at = seen()
+    assert model_call == "thinking" and calling_at != waited_at
+
+    # The first non-empty delta is the transition to prose; an empty one (a
+    # repeat placeholder mid-stream) is not.
+    store.observe_event(session, MessageUpdateEvent(message=Message.assistant(""), delta=""))
+    assert seen() == (model_call, calling_at)
+    store.observe_event(session, MessageUpdateEvent(message=Message.assistant("h"), delta="h"))
+    responding, responded_at = seen()
+    assert responding == "responding" and responded_at != calling_at
+
+    store.observe_event(session, MessageEndEvent(message=Message.assistant("hi")))
+    assert seen()[0] == "thinking"
+
+    store.observe_event(session, AgentEndEvent(messages=[Message.assistant("hi")]))
+    assert seen() == ("", None), "a settled turn has no phase to match"
+
+
+def test_the_phase_pair_rides_the_wire_and_is_not_durable() -> None:
+    """One round trip, and one strip — the two places a transient pair is read.
+
+    The pair is carried in ``refresh_from_session`` under the streaming gate so
+    a viewer attaching mid-turn receives the producer's own phase zero; it is
+    NOT carried into the checkpoint, because a checkpoint describes a turn that
+    has ended and there is no phase left to date.
+    """
+    import asyncio
+
+    state = _state(
+        streaming=True,
+        activity_phase="thinking",
+        activity_phase_started_at=1_700_000_000.0,
+        live_tool_started_at={"call-1": 1_699_999_900.0},
+    )
+    store = FrontendStateStore(state)
+    wire = sync_wire_payload(store.subscribe(lambda _u: None).sync)
+    snapshot = wire["snapshot"]
+    assert snapshot["activity_phase"] == "thinking"
+    assert snapshot["activity_phase_started_at"] == 1_700_000_000.0
+    assert snapshot["live_tool_started_at"] == {"call-1": 1_699_999_900.0}
+
+    class _Transcript:
+        def __init__(self) -> None:
+            self.appended: list[tuple[str, dict[str, Any]]] = []
+
+        async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+            self.appended.append((custom_type, payload))
+
+    transcript = _Transcript()
+    asyncio.run(store.checkpoint(transcript))
+    ((_, payload),) = transcript.appended
+    assert payload["state"]["live_tool_started_at"] == {}, (
+        "the live anchors describe calls running NOW in this process; nothing "
+        "in a durable checkpoint can restore them"
+    )
+    # The pair is a scalar the turn-end fold clears, so it is not stripped.
+    assert payload["state"]["activity_phase"] == "thinking"

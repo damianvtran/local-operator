@@ -464,3 +464,45 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
         assert resumed.model.model_id == A.model_id
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_journal_outranks_the_configured_birth_effort(tmp_path):
+    """`model_effort` is a BIRTH default, so a conversation's own stored
+    selection — the journal row every `/model` writes — outranks it on resume.
+
+    The two keys answer different questions: "what should NEW conversations
+    start on" versus "what was THIS conversation running". A config effort that
+    overrode a restored row would silently move a conversation the user had
+    deliberately left somewhere else, and would do it on the one path
+    (`--resume`) where they most expect their state back.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.transcript import Transcript as _Transcript
+
+    directory = tmp_path / "sessions" / "effort-journal"
+    transcript = _Transcript(directory)
+    # A version-2 row, i.e. one that carries an effort (the writer only emits
+    # `effort` from v2 on), naming a model whose ladder can express `low`.
+    await transcript.append_custom(
+        "selected_model",
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": "low"},
+    )
+    # The BIRTH spec a configured `model_effort: high` would have produced.
+    birth = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    stream = ScriptedStream([text_turn("ok")])
+    owner = Session(
+        model=birth,
+        model_source="config",
+        stream_fn=stream,
+        tools=[],
+        transcript=_Transcript(directory),
+        system_blocks_provider=lambda: [],
+        cwd=str(directory.parent),
+    )
+    try:
+        assert owner.model.reasoning_effort == "low"
+    finally:
+        await owner.dispose()

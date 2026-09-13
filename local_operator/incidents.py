@@ -238,7 +238,165 @@ _HINTS: dict[str, str] = {
     "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "
     "rather than resending the same request.",
+    # A cut-off is the harness's own verdict, not a provider's, and its advice is
+    # the opposite of "retry": whatever the turn was mid-way through may have
+    # half-happened, so the model must re-establish state before redoing work.
+    # The sentence is deliberately general because the CAUSE varies (retire,
+    # signal, owner death); the cause itself rides ``Incident.raw``.
+    "cut-off": "The runtime was cut off before this turn produced a result. The transcript "
+    "holds whatever was written before it stopped and nothing after. Check the "
+    "state of anything it was mid-way through before repeating the work; do not "
+    "assume the request completed.",
 }
+
+#: Why a turn was cut off. Harness-authored, so unlike :data:`_RULES` these are
+#: exact tokens rather than substring guesses over vendor text; the rendering
+#: borrows :class:`Incident`'s shape but not its classifier.
+#:
+#: ``runtime-retired`` and ``install-mid-update`` are OURS to explain (a
+#: planned retirement that caught a live turn; a lazy import against a
+#: half-replaced install). ``runtime-shutdown`` covers an ordinary termination
+#: signal, ``runtime-killed`` a process that vanished without exiting cleanly,
+#: and ``owner-lost`` the viewer-side verdict that the runtime it was bound to
+#: stopped answering. ``user-stop`` is the one DELIBERATE cause, and it is what
+#: keeps a user's own cancel from being reported as an error.
+#: The ONE deliberate cause in :data:`CUT_OFF_CAUSES`. Exported so the readers
+#: that have to tell a recorded stop apart from a cut-off do not re-spell the
+#: token: the restore seam's journaling guard and the durable-outcome writer are
+#: both answering that question, and a hard-coded copy on either side is one
+#: rename away from silently admitting a user's own ``/stop`` into the cut-off
+#: vocabulary.
+DELIBERATE_CUT_OFF_CAUSE = "user-stop"
+
+#: The DELIBERATE causes, as a SET rather than a token to compare against.
+#:
+#: WHY A SET AND NOT ``cause != DELIBERATE_CUT_OFF_CAUSE``: every reader that
+#: has to tell a recorded stop apart from a cut-off asks the same question, and
+#: an identity comparison against ONE token answers it only for the deliberate
+#: causes that existed when the comparison was written. A future deliberate
+#: token (a user-cancelled ``/fork``, a scripted ``lop stop --all``) added to
+#: :data:`CUT_OFF_CAUSES` with the old comparison in place would be narrated to
+#: the model as an involuntary cut-off — the exact misclassification the guard
+#: exists to prevent — from the moment it was coined. Here it is admitted by
+#: ADDING it to this set, so the two halves of the taxonomy cannot drift
+#: (review round 1, NIT-1).
+DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE})
+
+CUT_OFF_CAUSES: dict[str, str] = {
+    DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
+    "runtime-retired": "the runtime retired so the next engage would run a newer build",
+    "runtime-shutdown": "the runtime was terminated while this turn was running",
+    "runtime-killed": (
+        "the runtime disappeared without exiting cleanly while this turn was running"
+    ),
+    "install-mid-update": (
+        "a local-operator install was being replaced on disk while this turn was running"
+    ),
+    # Deliberately about what the VIEWER can verify, not about what happened to
+    # the process. The arm that paints this is the recovery loop's give-up,
+    # which fires both for an owner whose record is gone and for a live-but-
+    # silent one (the record is there, its pid is alive, and nothing answers) —
+    # "went away" asserted a death that arm cannot establish (review round 1,
+    # MINOR-3). "stopped answering" is the fact both shapes share.
+    "owner-lost": "the session's runtime stopped answering while this turn was running",
+    "disposed": "the session was disposed while this turn was running",
+}
+
+#: The sentence used when a cause token is not one this build knows — a newer
+#: runtime's token reaching an older viewer. Naming the gap is honest; guessing
+#: a cause would not be, and a refusal to render would hide the cut-off.
+CUT_OFF_UNKNOWN = "the turn was cut off and the cause could not be determined"
+
+
+def is_cut_off_cause(cause: str) -> bool:
+    """True iff ``cause`` names an INVOLUNTARY cut-off this build can render.
+
+    Membership AND kind, not identity: the vocabulary decides that the token is
+    one this build understands, and :data:`DELIBERATE_CUT_OFF_CAUSES` decides
+    that understanding a token is not enough to call the turn a cut-off.
+    """
+    return cause in CUT_OFF_CAUSES and not is_deliberate_cause(cause)
+
+
+def is_deliberate_cause(cause: str) -> bool:
+    """True iff ``cause`` is a recorded DELIBERATE act rather than a cut-off.
+
+    The single place the deliberate half of the taxonomy is read, so a surface
+    that needs "was this the user's own act?" (the phone's frame fill, the
+    journal guard) cannot answer it with a comparison that goes stale.
+    """
+    return cause in DELIBERATE_CUT_OFF_CAUSES
+
+
+def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
+    """One operator-facing sentence naming why a turn was cut off.
+
+    This is the string the durable outcome stores as ``reason`` and every
+    surface prints after its own prefix (``Stopped with an error — …``), so it
+    is deliberately a sentence and not a paragraph: ``detail`` carries an
+    optional parenthetical (a build pair, a pid, a started-at) rather than
+    more prose, because the sidebar tooltip has one line and truncates the
+    rest rather than wrapping it.
+    """
+    sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
+    return f"{sentence}{detail}"
+
+
+def cause_from_reason(reason: str) -> str:
+    """The cause token a rendered reason came from, or ``""`` when unknown.
+
+    The inverse of :func:`format_cut_off_notice` / :func:`render_cut_off_reason`,
+    for the one place that has the SENTENCE and needs the classification: a
+    locally synthesised turn end carries operator-facing prose (that is what
+    every surface prints), and a machine token must be recoverable from it so a
+    consumer can group or log the cause without parsing English twice.
+
+    Longest-prefix match rather than an exact one, because the notice append
+    parenthetical detail (``(0.54.11@b133eba → 0.54.12@402af7f)``). Returns
+    ``""`` for prose this vocabulary did not write, so a provider's own error
+    message is never misclassified as a harness cause.
+    """
+    for cause, sentence in CUT_OFF_CAUSES.items():
+        if sentence and sentence in reason:
+            return cause
+    return ""
+
+
+def format_cut_off_notice(cause: str, *, detail: str = "") -> str:
+    """The LIVE transcript notice for a cut-off turn.
+
+    Deliberately different from :func:`format_cut_off_message`: the live row is
+    what a watching user reads the moment the turn dies, so it leads with the
+    fact (``turn cut off``) and adds the one consequence they need (what the
+    transcript does and does not contain). The full incident form is for the
+    NEXT turn's model context, where the consequence and the advice both earn
+    their space.
+    """
+    return (
+        f"turn cut off — {render_cut_off_reason(cause, detail=detail)}. "
+        "The transcript holds what it wrote before that and nothing after."
+    )
+
+
+def format_cut_off_raw(reason: str) -> str:
+    """Render an ALREADY-COMPOSED cut-off reason into the incident text.
+
+    Split out from :func:`format_cut_off_message` because the restore path holds
+    a reason string (with its detail already appended) rather than a cause and a
+    detail it can recombine: re-deriving one from the other there would re-render
+    a different sentence than the one the store and the sidebar are showing.
+    """
+    return Incident(category="cut-off", raw=reason).render()
+
+
+def format_cut_off_message(cause: str, *, detail: str = "") -> str:
+    """Render a cut-off cause into the established incident text.
+
+    Built through :class:`Incident` rather than a parallel prose system, so the
+    next turn's card and the resume replay are the SAME surface as every other
+    failure, and the ``cut-off`` hint above is applied by the one renderer.
+    """
+    return format_cut_off_raw(render_cut_off_reason(cause, detail=detail))
 
 
 @dataclass(frozen=True)

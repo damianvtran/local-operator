@@ -20,6 +20,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import pwd
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +30,7 @@ import boto3
 import pytest
 from botocore.stub import ANY, Stubber
 from lop_osworld_v2_adapter import cleanup, provisioning, scoring, taskfile
+from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers import aws as aws_mod
 from lop_osworld_v2_adapter.providers.aws import (
     AllocationError,
@@ -39,6 +43,7 @@ from lop_osworld_v2_adapter.providers.aws import (
 )
 from lop_osworld_v2_adapter.providers.base import (
     GUEST_COMMAND_TIMEOUT_S,
+    MAX_OBSERVATION_CAUSE,
     guest_deadline_for,
 )
 
@@ -1225,6 +1230,169 @@ async def test_evaluate_returns_raw_when_the_judge_is_quiet() -> None:
             assert not any(
                 isinstance(h, aws_mod._JudgeErrorCapture) for h in logging.getLogger(name).handlers
             )
+
+
+# ---------------------------------------------------------------------------
+# observe: upstream's SWALLOWED capture failure becomes a bounded cause
+# ---------------------------------------------------------------------------
+
+# The upstream file that fetches frames, pinned. ``get_screenshot`` logs its
+# per-attempt failures here and then returns None, which is why the adapter sees
+# a frameless observation with no reason attached unless it captures them.
+_CONTROLLER = "/site-packages/desktop_env/controllers/python.py"
+
+# Upstream's own failure lines, verbatim from the pinned checkout.
+_STATUS_502 = "Failed to get screenshot. Status code: 502"
+_STATUS_504 = "Failed to get screenshot. Status code: 504"
+_INVALID_PAYLOAD = "Invalid screenshot payload (attempt 1/3)."
+_TRANSPORT = "An error occurred while trying to get the screenshot: HTTPConnectionPool(host='x')"
+_EXHAUSTED = "Failed to get screenshot."
+
+
+class _BlindEnv(_FakeEnv):
+    """Upstream's shape for a guest that cannot answer ``/screenshot``.
+
+    ``_get_obs`` logs the failed attempts and then returns a dict whose
+    screenshot is None -- exactly what the pinned ``get_screenshot``/
+    ``_get_obs`` pair does after its retries are exhausted. Each record names
+    the logger AND the file it is attributed to, so a test can show that a
+    record which does not come from that one function is not read as a capture
+    attempt.
+    """
+
+    def __init__(self, records: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self.records = records
+
+    def _get_obs(self) -> dict[str, Any]:
+        for logger_name, pathname, message in self.records:
+            _log_from(logger_name, pathname, message)
+        return {"screenshot": None, "instruction": "do it"}
+
+
+async def _observe_blind(
+    records: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _BlindEnv(records)
+        observed = await provider.observe()
+        # The handler is attached for the duration of the call only.
+        assert not any(
+            isinstance(h, aws_mod._ScreenshotFailureCapture)
+            for h in logging.getLogger(aws_mod._SCREENSHOT_LOGGER).handlers
+        )
+        return observed
+
+
+@pytest.mark.asyncio
+async def test_observe_reports_upstreams_failed_attempts_as_a_bounded_cause() -> None:
+    """The fact the harness could not obtain: why the frame was missing.
+
+    "environment returned no screenshot frame" is all a bundle could say after
+    two paid episodes died, because upstream logs the reason and returns None.
+    The cause must name the attempt count and status codes, and the latencies
+    that separate a refusal from a client timeout.
+    """
+
+    observed = await _observe_blind(
+        [
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _STATUS_502),
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _STATUS_502),
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _STATUS_504),
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _EXHAUSTED),
+        ]
+    )
+    assert observed["screenshot"] is None
+    cause = observed[SCREENSHOT_CAUSE_KEY]
+    assert cause.startswith("screenshot unavailable: ")
+    assert "upstream_failures=4" in cause
+    assert "kinds=status,status,status,exhausted" in cause
+    assert "codes=502,502,504" in cause
+    # The latencies are the discriminator the harness had to guess between.
+    assert re.search(r"first_ms=\d+", cause)
+    assert re.search(r"gaps_ms=\d+,\d+,\d+", cause)
+    assert re.search(r"elapsed_ms=\d+", cause)
+    assert len(cause) <= MAX_OBSERVATION_CAUSE
+
+
+@pytest.mark.asyncio
+async def test_observe_never_echoes_upstreams_message_text() -> None:
+    """Only a closed KIND and an integer status cross; the text never does.
+
+    Upstream's message can carry a URL, a guest path or a credential, and this
+    side cannot scan a canary before bounding -- the harness can
+    (``worker._redacted``), and it scans the worker's stderr tail, which is
+    where upstream's own words are surfaced instead.
+    """
+
+    observed = await _observe_blind(
+        [
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _INVALID_PAYLOAD),
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _TRANSPORT),
+            (aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _EXHAUSTED),
+        ]
+    )
+    cause = observed[SCREENSHOT_CAUSE_KEY]
+    assert "kinds=payload,transport,exhausted" in cause
+    assert "codes=" not in cause
+    for leaked in ("HTTPConnectionPool", "host='x'", "ConnectionError", "Invalid screenshot"):
+        assert leaked not in cause
+
+
+@pytest.mark.asyncio
+async def test_observe_adds_no_cause_when_upstream_said_nothing() -> None:
+    """An absent cause stays absent: the builder's text is never embellished."""
+
+    observed = await _observe_blind([])
+    assert observed["screenshot"] is None
+    assert SCREENSHOT_CAUSE_KEY not in observed
+
+
+@pytest.mark.asyncio
+async def test_observe_ignores_records_from_other_modules_and_loggers() -> None:
+    """Only the pinned file, on the pinned logger, is read as a capture attempt."""
+
+    observed = await _observe_blind(
+        [
+            # The right logger, but a record from another upstream module.
+            (aws_mod._SCREENSHOT_LOGGER, _DESKTOP_ENV, _STATUS_502),
+            # The right module, but another logger.
+            ("desktopenv.other", _CONTROLLER, _STATUS_502),
+            ("desktopenv.env", _CONTROLLER, _STATUS_502),
+        ]
+    )
+    assert SCREENSHOT_CAUSE_KEY not in observed
+
+
+@pytest.mark.asyncio
+async def test_the_cause_count_is_uncapped_while_its_detail_is_bounded() -> None:
+    """A long outage is counted honestly without inflating the artifact."""
+
+    observed = await _observe_blind([(aws_mod._SCREENSHOT_LOGGER, _CONTROLLER, _STATUS_502)] * 40)
+    cause = observed[SCREENSHOT_CAUSE_KEY]
+    assert "upstream_failures=40" in cause
+    assert cause.count("status") == aws_mod.MAX_CAUSE_RECORDS
+    assert len(cause) <= MAX_OBSERVATION_CAUSE
+
+
+def test_the_screenshot_capture_target_matches_the_pinned_upstream() -> None:
+    """The capture filters on a module basename off a pinned logger name; a
+    rename upstream would silently disarm it, so pin both against the
+    checkout. Skipped where that checkout is absent (CI)."""
+
+    inputs_root = Path(
+        os.environ.get(
+            "OSWORLD_INPUTS_ROOT", Path(pwd.getpwuid(os.getuid()).pw_dir) / "worktrees" / "osworld"
+        )
+    )
+    controller = inputs_root / "prepared" / "desktop_env" / "controllers" / "python.py"
+    if not controller.exists():  # pragma: no cover - inputs root absent on CI
+        pytest.skip("pinned OSWorld checkout not present")
+    source = controller.read_text()
+    assert f'getLogger("{aws_mod._SCREENSHOT_LOGGER}")' in source
+    for prefix, _kind in aws_mod._SCREENSHOT_RECORD_KINDS:
+        assert prefix in source, prefix
 
 
 @pytest.mark.asyncio

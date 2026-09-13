@@ -199,8 +199,8 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
         assert public_fact in "\n".join(m.text for m in history)
 
         async def summarize(prompt: str) -> str:
-            text, *_ = await client._stream(client._summary_request(prompt))
-            return text
+            summary = await client._stream(client._summary_request(prompt))
+            return summary.text
 
         compacted = await asyncio.wait_for(
             run_compaction_pass(
