@@ -60,7 +60,7 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
 | Source commit | the bump commit on `fix/extension-version-skew-does-not-break-bridge` (SHA in the PR thread). Recording it inside the commit that creates it is impossible, which is why the field that actually pins the input — the tree hash below — is computed from the staged tree and is stable across the doc-only edits that carry this entry |
-| `extension/` tree hash | `2c8363f2589fd2f608a1eb920670f299d36552cf` (staged tree, `git rev-parse <commit>:extension`) |
+| `extension/` tree hash | `f4c6e6d3f267a671d1fde462029655d841034a85` (staged tree, `git rev-parse <commit>:extension`) |
 | Artifact SHA-256 | *not applicable — never uploaded* |
 | Artifact size | *not applicable — never built for upload* |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged); the runtime now accepts the WINDOW `MIN_SUPPORTED_PROTO..PROTO_VERSION` |
