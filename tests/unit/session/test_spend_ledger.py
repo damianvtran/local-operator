@@ -810,3 +810,51 @@ async def test_a_live_turn_writes_a_recallable_record(tmp_path: Path) -> None:
     assert recalled is not None and recalled.micro == 2_100
     assert recalled.knowledge() is CostKnowledge.EXACT
     assert spend_module.SESSION_SPEND_CUSTOM_TYPE == SESSION_SPEND_CUSTOM_TYPE
+
+
+def test_rebuild_replaces_a_seeded_accumulator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy SEED must not look like newer state.
+
+    ``seed_spend_floor`` increments the call count, so a rebuild guarded on
+    ``spend.calls`` silently never ran for a pre-ledger session that had already
+    been opened — i.e. for exactly the population the rebuild exists for, 92.3%
+    of the real store. The seed is a reconstruction of money already in the
+    journal, so it is what the rebuild REPLACES, never a reason to skip. Found by
+    the e2e test, not by this file: the unit test that called
+    ``_rebuild_spend`` directly had no seed in its accumulator.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_message(Message.user("hello"))
+        await transcript.append_message(
+            Message.assistant("a", usage=receipt("openrouter", "x", 1.25))
+        )
+
+    asyncio.run(seed())
+
+    async def main() -> None:
+        # has_ui=True so construction restores through the frontend store, which
+        # is what seeds the accumulator from the legacy receipt.
+        session = make_session(tmp_path, has_ui=True)
+        assert session.restored_spend() is None
+        assert session.spend.calls == 1 and session._spend_seeded
+        monkeypatch.setattr(
+            session_module, "price_rows", lambda rows: [(1_250_000, True) for _ in rows]
+        )
+        session.rebuild_spend_if_needed()
+        async with asyncio.timeout(30):
+            while session._spend_tasks:
+                await asyncio.sleep(0.01)
+        spend = session.restored_spend()
+        assert spend is not None, "the seeded accumulator blocked the rebuild"
+        assert spend.rebuilt is True
+        assert spend.micro == 1_250_000
+        assert session._spend_seeded is False
+        assert session._spend_recorded is True
+
+    asyncio.run(main())

@@ -39,6 +39,16 @@ pytestmark = pytest.mark.e2e
 MODEL = ModelSpec(provider="test", model_id="ledger", context_window=100_000)
 
 
+def _no_stream(request=None, signal=None):  # noqa: ANN001
+    """An explicit empty async stream: this session never runs a turn."""
+
+    async def gen():
+        return
+        yield  # pragma: no cover - an async generator that yields nothing
+
+    return gen()
+
+
 def _receipt(usd: float) -> Usage:
     return Usage(
         provider="openrouter",
@@ -150,7 +160,7 @@ async def test_a_rebuilt_pre_ledger_session_publishes_an_exact_total(
     await _seed_pre_ledger(directory, 1.25)
     session = Session(
         model=MODEL,
-        stream_fn=lambda *_a, **_k: None,
+        stream_fn=_no_stream,
         tools=[],
         transcript=Transcript(directory),
         system_blocks_provider=lambda *_: [],

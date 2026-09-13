@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.naming import ConversationName
+from local_operator.session.spend import SessionSpend
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Deferred: ``frontend_state`` imports ``tui.costs``, whose package
@@ -573,8 +574,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     past it (106 before the warm members were added, 108 with them, 109 once
     ``restored_search_spend`` joined ``restored_usage``, 111 once
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
-    112 once the lease-warm retry needed ``recovering``), so recompute it rather
-    than adjusting it by the size of your own change.
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
+    112 once the lease-warm retry needed ``recovering``, 113 once
+    ``restored_spend`` joined the shared surface a viewer inherits), so
+    recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -1322,6 +1325,23 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         reason: the TUI reads it off the session to seed a resumed
         conversation's ledger, and a duck-typed ``getattr`` would make a rename
         degrade the band to a silently-short figure instead of an error.
+        """
+        ...
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable per-session spend this conversation carries, or ``None``.
+
+        DECLARED on the SHARED protocol rather than on
+        :class:`ViewerSessionProtocol`, and the distinction is the one that rule
+        is for: ``tui/app.py::_restore_reported_usage`` reads it through a
+        duck-typed binding that may hold EITHER kind of session (the band is
+        restored on adopt, for an owner runtime and for an attached facade
+        alike), and BOTH classes implement it -- the owner by recalling the
+        ``session_spend.v1`` row it writes, a viewer by recalling the same row
+        out of the journal suffix it already read on a cold open. Declaring it
+        on the viewer-only protocol would say a runtime lacks the member, which
+        is the opposite of the truth, and would let the owner-side read degrade
+        to a silent ``None`` (an unmarked total on screen) on a rename.
         """
         ...
 
