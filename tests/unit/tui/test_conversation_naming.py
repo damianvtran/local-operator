@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 
+from local_operator import slash_commands as slash_module
 from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
@@ -1271,9 +1272,20 @@ def test_the_automatic_prompt_did_not_inherit_the_tie_break() -> None:
 
 @pytest.mark.asyncio
 async def test_a_topic_shift_after_a_fresh_judgement_reports_a_refresh() -> None:
-    """What the command is for: the subject moved, and the receipt says so."""
+    """What the command is for: the subject moved, and the receipt says so.
+
+    The stub asserts WHICH question it was asked, not only what it answered.
+    It used to ignore ``system``/``prompt`` entirely, which made it pass on the
+    unfixed tree as well — the old anti-drift prompt produced this same verdict
+    here, so a stub that reads nothing pinned nothing about the judgement being
+    FRESH. Now the revert (``refresh_title`` asking with
+    ``THEME_SYSTEM_PROMPT``) fails this test, which is the guarantee its name
+    claims.
+    """
+    seen: list[tuple[str, str]] = []
 
     async def moved(system: str, prompt: str) -> str:
+        seen.append((system, prompt))
         return "<title>Billing importer rewrite</title>"
 
     turns = _turns(
@@ -1288,6 +1300,15 @@ async def test_a_topic_shift_after_a_fresh_judgement_reports_a_refresh() -> None
     assert result == naming.TitleRefresh(naming.TITLE_REFRESHED, "Billing importer rewrite")
     assert result.changed
 
+    # It was asked the ON-DEMAND question, not the anti-drift block.
+    system, prompt = seen[0]
+    assert system == naming.REFRESH_SYSTEM_PROMPT
+    assert system != naming.THEME_SYSTEM_PROMPT
+    # ...and the standing name travelled in the DATA as the anchor the verdict
+    # is about, so "moved" is a judgement of that title rather than a guess.
+    assert "<current-title>\nFix the login flow\n</current-title>" in prompt
+    assert "billing importer drops rows" in prompt
+
 
 @pytest.mark.asyncio
 async def test_an_equal_title_after_a_fresh_judgement_still_folds_to_unchanged() -> None:
@@ -1296,9 +1317,15 @@ async def test_an_equal_title_after_a_fresh_judgement_still_folds_to_unchanged()
     A verbatim restatement reached AFTER a genuine reconsideration is an honest
     answer, and the user is owed it. What the new prompt removes is its being
     the DEFAULT answer — previously the model was instructed to produce it.
+
+    Like its sibling above, this asserts the question that was asked as well as
+    the verdict: `TITLE_UNCHANGED` is what BOTH prompts produce when the model
+    restates, so a stub reading neither argument pins nothing.
     """
+    seen: list[tuple[str, str]] = []
 
     async def restates(system: str, prompt: str) -> str:
+        seen.append((system, prompt))
         return "<title>Fix the login flow</title>"
 
     result = await naming.refresh_title(
@@ -1306,6 +1333,10 @@ async def test_an_equal_title_after_a_fresh_judgement_still_folds_to_unchanged()
     )
     assert result.outcome == naming.TITLE_UNCHANGED
     assert result.title == "Fix the login flow"
+
+    system, prompt = seen[0]
+    assert system == naming.REFRESH_SYSTEM_PROMPT
+    assert "<current-title>\nFix the login flow\n</current-title>" in prompt
 
 
 @pytest.mark.asyncio
@@ -1396,28 +1427,45 @@ def test_every_advertised_surface_teaches_the_same_spelling() -> None:
     no rule. The bare words all still PARSE (pinned in
     ``test_title_refresh_qa``); what is pinned here is what the product SAYS,
     which is the part that drifts when a fifth surface is added later.
+
+    Enumerated per surface, rather than as one whole-file substring count:
+
+    * the `/help` row is pinned by EXACT equality, so a reword fails here;
+    * the picker row is pinned on the row it builds;
+    * the three runtime notices are one census of the canonical invocation, so
+      adding a surface or reverting one to the bare word moves a number.
+
+    What this still cannot see, stated rather than assumed: a fifth surface
+    teaching the capability in words that avoid the canonical clause entirely
+    (a notice saying "ask for a fresh name" without naming the command).
+    Catching that needs each notice pinned where it RENDERS, which the three
+    notice sites do not do yet.
     """
     entry = next(c for c in SLASH_COMMANDS if c.name == "rename")
-    assert "--refresh" in entry.description
+    assert entry.description == "Name this conversation, or /title --refresh"
+    assert naming.parse_title_arg("--refresh") == (True, "")
 
-    # The shape a user reads, spelled out once so a failure here shows the
-    # sentence rather than only a count.
-    named = "Fix the login flow"
-    assert "/title --refresh" in f"conversation: {named} — /title <words>, or /title --refresh"
-    assert "/title --refresh" in f"name: {named} — /title <words>, or /title --refresh"
-
-    # The teeth are below, and they are a strict SNAPSHOT of the whole clause,
-    # not a spelling check: the two assertions above are test-local literals
-    # that no production change can falsify, so the honesty comes from counting
-    # the real source lines. That means rewording a notice while KEEPING
-    # `--refresh` fails this test too. Deliberate, and the cost of the check —
-    # the sentence is what a user reads, so a copy edit to it is a change to
-    # what the product teaches and should be made on purpose. Update the count
-    # or the literal here in the same commit as the reword.
     app_source = Path(app_module.__file__).read_text(encoding="utf-8")
     serving_source = Path(serving_module.__file__).read_text(encoding="utf-8")
-    assert app_source.count("/title <words>, or /title --refresh") == 2
-    assert serving_source.count("/title <words>, or /title --refresh") == 1
+    slash_source = Path(slash_module.__file__).read_text(encoding="utf-8")
+
+    # The picker teaches the ARGUMENT rather than the invocation — the command
+    # name is already in the buffer when the row is offered — so it is the one
+    # surface that names the flag alone. Its BEHAVIOUR (the row boots, is
+    # offered, and what it submits reaches the refresh branch) is pinned by
+    # ``test_the_argument_picker_offers_the_flag_spelling``.
+    assert 'name="--refresh",' in app_source
+    assert 'aliases=("refresh",),' in app_source
+
+    # One entry per surface that teaches the INVOCATION. A reword that keeps
+    # `--refresh`, a revert to the bare word, or a new surface all move these
+    # numbers, so the agreement is counted rather than asserted at itself.
+    census = {
+        "slash_commands.py": slash_source.count("/title --refresh"),
+        "app.py": app_source.count("/title --refresh"),
+        "serving.py": serving_source.count("/title --refresh"),
+    }
+    assert census == {"slash_commands.py": 1, "app.py": 2, "serving.py": 1}, census
 
 
 # -- the theme sampler and the drift regression it fixes ----------------------

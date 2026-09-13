@@ -245,9 +245,21 @@ THEME_TAIL_TURNS = 4
 #: :data:`THEME_TURN_CHARS` is unchanged and still bounds each turn, so the
 #: envelope grows from at most 7x240 chars to at most 10x240 — roughly 600 extra
 #: input tokens, on a call the user explicitly asked for and is waiting on,
-#: against an automatic call that fires unasked. Under 10 conversational turns
-#: the two samplings are identical and no ``<elided/>`` is emitted, so a short
-#: session costs nothing extra.
+#: against an automatic call that fires unasked.
+#:
+#: Where the two windows part is worth stating exactly, because the obvious
+#: guess is wrong: they are byte-identical up to SEVEN turns (head+tail covers
+#: the whole trajectory and neither emits ``<elided/>``), and diverge from the
+#: EIGHTH, where head-3/tail-4 has already elided while head-2/tail-8 still
+#: shows a contiguous tail. Measured on the shipped samplers with equal turns:
+#: n=7 → 549 chars each; n=8 → 560 (elided) against 618; n=10 → 560 against
+#: 756. So the honest claim is bounded the same way the window is: a session
+#: costs nothing extra ONLY up to the turn where the windows part, and past it
+#: the extra is the most recent turns, capped by
+#: ``REFRESH_HEAD_TURNS + REFRESH_TAIL_TURNS`` turns of at most
+#: ``THEME_TURN_CHARS`` each — 10x240 no matter how long the session runs.
+#: That divergence is the intent rather than a cost to apologise for: the
+#: recency the refresh exists to weigh is precisely what head-3/tail-4 drops.
 REFRESH_HEAD_TURNS = 2
 REFRESH_TAIL_TURNS = 8
 
