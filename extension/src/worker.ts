@@ -289,7 +289,13 @@ function applyRole(role: "driver" | "standby", pairedNow: boolean): void {
   }
   fireAndForget(
     chrome.storage.session.set({
-      connState: standby ? "standby" : pairedNow ? "connected" : "pairing",
+      // Paired FIRST, role second, and the order matters: an UNPAIRED standby
+      // must land on the pairing form, because pairing is the one thing it can
+      // still do. Reporting "standby" there showed the user a card saying it was
+      // paired and standing by, with no way to enter the code that would make
+      // that true — and a second install is always in exactly that state when it
+      // first dials.
+      connState: !pairedNow ? "pairing" : standby ? "standby" : "connected",
     }),
     "connState write",
   );

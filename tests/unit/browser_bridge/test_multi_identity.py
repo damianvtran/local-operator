@@ -238,7 +238,17 @@ def test_u3_the_downgrade_contract_holds_for_a_schema_two_file(tmp_path: Path) -
 # --- U4: the gate ------------------------------------------------------------
 
 
-def test_u4_an_unlisted_identity_is_closed_4004_before_attach(tmp_path: Path) -> None:
+def test_u4_an_unlisted_identity_presenting_a_token_is_closed_4004_before_attach(
+    tmp_path: Path,
+) -> None:
+    """A peer CLAIMING a pairing it does not have is refused, before any link.
+
+    The token is what makes the claim: a revoked identity dialling back in with
+    its old secret, or an install pointed at a daemon that never authorised it.
+    This is the one case the 4004 gate still covers, and it must fire BEFORE
+    `attach()` so a refused peer cannot install a link and then be severed — the
+    unbounded-close rule #996's audit pinned.
+    """
     _schema_two(tmp_path)
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
@@ -256,6 +266,45 @@ def test_u4_an_unlisted_identity_is_closed_4004_before_attach(tmp_path: Path) ->
         # the 4004 rule exists to prevent.
         assert service.links == before
         assert service.link.websocket is None
+
+
+def test_u4c_an_unlisted_identity_with_no_token_may_enter_the_pairing_flow(
+    tmp_path: Path,
+) -> None:
+    """...and a peer asking to PAIR is admitted, or the second install is stuck.
+
+    This is the operator's actual sequence: the store build is already paired,
+    then a locally loaded build is installed and dials for the first time. It
+    presents no token because it has never been paired. Refusing it here left the
+    second install with no code to enter — a dial-refuse-redial loop — which is
+    the defect this change exists to remove (reproduced on the real rig; see the
+    PR evidence). It is admitted, told `paired: false`, and given its OWN code;
+    authority is unchanged, because an unpaired link is refused every RPC.
+    """
+    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN))
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{UNPACKED_ID}"}
+        ) as socket:
+            socket.send_json(_hello_frame(""))
+            ack = socket.receive_json()
+            assert ack["paired"] is False, "an unlisted, unpaired peer must hold no authority"
+            # The wheel is free here (the store build is paired in the FILE but
+            # has no live socket), so this link drives as soon as it connects.
+            # Driving is not authority: `paired` above is what gates RPCs.
+            assert ack["role"] == "driver"
+            codes = pairing_status(tmp_path)["pending"]
+            assert [entry["extension_id"] for entry in codes] == [UNPACKED_ID]
+            # And the code it was given is the one that authorises it.
+            socket.send_json({"event": "pair", "code": codes[0]["code"]})
+            result = socket.receive_json()
+            assert result["ok"] is True, result
+            saved = _identities(tmp_path)
+            assert {entry["extension_id"] for entry in saved} == {STORE_ID, UNPACKED_ID}
+            service = BridgeService(root=tmp_path)
+            assert service._valid_saved_token(UNPACKED_ID, result["token"]) is True
+            assert service._valid_saved_token(STORE_ID, result["token"]) is False
 
 
 def test_u4b_a_web_store_build_still_connects_while_another_identity_is_paired(

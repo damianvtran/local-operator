@@ -1646,10 +1646,21 @@ class BridgeService:
             await websocket.close(code=4001)
             return
         listed = _identity_ids(self.root)
-        if listed and extension_id not in listed:
-            # Still BEFORE `attach()`: the unbounded-close rule above is preserved
-            # verbatim. An allow-list only widens WHICH ids may install a link;
-            # an unknown id is refused exactly as the single pin refused it.
+        if listed and extension_id not in listed and hello.token:
+            # 4004 still refuses BEFORE `attach()`, so the unbounded-close rule
+            # above is preserved verbatim — what changed is WHO it refuses.
+            #
+            # A peer that presents a TOKEN is claiming a pairing it does not
+            # have (a revoked identity coming back with its old secret, or an
+            # install pointed at the wrong daemon), and refusing it is the whole
+            # point of the gate. A peer that presents NO token is not claiming
+            # anything: it is asking to pair, which is exactly what the first
+            # install did, and it must stay admissible or a SECOND install could
+            # never be added once the first is authorised — the operator's own
+            # case (a store build already paired, then a locally loaded build),
+            # and the case this change exists for. Refusing it here produced a
+            # dial-refuse-redial loop against the running daemon and left the
+            # second install with no code to enter at all (see PR evidence).
             await websocket.close(code=4004)
             return
 
