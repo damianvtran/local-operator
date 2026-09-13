@@ -146,7 +146,7 @@ def configure_cli_logging() -> None:
     configure_console_logging(level=logging.INFO, fmt=CLI_LOG_FORMAT)
 
 
-def quiet_wire_clients(level: int = logging.WARNING) -> None:
+def quiet_wire_clients(level: Optional[int] = None) -> None:
     """Pin the per-request wire clients so they cannot fill a log destination.
 
     Exposed separately from both ``configure_*`` functions because the pin is not
@@ -157,7 +157,15 @@ def quiet_wire_clients(level: int = logging.WARNING) -> None:
     pin regardless of the level it picks there, which is exactly the trap of
     spelling it only inside the console configurator (a later
     ``configure_console_logging(level=INFO)`` would silently restore the flood).
+
+    With no level, the pin is *at least* WARNING and *never more verbose than the
+    root logger already is*: at ``LOG_LEVEL=ERROR`` a hard WARNING floor would
+    make these clients the loudest thing in the process, which is the opposite of
+    what the caller asked for.
     """
+    if level is None:
+        root_level = logging.getLogger().level
+        level = max(root_level if root_level else logging.WARNING, logging.WARNING)
     for lib_logger in _CHATTY_WIRE_CLIENTS:
         logging.getLogger(lib_logger).setLevel(level)
 
@@ -390,12 +398,9 @@ def _open_rotating_handler(
         # traceback on startup is a broken one.
         return None, None
     handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT))
-    # 0o600 to match the directory's 0o700 and `credentials.env`'s own mode:
-    # the file carries prompt and error text from an interactive session.
-    try:
-        os.chmod(target, 0o600)
-    except OSError:  # Windows and exotic filesystems; the log still works
-        pass
+    # No chmod here: `_PrivateRotatingFileHandler._open` applies 0o600 to every
+    # file it opens, which includes this first one, and doing it in one place is
+    # what keeps a rotation from drifting back to umask-created 0644.
     return handler, target
 
 

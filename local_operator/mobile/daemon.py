@@ -772,10 +772,25 @@ class _OversizedControlFrames:
     schedule, the MCP client, a stalled runtime) could not be read past them.
 
     The first sighting is always reported on its own, so a one-off is never lost;
-    after that a run of them collapses into one line per window, carrying the
-    window count and a monotonic total. The total is what survives a flood that
-    stops mid-window: the next aggregated line — whenever it comes — states it.
+    after that a run collapses into one line per window carrying the window count
+    and a monotonic total.
+
+    A flood that stops mid-window states neither figure by itself: the counts sit
+    in memory until that pid queues another frame. That is the trade this makes,
+    and it is worth naming rather than papering over — the stopped flood has
+    already been seen once (its first sighting is unconditional) and its
+    unreported residue is bounded by a single window, while the behaviour it
+    replaces buried the file 6,104,351 times over. Flushing a stopped window would
+    need a timer task inside the daemon, which is more machinery than the
+    diagnostic is worth.
     """
+
+    #: Ceiling on tracked pids. A long-lived daemon sees one entry per session it
+    #: has ever dialled — ~32 MB at 100k pids — so the oldest is forgotten rather
+    #: than kept forever. It is dropped by insertion order: the pid that has been
+    #: known longest is the least likely to still be speaking, and a pid that
+    #: speaks again is re-counted from its next first sighting.
+    MAX_TRACKED_PIDS = 1024
 
     def __init__(self) -> None:
         self._windows: dict[int | None, tuple[float, int]] = {}
@@ -793,19 +808,28 @@ class _OversizedControlFrames:
                 "frame leaves that session's projection stale",
                 pid,
             )
+            self._forget_oldest()
             return
         if now - started < OVERSIZED_CONTROL_WINDOW_S:
             self._windows[pid] = (started, count + 1)
             return
         self._windows[pid] = (now, 0)
         logger.warning(
-            "mobile daemon: %d oversized control frames from pid %s in the last %.0fs "
+            "mobile daemon: %d oversized control frame%s from pid %s over %.0fs "
             "(%d this process); each skipped frame leaves that session's projection stale",
             count + 1,
+            "" if count + 1 == 1 else "s",
             pid,
             now - started,
             total,
         )
+
+    def _forget_oldest(self) -> None:
+        """Keep the tracked-pid map bounded when a daemon has seen many sessions."""
+        while len(self._totals) > self.MAX_TRACKED_PIDS:
+            oldest = next(iter(self._totals))
+            self._totals.pop(oldest, None)
+            self._windows.pop(oldest, None)
 
 
 #: One instance per daemon process; the reader loop is single-threaded on one
