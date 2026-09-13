@@ -310,15 +310,31 @@ def _identities(root) -> list[dict]:
   can never be added. Measured on the isolated rig before the change below: 97
   `/extension` accepts while the second install dialled and was refused, no
   pending code for it, `/health` authorised list unchanged.**
-  As implemented, 4004 refuses an unlisted identity that **presents a token** —
-  a peer claiming a pairing it does not have, i.e. a revoked install dialling
-  back with its old secret, which is the case the gate is actually for — and
-  admits one that presents **none**, because that peer is unambiguously asking to
-  pair. It is still refused before `attach()` (the unbounded-close rule is
-  untouched) and still told `paired: false`, so it holds no authority: an
-  unpaired link answers `not_paired` to every RPC. Both halves are pinned
-  (`test_u4_*`: token → 4004; no token → admitted, gets its own code, gains
-  authority only through the code dance).
+  **ROUND 3 SUPERSESSION (coder, 2026-09-13): the token branch is gone, because
+  it was a DEAD END rather than a defence.** A revoked install keeps the token it
+  was issued (`worker.ts` does not clear it on the 4003 close), so it re-dialled
+  with it, was closed before `attach()`, and therefore never reached
+  `_ensure_pending`: no code was ever minted for it, `lop browser pair` answered
+  "already paired … use --reset", and the pairing form its own popup showed could
+  not be completed by any code — the only escapes were `--reset` (which revokes
+  the working install too) or Settings → unpair. Measured (design review D1 / UX
+  U3): unlisted id **with** a token → closed 4004 with `pairing_status().pending`
+  empty and the popup painting *"Could not reach Local Operator on this machine."*
+  about a daemon it was fetching `/health` from; the same id **without** a token →
+  admitted, `hello_ack{paired:false}`, code minted. Since an unlisted id cannot be
+  authorised either way (authority comes from the FILE's entry for THIS id, and
+  `_valid_saved_token` selects by id), refusing a token that could never match
+  bought nothing that admitting it does not, and it cost the user the only route
+  back. **As implemented: every unlisted dial is admitted as an ASKER** —
+  `hello_ack{paired:false}`, its own code minted, refused every RPC until that
+  code is entered — which is the rule the rest of the daemon already followed and
+  the one §6.2's "every identity goes through the code dance" assumes. The
+  unbounded-close rule is untouched for the refusals that remain (no usable
+  ORIGIN, a malformed `hello`, a proto mismatch, a superseded socket).
+  Pinned by `test_u4_*`: admission + code + no authority for the token case,
+  re-pairing with the dead token for a revoked install (`test_u4d`), and a row
+  that the presented token still buys nothing (`_valid_saved_token` False for the
+  third id while the store build's own token stays valid for it).
 - `_valid_saved_token()` (`daemon.py:1018-1023`) selects the entry by ID and
   `compare_digest`s that entry's hash. Keep `secrets.compare_digest`; keep
   returning `False` on an empty token.
@@ -619,6 +635,20 @@ in the same commit or CI fails.**
   (§3.4), because a user staring at two popups cannot otherwise tell.
 - `pair --list`: the authorised identities, their labels, when each was paired
   and last seen, and which is driving.
+- **Round 3 (UX U2 / design D3): the label is NOT sufficient on its own.**
+  `_browser_label` is `<browser> extension <version>`, so two installs of the
+  SAME build — two profiles loading one unpacked build, or any two builds at one
+  version — are labelled byte-identically, and every surface that addresses an
+  identity by label then has no token that resolves it. The id prefix is the one
+  thing that always does, so it is printed beside the label everywhere an
+  identity is named: `status`/`pair --list` rows (`- label (cmadnonj…) driving`),
+  `--list` adds `paired <when>, last seen <when>` from the file (§8.1's promise,
+  and the only remaining field that differs when labels collide), the popup's
+  driver line (`Chrome extension 0.1.13 (cmadnonj…) is driving right now.`), and
+  the `waiting:` rows of `pair` (`009319  (Chrome extension 0.1.13 · omibaecb…)`).
+  The `note:` about a pre-0.1.13 standby is also gated on the **standby's** own
+  build (from `/health`'s `standby_labels`) rather than printed for any standby,
+  and it names the symptom the user sees (copy review C4 / UX U7).
 - `pair --revoke <id-or-label>`: removes one identity and severs only its link.
 - `pair --reset`: unchanged meaning — revoke **everything**. Must keep its
   UX-N1 property of exiting 0 when nothing is waiting (`cli.py:2005-2019`).
@@ -633,6 +663,18 @@ in the same commit or CI fails.**
 Pins the driver explicitly and demotes the incumbent. The escape hatch from
 §2.1. Small, honest, and the thing an operator reaches for when both installs
 are up and the wrong one has the wheel.
+
+**Round 3 (copy review C1 / UX U2): the failure has to say WHICH failure.**
+Asked for a label that two installs share, the command answered "no connected
+ extension matches '…'" — i.e. *nothing* matched, about a target two installs
+matched — and listed bare id prefixes with no labels, so it did not teach the
+token that would have worked. It now says **"no single connected extension
+matches"** (the wording `--revoke` already used for the same refusal) and lists
+`id  label` per candidate. Separately, an install that is **authorised but not
+connected** — the state a handover leaves behind, where `status` says "paired,
+not connected" — is answered `409 not_connected` with "that install is authorised
+but not connected right now — open its browser, then retry" instead of a
+not-found that reads as a typo'd id (UX U4).
 
 ### 8.3 `lop browser status`
 
@@ -723,7 +765,7 @@ cannot be side-loaded) and a path-derived unpacked build:
 | **No war** | Both installs connected for ≥120 s with `/health` sampled throughout: exactly one driver the whole time, **zero** 4000 evictions after settle. This is the §1.4 regression and it must be sampled, not assumed. |
 | **Standby cannot drive** | A session command while B is standby is served by A; B's debugger attachments are gone; B's popup shows the standby card (screenshot). |
 | **Failover** | Kill A's worker; B is promoted within one observed interval; a session command on a **stale handle** returns typed `tab_closed`, and the following `open` succeeds on a fresh tab (§5.3). Capture the timing. |
-| **Unknown ID** | A third build in a third directory that presents a TOKEN is closed **4004** before `attach()`, and nothing in the daemon's link state changed. One that presents NO token is admitted, gets its own code, and can pair (§3.3: refusing it would make a second install unaddable, which was the reported defect) — measured: token → 4004, no token → `hello_ack{paired:false, role:"standby"}`. |
+| **Unknown ID** | A third build in a third directory is **admitted as an asker** — with or without a token, since neither can be authorised (`§3.3`, round 3): `hello_ack{paired:false}`, its own code minted, no authority until that code is entered, nothing in the daemon's link state changed beyond a bounded unlisted link. **The pre-round-3 `4004` for the token-bearing half is gone** — measured as the revoked-install dead end that made re-pairing impossible without a storage wipe. |
 | **Revoked ID** | `pair --revoke B` severs B's link within `REVOKE_WATCH_S`; A keeps driving and keeps answering; B's popup shows the pairing form. |
 | **Token mismatch** | B with a corrupted stored token gets `paired: false`, is offered a code, and cannot issue RPCs (`not_paired`). |
 | **Old extension, new daemon** | The **released 0.1.10** build against the new daemon: pairs, drives, ignores the additive ack fields. Load the published store build in the rig profile for this one. |
