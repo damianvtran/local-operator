@@ -709,7 +709,7 @@ async def test_the_session_headline_includes_search_and_names_it(tmp_path, monke
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Est. cost" in text
     assert "incl. $0.0040 search" in text
@@ -737,7 +737,7 @@ async def test_a_session_that_never_searched_claims_no_search_spend(tmp_path, mo
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Est. cost" in text
     assert "search" not in text.split("Est. cost")[1].split("\n")[0]
@@ -765,7 +765,7 @@ async def test_the_headline_names_its_search_component_at_every_width(
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Est. cost" in text
     assert "$0.0040 search" in flowed(
@@ -848,7 +848,7 @@ async def test_a_narrow_frame_drops_the_note_column_rather_than_cropping_it(
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Est. cost" in text
     # Nothing HALF-written: no fragment of the note survives into the frame.
@@ -945,7 +945,7 @@ async def test_analytics_never_paints_a_cropped_money_fragment(tmp_path, monkeyp
         await _submit(pilot, app, "/analytics")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        rows = [line.plain for line in app.screen._report_lines() if "Est. cost" in line.plain]
+        rows = [line for line in _panel_lines(app).splitlines() if "Est. cost" in line]
 
     assert rows, "the headline row is on screen"
     row = rows[0]
