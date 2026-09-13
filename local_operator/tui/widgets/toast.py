@@ -129,6 +129,13 @@ _FAILURE_REASON_SEP = " — "
 #: D1-6).
 _NETWORK_MARKER = "network: "
 
+#: The failure glyph, mirrored from the notice spine (``NoticeBlock``'s ``error``
+#: arm) rather than imported: this widget composes from an OUTCOME and does not
+#: reach into the transcript widget, and the mirror is pinned by test. It marks
+#: every row of the failure card, which is what stops a row of it being read as
+#: the continuation of the transcript row it floats over (design round 2, D2-2).
+_TOAST_FAILURE_GLYPH = "✗"
+
 #: What a failure line must LEAD with for its tail to be a droppable REASON.
 #: Deliberately the command prefix rather than "the text contains a dash": the
 #: no-OAuth-endpoint challenge line (``notion rejected our credentials (401) —
@@ -188,9 +195,14 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       server BY HOST, so ``failed: linear — network: cannot reach
       linear.example.com`` stacked two colons and said ``linear`` twice inside
       57 cells. The host is the identity the user acts on, so the head goes and
-      the phrase keeps both the layer and the server (design review D1-2). The
-      hostless stdio copy has no host and therefore keeps the head, which is why
-      the marker (only ever composed WITH a host) is what selects this rung.
+      the phrase keeps both the layer and the server (design review D1-2) — but
+      only while the host really does carry the name: ``jira`` at
+      ``https://mcp.acme.com/mcp`` names no part of itself in the phrase, so the
+      head is kept there and the row reads ``failed: jira — network: cannot reach
+      mcp.acme.com``, which is a pairing rather than the doubling D1-2 objected
+      to (design review D2-3). The hostless stdio copy has no host and therefore
+      keeps the head, which is why the marker (only ever composed WITH a host) is
+      what selects this rung.
     * **Rung 1** — the whole row, whenever it fits. Byte-identical to the clamp
       for the corpus design review D9 verified at 100 columns (57/53/47 cells at
       a 6-cell name), so the pinned rows are untouched.
@@ -216,7 +228,10 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
     (D11's resolution 2), so the fall-through keeps the base's pixels there and
     the named constraint is recorded on the deferral instead.
     """
-    if text.startswith(_NETWORK_MARKER):
+    if text.startswith(_NETWORK_MARKER) and name.lower() in text.lower():
+        # Case-insensitive on purpose: the host is lower-cased by the SDK/HTTP
+        # layer while a configured name need not be, and a name that differs only
+        # in case is still the name the user reads twice.
         return truncate_cells(text, max(1, max_cells))
     label = f"failed: {name} — "
     full = label + text
@@ -279,6 +294,10 @@ def format_mcp_startup(
 
     if outcome.failures:
         names = sorted(outcome.failures)
+        # The detail row carries its own glyph too (see where it is appended), so it
+        # is composed against the same 2 cells the head already pays — otherwise a
+        # row sized to the full budget would wrap and take the card to three rows.
+        detail_budget = max(1, max_cells - 2)
         if len(names) == 1:
             # Says FAILED, like the multi-server variant: `gh — command not
             # found: gh` never named the state, so the reader had to infer which
@@ -288,7 +307,7 @@ def format_mcp_startup(
             # already names its server by host, which is why
             # :func:`_fit_failure_line` drops the head for that family (design
             # review D1-2). Every other family still opens on ``failed: ``.
-            detail = _fit_failure_line(names[0], outcome.failures[names[0]], max(1, max_cells))
+            detail = _fit_failure_line(names[0], outcome.failures[names[0]], detail_budget)
         else:
             # Multiple failures are a LIST, and when they share one cause the
             # list is the wrong shape: naming nine servers that all say the same
@@ -305,10 +324,25 @@ def format_mcp_startup(
             # branch — its text is the full ``network: …`` line, which already
             # names the network.
             if outcome.all_failures_are_network:
-                detail = _network_group_line(names, max(1, max_cells))
+                detail = _network_group_line(names, detail_budget)
             else:
-                detail = truncate_cells("failed: " + ", ".join(names), max(1, max_cells))
+                detail = truncate_cells("failed: " + ", ".join(names), detail_budget)
         text.append("\n")
+        # Every row of the card carries its own glyph, head and detail alike.
+        # WHY the detail row needs one: the card FLOATS over the transcript, so a
+        # row of it lands on a transcript row — measured at stand-down, the
+        # notice's first row (``…linear.example.com — /mcp``) kept its dash under
+        # the card's fill and the row read as ONE sentence:
+        # ``…linear.example.com — network: linear, notion, slack`` (design round 2,
+        # D2-2). A glyph at the card's left edge is the boundary that cannot be
+        # read as a continuation of whatever it abuts, whatever width the row
+        # under it happens to be; the alternative fixes (moving the card into the
+        # screen's inset, or reserving rows for it) either clip the card or are
+        # the layout reflow the toast LAYER exists to avoid.
+        text.append(
+            f"{_TOAST_FAILURE_GLYPH} ",
+            style=Style(color=theme_mod.semantic_color("danger")),
+        )
         text.append(
             detail,
             style=Style(color=theme_mod.semantic_color("danger")),
