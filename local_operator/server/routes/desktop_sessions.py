@@ -48,6 +48,7 @@ from local_operator.server.utils.desktop_receipts import (
 from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
+    resolve_working_directory,
 )
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.frontend_state import (
@@ -366,13 +367,22 @@ async def preview_session(body: DraftPreview, request: Request):
     route exists under that path today, the client would otherwise get whatever
     one a later edit adds, for a session literally named "preview".
 
-    A deliberately session-LESS op, and every absence below is the point. It
-    creates no record and no directory, binds no runtime, hands nothing to the
-    canonical store, and writes no receipt — a pane that is only being OPENED
-    must cost nothing durable. The alternative (create the record at pane open,
-    then cold-GET it) is honest but leaves a visible empty row in the sidebar for
-    every abandoned pane: ``create`` writes a directory plus a marker, and a
-    marker-only directory is listed.
+    A deliberately session-LESS op, and every absence below is the point. There
+    is no session record, nothing under ``sessions/`` (no directory, no marker, no
+    runtime lease), nothing handed to the canonical store, and no receipt row — a
+    pane that is only being OPENED must cost nothing durable. The alternative
+    (create the record at pane open, then cold-GET it) is honest but leaves a
+    visible empty row in the sidebar for every abandoned pane: ``create`` writes a
+    directory plus a marker, and a marker-only directory is listed.
+
+    ONE filesystem effect it does share with ``create``, named here rather than
+    glossed as "no directory": a ``target`` is validated against
+    ``AgentRegistry``, whose constructor materialises ``<config>/agents``
+    (``agents.py``; ``TeamRegistry`` deliberately does not mkdir). That is the
+    object the design mandates reusing — a second, non-mkdir'ing registry would be
+    a second profile-resolution path, which is the defect class this PR exists to
+    remove. The ``cwd`` check below runs FIRST, so a bad working directory is
+    refused before any registry is built.
 
     The state comes from the SAME synthesis a real cold open uses
     (``session.cold_model``), so the draft's model chip cannot disagree with the
@@ -391,6 +401,10 @@ async def preview_session(body: DraftPreview, request: Request):
 
     async def preview():
         pool = host(request)
+        # The SAME admission ``create`` applies, so one body gets one answer from
+        # either route (and 409, not a 200 describing a session that could never
+        # be created). See ``DesktopSessions.create`` / ``resolve_working_directory``.
+        await asyncio.to_thread(resolve_working_directory, body.cwd)
         if body.target is not None:
             target = body.target.model_dump()
             from local_operator.agents import AgentRegistry

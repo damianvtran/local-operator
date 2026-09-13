@@ -137,6 +137,19 @@ def reading_identity(
     return None
 
 
+def _unknown_context_window() -> int:
+    """``configure.UNKNOWN_CONTEXT_WINDOW``, imported where it is used.
+
+    A function rather than a module constant because ``model.configure`` is the
+    heavy model layer (its own module comment says so) and this module is
+    deliberately import-light: the value is only needed once a window is about to
+    be believed.
+    """
+    from local_operator.model.configure import UNKNOWN_CONTEXT_WINDOW
+
+    return int(UNKNOWN_CONTEXT_WINDOW)
+
+
 def reading_window(
     usage: Usage | None,
     *,
@@ -145,17 +158,29 @@ def reading_window(
 ) -> int | None:
     """The denominator this reading may be divided by, or ``None``.
 
-    Non-``None`` only when all three hold:
+    Non-``None`` only when the reading is attributable
+    (:func:`reading_identity`), the model it names is the model that will run
+    (``spec``'s own identity), the window was RESOLVED rather than defaulted
+    (``spec.context_metadata_resolved``), and the window VALUE itself is
+    vouched for — see below.
 
-    * the reading is attributable (:func:`reading_identity`) and the model it
-      names is the model that will run (``spec``'s own identity) — a count
-      measured on another model is not convertible, so it must not be divided by
-      this one's window;
-    * the window was RESOLVED rather than defaulted
-      (``spec.context_metadata_resolved``), because ``ModelSpec`` supplies a
-      128k default and dividing a real 322,546 by a phantom 128,000 is how a
-      resumed session painted 268.2%;
-    * the window is positive.
+    ``context_metadata_resolved`` alone is NOT enough, and assuming it was is how
+    this function first shipped a wrong denominator. ``UNKNOWN_CONTEXT_WINDOW``
+    (``configure.py``) is 128_000 — a PLACEHOLDER — and ``context_spec_for_access``
+    writes it TOGETHER WITH ``context_metadata_resolved: True`` on its two
+    ordinary unresolved paths: the selected account resolved to nothing
+    (``access is None``) and a catalogue row carrying no positive window. A real
+    receipt of 322_546 tokens would then be divided by the placeholder and the band
+    would print a MEASURED ``252.0%/128k`` for a conversation whose true budget is
+    larger — the ``268.2%`` class of defect this module exists to prevent,
+    reintroduced through the denominator instead of the numerator.
+
+    So a window equal to that placeholder is refused UNLESS the model's own
+    metadata corroborates it: ``default_context_window`` is the row's documented
+    default budget, so a spec that reports 128_000 as its default is a model
+    that really does serve 128k (the ``settings`` path in
+    ``context_spec_for_access`` prefers exactly that value). In every placeholder
+    case the field is ``None``, so the two are distinguishable without guessing.
 
     A ``None`` here is not a refusal to show the tokens — the caller still has
     the numerator — it is the band's honest ``window unknown`` state: absolute
@@ -171,4 +196,10 @@ def reading_window(
     if not getattr(spec, "context_metadata_resolved", False):
         return None
     window = int(getattr(spec, "context_window", 0) or 0)
-    return window if window > 0 else None
+    if window <= 0:
+        return None
+    if window == _unknown_context_window():
+        documented_default = int(getattr(spec, "default_context_window", 0) or 0)
+        if documented_default != window:
+            return None
+    return window

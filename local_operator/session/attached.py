@@ -1463,8 +1463,11 @@ class AttachedSession:
 
         FILLS ONLY, field by field, and that order is the contract: a checkpoint
         that carried accounting wins, because it is the conversation's LAST
-        turn-end state whereas a receipt is one point in time. Every write is
-        therefore gated on the target field still being unset.
+        turn-end state whereas a receipt is one point in time. EVERY write below
+        is therefore gated on its own target field still being unset — including
+        the window, which is the one that must not be imported under a stored
+        numerator (a checkpoint at 500_000/1_050_000 read as 390.6% of a fresh
+        128k denominator, with the checkpoint's tokens).
 
         * ``last_usage`` — the raw receipt, whenever there is one.
         * ``context_tokens`` — only when the reading can be attributed to the
@@ -1472,16 +1475,18 @@ class AttachedSession:
           which is the same gate ``_consistent_context`` applies to a checkpoint
           reading. A count measured on another model is not convertible.
         * ``context_window`` — only from ``reading_window``, which requires a
-          RESOLVED window for that same model. Never the spec's 128k default:
-          dividing a real 322,546 by a phantom 128,000 is the 268.2% defect this
-          deliberately does not reintroduce. With no window the strip renders
-          its honest ``window unknown`` state — absolute tokens, no arc.
-        * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced from
-          ONE receipt, so it UNDERSTATES lifetime spend on a long conversation.
-          That is what ``floor`` means on the wire and the cost chip already
-          prints the mark; a total that pretends to be exact would be the lie.
-          An unpriceable model yields ``None`` and no chip rather than
-          ``$0.0000``.
+          window the spec can VOUCH for: the resolved flag alone is not evidence,
+          because ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with
+          that flag whenever account metadata could not be resolved. Never the
+          spec's 128k placeholder. With no window the strip renders its honest
+          ``window unknown`` state — absolute tokens, no arc.
+        * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced on the
+          receipt's own serving identity (a receipt from another model was billed
+          at THAT model's rates), and only when the receipt is attributable at
+          all. Priced from ONE receipt, so it UNDERSTATES lifetime spend on a long
+          conversation: that is what ``floor`` means on the wire and the cost chip
+          already prints the mark. An unpriceable model yields ``None`` and no
+          chip rather than ``$0.0000``.
 
         Nothing here touches the wire shape: this fills INPUTS the strip already
         reads, and ``cumulative_cost`` stays a derived property. There is no
@@ -1493,6 +1498,9 @@ class AttachedSession:
         spec = state.effective_model or state.selected_model
         if spec is None:
             return state
+        # ONE attribution for both the numerator and the price, so a reading the
+        # receipt cannot be attributed to gets neither.
+        identity = reading_identity(seed, fallback=self._cold_selection)
         changes: dict[str, Any] = {}
         if state.last_usage is None:
             # Through the wire form and back, as every other writer of this
@@ -1501,18 +1509,28 @@ class AttachedSession:
             # than smuggled in as a bare Usage.
             changes["last_usage"] = FrontendUsage.model_validate(seed.model_dump(mode="json"))
         if state.context_tokens is None and seed.context_tokens:
-            identity = reading_identity(seed, fallback=self._cold_selection)
             if identity == (str(spec.provider or ""), str(spec.model_id or "")):
                 changes["context_tokens"] = int(seed.context_tokens)
                 changes["context_is_estimate"] = False
         window = reading_window(seed, fallback=self._cold_selection, spec=spec)
-        if window is not None:
+        # Gated like every other field: the checkpoint's own tokens/window pair
+        # is SELF-CONSISTENT, and importing a fresh denominator under a stored
+        # numerator computes a percentage the tokens were never measured on
+        # (a checkpoint at 500_000/1_050_000 read as 390.6% of the new window).
+        # A checkpoint that carried no window still gets one.
+        if window is not None and state.context_window is None:
             changes["context_window"] = window
-        if state.cumulative_parent_cost is None:
+        if state.cumulative_parent_cost is None and identity is not None:
             from local_operator.session.frontend_state import CostKnowledge
             from local_operator.tui.costs import turn_cost
 
-            cost = turn_cost(f"{spec.provider}/{spec.model_id}".strip("/"), seed)
+            # Priced on the receipt's OWN serving identity, not on the model
+            # that will run next: a reading taken on another model was billed at
+            # THAT model's rates (a cross-model receipt priced on the session
+            # model's table reported 0.008 where the receipt's own stamp gives
+            # 0.0064), and an unattributable receipt is not priced at all rather
+            # than being charged to whoever happens to be selected.
+            cost = turn_cost(f"{identity[0]}/{identity[1]}", seed)
             if cost is not None:
                 changes["cumulative_parent_cost"] = cost
                 changes["cost_knowledge"] = CostKnowledge.FLOOR
@@ -3699,6 +3717,14 @@ class AttachedSession:
                 through_id=through_id,
                 checkpoint_type=FRONTEND_CHECKPOINT_CUSTOM_TYPE if want_checkpoint else None,
             )
+            cut = through_id
+            if cut is not None and not suffix.through_present and not strict_cut:
+                # Older owners used best-effort cursors; preserve that fallback
+                # only for legacy full replay, never the negotiated window cut.
+                # ``through_present`` is false only after the reader reached
+                # the file START without meeting the cursor, so this is the
+                # same "id is not in the journal" the whole-file parse saw.
+                cut = None
             if want_checkpoint:
                 self._cold_checkpoint = suffix.checkpoint
                 # The accounting fallback rides the SAME read, from the rows
@@ -3708,17 +3734,21 @@ class AttachedSession:
                 # is in ``suffix.entries``. One parse, one pass, no extra I/O on
                 # a file that reaches 103 MB. See ``_seed_cold_usage`` for what
                 # the reading is used for and why the checkpoint still wins.
-                self._cold_seed_usage = seed_reported_usage(
-                    usages_since_newest_shrink(suffix.entries)
+                #
+                # NOT seeded when a cursor CUTS this read. The cut discards rows
+                # above the cursor from the replay below (the reader even forgets
+                # a compaction met above it), so a receipt from those rows
+                # describes a window this viewer is not showing — and a second
+                # implementation of the cut rule here is exactly the
+                # second-boundary defect the shared scan exists to prevent. Cold
+                # passes no cursor today, so this is the correctness of the
+                # shape: an uncut read seeds, a bounded one prefers "no reading"
+                # to a reading from outside the window.
+                self._cold_seed_usage = (
+                    seed_reported_usage(usages_since_newest_shrink(suffix.entries))
+                    if cut is None
+                    else None
                 )
-            cut = through_id
-            if cut is not None and not suffix.through_present and not strict_cut:
-                # Older owners used best-effort cursors; preserve that fallback
-                # only for legacy full replay, never the negotiated window cut.
-                # ``through_present`` is false only after the reader reached
-                # the file START without meeting the cursor, so this is the
-                # same "id is not in the journal" the whole-file parse saw.
-                cut = None
             # Resolve externalized media against the store that OWNED this
             # journal (``<config>/attachments``), derived from the session
             # directory rather than from this reader's environment — the

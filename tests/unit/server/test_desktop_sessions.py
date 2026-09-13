@@ -1397,3 +1397,34 @@ async def test_a_draft_preview_does_not_go_through_the_create_path(draft_api, mo
     assert result.json()["result"]["frontend"]["snapshot"]["selected_model"]["model_id"] == (
         "claude-opus-5"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_preview_refuses_a_working_directory_that_does_not_exist(draft_api) -> None:
+    """m2: one body answers the same way on both routes.
+
+    A cwd that cannot be created cannot host a session, so a preview describing one
+    would publish readings for a session the first send could never create — the
+    same refusal the design states for an unresolvable profile, and now the same
+    shared admission (`resolve_working_directory`) `create` applies.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-5"}
+    )
+    missing = root / "no-such-directory"
+
+    preview = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(missing)},
+    )
+    create = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(missing)},
+    )
+
+    assert preview.status_code == 409, "a preview must not describe a session that cannot exist"
+    assert create.status_code == 409
+    assert preview.json() == create.json(), "the two routes must answer the same body the same way"
+    assert not missing.exists(), "neither route may create the directory it was refused"
+    assert not (root / "sessions").exists()

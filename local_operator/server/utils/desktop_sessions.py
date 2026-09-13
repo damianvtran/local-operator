@@ -72,6 +72,21 @@ async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
 
 
+def resolve_working_directory(cwd: str) -> Path:
+    """The directory ``cwd`` names, or ``ValueError`` (→ 409) if it is not one.
+
+    Shared by ``DesktopSessions.create`` and the desktop's draft preview, so the
+    SAME body gets the same answer from either route. A working directory that
+    does not exist cannot start a session, so a strip describing one would be
+    reporting readings for a session that could never be created — which is
+    exactly what the preview's own contract refuses for an unresolvable profile.
+    """
+    directory = Path(cwd).expanduser().resolve()
+    if not directory.is_dir():
+        raise ValueError("Choose an existing working directory")
+    return directory
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -820,9 +835,7 @@ class DesktopSessions:
         return await asyncio.to_thread(read)
 
     async def create(self, cwd: str, *, target: dict[str, str] | None = None) -> str:
-        directory = Path(cwd).expanduser().resolve()
-        if not directory.is_dir():
-            raise ValueError("Choose an existing working directory")
+        directory = resolve_working_directory(cwd)
         binding = {"agent": "", "team": ""}
         if target:
             from local_operator.agents import AgentRegistry
