@@ -51,14 +51,22 @@ from textual.app import App
 from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, ToolCard
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
+    PeerMessageBlock,
     TranscriptBlock,
     TranscriptView,
+    WakeBlock,
 )
 from tests.unit.tui.conftest import StyledTranscriptApp
 
 #: A name long enough to widen the column past the floor. It renders through
 #: ``display_name`` as a SHORTER label, so the tests measure what is painted
 #: rather than what was passed in.
+#: A live fire, the shape `test_ledger_row_inset` uses. Only PART of a wake's
+#: text reaches the row (the schedule, not the envelope), which is why the marker
+#: below is the fragment the frame paints rather than the whole string.
+WAKE_TEXT = "(alarm) Scheduled wake w7 (1/3, every 1h) \u2014 check the build"
+SENDER = {"pid": 48213, "conversation_name": "lo-probe"}
+
 WIDE_TOOL = "mcp__linear_create_initiative"
 LONGER_TOOL = "list_variables"
 
@@ -292,6 +300,88 @@ async def test_a_sidebar_toggle_refits_every_row_the_frame_shows() -> None:
                 assert summary_col(app, card, f"echo {seeded.index(card)}") == before
                 card._set_hovered(False)
                 await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_column_is_the_column_the_row_paints() -> None:
+    """The guard's term has to be the column the BUILDER asked for (R2).
+
+    A builder asks the shared column of the width it builds its content IN: the
+    card's one-cell inner padding each side and the ledger inset come off the row
+    width first, and the gate that drops a row to the floor is applied to THAT
+    number. In the band where the two answers differ — a 72-cell row builds in 69
+    cells, so the shared column is not reachable even though the row's own width
+    clears the gate — a record taken of the outer width claims the shared column
+    while the row paints the floor, and the guard can no longer see the row it
+    exists to guard.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(76, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wide = ToolCard("wide", LONGER_TOOL, {"command": "list them"}, "")
+        view.append_block(wide)
+        wide.mark_done("done")
+        await _settle(pilot)
+
+        assert view.tool_name_col == TOOL_NAME_COL + 6, "the shared column is up"
+        assert wide._built_width == 72, "precondition: this terminal's row width"
+        # The row builds in 69 cells, under `NAME_GROWTH_MIN_ROW`, so it paints the
+        # floor — and that is what must have been recorded.
+        assert wide._built_name_col == TOOL_NAME_COL
+
+
+@pytest.mark.parametrize("kind", ["tool", "wake", "peer"])
+@pytest.mark.asyncio
+async def test_every_ledger_row_class_refits_when_it_lands_in_a_ledger(kind: str) -> None:
+    """All THREE row classes, because the guard lives on the base.
+
+    ``ToolCard``, ``WakeBlock`` and ``PeerMessageBlock`` are one ledger, and the
+    re-fit is one behaviour: each class's ``on_resize`` asks
+    :meth:`ExpandableActionBlock._layout_moved`. A class left on the older
+    width-only guard keeps the floor column until a pointer crosses it, which is
+    the operator's tear — review round 1 found exactly that on the peer row, on
+    this head, through the real replay path. Parametrized rather than written
+    once per class so a future row type cannot quietly be the odd one out, and
+    authored the way the replay authors each of them: a fold hint naming the
+    width the row is about to be given, content written while parentless.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wide = ToolCard("wide", LONGER_TOOL, {"command": "list them"}, "")
+        view.append_block(wide)
+        wide.mark_done("done")
+        await _settle(pilot)
+        shared = summary_col(app, wide, "list them")
+        destination = view.scrollable_content_region.width
+
+        if kind == "tool":
+            paged: TranscriptBlock = ToolCard("paged", "bash", {"command": "reveal me"}, "")
+            paged.set_fold_hint(destination)  # type: ignore[attr-defined]
+            paged.mark_done("done")  # type: ignore[attr-defined]
+            marker = "reveal me"
+        elif kind == "wake":
+            paged = WakeBlock(WAKE_TEXT, fold_width=destination)
+            marker = "w7 (1/3"
+        else:
+            paged = PeerMessageBlock("gates are green", SENDER, fold_width=destination)
+            # The peer row's summary LEADS with the sender, so this fragment is
+            # the summary's first cell; the message follows it inside the summary.
+            marker = '"lo-probe"'
+        assert paged._built_width == destination
+        assert paged._built_name_col == TOOL_NAME_COL  # authored with no ledger to ask
+
+        view.insert_blocks(0, [paged])
+        await _settle(pilot)
+
+        # No pointer anywhere in this sequence.
+        assert summary_col(app, paged, marker) == shared, (
+            f"{type(paged).__name__} paints its summary at "
+            f"{summary_col(app, paged, marker)} while its neighbours are at {shared}"
+        )
+        paged._set_hovered(True)
+        await pilot.pause()
+        assert summary_col(app, paged, marker) == shared
 
 
 @pytest.mark.asyncio

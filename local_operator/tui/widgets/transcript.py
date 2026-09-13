@@ -870,6 +870,8 @@ class ExpandableActionBlock(TranscriptBlock):
         current column alone, which would rebuild every row on every resize that
         happened to leave the width alone.
         """
+        from local_operator.tui.widgets.tool_card import row_body_width
+
         if width != self._built_width:
             return True
         if self._built_name_col is None:
@@ -880,7 +882,7 @@ class ExpandableActionBlock(TranscriptBlock):
             # as "the column moved" would rebuild rows no reader can see, on
             # every height-only resize.
             return False
-        return self._name_col(width) != self._built_name_col
+        return self._name_col(row_body_width(width)) != self._built_name_col
 
     def _row_indent(self) -> int:
         """Cells of left inset on this row's summary line AS BUILT.
@@ -1825,7 +1827,7 @@ class WakeBlock(ExpandableActionBlock):
         must be able to re-fit a settled card, and the content it produces is
         a pure function of the card's state, never new history.
         """
-        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
 
         # Same ladder as `ToolCard._refresh_row`, for the same reason: a row
         # built before its first layout pass must fold at the width it is
@@ -1847,7 +1849,7 @@ class WakeBlock(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because :meth:`_layout_moved` reads the pair to decide
         # whether this row still fits the ledger it just landed in.
-        self._built_name_col = self._name_col(width)
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -1878,6 +1880,7 @@ class WakeBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_body_width,
             row_indent,
             truncate_cells,
         )
@@ -1891,7 +1894,10 @@ class WakeBlock(ExpandableActionBlock):
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2403,9 +2409,16 @@ class PeerMessageBlock(ExpandableActionBlock):
         return identity, self._snippet
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the card at the new width (same guard as the tool card)."""
+        """Re-fit the card at the new width — or at a new shared column.
+
+        Same guard as the tool card, and the same two terms: the width this row is
+        laid out at and the ledger's shared column. Every ledger row class shares
+        it, which is the whole point of the guard living on the base — a peer row
+        sits between tool rows, so a peer left on the width-only form keeps the
+        floor column until a pointer crosses it (review round 1, R1).
+        """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -2446,7 +2459,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         must be able to re-fit a settled card, and the content it produces is a
         pure function of the card's state, never new history.
         """
-        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
 
         # Same ladder as `WakeBlock._refresh_row`, for the same reason: a row
         # built before its first layout pass must fold at the width it is about
@@ -2468,7 +2481,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because :meth:`_layout_moved` reads the pair to decide
         # whether this row still fits the ledger it just landed in.
-        self._built_name_col = self._name_col(width)
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -2499,6 +2512,7 @@ class PeerMessageBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_body_width,
             row_indent,
             truncate_cells,
         )
@@ -2512,7 +2526,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
