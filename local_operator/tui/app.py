@@ -12771,11 +12771,22 @@ class OperatorApp(App[None]):
     #: F9 into another session first. The command resolves its target from disk
     #: and records (``_resume_session``), spawns or attaches a fresh runtime, and
     #: answers honestly when the launcher has no resume factory — nothing in it
-    #: needs the view on screen to be connected. The states that must still
-    #: refuse a command while unbound do so BEFORE this set is consulted
-    #: (``_session_transition_pending``, ``_model_activation_pending``, shell
-    #: mode, an open aside), which is why this is an entry here rather than a
-    #: second gate with its own list.
+    #: needs the view on screen to be connected.
+    #:
+    #: WHICH ARMS THIS SET LANDS IN, named rather than inferred (review MINOR-a,
+    #: round 2). The refusals that need an owner are checked BEFORE this set is
+    #: consulted (``_session_transition_pending``, ``_model_activation_pending``,
+    #: shell mode, an open aside). ``_source_commands_ready`` asks a different
+    #: question — can the SOURCE serve a request — and its three false arms (a
+    #: pending command frame, a navigation in flight, a retired source) admit
+    #: every entry here; that exemption is the contract, not an oversight.
+    #: ``/resume`` is the only entry that starts a session transition, and the
+    #: transition is why the exemption is safe rather than merely tolerated:
+    #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
+    #: in flight resolves to the session the user asked for, and a command frame
+    #: is ended by the transition instead of raced with it. Measured in the
+    #: stopped state with ``_source_commands_ready()`` False in all three: the
+    #: gate admits ``/resume`` and the dispatcher reaches the handler.
     _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings", "/resume"})
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -12864,6 +12875,15 @@ class OperatorApp(App[None]):
         `_unavailable_notice`. What is left here is the "wait or act?" question
         for a source that is still being worked on or has genuinely given up.
 
+        SO A VERDICT-CARRYING SOURCE GETS "" FROM HERE (QA Q5, round 2). No
+        surface renders it — the sole caller returns on the same two fields, one
+        line earlier — but a direct read of the helper is how a later reader or
+        agent would take this for the row's text, and the reselect branch below
+        would answer it with an action the verdict exists to withhold. That
+        branch stays: it is the ordinary exhausted-latch answer and it is live on
+        every arm that latched without a verdict. Only the value for a source the
+        app has already decided about is silence.
+
         THE FOURTH STATE IS A `/resume` REDIAL, and it is the one the source's
         own fields cannot describe. That redial runs over a session that is
         still live, so `connection_error` and `connect_attempts` are both empty
@@ -12895,6 +12915,13 @@ class OperatorApp(App[None]):
                 f" Reconnecting to session {self._resume_retry_target} — "
                 "switching session stops the wait."
             )
+        if source.can_never_bind:
+            # Asked AFTER the redial (UX U3's precedence: a redial in flight owns
+            # the advice) and BEFORE the latched error, which is the field pair
+            # that would otherwise produce the reselect sentence. See the
+            # docstring: unreachable through the row, pinned so a direct read
+            # cannot contradict it.
+            return ""
         if source.connection_error:
             return " Select this session again to retry."
         if source.connect_attempts:
