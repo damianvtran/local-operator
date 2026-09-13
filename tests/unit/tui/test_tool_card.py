@@ -60,6 +60,8 @@ from local_operator.tui.widgets.tool_card import (
     LIVE_HEADER_RUNNING,
     LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
+    OUTPUT_INDENT,
+    REASON_MAX_ROWS,
     ROW_INDENT,
     ROW_INDENT_MIN_WIDTH,
     RUNNING_NOTICE,
@@ -1998,6 +2000,116 @@ def test_expanded_output_never_widens_the_card() -> None:
     for width in WIDTHS:
         for line in card._build_content(width).plain.splitlines():
             assert cell_len(line) <= width, (width, len(line))
+
+
+def test_a_long_failure_reason_wraps_with_the_body_indent() -> None:
+    """The expansion is the ONLY state that can carry a long failure's cause.
+
+    The collapsed row's status cap is a fraction of the row that the reason
+    shares with the glyph and the clock, so at 80 columns the row paints
+    ``Web search fail…`` and the cause is unreachable there at every width.
+    Measured on the real card before this fix: the expanded body cropped the
+    sentence at its 72-cell measure, leaving ``refused this search`` and
+    ``only provider tried`` ABSENT from the frame entirely (#1066).
+    """
+    message = (
+        "Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for "
+        "keyed Sonar: the anonymous tier refused this search (wall "
+        "fraud_authwall_upsell/LOGIN) ('perplexity' was the only provider tried)"
+    )
+    card = ToolCard("t", "web_search", {"query": "openai rate limits"})
+    card.mark_failed(message)
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert len(body) == 3
+    # Every continuation keeps the body indent, so a wrapped fragment does not
+    # read as a stray transcript row — the defect `session_panel._Body.note`
+    # was fixed for.
+    assert all(line.startswith(" " * OUTPUT_INDENT) for line in body)
+    # The sentence is whole: only the wrap's own line breaks were added.
+    assert " ".join(line.strip() for line in body) == message
+    assert all(cell_len(line) <= 80 - 2 for line in body)
+
+
+def test_the_body_wrap_is_budgeted_to_the_reason_not_captured_output() -> None:
+    """A tool's own bytes still clip: one output line is one row.
+
+    This is the half of the budget the merge is judged on. Measured at 80
+    columns on the real card: a 40-line stdout of 397-cell lines occupies 40
+    body rows before AND after the wrap — zero rows added. Wrapping every body
+    line instead would have spent six rows on each of those lines (240 rows
+    against 40), turning one tool call into a scroll trap in the transcript.
+    """
+    long_line = "payload=" + "x" * 400
+    card = ToolCard("t", "bash", {"command": "curl"})
+    card.mark_done("\n".join([long_line] * 5))
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert len(body) == 5
+    assert all(line.rstrip().endswith("…") for line in body)
+    assert all(cell_len(line) <= 80 - 2 for line in body)
+
+
+def test_a_failure_wraps_its_reason_and_still_clips_its_captured_output() -> None:
+    """One card, both halves: the reason wraps, the receipt beside it crops."""
+    reason = "ModelProviderError: " + "rate limited; " * 12
+    card = ToolCard("t", "bash", {"command": "pytest"})
+    card.mark_failed(reason, reason + "\n" + "x" * 400)
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert sum(1 for line in body if "rate limited" in line) == 3
+    assert body[0].strip().startswith("ModelProviderError:")
+    assert len(body) == 4
+    # The captured line after the reason is still exactly one cropped row.
+    assert body[-1].rstrip().endswith("…")
+
+
+def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:
+    """The expansion is the tool's OUTPUT — no synthetic row restating the row.
+
+    ``mark_failed(error, result_text)`` with a ``result_text`` that does not
+    begin with the error means the body's head line is captured output, so it
+    keeps the crop and the card does not grow a duplicate of the reason the
+    collapsed row already carries in full.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed("exit status 1", "Traceback:\n  boom")
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert body == ["  Traceback:", "    boom"]
+
+
+def test_the_reason_wrap_run_is_bounded() -> None:
+    """A pathological one-line payload cannot open an unbounded body."""
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(" ".join(["boom"] * 2000))
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert len(body) == REASON_MAX_ROWS
+    assert body[-1].rstrip().endswith("…")
+
+
+def test_the_reason_is_painted_once_and_the_hidden_count_follows_it() -> None:
+    """The reason is not printed twice, and the marker counts what is left.
+
+    ``mark_failed`` defaults ``result_text`` to the error, so the sentence is
+    both the reason and the body's first line: the wrap claims that line, and
+    the hidden-line marker must then count the lines the body still holds
+    rather than the raw result.
+    """
+    total = EXPAND_MAX_LINES + 5
+    card = ToolCard("t", "read", {"path": "big.txt"})
+    card.mark_failed("boom", "boom\n" + "\n".join(f"line {i}" for i in range(total)))
+    card.toggle_expanded()
+
+    rows = card._build_content(80).plain.splitlines()
+    assert rows.count("  boom") == 1
+    assert rows[-1].strip() == f"… {total - EXPAND_MAX_LINES} more lines"
 
 
 def test_failed_output_renders_in_the_danger_tint() -> None:

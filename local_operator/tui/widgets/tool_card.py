@@ -342,6 +342,19 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: Rows the expanded body may spend carrying the failure's REASON in full.
+#:
+#: The per-line crop above is load-bearing for CAPTURED output — a tool's own
+#: bytes are unbounded by design (a whole file, a minified payload, a 40 MB
+#: stdout), and the expansion is a receipt rather than a log viewer. The reason
+#: is the opposite kind of text: it is the card's OWN one-line sentence, and the
+#: collapsed row's status cap (``max(8, width // 3)``) can never carry it, so
+#: the expansion is its only home. Six rows is 432 cells at the canonical
+#: 80-column frame's 72-cell measure — over twice the longest failure sentence
+#: this codebase builds (the 201-cell web-search refusal, which wraps to 3 rows
+#: there) — while a pathological single-line payload (an HTTP body echoed back,
+#: a model-authored error) still cannot turn one card into a scroll trap.
+REASON_MAX_ROWS = 6
 #: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
 #: a payload argument is unbounded by design — `write` carries a whole file in
 #: `content` — and the block exists to answer "what was this call", which a
@@ -2223,8 +2236,8 @@ class ToolCard(ExpandableActionBlock):
         duration are the receipt, and a user who selects a settled row wants it.
 
         Below the summary, every row is written by
-        ``_append_input_body``/``_append_output_body``/``_append_diff_body``/
-        ``_append_live_body``, each of which opens with
+        ``_append_input_body``/``_append_output_body``/``_append_search_body``/
+        ``_append_diff_body``/``_append_live_body``, each of which opens with
         ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
         and it is the thing standing between a copied stderr and a paste that
         goes straight into a bug report — or, for a diff, between ``+ added``
@@ -2490,36 +2503,123 @@ class ToolCard(ExpandableActionBlock):
                 marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
                 row.append(truncate_cells(marker, line_width), style=dim)
 
+    def _failure_reason(self) -> str:
+        """The card's OWN failure sentence — the body's leading line, when it is that.
+
+        The row's status cap is a fraction of the row that the reason SHARES
+        with the glyph and the clock (``_outcome_runs``), so on the canonical
+        80-column frame a failure whose remedy fits can still lose its cause
+        entirely, and the expansion is the only state that can carry the
+        sentence whole.
+
+        Only the head line qualifies, because the expansion is documented as
+        the tool's full OUTPUT (module docstring): when ``mark_failed`` is given
+        a ``result_text`` whose first line is not the error, that line is
+        captured output and keeps the crop — the expansion must not grow a
+        synthetic row restating what the collapsed row already carries. Empty
+        for every state but ``error``, and for the fetch card, whose diagnosis
+        is PROMOTED into its own header row by ``_absorb_result`` (D5) and
+        already reflows there (D8).
+        """
+        if self._state != "error" or self._is_fetch_card:
+            return ""
+        reason = self._error.strip()
+        if not reason or not self._output or self._output[0].strip() != reason:
+            return ""
+        return reason
+
+    def _captured_output(self) -> list[str]:
+        """``_output`` minus the leading line :meth:`_failure_reason` just claimed.
+
+        ``mark_failed`` defaults ``result_text`` to the error itself, so the
+        common failure arrives as one line that is BOTH the reason and the
+        first output row; painting it in both places would print the sentence
+        twice.
+        """
+        return self._output[1:] if self._failure_reason() else self._output
+
+    def _append_reason_body(
+        self, row: Text, line_width: int, indent: str, dim: Style, ink: Style
+    ) -> None:
+        """Paint the failure reason WRAPPED, every continuation keeping the indent.
+
+        Wrapped rather than cropped because a cropped reason is unreachable in
+        EVERY state, and because the reason is our prose rather than the tool's
+        own bytes — the same split the fetch card already makes when it reflows
+        its own statement and clips the origin's (``_fetch_statement``, D3/D6).
+        Captured output keeps the one-line-per-row crop: wrapping it would let a
+        single 397-cell stdout line spend six rows at the 80-column frame's
+        72-cell measure, so a 40-line expansion would reflow the transcript from
+        40 rows to 240 — +200 rows on one tool call.
+
+        The INDENT on every row is load-bearing, not cosmetic: a continuation
+        landing at column 0 reads as a new transcript block rather than the rest
+        of this sentence — the defect ``session_panel._Body.note`` was fixed for.
+        ``wrap_cells`` (the cell-aware house wrapper, the same one the argument
+        block uses) rather than ``textwrap`` so a CJK reason wraps by the width
+        it is actually drawn at.
+
+        The run is capped at :data:`REASON_MAX_ROWS` and an overflow is
+        announced with the same ellipsis :func:`truncate_cells` uses, so no
+        single-line payload can open an unbounded body.
+        """
+        reason = self._failure_reason()
+        if not reason:
+            return
+        wrapped = wrap_cells(reason, line_width)
+        shown = wrapped[:REASON_MAX_ROWS]
+        if len(wrapped) > len(shown):
+            shown[-1] = truncate_cells(" ".join(wrapped[len(shown) - 1 :]), line_width)
+        for line in shown:
+            row.append("\n" + indent, style=dim)
+            row.append(line, style=ink)
+
     def _append_output_body(self, row: Text, width: int) -> None:
         """The plain-result expansion (bash/read/etc.): one line per row.
 
         The output block reuses the card's own inner padding budget and
         truncates per line: one output line is one row, so the expanded
-        height is exactly what the marker promises and never reflows.
+        height is exactly what the marker promises and never reflows — the
+        crop is what keeps a 40-line dump inside 40 rows.
+
+        The one line exempted from that crop is the card's own failure REASON,
+        which wraps (:meth:`_append_reason_body`): it is our sentence rather
+        than the tool's bytes, and the collapsed row provably cannot carry it.
         """
         dim = bindings.style("tool.output.dim")
-        body = bindings.style("tool.output.error") if self._state == "error" else dim
+        ink = bindings.style("tool.output.error") if self._state == "error" else dim
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        shown = self._output[:EXPAND_MAX_LINES]
+        self._append_reason_body(row, line_width, indent, dim, ink)
+        captured = self._captured_output()
+        shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
             row.append("\n" + indent, style=dim)
-            row.append(truncate_cells(line, line_width), style=body)
-        hidden = len(self._output) - len(shown)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(captured) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
     def _append_search_body(self, row: Text, width: int) -> None:
-        """Search expansion hierarchy: titles lead, URLs signal, snippets recede."""
+        """Search expansion hierarchy: titles lead, URLs signal, snippets recede.
+
+        A FAILED search (no sources, so ``_absorb_result`` falls back to the
+        model-facing text) arrives as the card's own reason sentence, which
+        wraps ahead of the result rows exactly as the plain body does — the
+        snippet ink it already fell to is kept, so this changes the wrap and
+        not the treatment.
+        """
         fg = bindings.style("tool.search.title")
         signal = bindings.style("tool.search.url")
         muted = bindings.style("tool.search.snippet")
         dim = bindings.style("tool.search.dim")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        shown = self._output[:EXPAND_MAX_LINES]
+        self._append_reason_body(row, line_width, indent, dim, muted)
+        captured = self._captured_output()
+        shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
             stripped = line.strip()
             if stripped.startswith(("http://", "https://")):
@@ -2533,7 +2633,7 @@ class ToolCard(ExpandableActionBlock):
                 ink = muted
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
-        hidden = len(self._output) - len(shown)
+        hidden = len(captured) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more search line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
