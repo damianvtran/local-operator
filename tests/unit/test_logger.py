@@ -545,15 +545,18 @@ def test_configure_file_logging_bounds_the_file_and_quiets_the_wire_clients(
     """A child with no terminal must log to a BOUNDED file, without the wire noise.
 
     Field report: the relay's log grew to 420 MB on the operator's machine, in
-    which 6,928,291 records were one line per HTTP request from the wire clients
-    and 44,681 were records anyone wanted. The cause was the runtime child's
+    which 557,352 records were one line per HTTP request from the wire clients and
+    45,581 were frame-limit records; the file reached 420 MB because nothing
+    rotated it. The cause was the runtime child's
     ``logging.basicConfig(level=INFO, filename=...)``: the root level handed to
     the libraries, and an unbounded ``FileHandler`` nothing rotated. The child
-    writes to the DAEMON's log on purpose — ``lop mobile logs`` covers both — so
-    the bound has to be applied to that path, not to this package's own console
-    log, which is why the helper takes one.
+    writes to its OWN file now — bounding a file means renaming it, and the
+    daemon's ``mobile.log`` is a launchd ``StandardOutPath`` it appends to through
+    an fd it never reopens (see ``paths.runtime_log_path``) — and
+    ``lop mobile logs`` reads both, which is why the helper takes a path rather
+    than assuming this package's console log.
     """
-    target = log_home.parent / "mobile.log"
+    target = log_home.parent / "runtime.log"
     root = logging.getLogger()
     saved_handlers, saved_level = list(root.handlers), root.level
     saved_client_levels = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}

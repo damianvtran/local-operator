@@ -1,4 +1,4 @@
-"""`lop mobile logs` must show BOTH writers of the relay log, not one tail.
+"""`lop mobile logs` must show BOTH writers of the relay log, and keep showing them.
 
 Why this is a regression guard rather than a nicety: the daemon and its session
 runtime children write separate files on purpose — the daemon's `mobile.log` is a
@@ -10,9 +10,13 @@ runtime children held the renamed inode while only the daemon held the fresh
 `mobile.log`.
 
 Two files per writer class is only acceptable while one command still shows both,
-so the argv this command builds is the contract under test — including the case
-where the runtime file does not exist yet, which is the normal state on a machine
-whose daemons are running but whose runtimes are all idle or not yet started.
+so the argv this command builds is the contract under test. The follow flag is
+part of it: ``-f`` follows the fd it opened, so it (a) never reads a file created
+after it started — the normal state on a machine whose daemons are up but whose
+runtimes have all exited — and (b) goes blind the first time a bounded runtime log
+rotates, because bounding means renaming. Both were measured against the system
+``tail`` in review; ``-F`` retries by name and reopens on rename, which is why it
+is the flag, and why a not-yet-existing path is passed rather than omitted.
 """
 
 from __future__ import annotations
@@ -41,23 +45,26 @@ def test_logs_reads_the_daemon_and_the_runtimes_in_one_tail(tmp_path, monkeypatc
 
     argv = call.call_args.args[0]
     assert argv[:3] == ["tail", "-n", "7"]
-    assert "-f" in argv
+    assert "-F" in argv, "follow must retry by name, so a rotation cannot blind it"
+    assert "-f" not in argv
     assert str(daemon_log) in argv, "the daemon's own log must still be read"
     assert str(runtime_log) in argv, "the runtimes' log must be read too"
     assert argv.index(str(daemon_log)) < argv.index(str(runtime_log))
 
 
-def test_logs_tolerates_a_machine_with_no_runtime_file_yet(tmp_path, monkeypatch) -> None:
-    """Before any runtime has started the file does not exist, and `tail` errors
-    on a missing path — so it must simply be left out rather than passed."""
+def test_logs_passes_a_runtime_file_that_does_not_exist_yet(tmp_path, monkeypatch) -> None:
+    """Before any runtime has started the file does not exist, and it must still be
+    named: `-F` retries a missing path, so the follow picks the file up the moment
+    a runtime creates it — which omitting the path would make impossible."""
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     daemon_log = log_dir() / "mobile.log"
     daemon_log.parent.mkdir(parents=True, exist_ok=True)
     daemon_log.write_text("daemon\n", encoding="utf-8")
+    assert not runtime_log_path().exists()
 
     with patch("subprocess.call", return_value=0) as call:
-        assert mobile_command(_args()) == 0
+        assert mobile_command(_args("--follow")) == 0
 
     argv = call.call_args.args[0]
     assert str(daemon_log) in argv
-    assert str(runtime_log_path()) not in argv
+    assert str(runtime_log_path()) in argv

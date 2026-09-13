@@ -430,8 +430,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     mobile_subparsers.add_parser("status", help="Daemon health, gate and live sessions")
     for action in ("start", "stop", "restart"):
         mobile_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
-    logs_parser = mobile_subparsers.add_parser("logs", help="Tail the daemon log")
-    logs_parser.add_argument("--lines", type=int, default=100)
+    logs_parser = mobile_subparsers.add_parser(
+        "logs", help="Tail the daemon's and the runtimes' logs"
+    )
+    logs_parser.add_argument(
+        "--lines", type=int, default=100, help="Lines per file (both files are read)"
+    )
     logs_parser.add_argument("--follow", "-f", action="store_true")
     mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
     uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
@@ -3926,18 +3930,25 @@ def mobile_command(args: argparse.Namespace) -> int:
         from local_operator.paths import runtime_log_path
 
         log = mobile_install.log_path()
+        runtime_log = runtime_log_path()
         # Both writers, one command. The daemon and its runtime children keep
-        # separate files on purpose (see `paths.runtime_log_path` — a runtime
-        # must never rotate the launchd-owned file the daemon appends to), and an
-        # operator diagnosing a relay wants both streams in one view. The runtime
-        # file appears only once a runtime has started, so its absence is normal.
-        targets = [log]
-        if runtime_log_path().exists():
-            targets.append(runtime_log_path())
+        # separate files on purpose (see `paths.runtime_log_path` — a runtime must
+        # never rotate the launchd-owned file the daemon appends to), and an
+        # operator diagnosing a relay wants both streams in one view.
+        #
+        # `-F`, not `-f`, and both paths unconditionally. `-f` follows the fd it
+        # opened, so it never reads a file created after it started — normal on a
+        # freshly booted machine, where no runtime has run yet — and goes blind at
+        # the first rotation of the runtimes' bounded file, because bounding means
+        # renaming. Both were measured against the system `tail` in review. `-F`
+        # retries a missing path quietly and reopens on rename, which is exactly
+        # what a file that appears mid-session and then rotates needs; the
+        # pre-existing reason it was skipped (a bare `tail` errors on a missing
+        # operand) does not apply to `-F`.
         tail = ["tail", "-n", str(args.lines)]
         if args.follow:
-            tail.append("-f")
-        tail.extend(str(path) for path in targets)
+            tail.append("-F")
+        tail.extend([str(log), str(runtime_log)])
         return subprocess.call(tail)
 
     if command == "password":
