@@ -168,14 +168,21 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # Free typing is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
-        # 45 cells, inside the ~55 at which the description column wraps and
-        # renders a phantom command name in `/help` (see `/model`, `/theme`).
+        # 43 cells, inside the ~55 at which the description column wraps and
+        # renders a phantom command name in `/help` (see `/model`, `/theme`);
+        # composed with the 20-cell name column that is a 63-cell row, one line
+        # at 80 columns.
         # The `--refresh` flag has to be HERE because the help table is where a
         # user learns the command exists at all, and the capability it names is
-        # the reason this entry changed. Spelled as the flag because that is
-        # what the argument picker offers and what the notices point at; the
-        # bare word still parses, it is just no longer what is advertised.
-        "Name this conversation, or --refresh the name",
+        # the reason this entry changed. The INVOCATION is spelled out rather
+        # than the bare flag alone because this is the only surface that teaches
+        # the words to TYPE: "or --refresh the name" reads as though the flag
+        # takes "the name" as a value — and `parse_title_arg("--refresh the
+        # name")` really does store that literal as the conversation's title,
+        # so the misreading is reachable, not pedantic. The picker needs no
+        # such help: it supplies the argument itself, so its row teaches the
+        # flag alone.
+        "Name this conversation, or /title --refresh",
         aliases=("title",),
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.rename",
