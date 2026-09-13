@@ -50,6 +50,15 @@ reach) gets one honest report instead of a budget spent on rounds that dial
 nothing. That second half is what the tests appended to "the viewer contract"
 below pin, including the arm that must still be retried — a facade
 mid-recovery.
+
+WHAT THESE DOUBLES CANNOT SHOW (UX round 2's gap note, carried here so nobody
+reads them as covering it). Every double in this file models a facade whose bind
+CANNOT complete: an isolated env has no launcher, so a round fails without ever
+starting a successor runtime. On a host where the engage's spawn path can heal —
+a production owner record whose successor gets published — the same click may
+HEAL instead of reporting, and the verdict arm is then NARROWER in production
+than these tests suggest. The claims here hold wherever the verdict is reached,
+not that it is reached everywhere a stopped owner is involved.
 """
 
 from __future__ import annotations
@@ -1990,6 +1999,38 @@ async def test_resume_is_runnable_in_the_state_whose_verdict_names_it(monkeypatc
         # with no "until connected" prefix (UX U4, round 1).
         assert app._unavailable_notice("Commands") == _stopped_sentence(session)
         assert "until connected" not in app._unavailable_notice("Commands")
+
+
+@pytest.mark.asyncio
+async def test_the_hint_helper_does_not_advise_the_reselect_the_verdict_withholds(
+    monkeypatch,
+) -> None:
+    """QA Q5 (round 2): the row and a direct read of its helper must agree.
+
+    `_unavailable_hint`'s reselect value is the answer for every arm that latched
+    WITHOUT a verdict, and its sole caller answers a verdict-carrying source one
+    line earlier — so that value reached no surface while still being what the
+    helper returned for it. Asserted here rather than left implicit, because the
+    way a later reader (or agent) takes a helper's answer for the row's text IS a
+    direct read. The control keeps the reselect branch honest: the same latched
+    error with no verdict still gets the advice it exists for.
+    """
+    session = PrewarmRemote("stoppedhint", can_go_cold=False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=2)
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert source.can_never_bind is True and source.connection_error
+        assert app._unavailable_hint() == "", "the helper must not offer a reselect"
+        # The row itself is unchanged: the verdict, and no "until connected".
+        assert app._unavailable_notice("Send") == _stopped_sentence(session)
+
+        # CONTROL: no verdict behind the same latched error -> the branch is live.
+        source.can_never_bind = False
+        assert app._unavailable_hint() == " Select this session again to retry."
 
 
 @pytest.mark.parametrize(
