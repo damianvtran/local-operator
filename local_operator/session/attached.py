@@ -6391,6 +6391,20 @@ class AttachedSession:
         # harness, so a shared instance is one `+=` from corrupting state.
         return self.frontend_state.last_usage
 
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """No rows recovered on a VIEWER: the transcript is the runtime's.
+
+        Declared and implemented rather than left to a duck-probe, because the
+        TUI reads it on the resume path and an absent member there degrades the
+        band to a silently-short figure. An empty tuple is the honest answer: a
+        viewer cannot read the owner's transcript, so it recovers nothing and the
+        ledger stays as it is. (The owner's own search spend reaches the band
+        through the shared ledger; a viewer in ANOTHER process has no ledger
+        rows to read, which is a pre-existing property of a process-wide ledger
+        rather than something this member can fix.)
+        """
+        return ()
+
     def running_subagents(self) -> int:
         return sum(
             1
