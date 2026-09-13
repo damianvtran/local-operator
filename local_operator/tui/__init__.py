@@ -184,20 +184,22 @@ async def run_tui(
     # stop Textual re-enabling the mode after seeing our reset. See
     # `terminal_modes` for why neither half suffices alone.
     reset_in_band_resize()
-    guarded = guard_pixel_mouse_latch()
-    if guarded:
-        # The guard's return value IS the configuration switch for the second
-        # half: with smooth scrolling closed, no in-band report can be a
-        # legitimate statement about OUR coordinates, so the parser's one-way
-        # pixel latch is gated off for the rest of the run. Deliberately NOT
-        # installed for a user who set TEXTUAL_SMOOTH_SCROLL=1 — that user asked
-        # for pixel coordinates and upstream behaviour must be untouched.
-        #
-        # This is the first import of `textual` on a boot that reaches here, and
-        # that is safe in this order and only in this order: it pulls
-        # `textual.constants` in, so it has to run AFTER the guard froze
-        # SMOOTH_SCROLL from the environment.
-        install_pixel_mouse_gate()
+    guard_pixel_mouse_latch()
+    # Then the second half, called unconditionally because it decides for itself
+    # whether it applies: it refuses while Textual may still negotiate
+    # pixel-mouse coordinates, which is the same condition the guard's own gate
+    # uses but read from the frozen constants rather than from that call's
+    # return value. The difference is not academic — the guard defers to an
+    # inherited `TEXTUAL_SMOOTH_SCROLL=0`, which is the value the guard itself
+    # writes, so keying on the return value would drop this half on every
+    # re-entrant boot and on every user who exported `0` as our docs say.
+    #
+    # This is the first import of `textual` on a boot that reaches here, and
+    # that is safe in this order and only in this order: it pulls
+    # `textual.constants` in, so it has to run AFTER the guard froze
+    # SMOOTH_SCROLL from the environment — and the gate reads that frozen value,
+    # so it has to run after the import for the same reason.
+    install_pixel_mouse_gate()
 
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 

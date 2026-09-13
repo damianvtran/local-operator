@@ -62,8 +62,10 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.terminal_modes import (
     DISABLE_IN_BAND_RESIZE,
     InBandResizeReclaimer,
+    guard_pixel_mouse_latch,
     install_pixel_mouse_gate,
     pixel_mouse_gate_installed,
+    pixel_mouse_negotiation_open,
     uninstall_pixel_mouse_gate,
 )
 from tests.unit.tui.test_app_pilot import (
@@ -105,15 +107,24 @@ def _positions(parser: XTermParser, data: str) -> list[tuple[int, int]]:
 
 
 @pytest.fixture
-def gated() -> Iterator[None]:
+def gated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Install the REAL gate for one test and guarantee it is uninstalled.
 
-    Unconditionally, and in a fixture rather than at the end of each test: the
-    gate patches a class shared by the whole worker process, and a test that
-    leaked an installed gate would flip ``mouse_pixels`` off for every other
-    file xdist happens to run in that worker — including the sibling test that
-    asserts the COLLAPSED behaviour.
+    The precondition is pinned rather than inherited: ``install_pixel_mouse_gate``
+    refuses while textual may still negotiate pixel mouse, and both names it
+    reads are frozen from the environment at ``textual`` import time — so a
+    developer running the suite with ``TEXTUAL_SMOOTH_SCROLL=1`` exported would
+    otherwise see these tests fail for their own shell.
+
+    Unconditionally uninstalled, and in a fixture rather than at the end of each
+    test: the gate patches a class shared by the whole worker process, and a
+    leaked gate would flip ``mouse_pixels`` off for every other file xdist
+    happens to run in that worker — including the sibling test that asserts the
+    COLLAPSED behaviour.
     """
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", False)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", False)
+    assert pixel_mouse_negotiation_open() is False
     installed = install_pixel_mouse_gate()
     try:
         # The fixture installs onto a clean class by contract, so a False here
@@ -125,10 +136,73 @@ def gated() -> Iterator[None]:
         uninstall_pixel_mouse_gate()
 
 
-# -- the gate: install, idempotence, reversal ---------------------------------
+# -- the gate: its precondition, install, idempotence, reversal ---------------
 
 
-def test_the_gate_installs_once_and_restores_the_original() -> None:
+@pytest.mark.parametrize(
+    ("smooth_scroll", "is_iterm", "negotiates"),
+    [
+        # (SMOOTH_SCROLL, IS_ITERM) -> does textual still negotiate pixel mouse?
+        # This mirrors textual's own gate on the mode-report branch
+        # (`_xterm_parser.py:319-322`), one row per combination.
+        pytest.param(True, False, True, id="smooth-scrolling-on"),
+        pytest.param(True, True, False, id="smooth-scrolling-on-iterm"),
+        pytest.param(False, False, False, id="smooth-scrolling-off"),
+        pytest.param(False, True, False, id="smooth-scrolling-off-iterm"),
+    ],
+)
+def test_the_gate_applies_exactly_when_textual_stops_negotiating(
+    monkeypatch: pytest.MonkeyPatch, smooth_scroll: bool, is_iterm: bool, negotiates: bool
+) -> None:
+    """The precondition, pinned across Textual's own gate's whole truth table.
+
+    A report is evidence about our coordinates only while the app may have asked
+    for pixel ones, so the gate installs iff the mode-report branch is shut. The
+    iTerm rows are the ones a booleans-only reading gets wrong: iTerm does not
+    take this path in textual 8.2.8 (``IS_ITERM`` closes it by itself), so the
+    in-band report cannot be solicited there whatever ``SMOOTH_SCROLL`` says.
+
+    ``TEXTUAL_SMOOTH_SCROLL=1`` on a non-iTerm terminal is the row that keeps
+    upstream behaviour: no gate, so that user's pixel coordinates keep working.
+    """
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", smooth_scroll)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", is_iterm)
+
+    assert pixel_mouse_negotiation_open() is negotiates
+
+    installed = install_pixel_mouse_gate()
+    try:
+        assert installed is (not negotiates)
+        assert pixel_mouse_gate_installed() is (not negotiates)
+    finally:
+        uninstall_pixel_mouse_gate()
+
+
+def test_the_gate_accepts_an_inherited_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An inherited ``TEXTUAL_SMOOTH_SCROLL=0`` must still install the gate.
+
+    This is the shape the operator's own runtime exports, the shape a
+    ``replace_self`` re-entry inherits, and the shape our documentation tells
+    users to set. The guard DEFERS to it (it is an integer Textual honours), so a
+    gate keyed on the guard's return value would silently drop both halves of
+    this fix on precisely the recommended configuration.
+    """
+    env: dict[str, str] = {"TEXTUAL_SMOOTH_SCROLL": "0"}
+    assert guard_pixel_mouse_latch(env) is False, "the guard defers to an honoured integer"
+    assert env == {"TEXTUAL_SMOOTH_SCROLL": "0"}
+
+    # What the deferred guard leaves behind is what the constants read.
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", False)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", False)
+    assert pixel_mouse_negotiation_open() is False
+    assert install_pixel_mouse_gate() is True
+    assert pixel_mouse_gate_installed() is True
+    uninstall_pixel_mouse_gate()
+
+
+def test_the_gate_installs_once_and_restores_the_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Idempotent and reversible, which is what lets a test own the class.
 
     A second install must not wrap its own wrapper (the wrapper would then run
@@ -137,6 +211,10 @@ def test_the_gate_installs_once_and_restores_the_original() -> None:
     function object rather than something that merely behaves like it.
     """
     original = XTermParser.parse_mouse_code
+    # The precondition first, so this test is about install/uninstall rather
+    # than about the developer's terminal.
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", False)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", False)
     assert pixel_mouse_gate_installed() is False
 
     assert install_pixel_mouse_gate() is True
@@ -307,19 +385,27 @@ async def test_a_headless_app_builds_no_re_closer(gated: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_re_closer_when_the_guard_did_not_apply(
+async def test_no_re_closer_when_the_negotiation_is_still_open(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A ``TEXTUAL_SMOOTH_SCROLL=1`` user keeps their smooth scrolling.
+    """A configuration that still negotiates pixel mouse keeps its pointer.
 
-    The gate is deliberately NOT installed in this test, which is the state
-    ``run_tui`` leaves a user who asked for pixel coordinates in. Writing
-    ``?2048l`` here would switch the mode off underneath them on every resize
-    and focus gain — the exact behaviour this half exists to avoid.
+    The gate is refused here (``SMOOTH_SCROLL`` on, non-iTerm — the state
+    ``run_tui`` leaves a user who asked for pixel coordinates in), so nothing
+    installed it and the app must build no re-closer: writing ``?2048l`` would
+    switch the mode off underneath that user on every resize and focus gain,
+    which is the exact behaviour this half exists to avoid.
+
+    Both names the decision reads are pinned, because both freeze from the
+    environment at ``textual`` import time and the developer's own terminal must
+    not decide this test.
     """
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", True)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", False)
+    assert install_pixel_mouse_gate() is False, "the gate refuses while the mode is negotiated"
+    assert pixel_mouse_gate_installed() is False
     _isolate_tui_settings(monkeypatch, tmp_path)
     monkeypatch.setattr(OperatorApp, "is_headless", property(lambda self: False))
-    assert pixel_mouse_gate_installed() is False
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
