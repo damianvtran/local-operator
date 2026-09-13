@@ -1941,10 +1941,11 @@ class ModelSpec(BaseModel):
     # non-blank ``reasoning_content`` on every assistant turn is ACCEPTED --
     # repeatedly, for both that session and a minimal synthetic tool loop. A
     # body whose assistant turns all carry a blank value is accepted on one
-    # shape where the same body with the keys absent is refused, so what the
-    # validator reads is the key's presence rather than its text; the harness
-    # still sends a real sentence, because a blank is leniency no replica has
-    # promised (see ``replay.REASONING_ECHO_PLACEHOLDER``).
+    # shape where the same body with the keys absent is refused, which is what
+    # moved the harness to send a real sentence rather than a blank -- but that
+    # single shape is NOT evidence about the rule in general (the accepted
+    # key-less bodies in the counter-shapes below are why), and this field does
+    # not conclude one.
     #
     # The exact server-side rule is NOT fully characterised, and this field does
     # not claim to encode it. Requests that omit the echo are accepted in other
