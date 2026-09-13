@@ -833,8 +833,15 @@ class ExpandableActionBlock(TranscriptBlock):
         """Whether opening the row reveals more than its one-line summary."""
         raise NotImplementedError
 
-    def _refresh_row(self) -> None:
-        """Rebuild and apply this subclass's current summary/expansion."""
+    def _refresh_row(self, width: int | None = None) -> None:
+        """Rebuild and apply this subclass's current summary/expansion.
+
+        ``width`` is the LANE a container published for the rebuild
+        (:meth:`TranscriptView._refit_ledger_lane`) or ``None`` when the caller
+        has none and the row derives its own; every implementation must accept
+        both, which is what lets the ledger's one repaint funnel carry a lane
+        without knowing which row type it is holding.
+        """
         raise NotImplementedError
 
     def _row_indent(self) -> int:
