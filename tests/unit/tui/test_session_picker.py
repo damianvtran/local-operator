@@ -34,6 +34,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _EXEC_LEGEND,
     _MARKER_LEGEND,
+    AGE_CELLS,
     BODY_MATCH_MARKER,
     CARD_PADDING_ROWS,
     EXEC_MARKER,
@@ -3895,12 +3896,13 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
       ``y1..y28`` at 100x30), and the sheet says so — see agent review round 1
       MINOR-2 and the design round's reading of the frame.
     * THE FRAME READ IS A SETTLED ONE, and that is asserted rather than assumed:
-      the test refreshes and then reads the compositor's strips twice, one pause
+      the test presses a key (a REACTIVE action — ``app.refresh()`` alone does
+      not settle the compositor, measured), then reads the strips twice, one pause
       apart, and requires them identical. Before that, a read taken three pauses
-      after the push could still be the pre-measurement layout — a 61-cell row
-      where the live composition was 90 at 100x30 (agent review round 2,
-      MINOR) — which would have made the containment assertion above pass on a
-      frame narrower than the one it witnesses. What it does NOT check: that the
+      after the push could still be the pre-measurement layout — a 58-61-cell row
+      where the live composition was 90 at 100x30 (agent review rounds 2 and 3,
+      MINOR) — which would have made the PAINTED assertions above pass on a frame
+      narrower than the one they witness. What it does NOT check: that the
       painted row is the composed row cell for cell. It checks that the list
       paints exactly one line per composed row and that no glyph leaves the
       content box; the composed rows themselves are checked against the plan by
@@ -3924,17 +3926,25 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
         app.push_screen(screen)
         for _ in range(3):
             await pilot.pause()
-        # SETTLE THE FRAME BEFORE READING IT, and then prove it is settled. The
-        # compositor's strips are what the terminal was SENT, but at this point
-        # in the sequence they can still be the layout from BEFORE the panes
-        # measured themselves: measured at 100x30, the strip read here was a
-        # 61-cell row while the live composition was 90, so the containment
-        # assertion below was passing on a NARROWER frame than the one it
-        # claims to witness (agent review round 2, MINOR). An explicit refresh
-        # plus a pause repaints from the resolved geometry; reading twice and
-        # comparing makes "settled" a checked property rather than an
-        # assumption, so a future sequence that reads mid-relayout fails here.
-        app.refresh()
+        # SETTLE THE FRAME BEFORE READING IT, WITH A REACTIVE ACTION — and then
+        # prove it is settled. The compositor's strips are what the terminal was
+        # SENT, but they can still be a frame from BEFORE the panes measured
+        # themselves: measured at 100x30 (agent review rounds 2 and 3), the strip
+        # read at this point carried a 58-61-cell list row while the live
+        # composition was 90 and the settled row 94. `app.refresh()` does NOT fix
+        # it — it repaints from the same stale layout, and two reads a pause apart
+        # are identical on the stale frame, which is how a `settled` assertion can
+        # pass on exactly the frame it was added to reject (agent review round 3,
+        # MINOR). A reactive action does settle it, so this presses a key; reading
+        # twice and requiring the two identical then makes "settled" a checked
+        # property rather than an assumption.
+        #
+        # WHAT THE STALE FRAME DID AND DID NOT AFFECT. The two assertions that
+        # read the PAINTED frame — no glyph in the outer band, and one painted row
+        # per composed row — were the ones comparing a narrower frame than the one
+        # they witness. The composed-length assertion was never affected by it:
+        # that one reads ``render_lines_for_test()``, the widget's own live text.
+        await pilot.press("down")
         await pilot.pause()
         settled = [strip.text for strip in app.screen._compositor.render_strips()]
         await pilot.pause()
@@ -4009,6 +4019,28 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
 
         raw_strips = list(app.screen._compositor.render_strips())
         strips = [strip.text for strip in raw_strips]
+        # ...AND THE ROW THE WIDGET COMPOSED IS THE ONE ON SCREEN, which is what
+        # makes the settle above a check rather than a claim. A frame that is
+        # merely STABLE can still be a stale one — measured at 100x30, the list
+        # rows on the pre-measurement frame measure 55 cells against a 90-cell
+        # composition, and `app.refresh()` leaves them there — so the first
+        # painted list row must be at least as wide as the live row. The crop
+        # starts on the pane's border box, one cell left of its content, so a
+        # settled row measures the composition plus that cell (91 against 90).
+        # Compared against the composed row's INK rather than its full length:
+        # the row is padded to its name field, and where the age and id are
+        # dropped there is nothing but ground after the name (12 cells of ink in
+        # an 18-cell row at 36x30).
+        first_painted = cell_len(
+            raw_strips[results.region.y]
+            .crop(max(0, results.region.x), max(0, results.region.right))
+            .text.rstrip()
+        )
+        assert first_painted >= cell_len(composed[0].rstrip()), (
+            size,
+            first_painted,
+            cell_len(composed[0].rstrip()),
+        )
         width, height = size
         ink = [
             (x, y) for y, text in enumerate(strips) for x, char in enumerate(text) if char != " "
@@ -4051,3 +4083,45 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
         # The picker still draws at the sizes that draw it at all: the list and
         # the row that says how to leave survive the inset and the narrow band.
         assert screen.render_footer_for_test().strip(), size
+
+
+@pytest.mark.asyncio
+async def test_the_drawn_age_column_band_edge_is_pinned() -> None:
+    """36x30 drops the age column; 37x30 draws it — in cells, not by implication.
+
+    THE ONE THING A SIZE LIST CANNOT SAY BY ITSELF. ``INSET_SIZES`` carries
+    34x30 / 35x30 / 36x30 and the boundary 37x30, and the containment assertion
+    runs at all four — but a row that FITS is satisfied both by a ladder that
+    dropped the age and by one that never intended to draw it, so nothing there
+    says where the band ends. Two edits walk through the guard as it stands
+    (agent review round 3, the band-edge NIT; QA round 2, Q-1): ``AGE_CELLS
+    9 -> 10``, after which the age is dropped at 37 as well and every row still
+    fits, and the reverse, an edit that draws the age a column earlier. So the
+    edge is asserted POSITIVELY here: a caret and a floor-width name at 36, that
+    same name beside the DRAWN age column at 37.
+
+    Both sizes are inside ``PICKER_MIN_WIDTH``, so this is not an envelope
+    question — it is the difference between "the row fits" and "the row is the
+    row this width is supposed to paint", which is what the band's fix is.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(12)]
+    for size, drawn in (((36, 30), False), ((37, 30), True)):
+        app = _real_app()
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            screen = SessionPickerScreen(rows, NOW)
+            app.push_screen(screen)
+            for _ in range(3):
+                await pilot.pause()
+            # Same reactive settle as the frame guard: `refresh()` alone leaves
+            # the pre-measurement layout in the compositor.
+            await pilot.press("down")
+            await pilot.pause()
+            plan = screen._layout()
+            results = screen.query_one("#session-picker-results")
+            row = screen.render_lines_for_test()[0]
+            caret_and_name = GUTTER_CELLS + plan.name_width
+            expected = caret_and_name + (2 + plan.age_width if drawn else 0)
+            assert plan.age_width == AGE_CELLS, size
+            assert cell_len(row) == expected, (size, cell_len(row), expected)
+            assert cell_len(row) <= results.size.width, size
