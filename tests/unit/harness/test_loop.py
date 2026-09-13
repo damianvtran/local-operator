@@ -400,6 +400,17 @@ async def test_abort_pairs_dangling_tool_calls():
         # appeared.
         "tool_call_compose",
         "tool_call_compose",
+        # ...and so does each call's TERMINAL dictation frame, which is new: the
+        # old flush here was gated on the argument size having moved, so a call
+        # whose size stopped changing (every call in this script — name and
+        # arguments arrive in one delta) had no ending at all on the wire. An
+        # interrupted turn is exactly where that matters, because the rows left
+        # on screen are the ones the user reads afterwards. `dictation_complete`
+        # says the model is no longer writing; the ABORT itself is the turn's
+        # verdict and stays where the taxonomy puts it (turn-end retirement,
+        # design round 1 D2), not on this frame.
+        "tool_call_compose",
+        "tool_call_compose",
         "message_end",
         "turn_end",
         "agent_end",
