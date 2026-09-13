@@ -1140,14 +1140,16 @@ def _draw_recorded_usage(
             f"{report.unknown_usage_calls:,} unknown"
         )
     # THE EXACT FIGURE, on demand. The band has 4-6 cells and must round; this
-    # screen has room, so the ledger's own integer micro-USD is readable here to
+    # screen has room, so the RECORD's own integer micro-USD is readable here to
     # the micro-dollar -- which is what makes the band's rounding a convenience
     # rather than a loss. ``μ$`` in the note says the unit outright, because
     # ``$1.897843`` invites the reader to wonder whether the last digits are
-    # cents or noise.
+    # cents or noise. Labelled "Record" and not "Ledger": this screen IS the
+    # ledger, and two rows calling different sums by the same name is how a
+    # reader concludes one of them is wrong.
     if runtime.spend_micro is not None:
         body.kv(
-            "Ledger total",
+            "Record total",
             format_usd_exact(runtime.spend_micro),
             notes=(
                 f"{runtime.spend_micro:,} μ$ · this session",

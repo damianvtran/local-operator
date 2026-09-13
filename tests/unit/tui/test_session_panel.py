@@ -2076,3 +2076,26 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
         build_session_report(_tool_report(plain), runtime(), 100).plain, "Tool surface"
     )
     assert not any("nested" in r for r in section)
+
+
+def test_exact_figure_and_reconciliation_are_readable_on_demand():
+    """§8.3/§8.4: the band rounds, so `/session` must not.
+
+    The status band's money cell is 4-6 cells wide and always will be; the trade
+    is only honest if the reader can ask for the whole number somewhere and get
+    it. This is the row that answers, beside the analytics ledger's own sum for
+    the same session — two observers that count different events, naming their
+    difference rather than one standing in for the other.
+    """
+    report = _tree_report()
+    exact = replace(runtime(), spend_micro=31_276_032, spend_knowledge="exact")
+    text = build_session_report(report, exact, width=120).plain
+    assert "$31.276032" in text
+    assert "31,276,032 μ$" in text
+    assert "record $31.276032" in text
+
+    # No record (a pre-ledger session): no exact row, and nothing claiming a
+    # micro-precision the session cannot speak for.
+    plain = build_session_report(report, runtime(), width=120).plain
+    assert "Record total" not in plain
+    assert "μ$" not in plain
