@@ -152,8 +152,8 @@ from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
     SearchSpendSnapshot,
-    combined_spend,
     job_cost,
+    search_spend_is_floor,
     turn_cost,
 )
 from local_operator.tui.error_text import error_text
@@ -37617,12 +37617,12 @@ class OperatorApp(App[None]):
         `/session` for the same session printed `$0.0040+` beside an explicitly
         unpriced row.
         """
-        snapshot = self._session_search_spend()
-        # Asked of the ONE combiner rather than re-derived here: the panels ask
-        # the same question of the same function, and a band that spelled the
-        # rule out again is how the two surfaces came to disagree about whether a
-        # figure was a floor.
-        return combined_spend(0.0, snapshot).is_floor
+        # Asked of the shared rule rather than re-derived here: the panels ask the
+        # same question of the same logic, and a band that spelled it out again is
+        # how the two surfaces came to disagree about whether a figure was a
+        # floor. It is the SEARCH rule and not the combiner, because the band has
+        # no model figure to combine at this point (round-1 review MINOR-2).
+        return search_spend_is_floor(self._session_search_spend())
 
     def _spend_text(self, total: float | None = None, *, floor: bool | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.

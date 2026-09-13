@@ -163,13 +163,28 @@ def estimate_search_cost(
         )
 
     if provider_id == "perplexity":
-        if usage is not None and (usage.input_tokens or usage.output_tokens):
-            # Sonar rates are not published in one table we can pin; the request
-            # fee alone is 5-14 per 1,000 depending on context size.
+        if usage is not None and not usage.keyless:
+            # A KEYED request is Sonar, and Sonar bills: $1/1M input and output
+            # tokens plus a per-request search fee that varies with context size
+            # (published prices, verified against Perplexity's rate pages; the
+            # fee is the $5/1,000 the note already carried). The anonymous tier
+            # below is the free one -- keyed traffic was reaching it by accident,
+            # because the keyed response reported no usage at all.
+            fee = 0.005
+            tokens = (usage.input_tokens or 0) + (usage.output_tokens or 0)
+            if not tokens:
+                # The API answered without a usage block: the request fee is
+                # still real, and the tokens are unknown rather than zero, so
+                # this is a FLOOR -- which ``priced_from_usage=False`` marks.
+                return SearchCost(
+                    usd=fee,
+                    basis="Sonar list price: request fee; token usage not reported",
+                    priced_from_usage=False,
+                )
             return SearchCost(
-                usd=0.005,
-                basis="anonymous is free; Sonar ≈$5/1,000 requests plus tokens",
-                priced_from_usage=False,
+                usd=round(fee + tokens * 1e-6, 6),
+                basis="Sonar list price: $5/1,000 requests + $1/1M tokens",
+                priced_from_usage=True,
             )
         return SearchCost(usd=0.0, basis=f"{BASIS_FREE} (anonymous)", priced_from_usage=False)
 

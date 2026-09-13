@@ -1141,3 +1141,29 @@ async def test_a_single_candidate_message_keeps_the_provider_name_once(
     # The provider is named once, in the scope note -- not again as a prefix.
     assert "perplexity: Fetch" not in message
     assert message.count("perplexity") == 1
+@pytest.mark.asyncio
+async def test_a_keyed_search_reports_usage_so_it_is_not_priced_free(tmp_path) -> None:
+    """MAJOR-1, end to end: the keyed branch handed back a usage-less response."""
+    payload = {
+        "id": "req-1",
+        "choices": [{"message": {"content": "Grounded answer"}}],
+        "citations": ["https://example.com"],
+        "usage": {"prompt_tokens": 14_500, "completion_tokens": 776},
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    manager = _credentials(tmp_path)
+    manager.set_credential("PERPLEXITY_API_KEY", "test-key")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["perplexity"].search(
+            client, manager, WebSearchSettings(), "query", 3
+        )
+
+    assert response.auth_mode == "api-key"
+    assert response.usage is not None
+    # ``keyless=False`` is what routes it away from the free anonymous price.
+    assert response.usage.keyless is False
+    assert response.usage.input_tokens == 14_500
+    assert response.usage.output_tokens == 776

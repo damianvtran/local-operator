@@ -55,7 +55,13 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
-from local_operator.tui.costs import MoneyFigure, SearchSpendSnapshot, combined_spend
+from local_operator.tui.costs import (
+    MoneyFigure,
+    SearchSpendSnapshot,
+    combined_spend,
+    cost_label,
+    cost_note_rungs,
+)
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
@@ -67,6 +73,7 @@ from local_operator.tui.widgets.analytics_panel import (
     format_tokens,
     proportion_bar,
     scope_needs_cost_legend,
+    search_component_text,
     search_spend_section,
     section_header,
     semantic_style,
@@ -882,7 +889,14 @@ def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
         search_spend_section(
             snapshot,
             body.width,
-            meta="this session · live",
+            # ``bars: operations`` follows the convention every sibling table on
+            # this screen already keeps (``bars: tokens``, ``bars: cost``): the
+            # section meta states what its bar is a share OF. Without it the
+            # eight cells count operations while the column beside them counts
+            # dollars, and on a row where the two point in opposite directions --
+            # twenty free searches beside one paid one -- the reader has to infer
+            # the scale (design review D3).
+            meta="this session · live · bars: operations",
             note=(
                 # Rewritten with the combined headline: the old note told the reader
                 # this screen kept the two apart, which stopped being true the moment
@@ -1055,13 +1069,17 @@ def _draw_recorded_usage(
             f"{own} + {subs} subagents",
             "incl. subagents",
         )
-        if _search_activity(runtime):
+        search_note = search_component_text(runtime.search_spend)
+        if search_note:
             # Appended rather than always present: a session that never searched
-            # must not carry "incl. $0.0000 search", which reads as a claim about
+            # must not carry a search clause, which reads as a claim about
             # retrieval that did not happen.
-            search_note = f"incl. {format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
             ladder = tuple(f"{rung} · {search_note}" for rung in ladder) + (search_note,)
-        body.kv("Est. cost", format_cost(MoneyFigure.of(spend)), notes=ladder)
+        body.kv(
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=ladder,
+        )
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
         # — because a folded continuation loses the body indent — dropped an
@@ -1079,16 +1097,15 @@ def _draw_recorded_usage(
             runtime.search_spend,
             model_is_partial=subtree.cost_is_partial,
         )
-        if spend.is_unknown:
-            note = "no published price"
-        elif _search_activity(runtime):
-            note = (
-                f"≈ list price × tokens · incl. "
-                f"{format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
-            )
-        else:
-            note = "≈ list price × tokens"
-        body.kv("Est. cost", format_cost(MoneyFigure.of(spend)), note)
+        # Laddered for the same reason the descendants branch above is (round-1
+        # MAJOR-2): one flat string was cropped mid-note at 60-80 columns, and
+        # the part it lost was the search component this row exists to name.
+        search_note = search_component_text(runtime.search_spend)
+        body.kv(
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=cost_note_rungs(spend, search_component=search_note),
+        )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:

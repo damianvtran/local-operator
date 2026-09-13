@@ -68,7 +68,13 @@ from local_operator.analytics.model import (
     session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.costs import MoneyFigure, SearchSpendSnapshot, combined_spend
+from local_operator.tui.costs import (
+    MoneyFigure,
+    SearchSpendSnapshot,
+    combined_spend,
+    cost_label,
+    cost_note_rungs,
+)
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -287,6 +293,25 @@ def search_block_needs_legend(snapshot: "SearchSpendSnapshot | None") -> bool:
     return any(scope_needs_cost_legend(scope) for scope in (snapshot, *snapshot.rows))
 
 
+def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
+    """How a headline names its search half: money when there is any, else volume.
+
+    Lives here rather than in ``costs.py`` because it needs ``format_cost``,
+    which this module owns -- and the alternative, a second money formatter in
+    the shared module, is the defect the panels' one-formatter rule exists for.
+
+    Design review D8: a free-only session printed ``incl. $0.0000 search`` on a
+    $0.393 figure. A zero names nothing, while the thing that happened was three
+    free searches -- and the volume form is the one the 80-column crop keeps.
+    """
+    if snapshot is None or not snapshot.count:
+        return ""
+    if snapshot.usd > 0:
+        return f"incl. {format_cost(MoneyFigure(cost_usd=snapshot.usd))} search"
+    word = "search" if snapshot.count == 1 else "searches"
+    return f"incl. {snapshot.count} free {word}"
+
+
 def search_spend_section(
     snapshot: SearchSpendSnapshot,
     width: int,
@@ -335,9 +360,23 @@ def search_spend_section(
     #: frame, unlike the ledger tables that size theirs from the content box:
     #: this block shares its line with a money gutter and a count, both of which
     #: must survive a 60-column terminal, and a bar that grew with the frame
-    #: would push them off it. Eight cells reads as a proportion at every width
-    #: the panels are tested at.
-    bar_cells = 8
+    #: would push them off it.
+    #:
+    #: DROPPED in a narrow frame (design review D4, 60-column measurement): eight
+    #: cells plus their gutter took the count's ten, so every count fell to its
+    #: own line -- indented LEFT of the provider it belongs to -- and four
+    #: providers took nine lines. Shrinking to four was measured and still did
+    #: not restore the one-line row, because the name and money gutters already
+    #: take 44 of the 47 cells a 60-column body has. The count is the load-bearing
+    #: half of the row and the bar is the refinement, so the refinement is what
+    #: goes; at 80 columns and up, both fit.
+    #: Measured against the BODY width this function is handed, not the terminal
+    #: width: at an 80-column terminal the body is ~66 cells, and a threshold on
+    #: the terminal put the bar in the wrong state at every width below 100.
+    #: ``0`` means "no bar at all" -- it must not reach ``proportion_bar``, whose
+    #: ``max(1, width)`` floor turns a zero into a one-cell bar, which says
+    #: nothing while still spending the two cells of its gutter.
+    bar_cells = 8 if width >= 62 else 0
 
     def row(
         name: str,
@@ -349,7 +388,7 @@ def search_spend_section(
         line = Text()
         line.append(f"  {name:<{_SEARCH_NAME_COL}}", style=semantic_style("dim"))
         line.append_text(_money_run(scope, _SEARCH_VALUE_CELL))
-        if share is not None:
+        if share is not None and bar_cells:
             # The USAGE half of the row: how much of this scope's work went to
             # this provider. Money alone cannot answer it -- six free searches
             # and no searches both total $0.0000 -- which is why the count and
@@ -432,7 +471,11 @@ def search_spend_section(
 
     lines.append(section_header("Search spend", meta))
     total_operations = max(snapshot.count, 1)
-    row("Total spend", snapshot, total_notes(), share=1.0 if snapshot.count else None)
+    # No bar on the total row (design review D6): it is the reference every other
+    # bar is measured against, so a full bar says only "100% of itself", and the
+    # provider bars below it -- each rounded independently -- could sum PAST its
+    # eight cells, which undercuts the share reading the bar exists to give.
+    row("Total spend", snapshot, total_notes())
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # reads has a share worth showing, and the guard dropped the row for it.
     if session is not None and session.count:
@@ -494,13 +537,37 @@ def search_spend_section(
     # would make the line answer a different question than the row above it.
     free_word = "free"
     if snapshot.free_operations or snapshot.paid_operations:
-        summary = (
-            f"{snapshot.free_operations} {free_word} "
-            f"({format_cost(MoneyFigure(cost_usd=snapshot.free_usd))}) · "
-            f"{snapshot.paid_operations} paid "
-            f"({format_cost(MoneyFigure(cost_usd=snapshot.paid_usd))})",
-            f"{snapshot.free_operations} {free_word} · {snapshot.paid_operations} paid",
+        # Round-1 MINOR-1: without the unpriced clause this line did not add up
+        # against "N searches · M unpriced" on the row above it -- three numbers
+        # that look like a breakdown have to BE one, or the reader is left
+        # recomputing by hand to find the missing operation.
+        unpriced_clause = (
+            f" · {snapshot.unpriced_searches} unpriced" if snapshot.unpriced_searches else ""
         )
+        # ``N of M priced free`` (design review D5): the old form made the reader
+        # add the two numbers to answer "how much of this was free", printed a
+        # structurally-always-zero ``($0.0000)`` beside the free count, and did
+        # not reconcile with the count on the row above when unpriced operations
+        # were present. The denominator is the PRICED operations, which is what
+        # makes the third number add up instead of being a leftover.
+        priced = snapshot.free_operations + snapshot.paid_operations
+        money = format_cost(MoneyFigure(cost_usd=snapshot.paid_usd))
+        if snapshot.free_operations and snapshot.paid_operations:
+            summary = (
+                f"{snapshot.free_operations} of {priced} priced free · {money} paid"
+                f"{unpriced_clause}",
+                f"{snapshot.free_operations}/{priced} free · {money} paid",
+            )
+        elif snapshot.paid_operations:
+            summary = (
+                f"{snapshot.paid_operations} paid ({money}){unpriced_clause}",
+                f"{snapshot.paid_operations} paid",
+            )
+        else:
+            summary = (
+                f"{snapshot.free_operations} {free_word} · $0.0000{unpriced_clause}",
+                f"{snapshot.free_operations} {free_word}",
+            )
         budget = width - 2
         chosen = next((candidate for candidate in summary if len(candidate) <= budget), summary[-1])
         line = Text(no_wrap=True, overflow="crop")
@@ -873,7 +940,7 @@ def build_report(
         search_spend_section(
             search_spend,
             width,
-            meta="process-wide · live",
+            meta="process-wide · live · bars: operations",
             session=session_search_spend,
             note=(
                 "Read from this process's live search ledger, not from disk. A resumed "
@@ -1016,20 +1083,19 @@ def build_report(
         search_spend,
         model_is_partial=aggregate.cost_is_partial,
     )
-    search_component = (
-        f"incl. {format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
-        if spend.search_usd > 0 or (search_spend is not None and search_spend.count)
-        else ""
-    )
-    if spend.is_unknown:
-        cost_note = "no published price"
-    elif search_component:
-        cost_note = f"≈ list price × tokens · {search_component}"
-    else:
-        # The trailing ``+`` on the figure already flags a partial (lower-bound)
-        # sum, so the note stays short enough to fit a narrow frame; the caveat
-        # it must always carry is that this is list price, not a billed invoice.
-        cost_note = "≈ list price × tokens"
+    search_component = search_component_text(search_spend)
+    # A LADDER, widest first, and the row is CROPPED to the frame. Round-1
+    # MAJOR-2: the single wide note was never cropped by the builder, so at 60-80
+    # columns it rendered "≈ list price × tokens · incl" -- the search component
+    # this row exists to name, destroyed by the row that names it.
+    # The trailing ``+`` on the figure flags a partial sum, and the ladder's
+    # narrow rungs keep the note short enough to fit a narrow frame; the caveat
+    # it must always carry is that this is list price, not a billed invoice.
+    cost_rungs = cost_note_rungs(spend, search_component=search_component)
+    # The note's budget is what the row leaves it: indent + name column + value
+    # cell + the two-cell gap before it.
+    note_budget = max(0, width - (2 + 22 + _VALUE_CELL + 2))
+    cost_note = next((rung for rung in cost_rungs if len(rung) <= note_budget), cost_rungs[-1])
     # Built directly (not via ``kv``) so the lower-bound ``+`` is dimmed like the
     # table cells (review D1) — the figure reads as a number, the ``+`` as a flag.
     # ``append_cost`` right-aligns (table cells); here we pass the figure's own
@@ -1037,10 +1103,11 @@ def build_report(
     # ``_VALUE_CELL`` so the cost note shares the gutter (D2).
     cost_text = format_cost(MoneyFigure.of(spend))
     cost_row = Text()
-    cost_row.append(f"  {'Est. cost':<22}", style=dim)
+    cost_row.append(f"  {cost_label(bool(search_component)):<22}", style=dim)
     append_cost(cost_row, MoneyFigure.of(spend), len(cost_text), fg, dim)
     cost_row.append(" " * max(0, _VALUE_CELL - len(cost_text)))
     cost_row.append(f"  {cost_note}", style=dim)
+    cost_row.truncate(width, overflow="crop")
     lines.append(cost_row)
     lines.append(Text())
 

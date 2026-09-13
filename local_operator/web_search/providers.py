@@ -484,12 +484,23 @@ async def _search_perplexity(
         )
         _ensure_success("Perplexity", response)
         payload = response.json()
+        # ``keyless=False`` is the whole point of this object: without a usage
+        # report the ledger priced a BILLED Sonar call as ``free (anonymous)``
+        # (round-1 review MAJOR-1), and the free/paid counters then printed that
+        # as an explicit claim. The tokens come from the API when it sends them;
+        # the request fee stands on its own when it does not.
+        api_usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         return SearchResponse(
             provider="perplexity",
             auth_mode="api-key",
             sources=_perplexity_sources(payload, limit),
             answer=_perplexity_answer(payload),
             request_id=str(payload.get("id") or "").strip() or None,
+            usage=SearchUsage(
+                input_tokens=api_usage.get("prompt_tokens"),
+                output_tokens=api_usage.get("completion_tokens"),
+                keyless=False,
+            ),
         )
 
     request_id = str(uuid.uuid4())
