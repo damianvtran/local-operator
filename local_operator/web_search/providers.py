@@ -291,6 +291,22 @@ def _perplexity_answer(payload: dict[str, Any]) -> str | None:
     return answer or None
 
 
+#: The block shapes the anonymous endpoint uses to SERVE results. The wall test
+#: asks whether any of these appeared, rather than whether the source extractor
+#: recognised one: a shopping, hotels, maps or media answer is served content
+#: that ``_perplexity_sources`` has no rows for, and treating its absence as "the
+#: endpoint served nothing" would discard a real answer that happens to carry a
+#: sign-in nudge (raised by the round-1 code review; the shapes are Perplexity's
+#: documented SSE block union).
+_RESULT_BLOCK_KEYS: tuple[str, ...] = (
+    "web_result_block",
+    "shopping_block",
+    "hotels_mode_block",
+    "maps_mode_block",
+    "media_block",
+)
+
+
 def _parse_perplexity_sse(body: str) -> dict[str, Any]:
     """Fold Perplexity's partial SSE blocks without losing earlier sources.
 
@@ -300,6 +316,9 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
     """
     merged: dict[str, Any] = {}
     sources_by_url: dict[str, dict[str, Any]] = {}
+    #: Result-bearing blocks seen anywhere in the stream, so the wall test can
+    #: ask what the endpoint SERVED instead of what the extractor recognised.
+    served_blocks: set[str] = set()
     answer = ""
     for line in body.splitlines():
         if not line.startswith("data:"):
@@ -322,6 +341,7 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
         for block in event.get("blocks") or []:
             if not isinstance(block, dict):
                 continue
+            served_blocks.update(key for key in _RESULT_BLOCK_KEYS if block.get(key) is not None)
             web_results = (block.get("web_result_block") or {}).get("web_results") or []
             for item in web_results:
                 if isinstance(item, dict) and item.get("url"):
@@ -338,9 +358,75 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
             answer = str(event["text"])
     if sources_by_url:
         merged["sources_list"] = list(sources_by_url.values())
+    if served_blocks:
+        # Private key: read by ``_perplexity_authwall`` and by nothing else. It
+        # is not a source list -- it is the answer to "did the endpoint serve
+        # anything at all", which is what separates a refusal from a thin result.
+        merged["_result_blocks"] = sorted(served_blocks)
     if answer:
         merged["text"] = answer
     return merged
+
+
+def _perplexity_authwall(payload: dict[str, Any]) -> str | None:
+    """The sign-in wall this payload is, or ``None`` when it is not one.
+
+    The anonymous endpoint refuses with a NORMALLY COMPLETED stream: HTTP 200,
+    ``status: COMPLETED``, ``final: true``, ``text`` carrying a short invitation
+    to sign in. Nothing in the transport says "refused", so the payload's own
+    ``upsell_information`` is the only marker (observed live:
+    ``{'name': 'fraud_authwall_upsell', 'upsell_type': 'LOGIN'}``).
+
+    It matters because the refusal is otherwise indistinguishable from a RESULT:
+    the chain accepts a response with an empty source list when its answer is
+    non-empty -- correct in general, since a provider may legitimately answer
+    without citations -- so this sentence was served to the model as the search
+    it asked for. Reported from a real session: five searches in one
+    conversation came back with no sources and ``Sign up and repeat your
+    request.`` as the answer, after DuckDuckGo matched nothing and Tavily's
+    keyless tier hit its daily cap. The model had to notice the sentence was not
+    an answer and fall back to fetching pages itself.
+
+    Returns the reason to record, or ``None``. Structural only: no wording is
+    matched, so a change to the sentence cannot silently un-fix this.
+    """
+    if payload.get("_result_blocks"):
+        # Something WAS served: a shopping, hotels, maps, media or web-result
+        # block came through, so this is a result carrying a sign-in nudge, not
+        # a refusal. Only "the endpoint served nothing" is a wall.
+        return None
+    upsell = payload.get("upsell_information")
+    # Unwrap however many JSON-string layers the stream used. The SSE carries it
+    # as a nested object in some responses and a JSON string in others, and a
+    # DOUBLE-encoded string was observed to escape detection entirely -- the wall
+    # then went back to being served as a search result, which is this fix's own
+    # bug. Bounded rather than ``while isinstance(...)``: a malformed payload
+    # must not spin.
+    for _ in range(3):
+        if not isinstance(upsell, str):
+            break
+        try:
+            upsell = json.loads(upsell)
+        except json.JSONDecodeError:
+            upsell = None
+            break
+    if not isinstance(upsell, dict):
+        return None
+    name = str(upsell.get("name") or upsell.get("upsell_type") or "").strip()
+    if not name:
+        return None
+    kind = str(upsell.get("upsell_type") or "").strip()
+    detail = f"{name}/{kind}" if kind else name
+    # Action FIRST, diagnostics last. The operator's transcript renders this on
+    # one line and never wraps it, so at the collapsed budget (~width//3) only
+    # the head survives: with the cause first, the reader saw "All configured
+    # web sear…" and never reached "fetch a page directly", the one move the
+    # model reading it can take unaided (design review D1, reproduced from saved
+    # frames at 80-200 columns).
+    return (
+        f"Fetch a page directly, or set PERPLEXITY_API_KEY for keyed Sonar: the "
+        f"anonymous tier refused this search (wall {detail})"
+    )
 
 
 async def _search_perplexity(
@@ -404,10 +490,19 @@ async def _search_perplexity(
     )
     _ensure_success("Perplexity", response)
     payload = _parse_perplexity_sse(response.text)
+    sources = _perplexity_sources(payload, limit)
+    # A wall with sources alongside it is still a result: never discard pages
+    # that were actually returned. A wall with nothing is a REFUSAL, and it is
+    # raised rather than returned empty so the chain records this reason and
+    # moves on -- and so a search whose every provider came back empty fails
+    # loudly instead of handing the model a sentence to disbelieve.
+    wall = _perplexity_authwall(payload)
+    if wall is not None and not sources:
+        raise RuntimeError(wall)
     return SearchResponse(
         provider="perplexity",
         auth_mode="anonymous",
-        sources=_perplexity_sources(payload, limit),
+        sources=sources,
         answer=_perplexity_answer(payload),
         request_id=str(payload.get("uuid") or request_id),
         # Anonymous mode is free; the Sonar key path (below) is token-billed and
