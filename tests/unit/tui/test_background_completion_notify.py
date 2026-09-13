@@ -19,6 +19,7 @@ to find unread work would be cleared by the toast telling them about it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -134,10 +135,55 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return calls
 
 
+#: The worker group `OperatorApp._notify_background_completions` runs its scan
+#: under (``run_worker(run(), group="background-notify")``). Named once here so
+#: the wait in `_await_completion_scan` cannot drift onto another group's workers.
+_SCAN_WORKER_GROUP = "background-notify"
+
+
+async def _await_completion_scan(app: OperatorApp) -> None:
+    """Block until the app's background-completion scan has RAN TO ITS END.
+
+    `_notify_background_completions` does its work on a worker thread
+    (`asyncio.to_thread(collect)`), so every effect this file asserts — the row
+    banners, the digest, the claims — lands after the poll that dispatched it has
+    already returned. A fixed number of `pilot.pause()` rounds is not the same
+    wait, because the two are not measured in the same unit: the budget is spent
+    in LOOP TURNS, while the scan costs WALL TIME (a catalogue scan plus eleven
+    SQLite transactions), and a contended runner stretches only the second.
+
+    That is exactly what happened in run 34764919312 (shard `3.12, 0`, gw2): the
+    digest test saw three row banners — precisely
+    `_BACKGROUND_NOTIFY_MAX_PER_TICK` — and an EMPTY `digests`, because the digest
+    is the last thing `collect` does and so the first thing a closed window loses.
+    Nothing about that run was a wrong answer: the scan had the correct ten
+    sessions in hand and was still claiming the seven the cap held back. The test
+    read `spawned` while the scan was mid-flight.
+
+    Waiting on the worker is waiting on the app's own completion signal, so the
+    wait lasts exactly as long as the scan does — and it is the pattern the rest
+    of the TUI suite already uses (`tests/unit/tui/test_info_panel.py` and its
+    neighbours call `app.workers.wait_for_complete()`). It is scoped to the scan's
+    group rather than taking that whole-manager form because an unrelated
+    long-lived worker would turn this wait into a hang, and this suite carries no
+    `pytest-timeout` to reclaim one.
+    """
+    scans = [worker for worker in app.workers if worker.group == _SCAN_WORKER_GROUP]
+    if scans:
+        await asyncio.gather(*(worker.wait() for worker in scans))
+
+
 async def _settle(app: OperatorApp, pilot: Any, rounds: int = 6) -> None:
-    """Run the app's own attention poll to completion, several times."""
+    """Run the app's own attention poll to completion, several times.
+
+    Each round WAITS for the scan that round dispatches before the next round
+    begins, so a round means "one attention poll and the work it started", not
+    "one poll and however much of the work this machine happened to reach" —
+    see `_await_completion_scan` for the CI failure that distinction cost.
+    """
     for _ in range(rounds):
         await app._poll_completion_attention()
+        await _await_completion_scan(app)
         for _ in range(4):
             await pilot.pause()
 
