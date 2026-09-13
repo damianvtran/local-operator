@@ -22,6 +22,7 @@ export enum ErrorCode {
   BUSY = 'busy',
   PROTO_MISMATCH = 'proto_mismatch',
   OWNER_REFUSED = 'owner_refused',
+  EXTENSION_UNRESPONSIVE = 'extension_unresponsive',
   INTERNAL = 'internal',
 }
 

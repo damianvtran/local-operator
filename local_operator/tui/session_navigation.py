@@ -41,6 +41,39 @@ class SurfaceNotReady(RuntimeError):
     """
 
 
+class OwnerWentCold(ConnectionError):
+    """A LIVE commit whose owner went cold before its first frame could paint.
+
+    The other half of the split above, and the reason both are named rather
+    than matched on text. ``SurfaceNotReady`` is a LOCAL paint failure of a
+    session that is bound and reachable, so it is terminal on the first
+    occurrence (#883). This one is the TRANSIENT shape and must spend the
+    reconnect budget instead: the frame was armed against a session that had
+    passed the bind postcondition, and the owner was lost in the window after
+    it — the facade is ``_recovering`` and clears itself within
+    ``COLD_FALLBACK_S``, so a reselect heals in milliseconds while a latch
+    makes the user perform that reselect by hand.
+
+    Raised from ``post_display_hook`` rather than by a timer because the gate's
+    FIRST check is ``is_cold``: for as long as the session is cold the gate
+    can never pass, so every frame it waits out is spent buying full-screen
+    relayouts for a verdict that is already known (measured pre-fix: 1,820
+    refusals, every one of them a relayout, over the 15 s timer).
+
+    Subclasses ``ConnectionError`` — the same type the bind postcondition in
+    ``_connect_sidebar_source`` raises for this exact condition, carrying the
+    same sentence — so the arms that already classify "the runtime is not
+    responding" as connectivity keep classifying this as connectivity, and no
+    second terminal wording is introduced.
+    """
+
+
+#: The one sentence both arms that detect an unreachable owner report, so the
+#: bind postcondition and the cold-frame failure are indistinguishable to the
+#: user and neither can drift into a second vocabulary for one condition.
+UNREACHABLE_OWNER_MESSAGE = "the runtime is not responding"
+
+
 class SessionNavigation(Generic[Prepared]):
     def __init__(
         self,

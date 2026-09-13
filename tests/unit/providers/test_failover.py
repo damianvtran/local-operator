@@ -19,6 +19,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamUsageEvent,
@@ -546,6 +547,249 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+class _FailsAfter:
+    """Emits scripted events, then dies mid-stream (a pre-content death)."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        for event in self._events:
+            yield event
+        raise ProviderError(500, "boom", retryable=True)
+
+
+@pytest.mark.parametrize(
+    ("leading", "walks_chain"),
+    [
+        ([], True),
+        ([StreamStartEvent(response_id="r1")], True),
+        ([StreamReasoningDelta(delta="weighing the options")], True),
+        (
+            [StreamStartEvent(response_id="r1"), StreamReasoningDelta(delta="weighing")],
+            True,
+        ),
+        # Usage is accounting, not content: it renders nothing, joins no
+        # transcript, and its consumers are documented as firing once per
+        # provider call -- so a lone usage event cannot be a reason not to
+        # retry. It is the shape an OpenAI-compatible aggregator produces when
+        # it reports accounting before any content, and the write that used to
+        # make a trivially retryable pre-content 5xx look like a mid-stream cut.
+        ([StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))], True),
+        (
+            [
+                StreamStartEvent(response_id="r1"),
+                StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0)),
+            ],
+            True,
+        ),
+        # The control: a VISIBLE delta is output the caller can see, so the
+        # attempt must not be replayed. Without this row, a carve-out that
+        # swallowed every event would pass every row above.
+        ([StreamTextDelta(delta="half an answer")], False),
+    ],
+    ids=[
+        "nothing",
+        "start",
+        "reasoning",
+        "start-and-reasoning",
+        "usage",
+        "start-and-usage",
+        "visible-text",
+    ],
+)
+async def test_a_pre_content_failure_after_a_non_content_event_still_walks_the_chain(
+    leading: list[Any], walks_chain: bool
+) -> None:
+    """What gates a retry is output the caller has SEEN, and these events are not.
+
+    ``forwarded_any`` means exactly that: the caller has seen output that cannot
+    be un-shown, so replaying the attempt would stream it twice. Only the events
+    in ``_RETRY_SAFE_STREAM_EVENTS`` fail that test — a boundary marker, the
+    model's private reasoning, and the provider's token accounting — and each
+    one is exempt for its own reason, spelled out there.
+
+    What this test protects is the CLASS of mistake rather than one instance of
+    it: each carve-out was added after the same bug was found in the wild, one
+    event type at a time, so the rows below are the members that exist plus the
+    control that must never move. A new member needs its own row here; deleting
+    the member from the tuple must fail the matching row and only that row.
+
+    The last row is the boundary that must not move: a visible delta still
+    blocks the retry, so this cannot degrade into "retry everything".
+    """
+
+    specs_seen: list[ModelSpec] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.model_id == "gpt-4o":
+            return _FailsAfter(leading)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    if not walks_chain:
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+        assert [spec.model_id for spec in specs_seen] == ["gpt-4o"]
+        return
+
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert specs_seen[-1].model_id == "claude-x"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # What this attempt produced is still FORWARDED -- carving a member out of
+    # the retry gate must not swallow it. Asserted as a set rather than a count:
+    # a pre-content failure is retried on the same target before the chain is
+    # walked, and each of those attempts legitimately re-emits the channel. How
+    # many attempts the ladder burns is the ladder's business.
+    forwarded = {e.delta for e in got if isinstance(e, StreamReasoningDelta)}
+    assert forwarded == {
+        event.delta for event in leading if isinstance(event, StreamReasoningDelta)
+    }
+    # Same rule for the accounting channel. Compared field-by-field rather than
+    # by identity because ``_stamp_serving_spec`` re-stamps a forwarded usage
+    # event with the serving spec, which is what makes a failover's cost land on
+    # the provider that actually served it.
+    forwarded_usage = [e.usage for e in got if isinstance(e, StreamUsageEvent)]
+    for usage in (event.usage for event in leading if isinstance(event, StreamUsageEvent)):
+        assert any(
+            served.input_tokens == usage.input_tokens
+            and served.output_tokens == usage.output_tokens
+            for served in forwarded_usage
+        ), "a forwarded usage event must survive the retry gate it was carved out of"
+
+
+async def test_a_lone_usage_event_rotates_the_credential_and_walks_the_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The usage carve-out must reach BOTH retry mechanisms, not just the chain.
+
+    ``forwarded_any`` is checked once, but it gates two behaviours: the tier-1
+    sibling rotation inside the provider and the tier-2 walk to the next target.
+    The parametrised test above proves the chain; a lone usage event that still
+    froze rotation would look identical there, because the walk happens anyway
+    once rotation returns "nothing left". So this test keeps a SECOND openai key
+    in the pool and asserts the second key is actually asked -- the observable
+    that distinguishes "rotated, then walked" from "never rotated".
+    """
+    sleeps: list[int] = []
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    used_keys: list[str | None] = []
+    specs_seen: list[ModelSpec] = []
+    accounting = Usage(input_tokens=7, output_tokens=0)
+
+    def primary(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        used_keys.append(api_key)
+
+        async def generate() -> AsyncIterator[Any]:
+            # Exactly the real shape: the provider accounts for the call, then
+            # the attempt dies before ANY content is forwarded.
+            yield StreamUsageEvent(usage=accounting)
+            raise ProviderError(500, "boom", retryable=True)
+
+        return generate()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.model_id == "gpt-4o":
+            return _FnClient(primary)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    auth = FakeAuth({"openai": ["k1", "k2"], "anthropic": ["k3"]})
+
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    # Rotated to the sibling account...
+    assert "k2" in used_keys, (
+        "a lone usage event must not stop tier-1 rotation; asked keys were "
+        f"{used_keys} with rotations {auth.rotations}"
+    )
+    assert auth.rotations[0] == ("openai", "k1")
+    # ...on the FAST transient budget, not the patient connectivity one: nothing
+    # about this failure resembles the machine being offline.
+    assert sleeps and max(sleeps) <= BACKOFF_CAP_MS
+    # ...and only then walked to the next provider.
+    assert specs_seen[-1].model_id == "claude-x"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # The accounting the failed attempt reported still reached the caller: it is
+    # metadata about a call that really happened, not content to be discarded.
+    assert any(
+        isinstance(e, StreamUsageEvent) and e.usage.input_tokens == accounting.input_tokens
+        for e in got
+    )
+
+
+async def test_a_usage_only_transport_cut_is_not_reported_as_mid_stream() -> None:
+    """The SAME flag feeds the mid-stream inference, so the carve-out must hold
+    on the transport arm too -- and this is the arm where the old behaviour did
+    real harm.
+
+    ``is_mid_stream_connectivity_loss`` reads ``forwarded_any`` through this
+    driver: bytes already forwarded means an interrupted answer, which the loop
+    CONTINUES (patient wait, then re-ask) instead of surfacing. A lone usage
+    event is not an answer, so a socket that dies after one is an ordinary
+    pre-content transport failure: the loop must be told to surface it, not to
+    continue a turn whose text never started.
+
+    The positive control lives next door, in
+    ``test_the_driver_marks_a_cut_that_already_forwarded_bytes``: the same kind
+    of cut after a VISIBLE delta must still be marked continuable.
+    """
+
+    async def client_for(spec: ModelSpec) -> Any:
+        async def generate(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            yield StreamUsageEvent(usage=Usage(input_tokens=7, output_tokens=0))
+            # No client in clients.py catches httpx, so a socket that dies
+            # mid-body reaches the driver raw -- see the driver's own comment.
+            raise httpx.ReadError("")
+
+        return _FnClient(generate)
+
+    forwarded: list[Any] = []
+    with pytest.raises(ProviderError) as excinfo:
+        async for event in stream_with_failover(
+            _request(),
+            FakeAuth({"openai": ["k1"]}),
+            # Budgets floored so a shape that IS retryable still terminates fast.
+            {
+                "retry": {
+                    "baseDelayMs": 1,
+                    "maxRetries": 1,
+                    "connectivityMaxRetries": 0,
+                    "fallbackChains": {},
+                }
+            },
+            client_for,
+        ):
+            forwarded.append(event)
+
+    assert forwarded, "the usage event must reach the caller, not be swallowed"
+    assert not excinfo.value.connectivity_loss, (
+        "a cut that only ever forwarded accounting was marked as an interrupted "
+        "answer, so the loop will continue a turn whose text never started"
+    )
 
 
 async def test_failover_stamps_serving_spec_on_usage() -> None:

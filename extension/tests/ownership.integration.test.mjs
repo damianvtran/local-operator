@@ -99,3 +99,113 @@ test("completion queued during allocation leaves no late tab", async () => {
   try { const opening=f.call("open"); const finishing=f.call("owner_finish",{...f.owner,outcome:"completed"}); await opening; assert.equal((await finishing).state,"closed"); assert.equal(f.tabs.size,0); }
   finally { await f.close(); }
 });
+
+// --- Audit A4 / scoping D3: the admission window -----------------------------
+
+/** Wait until `predicate` holds, without asserting a duration. */
+async function until(predicate, ms = 1000) {
+  const started = Date.now();
+  while (Date.now() - started < ms) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return predicate();
+}
+
+test("the cap read and the slot write are one admission window (D3)", async () => {
+  // The defect is the classic read-then-write race: two owners at 7 surfaces
+  // both read "one slot free" and both take it. The lane that used to prevent
+  // it spanned the WHOLE open handler (and with it another owner's navigation);
+  // it now spans exactly cap-read -> create -> putSurface.
+  const f = await fixture();
+  try {
+    for (let i = 0; i < 7; i++) {
+      await f.call("open", {
+        ...f.owner,
+        owner_proof: String(i).repeat(40),
+        requester: `session:synthetic-${i}`,
+      });
+    }
+    assert.equal(Object.keys(f.store().surfaces).length, 7, "precondition: one slot left");
+
+    const results = await Promise.allSettled([
+      f.call("open", { ...f.owner, owner_proof: "x".repeat(40), requester: "session:x" }),
+      f.call("open", { ...f.owner, owner_proof: "y".repeat(40), requester: "session:y" }),
+    ]);
+
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "exactly one open wins");
+    assert.equal(
+      results.filter((r) => r.status === "rejected" && r.reason.code === "tab_limit").length,
+      1,
+      "the loser gets a typed refusal, not a silent ninth tab",
+    );
+    assert.equal(Object.keys(f.store().surfaces).length, 8);
+    assert.equal(f.tabs.size, 8);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a parked owner's open does not block another owner's admission (D3)", async () => {
+  // The audit's repro, inverted: owner A is parked INSIDE its navigation (a
+  // slow page or a human origin prompt), which under the old whole-handler
+  // global lane also held admission. Owner B must complete while A is still
+  // parked, which cannot happen if B is queued behind A.
+  const f = await fixture();
+  try {
+    let release;
+    f.faults.navigationGate = new Promise((r) => {
+      release = r;
+    });
+    const parked = f.call("open");
+    assert.ok(
+      await until(() => Object.keys(f.store().surfaces ?? {}).length === 1),
+      "owner A consumed its slot and is now parked in navigate",
+    );
+
+    const other = await Promise.race([
+      f.call("open", { ...f.owner, owner_proof: "b".repeat(40), requester: "session:b" }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("owner B's open is parked behind owner A's navigation")), 750),
+      ),
+    ]);
+    assert.ok(other.tab, "owner B was admitted and finished while A was parked");
+
+    release();
+    await parked;
+    assert.equal(f.tabs.size, 2);
+  } finally {
+    f.faults.navigationGate = null;
+    await f.close();
+  }
+});
+
+test("a same-owner finish cannot overtake its own parked open (D3)", async () => {
+  // The per-owner lane must survive the narrowing: `owner_finish` racing its own
+  // in-flight `open` would otherwise let a late navigation resurrect a tab the
+  // session has already retired.
+  const f = await fixture();
+  try {
+    let release;
+    f.faults.navigationGate = new Promise((r) => {
+      release = r;
+    });
+    const opening = f.call("open");
+    assert.ok(await until(() => Object.keys(f.store().surfaces ?? {}).length === 1));
+
+    const finishing = f.call("owner_finish", { ...f.owner, outcome: "completed" });
+    const overtook = await Promise.race([
+      finishing.then(() => true),
+      new Promise((r) => setTimeout(() => r(false), 150)),
+    ]);
+    assert.equal(overtook, false, "owner_finish overtook its own open");
+
+    release();
+    await opening;
+    assert.equal((await finishing).state, "closed");
+    assert.equal(f.tabs.size, 0);
+  } finally {
+    f.faults.navigationGate = null;
+    await f.close();
+  }
+});

@@ -65,6 +65,7 @@ from local_operator.compaction.cutpoint import (
     RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
     build_compaction_marker,
     render_compaction_marker,
     replayed_user_message,
@@ -134,10 +135,14 @@ from local_operator.harness.wake import (
 )
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
+    DELIBERATE_CUT_OFF_CAUSE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    format_cut_off_notice,
+    format_cut_off_raw,
+    render_cut_off_reason,
 )
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
@@ -157,6 +162,12 @@ from local_operator.session.protocol import (
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
+
+# The roster-row resolution shared with the cold viewer. Imported here so the
+# OWNER path (this module's `_load_subagent_roster`) and the viewer path
+# (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
+# about one persisted row (UX review round 1, U2).
+from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
@@ -200,6 +211,33 @@ SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
 SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
 _SUBAGENT_ROSTER_VERSION = 1
 _SUBAGENT_SUMMARY_CHARS = 500
+
+#: The build THIS PROCESS loaded, read once and memoised. Compared against the
+#: install on disk by ``update.classify_import_failure``, which is the only way
+#: to tell a lazy import that lost a name to a HALF-REPLACED install from a
+#: genuine packaging bug: without a baseline the comparison can only ever say
+#: "equal", and every real defect would be mislabelled an install race.
+#:
+#: Read lazily rather than at import (importing this module must do no file I/O)
+#: and stamped in ``Session.__init__`` so in every runtime the FIRST read happens
+#: at process start, before an install can move under us.
+_PROCESS_BOOT_BUILD: Any = None
+_PROCESS_BOOT_BUILD_READ = False
+
+
+def _process_boot_build() -> Any:
+    """The ``BuildStamp`` this process booted from, or ``None`` if unreadable."""
+    global _PROCESS_BOOT_BUILD, _PROCESS_BOOT_BUILD_READ
+    if not _PROCESS_BOOT_BUILD_READ:
+        _PROCESS_BOOT_BUILD_READ = True
+        try:
+            from local_operator.update import installed_build
+
+            _PROCESS_BOOT_BUILD = installed_build()
+        except Exception:  # noqa: BLE001 — an unreadable stamp classifies nothing
+            _PROCESS_BOOT_BUILD = None
+    return _PROCESS_BOOT_BUILD
+
 
 #: Transcript custom-entry type holding the session's todo list. The todo tool
 #: keeps the live list in a module-level table keyed by session id (see
@@ -1791,10 +1829,16 @@ class Session:
         # rather than above it, and it is the path
         # `test_a_broken_attention_import_cannot_stop_a_session_from_loading`
         # exercises.
+        #
+        # Initialised BEFORE the attempt so a failure leaves it ``None`` rather
+        # than unset: ``_journal_restored_cut_off`` reads it on every boot — and
+        # clears it once narrated, which is what makes the attention tick's
+        # rescan a one-off (review round 2, NIT-1).
+        self._restored_cut_off: tuple[str, str, str, str] | None = None
         try:
             from local_operator.session.attention import bootstrap_transcript
 
-            bootstrap_transcript(transcript)
+            self._restored_cut_off = bootstrap_transcript(transcript)
         except Exception as exc:  # noqa: BLE001 — must not break session boot
             logger.warning(
                 "attention bootstrap failed for %s (%r); continuing without it",
@@ -1821,10 +1865,27 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # Stamp the build THIS process loaded, before any lazy import can meet a
+        # replaced tree: every later ``_note_import_failure`` compares against
+        # this value (see ``_process_boot_build``).
+        _process_boot_build()
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
         self._attention_run_token: str | None = None
+        #: Whether the CURRENT run's end has been CONSUMED for publication.
+        #: Set False at every turn start and True the moment
+        #: ``_publish_attention_outcome`` takes the end event, so a teardown can
+        #: tell "this run already said how it ended" from "it never got to" —
+        #: the distinction that decides whether dispose has to publish one.
+        self._attention_run_settled: bool = True
         self._attention_restored = False
+        #: Set by the ``bootstrap_transcript`` call ABOVE (see the attention
+        #: block) to the ``(kind, cause, reason, token)`` this boot classified
+        #: and published for an ORPHANED run, and journaled from ``async_init``
+        #: / ``refresh_attention`` because ``journal_incident`` awaits a
+        #: transcript write and ``__init__`` is synchronous. Deliberately NOT
+        #: re-initialised here — an initialiser at this point would overwrite
+        #: the value the bootstrap just produced.
         self._agent_id = agent_id
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
@@ -2148,6 +2209,31 @@ class Session:
         #: user prompt (compaction continuations hold the end until the
         #: pipeline flushes).
         self._last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+        #: The rendered reason for the last cut-off turn, mirrored onto the
+        #: canonical snapshot beside ``_last_turn_outcome``. A rebinding viewer
+        #: uses it to synthesise a real diagnostic (``_settle_suspect_turn``)
+        #: instead of the class placeholder ``"turn failed"``.
+        self._last_turn_cut_off: str = ""
+        #: Why the CURRENT turn is being cut off, as a machine token from
+        #: ``incidents.CUT_OFF_CAUSES``, or ``""`` when it is ending on its own
+        #: or was deliberately stopped. Set by the runtime's own exit paths (a
+        #: retire that caught a live turn, a termination signal, disposal) and
+        #: consumed by :meth:`_classify_cut_off` and
+        #: :meth:`_publish_attention_outcome`.
+        #:
+        #: Deliberately NOT derived from ``AbortSignal.reason``:
+        #: ``abort("session disposed")`` is produced by BOTH a user's `/stop` and
+        #: a SIGTERM, so the reason STRING cannot classify the trigger — only the
+        #: exit path that raised it can.
+        self._cut_off_cause: str = ""
+        #: Optional parenthetical riding with ``_cut_off_cause`` (a build pair, a
+        #: pid, a start time) — why the reason is specific instead of generic.
+        self._cut_off_detail: str = ""
+        #: Positive evidence that THIS turn was stopped on purpose. Once set, a
+        #: later ``note_cut_off`` is ignored: `lop stop` and SIGTERM converge on
+        #: the same clean-exit ordering, so the dispose rung always runs and
+        #: would otherwise relabel a user's own cancel as an error.
+        self._deliberate_stop_noted: bool = False
         # The loop's held end owns billing, but a later post-turn compaction owns
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
@@ -2376,6 +2462,10 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: Set by the deliver trampoline, consumed by the next persist, which
+        #: is what stamps ``last_fired_at`` on the wake index entry. See
+        #: :meth:`_persist_wake_schedules`.
+        self._wake_fired_since_persist = False
         # Catch-up state for the wake deliveries the process was DOWN for:
         # (occurrences skipped while down, grace re-arm from the just-run
         # load(), text of the aggregated catch-up prompt, and whether that
@@ -2733,12 +2823,13 @@ class Session:
     def _render_for_compaction(self, *, keep_images: bool = False) -> list[Message]:
         """The rendered history a compaction pass plans and commits against.
 
-        :meth:`_render_history` minus the todo reminders, because a reminder is
-        the ONE injection nothing persists (``_todo_continuation`` hands it to
-        the loop as a follow-up, which emits no event and reaches no
-        transcript), and compaction is built on the rendered history being
-        persisted history. Rendered into it, one reminder broke the pass at both
-        ends:
+        :meth:`_render_history` minus every LIVE-CONTEXT-ONLY injection — a
+        ``CustomMessage`` the transcript does not hold, which is one a resume
+        cannot replay. A todo reminder is the original member of that class:
+        ``_todo_continuation`` hands the reminder to the loop as a follow-up,
+        which emits no event and reaches no transcript. Compaction is built on
+        the rendered history being persisted history, and rendered into it one
+        ephemeral injection broke the pass at both ends:
 
         - ``_plan_compaction``'s replayability guard matches ``kept[0].id``
           against the transcript's entry ids, and a reminder's id is in no
@@ -2779,20 +2870,63 @@ class Session:
         the allow-list removal closed. Excluding it here keeps the live
         announcement in the REQUEST render (``_render_history``, untouched)
         while the rebuild the compaction commit owns stays persisted-only.
+
+        Those two are special cases of ONE class, and the enumeration was
+        itself the defect: an ephemeral injection type added later is filtered
+        only if someone remembers to list it here. The TRANSIENT model-switch
+        notice was the third member and went unlisted —
+        ``journal_model_switch(transient=True)`` appends a live-only failover
+        record, and the render baked it into the rebuilt context as a plain
+        ``Message(role="user")`` which the turn-end pass then persisted, so a
+        failover notice landed in a real session's transcript as a genuine
+        user row (four consecutive such rows in session ``835fbcafdc27``) and
+        every front end painted it as the user's own words. The predicate is
+        therefore STRUCTURAL rather than a list: a ``CustomMessage`` the
+        transcript does not hold is one a resume cannot replay, because the
+        only thing that puts a custom message back into a replayed context is
+        its own persisted entry. Filtering it here is what makes the rebuilt
+        context equal what a resume replays — the live/resume equivalence this
+        render exists to protect.
+
+        The price is stated rather than glossed, because it is a real one: a
+        live-only record is now absent from the rebuilt context, so a transient
+        notice reaches the model through the untouched request render only
+        UNTIL the next pass. After a commit the model is no longer told it is
+        on a fallback — it reads the authoritative ``Model:`` line in the
+        prompt tail instead, which is the same thing a resume gives it. The
+        alternative is the reported defect: re-seating the notice as user text
+        it can never take back.
+
+        The test is :meth:`Transcript.has_entry` (a constant-time id-set
+        check), NEVER :func:`_is_persistable_message`. That predicate answers a
+        different question — may the turn-end flush write this? — and returns
+        False for ``hub_message``, ``peer_message`` and ``wake_prompt``, whose
+        PRODUCERS persist them. Borrowing it here would drop persisted history
+        out of the rebuild and make a live context diverge from its own
+        resume.
+
+        The compaction marker is exempted because its entry IS persisted — as a
+        compaction entry, written by ``append_compaction`` under its own type
+        and its own id — so the message id ``build_compaction_marker`` mints is
+        in no entry set while a resume still replays the summary from that
+        payload. Without the exemption the structural rule would drop it from
+        the render it plans against; this is a statement about the predicate,
+        not a measurement of what any particular session's marker contains.
         """
 
         def _is_ephemeral_for_compaction(message: AgentMessage) -> bool:
             """Whether ``message`` must stay out of the compaction render.
 
-            Named rather than inlined because BOTH filters are
-            live-context-only injections whose rendered (id-carrying) copy
-            would otherwise be baked into the kept window and persisted by the
-            turn-end pass despite never being transcript material.
+            Named rather than inlined because every arm is a live-context-only
+            injection whose rendered (id-carrying) copy would otherwise be
+            baked into the kept window and persisted by the turn-end pass
+            despite never being transcript material.
             """
-            return _is_todo_reminder(message) or (
-                isinstance(message, CustomMessage)
-                and message.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
-            )
+            if not isinstance(message, CustomMessage):
+                return False
+            if message.custom_type == COMPACTION_MARKER_TYPE:
+                return False
+            return not self._transcript.has_entry(message.id)
 
         return self._render_history(
             [
@@ -2802,6 +2936,62 @@ class Session:
             ],
             keep_images=keep_images,
         )
+
+    def _restore_custom_sources(self, kept: list[Message]) -> list[AgentMessage]:
+        """Re-seat each rendered copy in ``kept`` onto the message it came from.
+
+        The commit rebuilds the live context from the RENDERED history, so
+        without this every delivery inside the kept window becomes an anonymous
+        stamped user message. The model still reads it, but every fold then
+        sees an injection-shaped row instead of the receipt its own type paints
+        — a hub note, a peer message, a wake line, a job result — while a
+        RESUME of the same session, which replays the persisted custom entries,
+        paints exactly those receipts. Restoring the source is what keeps live
+        equal to resume, on both the request and the display side.
+
+        The lookup is the LIVE CONTEXT, and that is complete by construction
+        rather than by luck: every custom message this render can contain is a
+        ``CustomMessage`` in ``_context.messages`` (the injection producers
+        append one, and a replayed marker or aside materialises as one), so the
+        render is a pure function of objects the map holds. The
+        ``has_entry`` guard is the belt on that brace — a copy whose id the
+        transcript does not hold is not a delivery a resume could paint, so it
+        keeps the rendered form rather than acquiring an identity no journal
+        can substantiate.
+
+        Deliberately limited to this one direction. Substituting in the other
+        (a custom the render never produced) would invent context; and a
+        context already anonymised by an older build is NOT healed here — it
+        heals on the next resume, where replay rehydrates the custom entries —
+        which is stated rather than implied because the alternative looks like
+        an omission. Each id is re-seated at most once, so two kept rows that
+        share a custom's id cannot collapse onto a single object.
+        """
+        sources: dict[str, CustomMessage] = {
+            message.id: message
+            for message in self._context.messages
+            if isinstance(message, CustomMessage)
+        }
+        restored: list[AgentMessage] = []
+        re_seated: set[str] = set()
+        for message in kept:
+            source = sources.get(message.id)
+            # ``re_seated`` is why the substitution is once per id: two kept rows
+            # can carry the same id (a duplicated delivery, a render emitted for
+            # both halves of a split), and collapsing both onto one object would
+            # silently drop the second row's content from the model's context —
+            # the one loss this whole pass must never cause. The second row keeps
+            # its rendered form, which is what it already is.
+            if (
+                source is not None
+                and message.id not in re_seated
+                and self._transcript.has_entry(message.id)
+            ):
+                re_seated.add(message.id)
+                restored.append(source)
+            else:
+                restored.append(message)
+        return restored
 
     async def _recover_if_request_too_large(self, error: BaseException | str) -> bool:
         """Graduated recovery from ``HTTP 413: Request exceeds the maximum size``.
@@ -3141,6 +3331,10 @@ class Session:
             self._tg_stack = stack
         self._handle_missed_wakes()
         await self._wake.pump()
+        # Narrate a cut-off this boot repaired BEFORE anything can open a turn,
+        # so the notice is in the live context the first turn reads. Deduped on
+        # the token, so a second open of the same session is silent.
+        await self._journal_restored_cut_off()
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -3560,6 +3754,49 @@ class Session:
         if not self._is_streaming:
             return set()
         return unanswered_tail_call_ids(self._context.messages)
+
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """The instant each in-flight call began, keyed by call id.
+
+        The local owner answers from its own folded state, which is the same
+        fold an attached viewer applies to the events it receives — one rule,
+        two transports — and this process is the PRODUCER of those stamps, so
+        the instants are the executor's own rather than a reconstruction.
+
+        Empty rather than raising when the store has not been built: the
+        accessor is read through ``getattr`` by hosts that may hold a reduced
+        facade, and "no live calls" is the honest answer for a session that
+        has never published state. Callers must treat a missing call id the
+        same way: withholding the clock, never defaulting the epoch.
+
+        Through the STORE, not ``frontend_state``: this runs once per tool
+        start on the event loop, and the property deep-copies the whole state
+        for a question about one small dict.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is None:
+            return {}
+        return store.live_tool_start_epochs()
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase, and the instant that phase began.
+
+        The local owner is the PRODUCER of the events this is folded from, so
+        the instants are its own rather than a reconstruction — which is why
+        the same phase a viewer reads off the wire is available here without one.
+
+        Read through the store rather than ``frontend_state``: the app asks this
+        on every event that moves the turn, and the property deep-copies every
+        job, usage row and trajectory for two scalars.
+
+        ``("", None)`` when the store has not been built — a facade with no
+        fold matches no phase, and the consumer withholds the clock rather than
+        counting from its own arrival.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is None:
+            return ("", None)
+        return store.activity_phase_clock()
 
     def context_breakdown(self) -> dict[str, int]:
         """On-demand token breakdown for the context the next request sends.
@@ -5906,6 +6143,146 @@ class Session:
         if store is not None:
             store.refresh_jobs(self)
 
+    def note_cut_off(self, cause: str, detail: str = "") -> None:
+        """Record WHY the current turn is being cut off, before it ends.
+
+        Called by the runtime's own exit paths — the dispose rung, a termination
+        signal, a retirement that caught a live turn — which are the only
+        writers that can classify the trigger. Deliberately suppressed once a
+        DELIBERATE stop was recorded for this turn: ``lop stop`` and SIGTERM
+        converge on the same clean-exit ordering (``ServingSessionHandle``), so
+        the dispose rung always runs and would otherwise relabel a user's own
+        cancel as an error — the one misclassification this taxonomy calls
+        worse than the bug it fixes.
+
+        A no-op on an idle session: the cause is consumed only by an
+        ``AgentEndEvent`` for the turn that was running, and it is cleared at
+        the head of the next one.
+
+        FIRST WRITER WINS. An exit is a sequence of rungs (a retirement latch,
+        then the stop rung, then the dispose), and the EARLIEST note is the
+        most specific one — a retirement that reaches disposal would otherwise
+        be relabelled a generic ``runtime-shutdown`` by the rung that merely
+        finishes the job. The one thing that outranks all of them is a
+        deliberate stop, which clears rather than fills (see
+        ``note_deliberate_stop``).
+        """
+        if not cause or self._deliberate_stop_noted or self._cut_off_cause:
+            return
+        self._cut_off_cause = cause
+        self._cut_off_detail = detail
+
+    def note_deliberate_stop(self) -> None:
+        """Record positive evidence that THIS turn is a user's own stop.
+
+        The taxonomy flips the default: with no evidence a cut-off is an ERROR,
+        and ``interrupted`` now has to be earned. This is how the stop rung
+        earns it, and it is why it must run BEFORE the dispose rung (which
+        notes an involuntary cause). Cleared per turn with
+        ``_cut_off_cause``.
+        """
+        self._deliberate_stop_noted = True
+        self._cut_off_cause = ""
+        self._cut_off_detail = ""
+
+    def _classify_cut_off(self, event: AgentEndEvent) -> AgentEndEvent:
+        """Re-label an involuntary abort as a CUT-OFF error before it is emitted.
+
+        A deliberate stop keeps today's shape (``aborted=True, error=None`` →
+        ``interrupted``). An involuntary one is rewritten to ``aborted=False,
+        error=<sentence>`` so every existing surface does the right thing
+        without being taught a new field: ``on_turn_ended`` appends its error
+        notice, ``_finalize_turn`` does NOT append the ``interrupted`` notice,
+        the title takes the ✗ mark (``failed=bool(error) and not aborted``),
+        ``_last_turn_outcome`` becomes ``"error"``, and
+        ``_publish_attention_outcome`` publishes ``error``. An OLD viewer that
+        has never heard of ``cut_off`` gets the same behaviour, which is the
+        backwards-compatibility requirement.
+
+        The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
+        name the cause precisely without re-deriving it from the vocabulary.
+
+        A turn that ALREADY ended with a real provider/tool error is left alone:
+        that error is a more specific diagnosis than "the runtime went away",
+        and overwriting it would throw away the only text that names the actual
+        fault. The guard reads ``event.error`` ALONE and not
+        ``event.error and not event.aborted`` (review round 1, MINOR-1): the loop
+        emits a provider failure on an aborted turn itself
+        (``harness/loop.py:945`` — ``aborted=True, error=<stream_error>``), so
+        the narrower test let a cut-off overprint the vendor's own "quota
+        exhausted" with a generic sentence, which is this method's contract
+        broken by its own guard. ``_publish_attention_outcome`` reads the verdict
+        back off the event (``cut_off_cause``), so the durable reason agrees with
+        the live row instead of naming a different failure.
+        """
+        cause = self._cut_off_cause
+        if not cause:
+            return event
+        if event.error:
+            return event
+        detail = self._cut_off_detail
+        return event.model_copy(
+            update={
+                "aborted": False,
+                "error": format_cut_off_notice(cause, detail=detail),
+                "cut_off": render_cut_off_reason(cause, detail=detail),
+                "cut_off_cause": cause,
+            }
+        )
+
+    async def _journal_restored_cut_off(self) -> None:
+        """Narrate the cut-off this boot repaired, ONCE, and stop asking.
+
+        MEMOISED BY CLEARING, which is the whole point of the clear rather than
+        housekeeping (review round 2, NIT-1). This is called from every attention
+        tick (1 Hz, ``refresh_attention``) and from ``async_init``, and
+        ``_journal_cut_off_once`` dedupes by SCANNING the transcript for the
+        token — measured at 0.71 ms per call on a 20k-entry transcript, paid
+        forever for a tuple that can only ever describe the one run this boot
+        already repaired.
+
+        Cleared BEFORE the await, not after: a tick that arrives while the
+        persist is in flight would otherwise start a second scan, and the second
+        narration is the duplicate the token dedupe exists to prevent.
+        """
+        restored = self._restored_cut_off
+        if restored is None:
+            return
+        _kind, cause, reason, token = restored
+        self._restored_cut_off = None
+        await self._journal_cut_off_once(token, reason, cause)
+
+    def _note_import_failure(self, exc: BaseException, module: str) -> bool:
+        """Record a lazy import that lost a name to a HALF-REPLACED install.
+
+        Conservative on purpose: ``update.classify_import_failure`` names the
+        cause ONLY when the install on disk has moved away from the build this
+        process booted from, so a genuine packaging bug keeps its ordinary
+        traceback instead of being mislabelled an install race. Returns whether
+        the cause was named.
+        """
+        from local_operator.update import classify_import_failure
+
+        reason = classify_import_failure(exc, module, boot=_process_boot_build())
+        if reason is None:
+            return False
+        logger.error("turn aborted by a mid-install import failure: %s", reason, exc_info=exc)
+        boot = _process_boot_build()
+        current = None
+        try:
+            from local_operator.update import installed_build
+
+            current = installed_build()
+        except Exception:  # noqa: BLE001 — the detail is a nicety
+            current = None
+        detail = (
+            f" ({boot.label()} → {current.label()})"
+            if boot is not None and current is not None and current.label() != boot.label()
+            else ""
+        )
+        self.note_cut_off("install-mid-update", detail)
+        return True
+
     async def refresh_attention(self) -> dict[str, Any]:
         """Reconcile cross-process receipts without changing the read watermark."""
         from local_operator.session.attention import (
@@ -5924,9 +6301,19 @@ class Session:
                 and saved.get("eligible", True)
             ):
                 await asyncio.to_thread(
-                    store.publish, identity, saved["token"], saved["anchor"], saved["kind"]
+                    store.publish,
+                    identity,
+                    saved["token"],
+                    saved["anchor"],
+                    saved["kind"],
+                    reason=str(saved.get("reason") or ""),
+                    cause=str(saved.get("cause") or ""),
                 )
             self._attention_restored = True
+        # The in-process TUI never calls ``async_init``, so this is its only
+        # route to the restored cut-off notice. Deduped on the token, so the
+        # runtime path (which calls both) narrates exactly once.
+        await self._journal_restored_cut_off()
         state = await asyncio.to_thread(store.state, identity)
         if state != self._attention:
             self._attention = state
@@ -5958,6 +6345,7 @@ class Session:
         self._attention_outcome = None
         if outcome is None:
             return
+        self._attention_run_settled = True
         # A delegating parent's first idle boundary is not a finished task.
         delegated = any(job.type == "task" and job.status == "running" for job in self.jobs.list())
         messages = [
@@ -5967,8 +6355,42 @@ class Session:
             and getattr(message, "role", None) == "assistant"
             and getattr(message, "text", "")
         ]
-        kind = "error" if outcome.error else "interrupted" if outcome.aborted else "complete"
+        # The classifier (``_classify_cut_off``) has already rewritten an
+        # unwanted cut-off into ``aborted=False, error=<notice>``, so this reads
+        # the two facts it needs rather than re-deriving them: ``cut_off`` says
+        # the end marker is an involuntary stop, and ``aborted`` alone still
+        # means the deliberate one.
+        #
+        # READ OFF THE EVENT, not off the local flag (review round 1, MINOR-1).
+        # The flag says a cut-off was NOTICED; the event says one was
+        # CLASSIFIED, and the two differ in exactly one case — a cut-off that
+        # coincided with a real provider error, which the classifier deliberately
+        # leaves alone. Reading the flag there would publish the cut-off sentence
+        # as the reason while the transcript, the live row and the model all hold
+        # the provider's message: the store and the surfaces disagreeing about
+        # one turn's failure is the class of bug this taxonomy exists to remove.
+        cut_off = bool(outcome.cut_off_cause)
+        kind = (
+            "error"
+            if (outcome.error or cut_off)
+            else "interrupted" if outcome.aborted else "complete"
+        )
         token = self._attention_run_token or str(uuid.uuid4())
+        # The DURABLE reason. For a cut-off it is the harness-authored cause
+        # sentence, never the live notice's longer framing: this string is what
+        # the sidebar, the phone and the next incident card print, and the
+        # tooltip has one line. A provider error keeps its own message, and a
+        # deliberate stop names itself so a later restore can tell it apart from
+        # an unexplained cut-off.
+        if cut_off:
+            cause = self._cut_off_cause
+            reason = render_cut_off_reason(cause, detail=self._cut_off_detail)
+        elif kind == "interrupted":
+            cause = DELIBERATE_CUT_OFF_CAUSE
+            reason = render_cut_off_reason(cause)
+        else:
+            cause = ""
+            reason = outcome.error or ""
         if kind == "complete" and (not messages or delegated):
             await self._transcript.append_custom(
                 ATTENTION_CUSTOM_TYPE,
@@ -5991,6 +6413,8 @@ class Session:
                 "token": token,
                 "anchor": anchor,
                 "kind": kind,
+                "cause": cause,
+                "reason": reason,
             },
         )
         self._attention = await asyncio.to_thread(
@@ -5999,7 +6423,15 @@ class Session:
             token,
             anchor,
             kind,
+            reason=reason,
+            cause=cause,
         )
+        # The model has to learn WHY even when this process survives the
+        # cut-off (a graceful termination signal aborts the turn and then exits,
+        # but a retirement that caught a live turn does not). Deduped on the
+        # token so a restore of the same run does not narrate it twice.
+        if cut_off:
+            await self._journal_cut_off_once(token, reason, cause)
         self.refresh_frontend_state()
 
     @property
@@ -6247,6 +6679,13 @@ class Session:
 
     async def _emit(self, event: AgentEvent) -> None:
         if isinstance(event, AgentEndEvent):
+            # BEFORE the handler fan-out and before the outcome fold: an
+            # involuntary cut-off is re-labelled here as a plain error with a
+            # named reason, so every existing consumer (the TUI's error notice,
+            # the title's ✗, the snapshot's ``last_turn_outcome``, the durable
+            # publish) does the right thing without being taught a new field. A
+            # deliberate stop is left exactly as it was.
+            event = self._classify_cut_off(event)
             self._attention_outcome = event
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
@@ -6258,6 +6697,10 @@ class Session:
                 self._last_turn_outcome = "aborted"
             else:
                 self._last_turn_outcome = "completed"
+            # Rides the snapshot beside the outcome so a viewer that rebinds
+            # after the turn settled can name the cause instead of the "turn
+            # failed" placeholder.
+            self._last_turn_cut_off = event.cut_off
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -6317,8 +6760,19 @@ class Session:
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
             # compaction, pruning, or a fold; unchanged events do no extra work.
+            #
+            # The read is `read_field`, NOT `store.state.history_generation`:
+            # the `state` property deep-copies every job, usage row and
+            # trajectory (it exists so no caller can mutate the store's own
+            # instance), so asking it for one int charged that clone on EVERY
+            # emitted event — every streaming delta — for every session with
+            # any subscriber. `history_generation` is in the store's
+            # ``_SHAREABLE_STATE_FIELDS`` allow-list precisely so this read
+            # can hand back the int itself. Symptom it caused: a parked
+            # sidebar source is a subscriber, so opening the sidebar re-armed
+            # the clone on sessions whose own terminal was elsewhere.
             replay_generation = self._transcript._history_generation
-            if store.state.history_generation != replay_generation:
+            if store.read_field("history_generation") != replay_generation:
                 store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
         for handler in list(self._handlers):
@@ -6507,6 +6961,16 @@ class Session:
             begin_message()
         self._attention_outcome = None
         self._attention_run_token = str(uuid.uuid4())
+        # This run has not yet said how it ended; a teardown that finds it so
+        # must publish the outcome itself (see ``Session.dispose``).
+        self._attention_run_settled = False
+        # Cleared at the head of EVERY turn, alongside the outcome, so a cause
+        # noted for a previous turn cannot label this one: the end event that
+        # consumes it is emitted from THIS turn's finally, and a stale cause
+        # would otherwise turn a healthy turn into an error.
+        self._cut_off_cause = ""
+        self._cut_off_detail = ""
+        self._deliberate_stop_noted = False
         from local_operator.session.attention import conversation_identity
 
         # A process dying after result persistence but before outcome publication
@@ -6528,6 +6992,16 @@ class Session:
                 may_drop=may_drop,
             )
             await self._drain_continuation()
+        except ImportError as exc:
+            # A lazy import against a HALF-REPLACED install is the one failure
+            # whose cause the traceback cannot state: ``lop-update`` replaces
+            # the installed tree in place, so the module may resolve while the
+            # NAME does not (design §1.6/§5.2). Named here — and re-raised, so
+            # today's error reporting is unchanged — because this is the only
+            # point in the turn that sees the exception without a provider
+            # adapter having already flattened it into a message.
+            self._note_import_failure(exc, "local_operator.session.session")
+            raise
         finally:
             self._turn_task = None
             await self._flush_held_end()
@@ -7361,7 +7835,7 @@ class Session:
         if parked:
             self._context.messages.extend(parked)
 
-    async def journal_incident(self, raw: str) -> None:
+    async def journal_incident(self, raw: str, *, token: str = "", rendered: str = "") -> None:
         """Persist and surface WHY the session last failed.
 
         The failover cascade rotates credentials and models and its notices
@@ -7372,6 +7846,13 @@ class Session:
         appended to the LIVE context so the very next turn sees it, and
         persisted so ``--resume`` replays it.
 
+        ``rendered`` overrides the classifier's own text for the one caller
+        whose incident is harness-authored rather than provider-derived: a
+        cut-off has no vendor text to classify, so its reason is built from
+        ``incidents.CUT_OFF_CAUSES`` and must not be pushed back through the
+        substring rules. ``token`` rides in ``details`` so the same orphaned
+        run is narrated at most once (see ``_journal_cut_off_once``).
+
         Holds ``_journal_lock`` across the persist-then-append pair so a
         notice fired immediately after cannot overtake it: this method awaits a
         transcript write and :meth:`journal_mcp_recovery` awaits nothing, so
@@ -7381,11 +7862,14 @@ class Session:
 
         if self._disposed or not raw:
             return
-        text = format_incident_message(raw, self._model.provider, self._model.model_id)
+        text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
+        if token:
+            details["token"] = token
         message = CustomMessage(
             custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
             attribution="system",
-            details={"text": text, "raw": raw[:1000]},
+            details=details,
         )
         try:
             async with self._journal_lock:
@@ -7393,6 +7877,41 @@ class Session:
                 self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
+
+    async def _journal_cut_off_once(self, token: str, reason: str, cause: str) -> None:
+        """Narrate one run's cut-off into the transcript, at most once.
+
+        The dedupe is on the TOKEN, and it is load-bearing rather than tidy:
+        an orphaned ``attention_started`` stays in the transcript forever (its
+        repair lives in the attention store, not the journal), so
+        ``_import_transcript_outcome`` re-classifies the same run on every boot.
+        Without this the model would be told about one cut-off once per open,
+        each time as if it were news.
+
+        The scan is over the transcript's own rows rather than a
+        ``latest_custom`` call, and that is a correction to the design rather
+        than a stylistic choice: ``Transcript._index_entry`` only indexes
+        ``ENTRY_CUSTOM`` rows for ``latest_custom``, while an incident is
+        written as a ``CustomMessage`` — a ``message`` row carrying
+        ``custom_type`` in its payload — precisely so the model sees it in the
+        live context. A ``latest_custom`` probe therefore returns ``None`` for
+        every incident this code has ever written and would let each boot
+        narrate again (measured: two identical rows after two boots). Scanning
+        the payloads also removes the design's accepted weakness that a later
+        incident of any kind would hide an older cut-off's token.
+        """
+        if self._disposed or not token:
+            return
+        try:
+            for entry in self._transcript.entries():
+                if entry.payload.get("custom_type") != SESSION_INCIDENT_MESSAGE_TYPE:
+                    continue
+                details = entry.payload.get("details")
+                if isinstance(details, dict) and str(details.get("token") or "") == token:
+                    return
+        except Exception:  # noqa: BLE001 — a dedupe read must not block the notice
+            pass
+        await self.journal_incident(reason, token=token, rendered=format_cut_off_raw(reason))
 
     async def journal_model_switch(
         self,
@@ -8948,9 +9467,15 @@ class Session:
             # resume and ``/export`` keep their frames; this keeps the LIVE
             # context honest too. The strip still applies to what the next
             # request SENDS (``_render_history`` re-renders on the way out).
-            kept = self._render_for_compaction(keep_images=True)[plan.cut :]
-            if not kept:
-                kept = plan.llm_history[plan.cut :]
+            rendered = self._render_for_compaction(keep_images=True)[plan.cut :]
+            if not rendered:
+                # The fallback is the plan's STRIPPED history, so it goes through
+                # the same identity restore as the render above — the two paths
+                # must not differ in whether a receipt survives a pass, and a
+                # fallback that skipped it would be invisible until a delivery
+                # happened to land on it.
+                rendered = plan.llm_history[plan.cut :]
+            kept = self._restore_custom_sources(rendered)
             summary, preserve_data = (
                 summarized
                 if summarized is not None
@@ -10586,6 +11111,11 @@ class Session:
         """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
         time, so swapping the hook (resume catch-up shim) takes effect without
         rebuilding the scheduler."""
+        # Marked before the hook runs, not after: a delivery that RAISES still
+        # advances the schedule (the scheduler's documented behaviour, so one
+        # broken wake cannot become a hot loop), so it must still count as a
+        # fire for the purpose of "when did this last go off".
+        self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
     def _prepare_missed_wake_catchup(self) -> None:
@@ -10788,18 +11318,31 @@ class Session:
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
-        self._write_wake_index_entry(schedules, clear=())
+        # A persist that follows a delivery stamps `last_fired_at`. The
+        # scheduler's pump delivers and THEN persists the advanced list, so
+        # the flag set at delivery is still standing here; consuming it (not
+        # just reading it) keeps a later unrelated persist — the wake tool
+        # adding a schedule, say — from restamping a fire that did not happen.
+        stamp = "last_fired_at" if self._wake_fired_since_persist else ""
+        self._wake_fired_since_persist = False
+        self._write_wake_index_entry(schedules, clear=(), stamp=stamp)
         if schedules:
             self._ensure_wake_supervisor()
 
     def _rebuild_wake_index_entry(self) -> None:
         """Open-time rewrite of the index entry from the scheduler's adopted
         rows. Clears ``stopped_at``: a stopped session's wakes are dormant
-        only until someone opens it again, and opening is exactly this."""
-        self._write_wake_index_entry(list(self._wake.schedules), clear=("stopped_at",))
+        only until someone opens it again, and opening is exactly this.
+
+        Stamps ``last_attempt_at``: a runtime existing for this session is
+        precisely what the supervisor engages to achieve, so this is where
+        "the wake machinery got this far" becomes observable."""
+        self._write_wake_index_entry(
+            list(self._wake.schedules), clear=("stopped_at",), stamp="last_attempt_at"
+        )
 
     def _write_wake_index_entry(
-        self, schedules: list[WakeSchedule], *, clear: tuple[str, ...]
+        self, schedules: list[WakeSchedule], *, clear: tuple[str, ...], stamp: str = ""
     ) -> None:
         """Best-effort index write. Swallows everything: see
         :meth:`_persist_wake_schedules` for why a failure here must not
@@ -10823,6 +11366,21 @@ class Session:
             # child), and the directory should not be touched twice for a
             # file that almost never exists.
             existing = wake_store.read_entry(root, self._session_id) if schedules else None
+            if stamp:
+                # LATENESS TELEMETRY, written by the one writer of schedule
+                # state. The supervisor deliberately never writes here (it
+                # would then be able to disagree with the session about what
+                # has fired), so the only way `lop wake status` can report how
+                # late a wake actually was is for the session to record these
+                # two instants as it passes them:
+                #
+                #   last_attempt_at — a runtime came up for this session
+                #   last_fired_at   — a wake was actually delivered
+                #
+                # The gap between `next_due_at` and these is the lateness the
+                # whole defect was invisible for. They ride on `preserve`, so
+                # an ordinary persist that stamps neither keeps both.
+                existing = {**(existing or {}), stamp: int(time.time() * 1000)}
             wake_store.write_entry(
                 root,
                 self._session_id,
@@ -11043,7 +11601,17 @@ class Session:
                 logger.warning("dropping malformed persisted subagent row: %r", raw)
         if rows:
             try:
-                self.jobs.restore(rows)
+                # RESOLVE BEFORE RESTORE, through the SAME resolver the cold
+                # viewer uses (``session/restored_rows.py``). This is the writer
+                # that matters for what the user ends up looking at: the manager
+                # publishes this table as the session's roster, so rows restored
+                # raw would replace the viewer's record-resolved rows within a
+                # second of the session opening — a settled ``completed`` child
+                # back to a blanket ``interrupted``, with the cause dropped
+                # (UX review round 1, U2). ``AsyncJobManager.restore`` cannot do
+                # this itself: the record facts live here, in the roster
+                # payload, and not in the manager's table.
+                self.jobs.restore(resolve_restored_rows(rows, roster_records(details)))
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent job rows", exc_info=True)
         if isinstance(details.get("accounting"), list):
@@ -11622,8 +12190,8 @@ class Session:
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
                 self._web_tools_dirty = True
-        if "hosting" in changed or "model_name" in changed:
-            self._on_configured_model_changed(values, local=source == "local")
+        if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
+            self._on_configured_model_changed(values, local=source == "local", changed=changed)
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -11655,7 +12223,9 @@ class Session:
             return
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
-    def _on_configured_model_changed(self, values: Mapping[str, Any], *, local: bool) -> None:
+    def _on_configured_model_changed(
+        self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]
+    ) -> None:
         """Defaults seed NEW conversations; reloading them never selects a model.
 
         A watcher cannot identify which pane authored an edit. Local commands
@@ -11711,25 +12281,79 @@ class Session:
         per-tick coalescing of the notice, which a source flag cannot express.
         The fix is scoped to ``local`` because ``source`` identifies that
         writer set exactly, not because tearing is impossible elsewhere.
+
+        ``model_effort`` is part of the SAME predicate, for the reason the pair
+        is: it is the third key of the same ``model`` section, it governs the
+        same birth defaults, and the TUI's own listener skips the whole
+        ``model`` section (a local write is the author's own receipt). Without
+        it an effort-only edit from ANOTHER process would change new sessions'
+        default with no signal anywhere — the one member of the section that
+        moved silently. The notice's advice is now literally true: ``/model
+        saved`` adopts the configured effort here, so naming the change is
+        naming the thing the user can act on.
+
+        The third member is detected as a CHANGE rather than inferred from values
+        (round-3 ruling). ``ConfigChange.changed_keys`` states which registry key
+        actually moved, so the rule is: the pair still matches this session's
+        model AND ``model_effort`` is one of the keys that moved. That is the
+        form that satisfies every case at once. A value comparison cannot: it has
+        to decide what the session's "own" level is, and each such rule
+        mis-fires in one direction — comparing against the raw spec field made
+        an unrelated delivery announce for every seed-carrying model (M2);
+        normalising a seed to ``""`` made an unrelated same-value write announce
+        for a session holding a DELIBERATE level (Q2); and it made a genuine
+        move to ``""`` (the user clearing the key) silent for a session on the
+        seeded level (Q3) — the one member of this section the effort term
+        exists to keep audible. A key that moved is a fact about the writer, not
+        a guess about the reader.
         """
         if self._job_id is not None:
             return
         if local:
             return
-        if (values.get("hosting"), values.get("model_name")) == (
-            self.model.provider,
-            self.model.model_id,
+        if values.get("hosting") != self.model.provider or (
+            values.get("model_name") != self.model.model_id
         ):
+            # The model default itself moved: the #785 notice, unchanged.
+            self._spawn_background(
+                self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"keeping {self.model_label}; default changed for new sessions. "
+                            "/model saved adopts it here"
+                        ),
+                        kind="info",
+                        headline="Model unchanged",
+                    )
+                )
+            )
             return
+        if "model_effort" not in changed:
+            # The pair still matches and no effort key moved: a delivery that
+            # changed nothing this session follows. The ordinary case is an
+            # unrelated rewrite of `model_name` to the SAME value (or a two-key
+            # save that re-states the pair) — announcing there was M2/Q2.
+            return
+        # An EFFORT-ONLY delivery: name the member that moved and the value it
+        # moved to. "Model unchanged" with an unnamed "a default changed" was
+        # literally true and still left the reader unable to tell WHICH default
+        # without opening `/settings` (U6).
+        #
+        # No model label on this row (U7): the pair MATCHES this session's model
+        # by construction here, so `keeping <label>` restated what the status band
+        # already shows — and the 24 cells it cost were what pushed a 120-cell
+        # row past the 110-cell budget at 120 columns, orphaning the pointer.
+        # The label belongs on the branch above, where the pair really moved.
+        stored_effort = str(values.get("model_effort") or "")
         self._spawn_background(
             self._emit(
                 NoticeEvent(
                     text=(
-                        f"keeping {self.model_label}; default changed for new sessions. "
-                        "/model saved adopts it here"
+                        "reasoning effort default changed for new sessions "
+                        f"({stored_effort or 'auto'}); /model saved adopts it here"
                     ),
                     kind="info",
-                    headline="Model unchanged",
+                    headline="Effort default changed",
                 )
             )
         )
@@ -11907,6 +12531,14 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # In-process disposal is a cut-off for whatever turn is running: this
+        # path is reached by a host tearing a session down directly (the
+        # runtime's own handle disposes through ``ServingSessionHandle``, which
+        # notes its more specific cause FIRST, and first-wins keeps that one).
+        # Harmless when nothing is in flight — the cause is consumed only by the
+        # running turn's end event — and suppressed outright after a deliberate
+        # stop, so a user's own cancel is never relabelled.
+        self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -11940,6 +12572,33 @@ class Session:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
                 except BaseException:  # noqa: BLE001 — dispose must always proceed
                     pass
+            if self._attention_run_token is not None and not self._attention_run_settled:
+                # STILL OWES AN OUTCOME, and nothing else will write one. A turn
+                # parked in a TOOL is cancelled at its await, so the loop never
+                # reaches the ``AgentEndEvent`` it would otherwise yield: the
+                # pipeline's finally runs `_publish_attention_outcome` with
+                # `_attention_outcome` unset and the run leaves NO durable
+                # outcome. A restore then reclassified it from absence and
+                # reported a user's own `/stop` as an unexplained cut-off —
+                # reproduced on a real runtime, so the design's "the deliberate
+                # stop is recorded in the outcome marker itself" did not hold
+                # for the one shape the operator actually hits.
+                #
+                # Keyed on the RUN and its settled flag rather than on the turn
+                # TASK being live: a prompt dispatched over the control socket is
+                # cancelled when that socket closes, so by the time dispose looks
+                # the task is already done and "was a turn live?" answers no for
+                # exactly the case this exists for. Synthesising the end goes
+                # through the SAME classifier and publisher, so the
+                # deliberate/error split is still decided in one place.
+                try:
+                    if self._attention_outcome is None:
+                        self._attention_outcome = self._classify_cut_off(
+                            AgentEndEvent(messages=[], aborted=True)
+                        )
+                    await self._publish_attention_outcome()
+                except Exception:  # noqa: BLE001 — teardown must always proceed
+                    logger.warning("could not publish a disposed turn's outcome", exc_info=True)
             # The browser surface is session-scoped and lives in the user's own
             # browser, so an unclosed one is a tab THEY have to close by hand.
             # After the turn has stopped (so nothing is mid-navigation on it)

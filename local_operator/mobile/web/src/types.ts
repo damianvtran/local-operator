@@ -213,6 +213,11 @@ export interface SessionProjection {
 	    first turn ends. The resume affordance reads this, never an inference
 	    from the streaming flag flipping. */
 	stop_reason: string;
+	/** True when that turn was CUT OFF by the harness rather than stopped on
+	    purpose. The composer's word follows it, so the button agrees with the
+	    danger notice above it. Optional because an older daemon omits the field
+	    entirely; absent means false, which is also what a deliberate stop is. */
+	cut_off?: boolean;
 	/** User messages waiting for the turn boundary. */
 	queued_count: number;
 	/** Process gone; history still resumable. */

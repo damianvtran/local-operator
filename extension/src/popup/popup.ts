@@ -25,6 +25,7 @@ type State =
   | "pairing"
   | "disconnected"
   | "incompatible"
+  | "unresponsive"
   | "origin"
   | "origin-ack"
   // The neutral pre-render placeholder. Never shown BY render() — it is the
@@ -36,6 +37,7 @@ const sections = [
   "pairing",
   "disconnected",
   "incompatible",
+  "unresponsive",
   "origin",
   "origin-ack",
   "pending",
@@ -108,7 +110,23 @@ let scopeBuiltForEntryId: string | undefined;
 const repeatAskByOrigin = new Map<string, DecidedOrigin>();
 
 interface Health {
+  /** The daemon's liveness bit for the socket. DECLARATIVE ONLY: the card choice
+   * below reads `paired` and `extension_unresponsive` instead, because "the
+   * socket is open" is not the question the user is asking (a paired,
+   * not-attached link — Chrome up, worker between dials — is `false` here and
+   * still renders the connected card; see the recorded D2-4 follow-up). Kept in
+   * the type because /health is the wire contract, not because this module
+   * consumes it. */
   extension_connected: boolean;
+  /** The socket is attached but the worker has stopped answering — either
+   * still attached and mute, or severed by the daemon for silence within its
+   * cooling-off window (`LINK_DROP_TTL_S`). The daemon reports it so this card
+   * can stop claiming the agent can drive when it cannot (design D4). Optional
+   * in the type because an older daemon simply does not send it. */
+  extension_unresponsive?: boolean;
+  /** Whether a link is attached right now; not the same as healthy. Paired
+   * with the flag above so a render can say what it actually observes. */
+  link_attached?: boolean;
   paired: boolean;
   browser: string;
   current_url?: string;
@@ -127,6 +145,10 @@ const TONE: Record<State, string> = {
   pairing: "var(--hairline-strong)",
   disconnected: "var(--hairline-strong)",
   incompatible: "var(--danger)",
+  // Danger, like `incompatible`: the user must recover this themselves and the
+  // agent cannot do it for them. It is emphatically NOT success — a green card
+  // over a mute worker is the symptom the incident was made of.
+  unresponsive: "var(--danger)",
   origin: "var(--hairline-strong)",
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
@@ -150,39 +172,93 @@ let pairingShown = false;
 // because renders are serialised — see daemonHealth().
 const HEALTH_TIMEOUT_MS = 3000;
 
-// The last known pairing outcome, mirrored into localStorage so the FIRST
-// PAINT can size itself.
+// The pinned #pending height this browser last settled on, mirrored into
+// localStorage so the FIRST PAINT can size itself.
 //
 // #pending is the only section shipping visible, so it paints on every open,
 // before render()'s awaits resolve. Its pinned height therefore decides how far
-// the card travels when the real state arrives. Pinned to the pairing form the
-// first-run user settles with no motion but the already-paired user — who opens
-// this popup for the rest of the product's life — falls ~121px. chrome.storage
+// the card travels when the real state arrives — pinned to the pairing form the
+// first-run user settles with no motion but the already-paired user, who opens
+// this popup for the rest of the product's life, falls ~121px. chrome.storage
 // is async and so cannot inform a synchronous first paint; localStorage on an
-// extension page is synchronous, so the bit is mirrored there purely as a
-// LAYOUT HINT.
+// extension page is synchronous, so the pinned height is mirrored there purely
+// as a LAYOUT HINT.
+//
+// It records the PIN rather than a boolean derived from /health (design D3-1).
+// A boolean could only ever name two of the three measured states, so a browser
+// in the third — the wedged-but-paired worker this PR exists for — opened at
+// whichever of the two the boolean happened to collapse to and then grew the
+// difference: measured 86px → 378.8px, a 167.8px reflow in the state whose copy
+// sends the user to "Check again". The pin is written by show(), i.e. for the
+// card that was actually rendered, so a repeated open reproduces the height
+// already on screen.
 //
 // It is a hint and nothing else: it never gates behaviour, and render() paints
-// whatever /health actually reports. A stale or absent bit costs one resize,
+// whatever /health actually reports. A stale or absent pin costs one resize,
 // which is exactly the behaviour without it — so there is nothing to fail
-// closed about, and no security surface (it records that a pairing happened,
-// never a credential).
-const PAIRED_HINT_KEY = "lop:paired-hint";
+// closed about, and no security surface (it records a card height, never a
+// credential).
+const PIN_HINT_KEY = "lop:pin-hint";
+// The previous revision stored a BOOLEAN under its own key. It is read once, as
+// a fallback, so an already-paired browser's first open after the rename does
+// not pay a resize for it: "1" meant the connected card. Nothing writes the old
+// key again, and a stale "0" is indistinguishable from absent — both mean "no
+// hint", which falls back to the tall pin.
+const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 
-function readPairedHint(): boolean {
+// The pin that belongs to each state, measured at 300x600 against the card this
+// popup renders. The pin is `#pending`'s min-height and the card's own chrome
+// (padding, the driven-URL trough, the actions row) is the constant between
+// them, so a pin is the state's total card height minus that chrome:
+//
+//   connected card      211.2px  ->  86px
+//   pairing form        344.0px  -> 219px
+//   unresponsive card   378.8px  -> 254px
+//
+// A state with no entry keeps the last hint. That is deliberate: only these
+// three were measured in a real render, and a pin for the rest would be a pixel
+// guess no frame backs — while an unmeasured state costs exactly the one
+// resize a browser with no hint at all gets. Re-measure all three together when
+// any of them moves: a stale pin IS the resize this whole block exists to
+// prevent (popup.css carries the same numbers).
+//
+// The `connected` figure is the card with an EMPTY driven-URL trough. The same
+// state is taller once a URL is in it — a settled 257.3px (and 292.1px for the
+// long-URL variant) against this table's 211.2px, +47.3px / +82.1px of reopen
+// growth. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and it
+// was measured identical across the pre-PR base and both remediation heads: the
+// hint records the height the browser last SETTLED on, so a card whose text
+// changes between opens pays one resize either way, and a per-state constant
+// cannot express a height that depends on the URL. Do not add one here; the
+// provenance lives in PR #996's D3-1 note. Re-measuring `connected` with a URL
+// present will therefore read ~257px and is not a contradiction of this table.
+const PIN_CONNECTED = "86px";
+const PIN_PAIRING = "219px";
+const PIN_UNRESPONSIVE = "254px";
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+const PIN_BY_STATE: Partial<Record<State, string>> = {
+  connected: PIN_CONNECTED,
+  pairing: PIN_PAIRING,
+  unresponsive: PIN_UNRESPONSIVE,
+};
+
+/** The pinned height this browser last settled on, or null for "no hint". */
+function readPinHint(): string | null {
   try {
-    return localStorage.getItem(PAIRED_HINT_KEY) === "1";
+    const stored = localStorage.getItem(PIN_HINT_KEY);
+    if (stored !== null && PINS.includes(stored)) return stored;
+    return localStorage.getItem(LEGACY_PAIRED_HINT_KEY) === "1" ? PIN_CONNECTED : null;
   } catch {
-    // Storage can be unavailable (disabled, quota, partitioned context). The
-    // unpaired pin is the safe default: it is the state a user who cannot be
-    // identified is most likely to be in on their first open.
-    return false;
+    // Storage can be unavailable (disabled, quota, partitioned context). No
+    // hint is the safe answer: it is the behaviour this popup had before the
+    // hint existed, and it is what a browser we cannot identify must get.
+    return null;
   }
 }
 
-function writePairedHint(paired: boolean): void {
+function writePinHint(pin: string): void {
   try {
-    localStorage.setItem(PAIRED_HINT_KEY, paired ? "1" : "0");
+    localStorage.setItem(PIN_HINT_KEY, pin);
   } catch {
     // A hint that cannot be stored simply is not used next time.
   }
@@ -190,20 +266,25 @@ function writePairedHint(paired: boolean): void {
 
 /** Size the pre-render placeholder to the state it is most likely to become,
  * so the first paint settles without moving the popup window. Called inline at
- * module scope, before the first paint, and again whenever the hint changes. */
+ * module scope — before the first paint — and again from show(), which is where
+ * the hint is learned. */
 function applyPendingPin(): void {
   const pending = document.getElementById("pending");
   if (!pending) return;
-  // Measured at 300x600 against THIS card: 86px lands the card on connected's
-  // height (207px), 219px on the pairing form's (340px). Re-measure both if the
-  // pairing form or the error slot changes height — a stale pin is a resize.
-  pending.style.minHeight = readPairedHint() ? "86px" : "219px";
+  pending.style.minHeight = readPinHint() ?? PIN_PAIRING;
 }
 applyPendingPin();
 
 function show(state: State): void {
   for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
   document.getElementById("card")?.style.setProperty("--tone", TONE[state]);
+  // Record the pin for the card being painted, so the NEXT open starts at the
+  // height this one settles on (design D3-1). Here rather than at the call
+  // sites because show() is the single point that decides which card is on
+  // screen — every render path funnels through it, and one of them picking the
+  // wrong pin is exactly the defect this replaced.
+  const pin = PIN_BY_STATE[state];
+  if (pin) writePinHint(pin);
   if (state === "pairing") {
     const input = document.getElementById("pair-code") as HTMLInputElement | null;
     // Focus only a form the user has NOT been looking at. `pairingShown` is
@@ -434,10 +515,34 @@ async function renderOnce(): Promise<void> {
     show("incompatible");
     return;
   }
-  // /health is the authority on whether this browser is paired, so it is what
-  // the first-paint layout hint is mirrored from — in BOTH directions, so an
-  // unpair shrinks the next first paint back to the form's height.
-  writePairedHint(health.paired);
+  // /health is the authority on whether this browser is paired, and the two
+  // cards below are what decide which pin show() records for the next open.
+  // Nothing is mirrored from /health here: the previous revision derived a
+  // BOOLEAN from `paired || extension_unresponsive` and the wedge state — which
+  // renders the honest card below, not the pairing form — is precisely the one
+  // the boolean could not express, so every reopen of it started at the
+  // connected card's height and grew 167.8px into this card (design D3-1,
+  // measured 86px → 378.8px). show() records the pin per card instead.
+  // The worker is wedgeable in a way the socket does not show: attached, paired,
+  // and answering nothing. Say so instead of painting the green "Connected."
+  // card over a browser the agent cannot drive — that card is exactly what the
+  // incident looked like from this popup (design D4). One render after the state
+  // clears, the card returns to normal, because this reads /health on every
+  // render like everything else here.
+  //
+  // Read BEFORE the `paired` gate, deliberately. `paired` here is link-derived
+  // (`daemon.py`: it is false once the daemon has severed the link), while the
+  // daemon's own `paired:` line — and the pairing on disk — are still true. So a
+  // gate on `paired` made this card unreachable in exactly the half of its
+  // window it exists for: the post-drop cooling-off period, where the popup fell
+  // through to the PAIRING FORM ("Enter the code shown in Local Operator") for a
+  // browser that is paired on disk and about to re-dial (QA Q2-3 / review R2-5).
+  // Keyed on the latch, which is the daemon's statement about the link, not on
+  // the link's own copy of `paired`.
+  if (health.extension_unresponsive === true) {
+    show("unresponsive");
+    return;
+  }
   if (health.paired) {
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
@@ -648,6 +753,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
+document.getElementById("retry-unresponsive")?.addEventListener("click", () => void render());
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {
