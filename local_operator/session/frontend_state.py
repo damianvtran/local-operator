@@ -28,7 +28,19 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Callable
+
+    #: The duck-typed session members this store calls when a real session is
+    #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
+    #: signature rather than passing ``object`` around; the guard itself is the
+    #: runtime contract, and a reduced host simply has none of them.
+    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    SeedSpendFn = Callable[..., SessionSpend]
+    ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
+    IdentityFn = Callable[[Any], dict[str, str]]
 
 from pydantic import (
     BaseModel,
@@ -62,6 +74,11 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
+from local_operator.session.spend import (
+    SessionSpend,
+    serving_identity,
+    usage_prices_known,
+)
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -3119,6 +3136,10 @@ class FrontendStateStore:
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
         self._todo_sequences: dict[str, int] = {}
         self._todo_seed_floor = state.sequence
+        #: The accumulator for a host whose session exposes none (a reduced
+        #: facade, a test double). ONE arithmetic site still: this is the same
+        #: ``SessionSpend``, not a second sum computed here.
+        self._local_spend: SessionSpend | None = None
 
     @property
     def state(self) -> FrontendSessionState:
@@ -3631,7 +3652,18 @@ class FrontendStateStore:
                 child_costs[job.id] = cost
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
-        if parent_cost is None and last_usage is not None:
+        # The record is the durable money and it is newer than the checkpoint's
+        # turn-end copy, so it wins when it exists at all. A pre-ledger session
+        # has no record, so its best legacy figure is SEEDED into the accumulator
+        # here and read back from it below -- which is what keeps the total
+        # continuous when the first live call lands (the per-call branch adds to
+        # the same number instead of replacing it).
+        self._seed_legacy_spend(session, last_usage if isinstance(last_usage, Usage) else None)
+        spend = self._spend_of(session)
+        if spend.calls:
+            parent_cost = spend.usd
+            knowledge = spend.knowledge()
+        elif parent_cost is None and last_usage is not None:
             cost = turn_cost(_label(effective), last_usage)
             if cost is not None:
                 parent_cost = cost
@@ -3784,8 +3816,129 @@ class FrontendStateStore:
             self.mutate(**changes)
         return self.state
 
+    def _spend_of(self, session: Any) -> SessionSpend:
+        """The session's spend accumulator, or one owned by this store.
+
+        The fallback exists for hosts that expose no session accumulator (a
+        reduced facade or a test double). It is the SAME value object, so the
+        money still has exactly one arithmetic site; only its owner differs.
+        """
+        spend = getattr(session, "spend", None)
+        if isinstance(spend, SessionSpend):
+            return spend
+        if self._local_spend is None:
+            self._local_spend = SessionSpend()
+        return self._local_spend
+
+    def _accrue_call(self, session: Any, usage: Usage, paint_cost: float | None) -> SessionSpend:
+        """Count ONE provider call and hand its price off the loop.
+
+        Called from both per-call accrual sites (the event stream and detached
+        leaf calls) so a call is billed once whichever path saw it. The paint
+        cost is the optimistic figure the band paints this tick; the session's
+        off-loop pricer converges it to the full resolver's answer, which is the
+        only one that can price the models the paint resolver cannot (§2.4).
+        """
+        spend = self._spend_of(session)
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        # A store whose state already carries a cost (a restored checkpoint, or
+        # a host holding one outside the accumulator) must not lose it the
+        # moment the first live call lands: seed the accumulator from it first,
+        # so the addition below builds on that number rather than replacing it.
+        #
+        # ``usage=None`` deliberately: THIS call's receipt is not legacy state,
+        # and letting the seed price it would bill the call twice.
+        self._seed_legacy_spend(session, None)
+        micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
+        # ``cast`` rather than a bare call: these are duck-typed members on a
+        # session facade (a reduced host may not have them at all), so pyright
+        # sees ``object`` where the runtime contract is the call signature
+        # below. The ``callable`` guard IS the runtime contract.
+        accrue = getattr(session, "accrue_spend", None)
+        if callable(accrue):
+            index = int(cast("AccrueSpendFn", accrue)(micro, identity))
+        else:
+            index = spend.accrue(micro, identity)
+        schedule = getattr(session, "schedule_spend_price", None)
+        if callable(schedule) and not usage_prices_known(usage):
+            # A provider receipt is already the exact bill; nothing to converge.
+            cast("ScheduleSpendFn", schedule)(index, usage, identity)
+        return spend
+
+    def _spend_remainder(self, session: Any, remainder: float) -> SessionSpend:
+        """Apply a turn-end remainder to the accumulator, if it is worth one."""
+        self._seed_legacy_spend(session, None)
+        spend = self._spend_of(session)
+        delta = int(round(remainder * 1_000_000))
+        adjust = getattr(session, "adjust_spend", None)
+        if callable(adjust):
+            adjust(delta)
+        else:
+            spend.adjust(delta)
+        return spend
+
+    def _seed_legacy_spend(self, session: Any, usage: Any) -> SessionSpend | None:
+        """Start a pre-record session's accumulator from its best legacy figure.
+
+        The best available source, in order: the store's own restored cost (a
+        checkpoint's whole accumulator, 7.7% of the real store), then the one
+        restored receipt priced on its own serving identity. Both are FACTS
+        about money this session spent; neither is this accumulator's own sum,
+        which is why the seed carries ``≥``.
+
+        Returns ``None`` for a host with no session accumulator (a reduced
+        facade), which then keeps the plain float path it always had.
+        """
+        spend = self._spend_of(session)
+        # "Already has state" is a NONZERO TOTAL as well as a call count: a
+        # turn-end remainder can put money in the accumulator with no per-call
+        # accrual (an AgentEndEvent whose calls were never seen individually),
+        # and seeding over it would bill the turn twice.
+        if spend.calls or spend.micro:
+            return spend
+        legacy = self._state.cumulative_parent_cost
+        knowledge = self._state.cost_knowledge
+        if not legacy and isinstance(usage, Usage):
+            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
+            if cost:
+                legacy = cost
+                knowledge = CostKnowledge.FLOOR
+        if not legacy:
+            return None
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        micro = int(round(float(legacy) * 1_000_000))
+        seed = getattr(session, "seed_spend_floor", None)
+        if callable(seed):
+            return cast("SeedSpendFn", seed)(
+                micro, identity, floor=knowledge is not CostKnowledge.EXACT
+            )
+        # No session accumulator at all (a reduced facade or a test double): the
+        # store's own accumulator still has to continue from the state it was
+        # handed, or the first live call would replace that money instead of
+        # adding to it. Same value object, one arithmetic site.
+        spend.accrue(micro, identity)
+        spend.floor = knowledge is not CostKnowledge.EXACT
+        return spend
+
     def refresh_restored_usage(self, session: Any) -> FrontendUpdate | None:
-        """Price the restored point-in-time reading without rescanning state."""
+        """Publish the restored point-in-time reading and the durable spend.
+
+        The spend comes from the RECORD — the accumulator the session recalled
+        in O(1) — and only falls back to a seated legacy figure when the session
+        has no accumulator to speak for it (a pre-ledger session). That fallback
+        is today's behaviour, kept exactly: a session with no record must not
+        silently lose its ``≥``, and it must not lose the money either.
+        """
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if not isinstance(usage, Usage):
@@ -3796,13 +3949,11 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens,
             "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
         }
-        if state.cumulative_parent_cost is None:
-            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
-            if cost is not None:
-                changes.update(
-                    cumulative_parent_cost=cost,
-                    cost_knowledge=CostKnowledge.FLOOR,
-                )
+        self._seed_legacy_spend(session, usage)
+        spend = self._spend_of(session)
+        if spend.calls:
+            changes["cumulative_parent_cost"] = spend.usd
+            changes["cost_knowledge"] = spend.knowledge()
         return self.mutate(**changes)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
@@ -3814,20 +3965,15 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }
-        if cost is not None:
+        if cost is not None or usage.input_tokens or usage.output_tokens:
+            spend = self._accrue_call(session, usage, cost)
             changes.update(
-                cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + cost,
-                cost_knowledge=(
-                    CostKnowledge.EXACT
-                    if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                    else state.cost_knowledge
-                ),
+                cumulative_parent_cost=spend.usd,
+                cost_knowledge=spend.knowledge(),
                 usage_components=_capped_components(
                     list(state.usage_components) + list(usage.cost_components or [usage])
                 ),
             )
-        elif usage.input_tokens or usage.output_tokens:
-            changes["cost_knowledge"] = CostKnowledge.PARTIAL
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
@@ -4065,23 +4211,23 @@ class FrontendStateStore:
                 total = turn_cost(_label(getattr(session, "effective_model", None)), aggregate)
                 if total is not None:
                     remainder = max(0.0, total - state.current_turn_accrued_cost)
-                    previous = state.cumulative_parent_cost or 0.0
+                    # The remainder is MONEY, not another provider call: it
+                    # reconciles the aggregate's price with the sum of its
+                    # calls' prices, so it moves the total without moving the
+                    # call count the knowledge state is derived from.
+                    spend = self._spend_remainder(session, remainder)
                     changes.update(
-                        cumulative_parent_cost=previous + remainder,
+                        cumulative_parent_cost=spend.usd,
                         current_turn_accrued_cost=0.0,
                         usage_components=_capped_components(
                             list(state.usage_components)
                             if state.current_turn_accrued_cost > 0
                             else list(state.usage_components) + list(aggregate.cost_components)
                         ),
-                        cost_knowledge=(
-                            CostKnowledge.EXACT
-                            if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                            else state.cost_knowledge
-                        ),
+                        cost_knowledge=spend.knowledge(),
                     )
                 elif any(u.input_tokens or u.output_tokens for u in usages):
-                    changes["cost_knowledge"] = CostKnowledge.PARTIAL
+                    changes["cost_knowledge"] = self._spend_of(session).knowledge()
                     changes["current_turn_accrued_cost"] = 0.0
                 # `messages` remain the billing authority even when a post-turn
                 # compaction invalidates their occupancy. The session stamps the
@@ -4105,27 +4251,26 @@ class FrontendStateStore:
                 return
             # Occupancy is a level. Cost accrues per call so arbitrary joins see
             # the same lifetime figure; AgentEnd adds only the final remainder.
+            # The ADDITION happens in the session's accumulator (one arithmetic
+            # site, design §5.1) and the per-turn sum stays here as turn state,
+            # which is what the remainder below is computed against.
             call_cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
             changes.update(
                 last_usage=usage.model_dump(mode="json"),
                 context_tokens=usage.context_tokens or usage.input_tokens or state.context_tokens,
                 context_is_estimate=False,
             )
-            if call_cost is not None:
-                changes.update(
-                    cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + call_cost,
-                    current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
-                    cost_knowledge=(
-                        CostKnowledge.EXACT
-                        if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                        else state.cost_knowledge
-                    ),
-                    usage_components=_capped_components(
-                        list(state.usage_components) + list(usage.cost_components or [usage])
-                    ),
-                )
-            elif usage.input_tokens or usage.output_tokens:
-                changes["cost_knowledge"] = CostKnowledge.PARTIAL
+            if call_cost is not None or usage.input_tokens or usage.output_tokens:
+                spend = self._accrue_call(session, usage, call_cost)
+                if call_cost is not None:
+                    changes.update(
+                        cumulative_parent_cost=spend.usd,
+                        current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
+                        usage_components=_capped_components(
+                            list(state.usage_components) + list(usage.cost_components or [usage])
+                        ),
+                    )
+                changes["cost_knowledge"] = spend.knowledge()
         elif isinstance(event, CompactionEndEvent) and event.success:
             changes.update(
                 context_tokens=event.tokens_after or None,

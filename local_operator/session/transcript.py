@@ -57,6 +57,7 @@ from local_operator.session.creation import (
     ensure_session_created_at,
     session_created_at,
 )
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -89,10 +90,24 @@ ENTRY_PRUNE = "prune"
 #: deletion. A deny-list cannot see a type that does not exist yet; this one
 #: excludes it by default.
 #:
-#: ``session_incident`` is the ONLY member. ``session_model_switch`` is a
-#: deliberate act whose consequences a user may want ranked, and every other
-#: custom type is a separate argument nobody has made yet.
-BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+#: ``session_incident`` and ``session_spend.v1`` are the members.
+#: ``session_model_switch`` is a deliberate act whose consequences a user may
+#: want ranked, and every other custom type is a separate argument nobody has
+#: made yet.
+#:
+#: ``session_spend.v1`` is here for two reasons, and the second is the one that
+#: made it necessary. It is bookkeeping ABOUT the session (a running total the
+#: runtime maintains, never work a user asked for), and the ONE-TIME REBUILD for
+#: a pre-ledger session appends one to a transcript that may be months old —
+#: without this exemption, merely OPENING an old session would rank it as
+#: freshly worked on the picker and, worse, reset its age for
+#: ``session.cleanup``. The exemption is scoped to the TYPE (not to the rebuild's
+#: call site) because the type is what the allow-list names, so a live accrual
+#: during a real turn is exempt too — which costs nothing, since that turn's own
+#: messages move the clock in the same batch.
+BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
+    {SESSION_INCIDENT_MESSAGE_TYPE, SESSION_SPEND_CUSTOM_TYPE}
+)
 
 
 def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
@@ -107,9 +122,18 @@ def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
     write with nothing bookkeeping in it has earned no exemption.
     """
     return bool(entries) and all(
-        entry.type == ENTRY_MESSAGE
-        and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM
-        and entry.payload.get("custom_type") in BOOKKEEPING_CUSTOM_TYPES
+        # The type is checked FIRST and for both spellings: the exemption is a
+        # property of the TYPE, and the type is what the allow-list names.
+        # ``append_custom`` writes ``{custom_type, details}`` with NO ``kind``,
+        # so matching only the ``CustomMessage`` spelling (a ``message`` entry
+        # with ``kind: custom``) would let exactly the bookkeeping rows this
+        # allow-list exists to exempt advance the activity clock — including
+        # the spend record the pre-ledger rebuild appends to an old session.
+        entry.payload.get("custom_type") in BOOKKEEPING_CUSTOM_TYPES
+        and (
+            (entry.type == ENTRY_MESSAGE and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM)
+            or entry.type == ENTRY_CUSTOM
+        )
         for entry in entries
     )
 
@@ -187,7 +211,14 @@ SHRUNK_KEY = "context_shrunk_here"
 #: (``subagent_view`` folds the whole parent/child message log), so dropping its
 #: older entries would erase history; it is deliberately absent. Add a type here
 #: only after confirming nothing reads it by iteration.
-_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster"})
+#:
+#: ``session_spend.v1`` belongs here for exactly the reason its record carries a
+#: RUNNING TOTAL rather than a per-call delta list: the newest row is the whole
+#: answer, so the older ones are dead bytes. Without this it would accumulate one
+#: row per provider call forever — the failure mode that left
+#: ``frontend_state_checkpoint_v1`` holding 35.1% of all transcript bytes on the
+#: operator's store (design §2.3, §R9).
+_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster", SESSION_SPEND_CUSTOM_TYPE})
 
 
 @dataclass
@@ -420,15 +451,21 @@ class ReplaySuffix:
     :meth:`Transcript.build_llm_history` exactly (see the reader for why a
     suffix is sufficient). ``through_present`` tells a caller whose cursor was
     NOT found whether it should trust the whole-file fallback semantics or
-    treat the cursor as unknown; ``checkpoint`` is the durable frontend
-    checkpoint when it was requested and is inside the suffix.
+    treat the cursor as unknown; ``checkpoint`` is the newest row of the FIRST
+    requested type, so a single-type caller reads exactly what it always did,
+    and ``checkpoints`` maps every requested type to its newest details — the
+    cold money reader needs two types out of one pass and must not pay a second
+    read for the second (§4 of the design).
     """
 
     entries: tuple[TranscriptEntry, ...]
     through_present: bool
     checkpoint: dict[str, Any] | None
+    #: Newest row of each requested custom type, keyed by type. Additive: a
+    #: caller requesting one type sees the same value in ``checkpoint``.
+    checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
-    bytes_read: int
+    bytes_read: int = 0
 
 
 #: Backward read granularity. One MiB is large enough that a compaction's kept
@@ -442,7 +479,7 @@ def read_replay_suffix(
     directory: str | Path,
     *,
     through_id: str | None = None,
-    checkpoint_type: str | None = None,
+    checkpoint_types: tuple[str, ...] | str | None = None,
 ) -> ReplaySuffix:
     """Read only the journal suffix :func:`replay_entries` needs, from EOF.
 
@@ -467,11 +504,16 @@ def read_replay_suffix(
       today's whole-file cost, which is the correct fallback, not a shortcut);
     - ``through_id``, when given, is in the buffer — a cursor not yet seen
       means "read further", never "cut at the tail" (the strict-cut contract);
-    - the newest custom row of ``checkpoint_type`` is in the buffer, when one
-      is requested, so the caller does not pay a second read for it. It is a
-      parameter rather than an import: the frontend checkpoint's type constant
-      lives in ``frontend_state``, whose import graph reaches the TUI, and this
-      module must stay a leaf.
+    - the newest custom row of EVERY requested type is in the buffer, so the
+      caller does not pay a second read for it. A TUPLE, not one type: the cold
+      money reader wants the frontend checkpoint AND the spend record out of the
+      same pass, and two parameters would mean two stop conditions (`seen`
+      flags computed from the same buffer) that could disagree — the single
+      predicate is what keeps "I have everything I asked for" one fact. A bare
+      ``str`` is still accepted, because a single-type caller must not have to
+      change. Types are parameters rather than imports: the frontend
+      checkpoint's type constant lives in ``frontend_state``, whose import
+      graph reaches the TUI, and this module must stay a leaf.
 
     Malformed rows are skipped individually, matching forward replay. The
     first partial line of the earliest chunk is discarded: it is the tail of a
@@ -488,7 +530,14 @@ def read_replay_suffix(
         return ReplaySuffix(
             entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
         )
-    checkpoint: dict[str, Any] | None = None
+    # Normalise the request ONCE, so every stop/collect site below reads the
+    # same tuple: an empty request means "no custom rows wanted" (the cheapest
+    # read), and a bare string is one type — the spelling every existing caller
+    # already uses.
+    wanted: tuple[str, ...] = (
+        (checkpoint_types,) if isinstance(checkpoint_types, str) else tuple(checkpoint_types or ())
+    )
+    checkpoints: dict[str, dict[str, Any]] = {}
     compaction: TranscriptEntry | None = None
     first_kept_id: str | None = None
     seen_ids: set[str] = set()
@@ -552,19 +601,21 @@ def read_replay_suffix(
                 ):
                     compaction = entry
                     first_kept_id = entry.payload.get("first_kept_entry_id") or None
-                if (
-                    checkpoint_type is not None
-                    and checkpoint is None
-                    and entry.type == ENTRY_CUSTOM
-                    and entry.payload.get("custom_type") == checkpoint_type
-                ):
-                    checkpoint = dict(entry.payload.get("details", {}))
+                if wanted and entry.type == ENTRY_CUSTOM:
+                    custom_type = entry.payload.get("custom_type")
+                    if (
+                        isinstance(custom_type, str)
+                        and custom_type in wanted
+                        and custom_type not in checkpoints
+                    ):
+                        details = dict(entry.payload.get("details", {}))
+                        checkpoints[custom_type] = details
             at_start = position == 0
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = checkpoint_type is None or checkpoint is not None
+            checkpoint_seen = all(name in checkpoints for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
@@ -574,7 +625,10 @@ def read_replay_suffix(
     return ReplaySuffix(
         entries=tuple(parsed),
         through_present=through_id is None or through_id in seen_ids,
-        checkpoint=checkpoint,
+        # The FIRST requested type, deliberately: every pre-existing caller
+        # passes one type and must see the value it always saw here.
+        checkpoint=checkpoints.get(wanted[0]) if wanted else None,
+        checkpoints=checkpoints,
         bytes_read=end_of_file - position,
     )
 
@@ -789,10 +843,22 @@ class Transcript:
             payload["preserved_turns_shed"] = preserved_turns_shed
         return await self._append(ENTRY_COMPACTION, payload)
 
-    async def append_custom(self, custom_type: str, details: dict[str, Any]) -> TranscriptEntry:
+    async def append_custom(
+        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+    ) -> TranscriptEntry:
         """Append a host bookkeeping entry (wake schedules, checkpoints, …).
-        Custom entries never enter LLM context."""
-        return await self._append(ENTRY_CUSTOM, {"custom_type": custom_type, "details": details})
+
+        Custom entries never enter LLM context. ``preserve_mtime`` forwards the
+        bookkeeping request to the write path (it is still validated there
+        against :data:`BOOKKEEPING_CUSTOM_TYPES`): the per-session spend record
+        must not move the activity clock, or a live session appending one per
+        provider call would keep re-ranking itself as freshly worked.
+        """
+        return await self._append(
+            ENTRY_CUSTOM,
+            {"custom_type": custom_type, "details": details},
+            preserve_mtime=preserve_mtime,
+        )
 
     async def append_prune(self, target_entry_id: str, notice: str) -> TranscriptEntry:
         """Journal that compaction blanked the tool result at ``target_entry_id``.
@@ -807,10 +873,15 @@ class Transcript:
         return await self._append(ENTRY_PRUNE, {"target": target_entry_id, "notice": notice})
 
     async def _append(
-        self, type: str, payload: dict[str, Any], entry_id: str | None = None
+        self,
+        type: str,
+        payload: dict[str, Any],
+        entry_id: str | None = None,
+        *,
+        preserve_mtime: bool = False,
     ) -> TranscriptEntry:
         entry = TranscriptEntry(entry_id or uuid.uuid4().hex, time.time(), type, payload)
-        return (await self._commit(lambda: [entry]))[0]
+        return (await self._commit(lambda: [entry], preserve_mtime=preserve_mtime))[0]
 
     async def _commit(
         self,
@@ -1124,6 +1195,25 @@ class Transcript:
         function for why the boundary is positional and why it matters.
         """
         return usages_since_newest_shrink(self._entries)
+
+    def all_usage_rows(self) -> list[dict[str, Any]]:
+        """Every message entry's ``usage``, oldest first, with NO boundary.
+
+        The one-time rebuild's input (design §6.2): a session's money is not
+        invalidated by a later rewrite of its context, so the sum must include
+        rows a compaction or prune pushed outside the replay window. Delegating
+        to the module function keeps that rule in one place, exactly as
+        :meth:`usages_since_compaction` delegates the opposite one.
+        """
+        return all_usage_rows(self._entries)
+
+    def journal_shrank(self) -> bool:
+        """Whether this journal's money can never be whole again.
+
+        True when a compaction or a prune removed rows — the only justification
+        for a FLOOR after this change, and therefore the rebuild's ``floor``.
+        """
+        return journal_shrank(self._entries)
 
     def search_spend_rows(self) -> list[dict[str, Any]]:
         """Every ``web_search`` cost this conversation recorded, oldest first.
@@ -1616,6 +1706,60 @@ def usages_since_newest_shrink(entries: Sequence[TranscriptEntry]) -> list[dict[
         for entry in entries[start:]
         if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
     ]
+
+
+def all_usage_rows(entries: Sequence[TranscriptEntry]) -> list[dict[str, Any]]:
+    """Every message entry's ``usage`` payload, oldest first, UNCUT.
+
+    Deliberately unbounded by the shrink boundary, and that is the whole point
+    of the rebuild it feeds (design §2.2). The boundary exists because a context
+    SIZE reading taken before a pass describes a context that no longer exists;
+    money is not invalidated by a later rewrite of the context, so restricting
+    the sum to survivors would delete spend that was really charged. Measured on
+    one real session: every row in the file prices at $324.99, only the 262 rows
+    inside the boundary at $36.99 — the boundary silently removes 8.8x of the
+    bill. :meth:`Transcript.search_spend_rows` states the same rule for search
+    money: "money already spent is not invalidated by a later rewrite of the
+    context".
+
+    Module-level and parameterised on ``entries`` for the same reason
+    :func:`usages_since_newest_shrink` is: the rebuild reads a real transcript's
+    own already-parsed entries, and nothing here touches the filesystem.
+    """
+    return [
+        dict(entry.payload["usage"])
+        for entry in entries
+        if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
+    ]
+
+
+def journal_shrank(entries: Sequence[TranscriptEntry]) -> bool:
+    """Whether rows carrying money may already have been dropped from the file.
+
+    The rebuild's ``floor`` is this predicate and nothing else: it says the sum
+    cannot be whole IN PRINCIPLE because a compaction or a prune removed rows,
+    which is the only situation ``≥`` is allowed to mean after this change (the
+    old meaning — "we restored a point-in-time reading" — is what made the mark
+    noise on 93.8% of the store, design §5.4).
+
+    Both spellings of the shrink are consulted, exactly as
+    :func:`usages_since_newest_shrink` consults them: the live journal's
+    ``compaction``/``prune`` entries, and the marks a fold leaves behind
+    (``SHRUNK_KEY`` on the boundary row, ``provider_payload.pruned`` on a
+    blanked row). A folded journal keeps the marks and loses the entries, so
+    reading only the entries would classify a folded session as complete when
+    rows are demonstrably gone.
+    """
+    for entry in entries:
+        if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
+            return True
+        payload = entry.payload or {}
+        provider_payload = payload.get("provider_payload") or {}
+        if provider_payload.get(SHRUNK_KEY) or (
+            entry.type == ENTRY_MESSAGE and provider_payload.get("pruned")
+        ):
+            return True
+    return False
 
 
 def context_cut_index(entries: Sequence[TranscriptEntry], *, quiet: bool = False) -> int:
