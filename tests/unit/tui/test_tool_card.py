@@ -573,6 +573,136 @@ def test_web_fetch_non_2xx_renders_error_treatment() -> None:
     assert _style_at(card._build_content(120), "⚠ HTTP 403").color == Color.parse(danger)
 
 
+def test_a_blocked_card_names_the_vendor_and_the_attempt_count() -> None:
+    """Design review round 1, D1 + D2 + D4 + DN2, on the operator's own case.
+
+    Before this round the card printed the vendor-less generic copy in its danger
+    row while the row above it said "blocked by Akamai" — two wordings of one
+    fact, with the *name* only on the line the card throws away — and the
+    successfully-escalated fetch was character-for-character a one-attempt
+    success. It also reported the discarded challenge page's byte count on a row
+    whose line count described the replacement.
+    """
+    url = "https://www.shoppersdrugmart.ca/?lang=en&query=power+bar"
+    preview = (
+        f"⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content. {url}\n"
+        "text · text/html · cache miss · 2 attempts (default, browser-profile)\n\n"
+        "The origin's bot protection refused this request. A browser-shaped retry was "
+        "also refused, so no headless fetch of this URL will succeed.\n"
+        "Origin reference: 18.4b182117.1789250183.345ea6ea\n"
+        "Next step: use the `browser` tool on this URL.\n"
+        f"{url}"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_done(
+        preview,
+        {
+            "url": url,
+            "final_url": url,
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "bytes": 382,
+            "lines": 4,
+            "ok": False,
+            "http_error": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "failure_kind": "blocked",
+            "block_vendor": "akamai",
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+
+    # D2: ONE danger row, and it is the one that names the vendor.
+    assert content.count("⚠ HTTP 403 Forbidden") == 1
+    assert "blocked by Akamai bot protection" in content
+    assert "error/block page, not page content" not in content
+    # D1: the count and the identity change §3.6 promises are on the card.
+    assert "2 attempts (default, browser-profile)" in content
+    # DN2: no byte count for a replaced body — it describes the discarded page.
+    assert "382 B" not in content
+    assert "text · 4 lines" in content
+
+    # D4: the actionable sentence is the anchor, the opaque reference recedes,
+    # and the prose itself is NOT dim (3.32:1 on the light error-tinted panel).
+    built = card._build_content(120)
+    assert _triplet(_style_at(built, "Next step:").color) == _triplet(
+        Style(color=theme_mod.semantic_color("signal")).color
+    )
+    assert _triplet(_style_at(built, "Origin reference:").color) == _triplet(
+        Style(color=theme_mod.semantic_color("dim")).color
+    )
+    assert _triplet(_style_at(built, "The origin's bot protection").color) == _triplet(
+        Style(color=theme_mod.semantic_color("muted")).color
+    )
+
+
+def test_a_terminal_failure_card_is_the_same_visual_family() -> None:
+    """Design review round 1, D5 + D3: a stall is a FETCH card, not a bash row.
+
+    A terminal failure carries no ``render_method``/``final_url``, so this card
+    used to fall through to the generic output body: no ⚠ lead, transcript ink,
+    and a ``Fetched:`` row with no status — two failure shapes of one tool reading
+    as two different tools. ``failure_kind`` is the key both carry.
+
+    D3 rides along here: the statement is fitted to the card's own width at paint
+    time, so it is one row where there is room and never clipped mid-word where
+    there is not.
+    """
+    url = "https://stalls.example/x"
+    explanation = (
+        "A browser-shaped retry was tried as well, since a stalled request is "
+        "frequently a silent block."
+    )
+    text = (
+        "Read timed out after 20.0s — the origin accepted the connection but never "
+        "sent a response (2 attempts: default, browser-profile)\n"
+        f"{explanation}\n"
+        "Next step: use the `browser` tool on this URL. It drives the real browser "
+        "(a write-tier, approval-gated action), which is the only path that clears "
+        "an interactive challenge.\n"
+        f"{url}"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.restore(
+        state="error",
+        result_text=text,
+        error=text.splitlines()[0],
+        details={
+            "url": url,
+            "cache": "miss",
+            "failure_kind": "stall",
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(100).plain
+
+    # The fetch family: a structured Fetched row and a ⚠ lead…
+    assert "Fetched: " + url in content
+    assert "⚠ Read timed out after 20.0s" in content
+    # …and the lead is not repeated in the body (it was promoted, like the
+    # response family's lead is stripped).
+    assert content.count("Read timed out after 20.0s") == 1
+
+    # D3 at 80 columns: every row of the sentence is painted in full — no
+    # mid-word ellipsis, which is what the 76-cell hard wrap produced.
+    narrow = card._build_content(80).plain.splitlines()
+    explained = [row for row in narrow if "bot " in row or "silent block" in row]
+    assert explained
+    assert all("…" not in row for row in explained)
+    # D3 at 150: the sentence fits ONE row, because the wrap follows the card's
+    # width instead of stopping at a constant 76 cells.
+    wide = card._build_content(150).plain.splitlines()
+    assert any(explanation in row for row in wide)
+
+
 def test_web_fetch_low_quality_note_surfaced_once() -> None:
     """The low-quality advisory appears, and (D4) only ONCE: the model-facing
     header carried a second `· sparse/JS-gated` copy that D1's header strip

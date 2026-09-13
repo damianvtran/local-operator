@@ -13,6 +13,8 @@ import httpx
 import pytest
 
 from local_operator.web_fetch.failure import (
+    _is_stock_block_page,
+    attempt_summary,
     classify_exception,
     classify_response,
     describe,
@@ -199,7 +201,10 @@ def test_empty_exception_string_still_produces_a_legible_message() -> None:
 
     failure = classify_exception(exc, timeout_s=20.0)
     text = " ".join(describe(failure, attempts=2, profiles=("default", "browser")).split())
-    assert "read timed out after 20.0s" in text
+    # Sentence case (design review round 1, DN3): this text is the card body's
+    # FIRST line in the terminal case, where a lowercase opening read as a
+    # fragment with nothing in front of it.
+    assert "Read timed out after 20.0s" in text
     assert "never sent a response" in text
     assert not text.rstrip().endswith(":")
 
@@ -226,6 +231,43 @@ def test_stock_waf_page_needs_both_title_and_heading_and_a_small_body() -> None:
     failure = classify_response(403, {"content-type": "text/html"}, article)
     assert failure is not None
     assert failure.vendor is None  # no vendor claimed for a long, unsigned body
+
+
+def test_the_stock_page_bound_is_bytes_not_characters() -> None:
+    """Review round 1, N2: ``_STOCK_PAGE_MAX_BYTES`` claimed 2 KB and compared
+    CHARACTERS.
+
+    ``body_head`` is decoded text, so the old ``len(body_head)`` was a character
+    count: 700 euro signs are 700 characters and 2 100 bytes of UTF-8, i.e. a
+    body a third larger than the bound could still be read as a "tiny stock
+    page". The unit in the name has to be the unit the comparison uses, or the
+    next person tunes this against the wrong quantity. Exercised on the predicate
+    itself: both branches of ``classify_response`` for a 403 yield
+    ``vendor=None``, so a test at that level cannot tell the two apart.
+    """
+    small_stock = "<title>Access Denied</title><h1>Access Denied</h1>"
+    assert _is_stock_block_page(small_stock) is True
+
+    big_but_few_chars = small_stock + ("\u20ac" * 700)
+    assert len(big_but_few_chars) < 2048  # what a character count sees
+    assert len(big_but_few_chars.encode("utf-8")) > 2048  # what the wire carries
+    assert _is_stock_block_page(big_but_few_chars) is False
+
+
+def test_attempt_summary_collapses_a_repeated_identity() -> None:
+    """Review round 1, Q3: ``3 attempts (default, default, default)`` is accurate
+    and reads like a bug.
+
+    The sequence exists to show a CHANGE of identity — that is the fact a reader
+    cannot get from the count — so consecutive repeats collapse while the mixed
+    case (the one that matters) is untouched.
+    """
+    assert attempt_summary(3, ("default", "default", "default")) == "3 attempts (default)"
+    assert attempt_summary(2, ("default", "browser")) == "2 attempts (default, browser-profile)"
+    assert attempt_summary(2, ("default", "default")) == "2 attempts (default)"
+    # One attempt says nothing, and an absent identity list is not a lie.
+    assert attempt_summary(1, ("default",)) == ""
+    assert attempt_summary(2, ()) == "2 attempts"
 
 
 def test_2xx_and_3xx_are_not_failures() -> None:

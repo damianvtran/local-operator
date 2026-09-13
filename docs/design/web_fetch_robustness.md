@@ -1,8 +1,11 @@
 # Design: `web_fetch` robustness — transient failures, bot-blocks, and honest diagnostics
 
 Status: **implemented**. The manager ratified §12 as: `blocked_retry` default on
-(1), the 0.6 stall fraction ships fixed with no knob (2), no card hint row and
-no UI parity PR (3), the empty-`str(exc)` fix folded in (4), ship (5).
+(1), no card hint row and no UI parity PR (3), the empty-`str(exc)` fix folded in
+(4), ship (5). **§12.2 (the 0.6 stall fraction) was ratified and then REVERSED**
+during remediation when the measurement showed it turned a slow-but-working
+origin into a failure — see the §3.3 decision record, which supersedes both §12.2
+and this line.
 
 Three things the implementation had to settle that this document did not, each
 recorded here rather than only in the PR so the next reader of the design sees
@@ -226,8 +229,14 @@ The distinction costs one boolean and buys the agent a correct next step.
 different. Measured on `canadiantire.ca`: the lop profile never gets headers back
 (ReadTimeout at 20 s), while a browser-shaped profile gets a 403 in 0.07-0.25 s.
 A stall is therefore frequently a *silent* block, and the right response is the
-same profile escalation §4 describes — on a **shortened** budget, because the
-whole point is not to spend another 20 s learning nothing.
+same profile escalation §4 describes.
+
+**What shipped is narrower than this section first assumed, and §3.3 records
+why:** a stall consumes the whole slice it was granted, so with the first-attempt
+cap removed there is normally nothing left to fund the escalation and it does not
+run. The re-measured live behaviour at the defaults is one honest attempt,
+~20 s, and the classified terminal message. The escalation remains reachable
+whenever a stall leaves budget behind (a later hop's short remainder).
 
 ---
 
@@ -283,16 +292,34 @@ multiply it. It becomes a **deadline for the whole call** instead:
   connect/read/write/pool values.)
 - Before sleeping a backoff, check it fits: if `delay > remaining - 0.25 s`, stop
   retrying and return the failure now rather than sleeping into the deadline.
-- **Attempt budgeting for the stall class:** attempt 1 of a hop is capped at
-  `min(remaining, 0.6 * timeout)`. That is what converts the canadiantire case
-  from "20 s then nothing" into "12 s then a fast browser-shaped probe that
-  returns a real 403 in ~0.25 s". The 0.6 split is a judgement call; the
-  evidence that would tune it is the distribution of time-to-first-byte on
-  genuinely slow-but-working origins, which we do not have. 0.6 is chosen because
-  a page that has sent no headers in 12 s is overwhelmingly more likely to be
-  black-holed than slow. It applies **only when there is a fallback attempt left
-  to spend** — the last attempt always gets the full remaining budget, so a
-  genuinely slow origin is never penalised on its final try.
+- **Attempt budgeting for the stall class: none, and this is a DECISION this
+  document records as shipped rather than a gap.**
+
+  The design originally capped the first attempt of a hop at
+  `min(remaining, 0.6 * timeout)` while a fallback remained, to leave the
+  browser-shaped probe something to spend on a black-holing origin. **That cap is
+  gone. The shipped behaviour is the opposite: every attempt — including the
+  first, honest one — gets the full remaining budget, and the escalation is
+  opportunistic, funded only by whatever the hop's own outcome left behind.**
+
+  Why it had to go: `httpx`'s read timeout bounds the wait for response HEADERS
+  as well as inter-chunk gaps, so "cap the first attempt" is really "give the
+  fetch a 12 s timeout whenever a fallback exists" — and with the shipped
+  defaults a fallback always exists. An origin whose time-to-first-byte fell
+  between 0.6·T and T therefore **succeeded before this change and failed after
+  it**, as a terminal `stall` naming a vendor we never reached. Re-measured on a
+  fake clock: a 13 s-first-byte origin at T=20 returns 200 in one attempt on the
+  pre-change engine, and returns `FAILURE kind=stall granted=[12.0, 8.0]` under
+  the cap. The regression guard for that is
+  `tests/unit/web_fetch/test_service.py::test_slow_but_working_origin_still_succeeds`.
+
+  What it costs: a real black-hole now spends the whole budget on the honest
+  attempt, so the escalation has nothing left to spend and does not run.
+  `canadiantire.ca` is back to ~20 s rather than ~12 s — the −8 s row this table
+  used to claim was bought with a timeout reduction, and is withdrawn. What the
+  user gets instead is the thing §1.3 was actually about: a classified, readable
+  terminal message ("The origin accepted the connection but never sent a
+  response", plus the next step) rather than an empty string after a colon.
 
 Worst-case added latency versus today, stated plainly:
 
@@ -300,13 +327,22 @@ Worst-case added latency versus today, stated plainly:
 |---|---|---|---|
 | 200 first try | t | t | **0** (same one request) |
 | 404 / other non-retryable 4xx | t | t | **0** |
+| slow-but-working origin (first byte > 0.6·T) | t | t | **0** — it still succeeds; the 0.6 cap had turned this into a failure |
 | block detected (medium.com) | 0.06 s | ~0.3 s | +~0.25 s (one extra request) |
-| stall (canadiantire, T=20) | 20.2 s | ~12.3 s | **−8 s** |
+| stall (canadiantire, T=20) | 20.2 s | ~20 s | **0** — the escalation is not funded (see the decision record above); the gain is the message, not the seconds |
 | persistent 500 | t | t + ~1.9 s sleep + 2 requests | bounded by T |
 | any case, hard ceiling | T | T | **0** — the deadline is the bound |
 
 The last row is the one that matters: the deadline never moves, so no
-configuration of retries can make a call exceed its stated timeout.
+configuration of retries can make a call exceed its stated timeout. **That claim
+now includes the resolver**, which it did not at first: `getaddrinfo` has no
+timeout of its own in the stdlib, so the per-attempt timeout used to be computed
+BEFORE a lookup that could outlast the whole budget. The lookup now runs under
+`asyncio.wait_for(remaining)` and the request's own timeout is recomputed from
+what is left after it. The honest reading: the call cannot exceed T; an abandoned
+resolver thread cannot extend it (it may linger in the executor until the
+resolver's own timeout ends it), and that distinction is stated in
+`service.py::_request_once`.
 
 ### 3.4 `Retry-After`
 
@@ -417,8 +453,8 @@ anywhere else.
   in the face of a refusal, and for a clean A/B during rollout.
 - The escalated attempt gets the same deadline arithmetic as any other.
 - If the escalated attempt also fails, the **escalated** outcome is what is
-  reported (it is the more informative one: canadiantire goes from "timed out"
-  to "403 from Akamai"), with `details` recording both.
+  reported (it is the more informative one when it produced a response), with
+  `details` recording both.
 
 ---
 
@@ -507,24 +543,44 @@ untouched:
 | `suggested_tool` | `str \| None` | `"browser"` when the block is confirmed unretrievable |
 
 A cache hit continues to carry none of these except `attempts: 0`, which is
-truthful (no network attempt was made).
+truthful (no network attempt was made) **and no `profiles`** — a hit made no
+request, so it has no request identity either. `attempts`/`profiles` also ride
+the **terminal** failure path (no response ever arrived): they travel on the
+`FetchError` from the engine, so the structured payload cannot disagree with the
+preview that states "2 attempts".
 
-### 5.4 The card: no structural change, and why that is the right call
+### 5.4 The card: no NEW row, and the row logic that did change
 
 `_fetch_result_output` builds its rows from `details`
-(`tool_card.py:744-809`). Two things happen with **no code change at all**
-because of how the card already works:
+(`tool_card.py:744-809`). The decision this section records still stands: **no new
+card row, and no `local-operator-ui` parity obligation.** The design review round
+that followed found the card's *existing* rows were saying things the model text
+did not, though, and four small changes landed on those rows only:
 
-1. The error row keeps rendering from `http_error` + `status`.
-2. The new body text flows through `_strip_fetch_header` correctly — verified by
-   running the real function against the proposed new header block in this
-   worktree: the lead and meta lines are stripped and the new explanatory lines
-   survive, and the existing 404 shape still strips identically.
+1. The error row keeps rendering from `http_error` + `status`, but a CONFIRMED
+   block now prints the same classified sentence the model-facing lead uses
+   ("blocked by Akamai bot protection"), imported from `failure.py` rather than
+   re-typed. Before this, one screen carried two wordings of one fact and the
+   vendor's name was only on the line the card discards.
+2. The attempt count and identity sequence ride the existing `Rendered:` row
+   ("`Rendered: text · 4 lines · 2 attempts (default, browser-profile)`").
+   Without it, the medium.com case — 403 on the honest profile, 200 on the
+   escalation — was character-for-character an ordinary one-attempt success on
+   the card, which is the silent behaviour this whole change exists to end.
+3. The statement body is fitted to the card's own width at paint time instead of
+   arriving pre-wrapped to 76 cells: a constant is wrong at 80 columns (clipped
+   mid-word) and wrong at 150 (the block stopped half-way across).
+4. A terminal failure (a stall, a transport error) is a FETCH card too. It
+   carries no `render_method`/`final_url`, so it used to fall through to the
+   generic output body and read as a different tool; `failure_kind` is the key
+   both shapes carry, and the tool's own first sentence is promoted to the
+   danger row rather than duplicated in the body.
 
-I therefore recommend **not** adding a card hint row in this change. The reasons:
+The reasons the pinned row is still **not** warranted are unchanged:
 
 - The information the agent needs is model-facing text; the human reading the
-  card already sees `⚠ HTTP 403 Forbidden — error/block page`, which is accurate.
+  card now sees `⚠ HTTP 403 Forbidden — blocked by Akamai bot protection`, which
+  is accurate and names the vendor.
 - A new row means a TUI change, a designer round, **and** a parity obligation in
   `local-operator-ui` (`docs/evidence/tui-parity/tool-row-spec.md:282` pins the
   fetch header rows in order). That is a second repo's work for a cosmetic gain.
@@ -532,13 +588,10 @@ I therefore recommend **not** adding a card hint row in this change. The reasons
   rows, so the "next step: browser" sentence **is visible to the user** — it
   arrives as body, not as a pinned row.
 
-Because the card's *painted output changes* (the body text differs even though no
-row logic does), a rendered before/after frame is still required by the
-repository's visual-validation rule — see §7. This is a "capture the frame, no
-designer round" change: there is no layout, spacing, colour or row-structure
-delta to review. If the reviewer disagrees and wants the hint pinned as a row,
-that flips it into a user-visible change with a designer round and a parity PR;
-§12 lists it as a decision.
+Because the card's painted output changes, rendered before/after frames are
+required by the repository's visual-validation rule — see §7. The designer round
+this section originally argued against did happen and drove items 1-4 above; it
+is on the PR as `### Design review — round 1`.
 
 ---
 
@@ -668,8 +721,9 @@ none should be written** — adding one would be a migration that does nothing.
     total elapsed < 2.5 s and fewer than `max_attempts` requests when the
     deadline binds (asserted structurally on a fake clock, per AGENTS.md
     "prefer a structural invariant to a numeric one").
-22. **Stall shortening**: a transport that never responds → attempt 1 is given
-    ≤ 0.6·T, and the escalated attempt happens.
+22. **No first-attempt cap**: a transport that never responds → attempt 1 is
+    granted the FULL remaining budget (not 0.6·T), and a slow-but-working origin
+    whose first byte lands between 0.6·T and T still succeeds.
 23. **Empty-`str(exc)` regression**: a `ReadTimeout("")` produces a message that
     names the class and the attempt count and does **not** end in `': '`.
 24. Enrichment probes never trigger the escalation (a blocked `.md` twin costs
@@ -716,9 +770,12 @@ capture go on the PR.
 2. **The stalled host becomes a bounded, informative result.**
    Same command against the canadiantire PDP URL.
    Before (captured today): 20.5 s, `error: timed out fetching '…': ` (empty
-   reason). Expected after: ~12.3 s, `⚠ HTTP 403 Forbidden — blocked by Akamai
-   bot protection` with the reference id and the `browser` next step, and the
-   elapsed time printed alongside.
+   reason). RE-MEASURED after remediation, at the defaults: **20.38 s**, one
+   attempt, `Read timed out after 19.8s — the origin accepted the connection but
+   never sent a response`, with the URL and the `browser` next step. The ~12.3 s
+   `⚠ HTTP 403 Forbidden — blocked by Akamai` this plan originally expected was an
+   artefact of the 0.6 first-attempt cap and is withdrawn (§3.3); the escalation
+   that found that 403 is only reachable while a stall leaves budget behind.
 3. **Local server that 500s then 200s.** A `http.server.ThreadingHTTPServer`
    subprocess on a free port, `allow_private: true` for that run only; first GET
    500, second 200. Expected: one success, `attempts: 2`, server access log
@@ -859,7 +916,10 @@ none of the fetch detail keys, so new keys are invisible to it. If §12's decisi
 7. **No change to the default request identity** (§4.1).
 8. **No retry of the enrichment probes.** They are an optimisation; retrying them
    multiplies request volume for no user-visible gain.
-9. **No new card row, no designer round** (§5.4) — unless §12.3 says otherwise.
+9. **No new card row, no UI parity PR** (§5.4). The designer round the original
+   text hoped to avoid did run, and it changed only the CONTENT of existing rows —
+   so the second-repo parity obligation still does not apply (review round 1,
+   D1-D5).
 10. **No config migration** (§6.3) — additive defaults already cover old files,
     and a no-op migration is worse than none.
 11. **No change to `_fetch_or_abort`** — it already covers everything it needs to
@@ -893,13 +953,16 @@ none of the fetch detail keys, so new keys are invisible to it. If §12's decisi
 
 ## 11. Relationship to `docs/design/web_fetch.md`
 
-Nothing here contradicts it. Three places refine it:
+**This document does contradict that one in exactly one place, and the earlier
+revision's claim of non-contradiction was wrong.** §7 item 7 of that doc says
+"each fetch is anonymous … Set a plain `User-Agent` identifying lop", and an
+escalated attempt sends a Chrome UA with `Sec-Fetch-*`. The contradiction is
+narrow — one compatibility attempt after a refusal, never the default posture,
+never ambient credentials, never the user's session — and it is now stated as an
+exception in that doc's §7 item 7 rather than denied here (review round 1, R6).
 
-- §7 item 7 of that doc says "Set a plain `User-Agent` identifying lop". That
-  remains the default and the posture; this document adds a **single
-  compatibility attempt after a refusal**, which is a narrowing exception, not a
-  reversal. The original doc's intent — no ambient credentials, no user session —
-  is fully preserved.
+Two other places refine that doc:
+
 - §6 of that doc describes one request per hop; this makes it up to three plus one
   escalation, under a whole-call deadline that did not previously exist.
 - §16's risk list gains the four risks in §8 above.
@@ -924,6 +987,10 @@ supersede.
    the evidence that would settle it is a distribution of time-to-first-byte
    across slow-but-working origins, which we would have to collect. Confirm, or
    tell me to make it configurable (I lean against: another knob nobody tunes).
+   — **RATIFIED, THEN REVERSED.** The remediation round produced exactly the
+   measurement this item asked for, and it says the opposite: the cap turns a
+   13 s-first-byte origin into a terminal `stall`. The fraction is removed
+   entirely; §3.3 is the record.
 3. **Card hint row: no.** I recommend the model-facing-text-only change with a
    rendered frame but **no designer round and no UI parity PR** (§5.4, §8.2). If
    you want the `browser` escalation pinned as a structured card row instead, say

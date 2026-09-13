@@ -133,7 +133,15 @@ def _set_field(args: argparse.Namespace) -> int:
     try:
         if key == "enabled":
             set_fetch_enabled(manager, value in ("on", "true", "1", "yes"))
-        elif key == "allow-private":
+            # The ONE key here that is not live: the tool's presence in the
+            # inventory is reconciled by the session, not re-read per call, so a
+            # running session has to re-add or drop the tool to see this.
+            print(
+                f"web_fetch {key} set to {value}. "
+                "Reload a running session to add or remove the tool."
+            )
+            return 0
+        if key == "allow-private":
             set_allow_private(manager, value in ("on", "true", "1", "yes"))
         elif key == "ttl":
             set_cache_ttl(manager, int(value))
@@ -151,7 +159,12 @@ def _set_field(args: argparse.Namespace) -> int:
     except ValueError as error:
         print(f"error: {error}")
         return 1
-    print(f"web_fetch {key} set to {value}. Reload a running session to apply the master switch.")
+    # Every remaining key is read per fetch (the service resolves settings on
+    # every call), so a running session picks it up on the NEXT fetch with no
+    # reload at all. The message used to claim otherwise for all of them, which
+    # was wrong for the four live knobs and actively misleading for the two retry
+    # ones this change added (review round 1, N1).
+    print(f"web_fetch {key} set to {value}. Takes effect on the next fetch.")
     return 0
 
 

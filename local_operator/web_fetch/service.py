@@ -27,7 +27,7 @@ import json
 import random
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -131,19 +131,26 @@ _RETRY_MIN_MARGIN_S = 0.25
 #: back later, and the agent can act on the number.
 _RETRY_AFTER_MAX_SLEEP_S = 10.0
 
-#: Fraction of the whole-call budget the FIRST attempt of a hop may spend when a
-#: fallback attempt is still available. This is what turns the canadiantire case
-#: from "20 s then nothing" into "12 s then a browser-shaped probe that answers
-#: in ~0.25 s": a page that has sent no headers in 12 s is overwhelmingly more
-#: likely to be black-holed than slow.
+#: NOTE on attempt budgeting — deliberately absent, and the reasoning is a
+#: decision recorded in ``docs/design/web_fetch_robustness.md`` §3.3.
 #:
-#: A judgement call, not a measurement — the evidence that would tune it is the
-#: distribution of time-to-first-byte on genuinely slow-but-working origins,
-#: which we do not have. Deliberately NOT configurable (another knob nobody
-#: tunes). It applies only while a fallback attempt remains: the LAST attempt
-#: always gets the full remaining budget, so a genuinely slow origin is never
-#: penalised on its final try.
-_STALL_FIRST_ATTEMPT_FRACTION = 0.6
+#: An earlier revision of this change capped the first attempt of a hop at
+#: ``0.6 * timeout`` while a fallback remained, to leave the browser-shaped
+#: probe something to spend on a black-holing origin. That cap silently turned a
+#: slow-but-working origin into a failure: ``httpx``'s read timeout bounds the
+#: wait for response HEADERS too, so an origin whose time-to-first-byte exceeds
+#: 0.6·T (12 s of the default 20 s) was cut off on its first, honest attempt and
+#: then handed a browser-profile retry that had 0.4·T left — reported to the
+#: model as a "silent block" naming a vendor we never saw. Re-measured against
+#: the same fake-clock harness that found it: a 13 s-first-byte origin succeeds
+#: on the pre-change engine and failed as ``stall`` under the cap.
+#:
+#: So there is no first-attempt cap: **every attempt gets the full remaining
+#: budget**, and the escalation is opportunistic — funded only by whatever the
+#: hop's own outcome left behind. A fast refusal (403) still leaves ~all of T for
+#: the probe, which is where the measured win lives; a stall that consumes the
+#: budget simply reports a classified, readable terminal message instead of
+#: pretending to have diagnosed a vendor it never reached.
 
 #: Connect is capped independently of read: a handshake that has not completed
 #: in 5 s is not going to, and spending the whole budget on it would leave
@@ -187,11 +194,28 @@ class FetchError(Exception):
     throw), and is ``None`` for the policy refusals that never reach the network
     — an SSRF refusal is not a "failure class", it is the guard working. It is
     ADDITIVE: every existing ``str(error)`` call site keeps working unchanged.
+
+    ``attempts``/``profiles`` carry the same retry facts the message already
+    states in prose, so a caller that builds ``details`` from the exception does
+    not have to parse the sentence to find out how many requests were spent. The
+    pair is why the terminal path's ``details`` can finally agree with its own
+    preview text (design §5.3: ``attempts`` is a key, excluded only for a cache
+    hit) — before this the model read "2 attempts" while the structured payload
+    said nothing.
     """
 
-    def __init__(self, message: str, *, failure: FetchFailure | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure: FetchFailure | None = None,
+        attempts: int = 0,
+        profiles: Sequence[str] = (),
+    ) -> None:
         super().__init__(message)
         self.failure = failure
+        self.attempts = attempts
+        self.profiles = list(profiles)
 
 
 def coerce_fetch_settings(raw: object) -> WebFetchSettings:
@@ -597,23 +621,6 @@ class _Budget:
     def remaining(self) -> float:
         return self.deadline - _now()
 
-    def attempt_timeout(self, remaining: float, *, first: bool, has_fallback: bool) -> float:
-        """How long THIS attempt may take.
-
-        The first attempt of a hop is capped at a fraction of the budget while a
-        fallback attempt remains, because a page that has sent no headers in
-        12 s of a 20 s budget is overwhelmingly more likely to be black-holed by
-        an anti-bot layer than merely slow — and the browser-shaped probe that
-        follows answers in ~0.25 s on the hosts where that is true.
-
-        The LAST attempt always gets the full remaining budget: a genuinely slow
-        origin must never be penalised on its final try, which is what keeps
-        this from becoming a timeout reduction in disguise.
-        """
-        if first and has_fallback:
-            return min(remaining, self.total * _STALL_FIRST_ATTEMPT_FRACTION)
-        return remaining
-
 
 @dataclass
 class _Telemetry:
@@ -643,11 +650,20 @@ def _backoff_delay(attempt: int, retry_after_s: float | None) -> float | None:
     honouring it is both the polite and the effective behaviour — but only while
     it fits inside a live turn. A two-minute wait returns ``None`` so the caller
     reports the number instead of blocking the user on it.
+
+    The honoured interval carries the SAME ±25 % jitter as our own backoff curve
+    (design §3.4), and it matters most here: the tool description invites parallel
+    ``web_fetch`` calls, so several calls refused by one rate-limited origin would
+    otherwise sleep the identical interval and retry in lockstep — the exact burst
+    the jitter exists to spread out. The jitter is applied BEFORE the cap is
+    consulted so a value nudged over ``_RETRY_AFTER_MAX_SLEEP_S`` is reported
+    rather than slept.
     """
     if retry_after_s is not None:
-        if retry_after_s > _RETRY_AFTER_MAX_SLEEP_S:
+        delay = retry_after_s * (1 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER))
+        if retry_after_s > _RETRY_AFTER_MAX_SLEEP_S or delay > _RETRY_AFTER_MAX_SLEEP_S:
             return None
-        return retry_after_s
+        return delay
     delay = min(_RETRY_BASE_S * (2 ** (attempt - 1)), _RETRY_CAP_S)
     return delay * (1 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER))
 
@@ -874,6 +890,8 @@ class WebFetchService:
                 url=url,
             ),
             failure=failure,
+            attempts=telemetry.attempts,
+            profiles=telemetry.profiles,
         )
 
     async def _attempt_series(
@@ -909,17 +927,22 @@ class WebFetchService:
                     )
                 break
 
-            attempt_timeout = budget.attempt_timeout(
-                remaining,
-                first=attempt == 1,
-                has_fallback=attempt < max_attempts or budget.escalation_available,
-            )
+            # EVERY attempt gets the full remaining budget — including the first
+            # one. There used to be a `min(remaining, 0.6 * total)` cap here for
+            # the first attempt of a hop; it turned a slow-but-working origin into
+            # a failure, and the reasoning for its removal is at the top of this
+            # module. The escalation is opportunistic: it is funded by whatever
+            # the hop's own outcome left behind, so a refusal still leaves
+            # ~all of T for the browser-shaped probe while a stall that spends the
+            # budget simply reports the stall. The attempt's timeout is derived
+            # from the budget INSIDE ``_request_once``, after the resolver, which
+            # is what keeps the number honest (see that method).
             telemetry.attempts += 1
             telemetry.profiles.append(profile)
 
             try:
                 status, headers, body, complete = await self._request_once(
-                    owner, url, ceiling, attempt_timeout, budget.total, profile=profile
+                    owner, url, ceiling, budget, profile=profile
                 )
             except FetchError as error:
                 if error.failure is None:
@@ -948,8 +971,12 @@ class WebFetchService:
                     return response, None
 
             telemetry.failure = failure
-            if failure.retry_after_s is not None:
-                telemetry.retry_after_s = failure.retry_after_s
+            # Set UNCONDITIONALLY, including to ``None``: a 429's Retry-After
+            # must not ride into the details of a later, different failure. A
+            # caller reading ``retry_after_s`` is being told what the REPORTED
+            # outcome asked for, and a 503 that named no interval has nothing to
+            # say about the 2 s an earlier attempt was told to wait.
+            telemetry.retry_after_s = failure.retry_after_s
             if not failure.retryable or attempt >= max_attempts:
                 break
 
@@ -969,8 +996,7 @@ class WebFetchService:
         owner: WebReadIO,
         url: str,
         ceiling: int,
-        attempt_timeout: float,
-        pool_timeout: float,
+        budget: _Budget,
         *,
         profile: str,
     ) -> tuple[int, dict[str, str], bytes, bool]:
@@ -982,16 +1008,69 @@ class WebFetchService:
         attempt 2 must be refused on attempt 2, and a retry that reused attempt
         1's vetted address without re-checking would reopen exactly the rebinding
         window the pin exists to close.
+
+        The deadline is the ceiling for the VALIDATION too, not just the request:
+        ``getaddrinfo`` has no timeout of its own in the stdlib, so an unbounded
+        lookup would let a hung resolver push the call past its stated timeout and
+        make the per-attempt timeout computed before it stale. So the lookup runs
+        under ``asyncio.wait_for(remaining)`` and the request's own timeout is
+        recomputed from what is left AFTER it (see ``_attempt_series``).
         """
         # Validate returns the vetted IP to PIN this request's connection to, so
         # httpx cannot re-resolve to a different (internal) address between this
         # check and the socket open (M1). Re-run on EVERY request — every hop,
         # every retry, every enrichment probe, and the escalated attempt.
-        # DNS can block even before HTTP starts, which is why it runs in a
-        # thread.
-        pinned_ip = await asyncio.to_thread(
-            validate_public_url, url, allow_private=self.settings.allow_private
-        )
+        # DNS can block even before HTTP starts, which is why it runs in a thread.
+        #
+        # The abandoned-thread caveat: a timed-out ``to_thread`` cannot be
+        # cancelled, so the worker keeps running until getaddrinfo returns on its
+        # own. That thread cannot extend THIS call (the wait_for is what the call
+        # awaits) — it can only linger in the executor, where the resolver's own
+        # timeout ends it. The guarantee this buys is therefore about the fetch,
+        # not about the thread: no configuration of retries can make the CALL
+        # exceed its stated timeout.
+        resolver_budget = budget.remaining()
+        if resolver_budget <= 0:
+            raise FetchError(
+                f"ran out of time after {budget.total:.1f}s before resolving {url}",
+                failure=FetchFailure(
+                    kind="stall",
+                    retryable=False,
+                    detail=f"ran out of time after {budget.total:.1f}s",
+                ),
+            )
+        try:
+            pinned_ip = await asyncio.wait_for(
+                asyncio.to_thread(
+                    validate_public_url, url, allow_private=self.settings.allow_private
+                ),
+                timeout=resolver_budget,
+            )
+        except asyncio.TimeoutError:
+            # A policy refusal (private host, bad scheme) raises out of the
+            # thread as its own FetchError; only a lookup that never returns lands
+            # here. Classified as ``transport`` so the caller's retry decision is
+            # unchanged, and read as a stall by the model — which is what it is.
+            raise FetchError(
+                f"resolving {url} took longer than the {resolver_budget:.1f}s left "
+                "of this fetch's time budget",
+                failure=FetchFailure(
+                    kind="transport",
+                    retryable=True,
+                    detail=(
+                        "the host name could not be resolved in time — the lookup "
+                        f"did not finish within the {resolver_budget:.1f}s left of "
+                        "the fetch budget"
+                    ),
+                ),
+            ) from None
+        # Recompute against the TRUE remaining time: the lookup above just spent
+        # an unbounded amount of it, and the timeout the caller computed before
+        # that is now stale (it could exceed the deadline by the lookup's
+        # duration). A negative value is clamped to a hair above zero rather than
+        # passed through, so the attempt still costs one fast, classified failure
+        # instead of an httpx ``Timeout`` built from a negative number.
+        attempt_timeout = max(budget.remaining(), 0.001)
         origin = httpx.URL(url)
         async with owner.client(
             # The pool key keeps the CALL's timeout, not the attempt's: the
@@ -1003,12 +1082,12 @@ class WebFetchService:
                 origin.scheme,
                 origin.host,
                 origin.port,
-                pool_timeout,
+                budget.total,
                 id(self.transport),
             ),
             transport=self.transport,
             follow_redirects=False,
-            timeout=pool_timeout,
+            timeout=budget.total,
             headers={"User-Agent": USER_AGENT},
         ) as client:
             extra = BROWSER_PROFILE_HEADERS if profile == "browser" else None
