@@ -1123,9 +1123,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # no such seam and must not grow one; a later figure that counts it as
     # declared-for-both would mean the in-process session had grown a transport
     # failure it cannot have.
-    assert len(viewer_only) == 48, (
+    #
+    # 48 → 50 is the same direction again: the desktop warm op adds
+    # ``warm_runtime`` and ``engage_in_flight``, both viewer-only for the same
+    # kind of reason — a runtime has no viewer to warm speculatively and no
+    # bind lock to sample — and both are read by the desktop bridge through
+    # ``bridge.remote``. Growth is not the decay this pin guards against (the
+    # aggregate below is a FLOOR), but the figure is exact on purpose, so it
+    # is edited deliberately rather than relaxed.
+    assert len(viewer_only) == 50, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 48, and the aggregate floor is set at 40 against that number. A "
+        "says 50, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1733,3 +1741,39 @@ def test_two_probe_loops_sharing_one_variable_keep_both_sets() -> None:
         "planted_loop_a",
         "planted_unpack_b",
     }
+
+
+def test_the_quoted_isinstance_member_count_is_still_true() -> None:
+    """The figure two docstrings cite beside their timing must not rot.
+
+    ``ViewerSessionProtocol`` and ``tui/app.py::_is_viewer`` both justify NOT
+    dispatching on ``isinstance`` by naming how many members a positive check
+    walks. That number had drifted to 84 while the protocol grew to 106, which
+    nothing noticed because a stale comment fails no test (review round 1,
+    NIT-4). It is now derived here so a member added or removed without
+    updating the prose is a failure rather than a slow lie.
+
+    ``_get_protocol_attrs`` is exactly the set ``isinstance`` walks, which is
+    why it -- and not the viewer-only population pinned above -- is the right
+    quantity beside the measurement. The two differ because this one counts
+    inherited members; they answer different questions and must not be
+    reconciled.
+    """
+    import re
+    from typing import _get_protocol_attrs  # type: ignore[attr-defined]
+
+    from local_operator.session.protocol import ViewerSessionProtocol
+    from local_operator.tui.app import _is_viewer
+
+    walked = len(_get_protocol_attrs(ViewerSessionProtocol))
+    for doc, where in (
+        (ViewerSessionProtocol.__doc__ or "", "session/protocol.py"),
+        (_is_viewer.__doc__ or "", "tui/app.py::_is_viewer"),
+    ):
+        quoted = {int(n) for n in re.findall(r"(\d+)\s+public\s*\n?\s*members", doc)}
+        assert quoted == {walked}, (
+            f"{where} quotes {sorted(quoted) or 'no'} public members beside its "
+            f"isinstance timing; a positive check now walks {walked}. Recompute "
+            "with len(typing._get_protocol_attrs(ViewerSessionProtocol)) rather "
+            "than adjusting the old figure by the size of your change."
+        )
