@@ -4,6 +4,7 @@ streaming rows that update in place, subagent roster aggregation."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -43,6 +44,7 @@ from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     PendingRequest,
     SessionProjection,
+    SubagentRow,
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import SessionRecord
@@ -437,6 +439,172 @@ def test_live_fold_bounds_subagent_prompt_and_outcome_on_the_wire() -> None:
     assert len(wire_row["result_text"]) <= SUBAGENT_OUTCOME_CHARS
     # An empty error field stays empty (a cap must not manufacture a placeholder).
     assert wire_row["error_text"] == ""
+
+
+#: Production-shaped job ids: 12 hex chars, as ``uuid4().hex[:12]`` builds them.
+#: The LENGTH is load-bearing — ``peer_ids`` costs ~16 bytes per sibling id on
+#: the wire, so a 256-wide group of this shape crosses the 1 MiB line limit
+#: while the same group with ``child-0``-style ids stays ~100 KB under it.
+_SIBLING_ID_HEX = 12
+
+
+def _flat_roster_fold(width: int) -> ProjectionFold:
+    """A flat sibling group folded by the REAL roster path.
+
+    Every child sits under one parent (``parent_job_id: None``), which is the
+    production shape — 256 parallel eval children — and the one that makes
+    ``peer_ids`` O(n^2): each row lists every sibling but itself.
+    """
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(width):
+        comms.record_launch(
+            f"{index:0{_SIBLING_ID_HEX}x}",
+            f"osworld-eval-{index}",
+            prompt="Analyse the episode and click the correct element " * 4,
+        )
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    for row in fold.projection.subagents:
+        row.result_text = "observed the agent fail to click the correct element " * 4
+    return fold
+
+
+def _projection_line(data: dict[str, Any]) -> int:
+    """Exactly what the socket writes for a projection frame."""
+    return len(json.dumps({"op": "projection", "data": data}).encode()) + 1
+
+
+@pytest.mark.parametrize("width", [1, 50, 250, 1000])
+def test_a_wide_sibling_group_cannot_make_the_projection_unreadable(width: int) -> None:
+    """The cap's CONTRACT, at every roster width that matters.
+
+    ``cap_projection_frame`` is a soft cap: it degrades optional tiers and may
+    still return an over-limit payload, which the socket then writes raw. The
+    welcome projection is therefore the one frame family that could make a
+    session unopenable by ANY viewer — the client's ``readline`` raises over the
+    same 1 MiB, its pump dies, and every retry dies the same way. This pins the
+    contract structurally (the frame the send path would report as oversize is
+    None) rather than with a byte ceiling, so it stays true whatever the row
+    payload happens to weigh.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_DERIVED_ROSTER_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.session.frontend_state import oversized_frame_report
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(width)
+    data, _degraded = cap_projection_frame(fold.projection)
+
+    assert oversized_frame_report({"op": "projection", "data": data}, _MAX_LINE_BYTES) is None
+
+    rows = data["subagents"]
+    assert rows
+    # ``parent_job_id`` is what every shed field can be REBUILT from, so it must
+    # survive on every row no matter which tier fired (the canonical side
+    # reasons the same way, and the phone normalises an absent list as empty).
+    assert all("parent_job_id" in row for row in rows)
+    # The derived graph is shed ALL OR NOTHING per frame: a half-shed roster
+    # would leave a reader unable to tell "no peers" from "not carried".
+    for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+        carried = {bool(row.get(field)) for row in rows}
+        assert len(carried) == 1, f"{field} was shed for only some rows"
+
+
+def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
+    """256 flat siblings: the frame production could not send, and what fixed it.
+
+    The tiers that existed before this shed only TEXT, and none of them can
+    touch the field that actually grows this frame: ``peer_ids`` is every
+    sibling's job id, so a flat group of width n costs O(n^2). At production
+    width the derived graph alone is ~1 MB against a 1 MiB line limit, which is
+    why the cap's own "the control socket will drop it" warning (30,839 lines
+    across five sessions) was followed by an unreadable write.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(256)
+    naive = _projection_line(fold.projection.to_json())
+    derived = sum(len(str(list(row.peer_ids)).encode()) for row in fold.projection.subagents)
+    assert naive > _MAX_LINE_BYTES, (
+        f"the fixture no longer reproduces the unreadable welcome: {naive:,} B is "
+        f"inside the {_MAX_LINE_BYTES:,} B limit"
+    )
+    assert derived > 1_000_000, (
+        "the fixture no longer reproduces WHY it was fatal: without an O(n^2) "
+        f"derived graph ({derived:,} B here) the text tiers could have fitted it"
+    )
+
+    data, degraded = cap_projection_frame(fold.projection)
+    rows = data["subagents"]
+    assert degraded is True
+    assert len(rows) == 256, "the shed tier must shed fields, not children"
+    assert all(row.get("peer_ids") == [] for row in rows)
+    assert all(row.get("child_ids") == [] for row in rows)
+    assert all(row.get("ancestor_ids") == [] for row in rows)
+    assert all(row.get("ancestors") == [] for row in rows)
+    assert all("parent_job_id" in row for row in rows)
+    assert _projection_line(data) <= _MAX_LINE_BYTES
+    # Nothing else was spent to get there: the row TEXT is still the reader's.
+    assert all(row["label"] for row in rows)
+
+
+def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
+    """The last tier before the honest warning: identity plus a count.
+
+    A roster wide enough that even identity rows cannot fit is genuinely
+    unbounded, so the frame degrades to one row per child carrying only what a
+    reader cannot derive — job id, label, parent edge, lifecycle — plus the
+    roster WIDTH, because a roster that reads as empty would be a worse lie than
+    one that says how many children there are. Everything dropped is fetchable
+    per child, the same trade the transcript already makes with /history.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ROSTER_IDENTITY_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.session.frontend_state import oversized_frame_report
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    rows = [
+        SubagentRow(
+            job_id=f"child-{index}",
+            label=f"child {index}",
+            parent_job_id=None,
+            progress="working",
+            prompt="P" * 120,
+        )
+        for index in range(4_000)
+    ]
+    projection = SessionProjection(session_id="s1", pid=1, subagents=rows)
+    data, degraded = cap_projection_frame(projection)
+
+    assert degraded is True
+    assert data["subagent_count"] == 4_000
+    assert len(data["subagents"]) == 4_000
+    assert all(set(row) <= set(FRAME_CAP_ROSTER_IDENTITY_FIELDS) for row in data["subagents"])
+    assert all("parent_job_id" in row for row in data["subagents"])
+    assert oversized_frame_report({"op": "projection", "data": data}, _MAX_LINE_BYTES) is None
+    # The frame must still rebuild into a projection on the client, or the
+    # degradation would trade an unreadable frame for an unusable one.
+    record = SessionRecord(
+        pid=7,
+        kind="tui",
+        session_id="s1",
+        conversation_name="c",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+        protocol=1,
+    )
+    rebuilt = _projection_from_json(data, record)
+    assert rebuilt.session_id == "s1"
+    assert len(rebuilt.subagents) == 4_000
+    assert rebuilt.subagents[0].label == "child 0"
 
 
 def test_live_fold_keeps_failed_child_error_text_generous() -> None:
