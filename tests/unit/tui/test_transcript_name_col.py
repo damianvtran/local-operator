@@ -22,6 +22,19 @@ In every case hovering a row repaired that row alone (``on_enter`` →
 a time. The assertions here are on the frame the compositor painted, with no
 pointer anywhere in the sequence.
 
+A fourth path survived all three fixes, and it is the one the operator saw
+again on the released build. A row paged in or restored from history is
+authored while it is still PARENTLESS: the builders set a fold hint naming the
+width the row is about to be given and then author its content (`session_
+presentation`, and ``insert_blocks`` for the pages it mounts). With no ledger to
+ask, the row bakes the floor column, and because the hint is the width it really
+is given, the resize guard compared width with width, read "unchanged", and
+skipped the rebuild that would have re-read the column. So the paged row stayed
+on the floor while its mounted neighbours painted the shared column — and a
+pointer crossing it re-fitted that one row, which is the tearing-under-the-cursor
+symptom. The guard now compares the column too (``_layout_moved``), which is the
+second input the row's geometry is built from.
+
 What is asserted is the COLUMN, never frame bytes or whole-row text: hover
 legitimately rewrites a row's own text (``_build_row`` lights the ``⟨expand⟩``
 offer when the row is hovered), so "the frame is unchanged" is the wrong
@@ -35,7 +48,7 @@ import pytest
 from rich.text import Text
 from textual.app import App
 
-from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, ToolCard
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TranscriptBlock,
@@ -150,6 +163,135 @@ async def test_appending_a_longer_name_repaints_the_rows_already_painted() -> No
         assert expected > narrow
         assert summary_col(app, first, "echo alpha") == expected
         assert summary_col(app, second, "echo beta") == expected
+
+
+#: A terminal whose TRANSCRIPT content region is exactly ``FALLBACK_WIDTH``.
+#: The same trap as the hint, reached with no hint at all: a row authored while
+#: it was parentless falls back to that width, so on a terminal of this size the
+#: row is laid out at exactly the width it authored at.
+FALLBACK_TERMINAL = (84, 24)
+
+
+@pytest.mark.asyncio
+async def test_a_row_authored_before_it_was_appended_paints_the_shared_column() -> None:
+    """The authoring order the replay and paging paths use: hint, then append.
+
+    ``session_presentation`` tells a restored row the width it is about to be
+    given *before* the state calls that author its content, so the row folds once
+    instead of flashing at the console width — the reason ``set_fold_hint``
+    exists. The cost of that order is that the content is written with no ledger
+    to ask, so the row bakes the floor column, and its authored width is exactly
+    the width it is then handed. A guard reading only the width reports
+    "unchanged" and never re-fits it: the paged row keeps the floor while the
+    rows around it paint the shared column.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        wide = ToolCard("wide", LONGER_TOOL, {"command": "list them"}, "")
+        view.append_block(wide)
+        await _settle(pilot)
+        shared = summary_col(app, wide, "list them")
+
+        # The paging path, reproduced in its own order.
+        destination = view.scrollable_content_region.width
+        paged = ToolCard("paged", "bash", {"command": "reveal me"}, "")
+        paged.set_fold_hint(destination)
+        paged.mark_done("done")  # authors the row while it has no parent
+        assert paged._built_width == destination  # ... at exactly that width
+        view.insert_blocks(0, [paged])
+        await _settle(pilot)
+
+        # No pointer anywhere in this sequence: the row finds the ledger's column
+        # on its own layout pass, like any other newcomer.
+        assert summary_col(app, paged, "reveal me") == shared
+
+        # And a pointer crossing it changes nothing — hover is not load-bearing
+        # for alignment, which is the claim the operator's report is about.
+        paged._set_hovered(True)
+        await pilot.pause()
+        assert summary_col(app, paged, "reveal me") == shared
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_lands_at_the_width_it_was_authored_at_still_fits() -> None:
+    """The same trap with no hint at all: the ``FALLBACK_WIDTH`` landmine.
+
+    On a terminal whose content region IS the fallback width, every parentless
+    build is laid out at exactly the width it authored at, so nothing about the
+    hint is special — the width-only guard was. Nothing else in the frame can be
+    trusted as a reference either, because every row is stale together at this
+    size; the frame is self-consistently wrong, which is why the claim is made
+    against a row whose width MOVED under it (and therefore re-fitted).
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=FALLBACK_TERMINAL) as pilot:
+        view = app.query_one(TranscriptView)
+        assert view.scrollable_content_region.width == FALLBACK_WIDTH
+        # The reference row is APPENDED BEFORE it is settled, so its content is
+        # authored while it is mounted — the one order in this frame that can read
+        # the shared column. Everything authored while parentless lands on the
+        # fallback width here, which is exactly the point.
+        wide = ToolCard("wide", LONGER_TOOL, {"command": "list them"}, "")
+        view.append_block(wide)
+        wide.mark_done("done")
+        await _settle(pilot)
+        shared = summary_col(app, wide, "list them")
+
+        paged = ToolCard("paged", "read", {"command": "reveal me"}, "")
+        paged.mark_done("done")
+        assert paged._built_width == FALLBACK_WIDTH
+        view.insert_blocks(0, [paged])
+        await _settle(pilot)
+
+        assert summary_col(app, paged, "reveal me") == shared
+
+
+@pytest.mark.asyncio
+async def test_a_sidebar_toggle_refits_every_row_the_frame_shows() -> None:
+    """The WIDTH/RIGHT-EDGE invariant across the gesture the operator reported.
+
+    The second report was the same tear on the right: rows whose right-aligned
+    status sits at different cells after a sidebar toggle and a scroll, mending
+    one row at a time under the pointer. A toggle moves the lane the transcript is
+    given, so every row's width moves with it, and a row left at the old width
+    paints its status in the wrong column.
+
+    A GUARD, not a reproduction, and it says so deliberately: it passes on the
+    unfixed tree as well, because the width term of ``on_resize`` already caught
+    every width change these harnesses can drive (the search, and what it could
+    not reach, is recorded on the PR). What it can see is the shape a regression
+    in the refit path would take: every mounted row must agree with the pane on
+    the width it was BUILT at, after the toggle settles and again after a hover,
+    because hover must never be load-bearing for geometry.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        seeded = []
+        for index, name in enumerate(("bash", "list_variables", "read", "web_search")):
+            card = ToolCard(f"c{index}", name, {"command": f"echo {index}"}, "")
+            view.append_block(card)
+            card.mark_done("done")
+            seeded.append(card)
+        await _settle(pilot)
+
+        for key in ("ctrl+b", "pageup", "pagedown", "ctrl+b"):
+            await pilot.press(key)
+            await _settle(pilot)
+            pane = view.scrollable_content_region.width
+            for card in seeded:
+                assert card._built_width == pane, (
+                    f"{card.tool_call_id} paints at {card._built_width} while the "
+                    f"pane is {pane} (after {key})"
+                )
+                before = summary_col(app, card, f"echo {seeded.index(card)}")
+                card._set_hovered(True)
+                await pilot.pause()
+                assert card._built_width == pane
+                assert summary_col(app, card, f"echo {seeded.index(card)}") == before
+                card._set_hovered(False)
+                await pilot.pause()
 
 
 @pytest.mark.asyncio
