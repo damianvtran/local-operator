@@ -102,6 +102,30 @@ class HistoryPage(BaseModel):
     cursor_missing: bool
 
 
+#: How a child's transcript read ended, when the absence of rows needs naming.
+#:
+#: ``pending`` and ``gone`` are the two DIFFERENT absences a reader must not
+#: conflate (design § 9.1): ``pending`` is a child whose directory exists and
+#: whose ``transcript.jsonl`` does not, so a reader offers "nothing yet" and
+#: re-probes on the next pulse; ``gone`` is a missing directory, which is
+#: final, so a reader stops asking. ``ready`` covers a file that exists even
+#: when it holds no rows — an empty page and an unwritten child are not the
+#: same fact, and only the filesystem can tell them apart.
+ChildTranscriptState = Literal["ready", "pending", "gone"]
+
+
+class ChildTranscriptPage(HistoryPage):
+    """One page of a CHILD's transcript, in the parent's own envelope.
+
+    Derived by the backend and by nothing else (design § 9.1): the two stores
+    that know a subagent exists are not witnesses to whether it has written,
+    so a renderer inferring ``state`` from a roster row's status would report a
+    running child as readable the moment it is registered.
+    """
+
+    state: ChildTranscriptState
+
+
 class SnapshotPayload(BaseModel):
     frontend: FrontendSync
     history: HistoryPage

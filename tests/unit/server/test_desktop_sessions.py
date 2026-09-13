@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
 from local_operator.harness.types import Message
+from local_operator.resume import ORIGIN_FORK, ORIGIN_SUBAGENT, mark_session_origin
 from local_operator.server.routes import capabilities, desktop_sessions
 from local_operator.server.routes.desktop_sessions import Answer, Command, Image, Prompt
 from local_operator.server.utils import desktop_sessions as module
@@ -23,9 +25,18 @@ from local_operator.server.utils.desktop_receipts import (
     DesktopReceipts,
     ReceiptConflict,
 )
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessions,
+    SubagentChildUnavailable,
+)
 from local_operator.session.runtime import registry
-from local_operator.session.transcript import Transcript, read_transcript_page
+from local_operator.session.transcript import (
+    ENTRY_MESSAGE,
+    TRANSCRIPT_FILENAME,
+    Transcript,
+    TranscriptEntry,
+    read_transcript_page,
+)
 
 
 @pytest.mark.asyncio
@@ -357,6 +368,10 @@ def test_route_response_models_publish_the_real_canonical_contract():
         ("/v1/desktop/sessions", "get"): "SessionList",
         ("/v1/desktop/sessions", "post"): "CreatedSession",
         ("/v1/desktop/sessions/{session_id}", "get"): "SessionSnapshot",
+        (
+            "/v1/desktop/sessions/{session_id}/children/{child_id}/transcript",
+            "get",
+        ): "ChildTranscriptPage",
         ("/v1/desktop/sessions/{session_id}/history", "get"): "HistoryPage",
         ("/v1/desktop/sessions/{session_id}/messages", "post"): "MessageAdmission",
         ("/v1/desktop/sessions/{session_id}/commands", "post"): "CommandReceipt",
@@ -1428,3 +1443,529 @@ async def test_a_preview_refuses_a_working_directory_that_does_not_exist(draft_a
     assert preview.json() == create.json(), "the two routes must answer the same body the same way"
     assert not missing.exists(), "neither route may create the directory it was refused"
     assert not (root / "sessions").exists()
+
+
+# -- the child transcript route (design § 9.1) --------------------------------
+#
+# A new READ PATH ACROSS A TRUST BOUNDARY, so these tests are about what the
+# route REFUSES at least as much as about the rows it returns. Two ids arrive
+# from a renderer that holds an absolute `session_dir` on the wire and must
+# never be able to submit one; the route, not the caller, proves membership.
+
+PARENT_ID = "0123456789ab"
+CHILD_ID = "abcdef012345"
+UNNAMED_CHILD_ID = "001122334455"
+
+#: Every way the containment proof can fail, one per clause. Parametrised so
+#: the transcript route and the attachment route cannot drift apart: a gate
+#: with two callers is a gate that has to hold for both.
+REFUSAL_CASES = [
+    "child-id-is-not-an-id",
+    "child-id-is-a-path",
+    "parent-unknown",
+    "parent-is-a-subagent",
+    "child-unknown",
+    "child-is-the-users-own-conversation",
+    "child-is-a-fork",
+    "parent-never-named-it",
+    "roster-points-outside-the-sessions-root",
+]
+
+
+def subagent_child(
+    root: Path,
+    *,
+    parent_id: str = PARENT_ID,
+    child_id: str = CHILD_ID,
+    origin: str | None = ORIGIN_SUBAGENT,
+) -> tuple[Path, Path]:
+    """A parent conversation directory plus one child directory on disk.
+
+    The child's origin marker is written by the PRODUCTION writer
+    (`mark_session_origin`) because that marker is a containment fact this
+    route reads — a hand-rolled copy in the fixture could drift from the one
+    the launcher writes and every refusal test would pass vacuously.
+    """
+    sessions = root / "sessions"
+    parent_dir = sessions / parent_id
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    (parent_dir / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(root)}))
+    child_dir = sessions / child_id
+    child_dir.mkdir(parents=True, exist_ok=True)
+    if origin is not None:
+        mark_session_origin(child_dir, origin, label="reviewer")
+    return parent_dir, child_dir
+
+
+def name_child(parent_dir: Path, *session_dirs: Path, job_id: str = "job-1") -> None:
+    """Record children on the parent's roster through the PRODUCTION writer.
+
+    `_write_roster_sidecar` is what `Session._persist_subagent_roster` calls on
+    every roster move, so the containment proof is exercised against the store
+    shape a runtime actually writes. `session_dir` is the field a record
+    carries (there is no `session_id`), and it is the whole basis of the
+    ownership check.
+    """
+    from local_operator.session.session import (
+        SUBAGENT_ROSTER_SIDECAR,
+        _write_roster_sidecar,
+    )
+
+    _write_roster_sidecar(
+        parent_dir / SUBAGENT_ROSTER_SIDECAR,
+        {
+            "version": 1,
+            "generation": len(session_dirs),
+            "jobs": [],
+            "accounting": [],
+            "records": [
+                {"job_id": f"{job_id}-{index}", "label": "reviewer", "session_dir": str(directory)}
+                for index, directory in enumerate(session_dirs)
+            ],
+        },
+    )
+
+
+def uncontained_pair(tmp_path: Path, case: str) -> tuple[DesktopSessions, str, str]:
+    """The pool, parent id and child id for ONE refusal case.
+
+    Each case starts from a real, contained pair and breaks exactly one clause,
+    so a refusal cannot be an accident of a fixture that never looked readable.
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+    if case == "child-id-is-not-an-id":
+        return pool, PARENT_ID, "not-an-id"
+    if case == "child-id-is-a-path":
+        # What a renderer holding `session_dir` would send if the route ever
+        # took a path: an absolute directory, and one that escapes upward.
+        return pool, PARENT_ID, str(child_dir)
+    if case == "parent-unknown":
+        return pool, "ffffffffffff", CHILD_ID
+    if case == "parent-is-a-subagent":
+        mark_session_origin(parent_dir, ORIGIN_SUBAGENT, label="child-too")
+        return pool, PARENT_ID, CHILD_ID
+    if case == "child-unknown":
+        return pool, PARENT_ID, UNNAMED_CHILD_ID
+    if case == "child-is-the-users-own-conversation":
+        # On disk, user-owned (an ABSENT marker means the user, see
+        # `session_origin`) — and named by the roster, so only the origin
+        # clause can refuse it.
+        (child_dir / "origin.json").unlink()
+        return pool, PARENT_ID, CHILD_ID
+    if case == "child-is-a-fork":
+        mark_session_origin(child_dir, ORIGIN_FORK, parent=PARENT_ID)
+        return pool, PARENT_ID, CHILD_ID
+    if case == "parent-never-named-it":
+        name_child(parent_dir, tmp_path / "sessions" / UNNAMED_CHILD_ID)
+        return pool, PARENT_ID, CHILD_ID
+    if case == "roster-points-outside-the-sessions-root":
+        elsewhere = tmp_path / "elsewhere" / CHILD_ID
+        elsewhere.mkdir(parents=True)
+        mark_session_origin(elsewhere, ORIGIN_SUBAGENT, label="reviewer")
+        name_child(parent_dir, elsewhere)
+        return pool, PARENT_ID, CHILD_ID
+    raise AssertionError(f"unhandled refusal case {case!r}")
+
+
+@pytest.mark.asyncio
+async def test_child_route_returns_the_childs_raw_rows_in_the_parents_envelope(tmp_path):
+    """§ 9.1: `read_transcript_page`'s rows, verbatim, plus the derived state.
+
+    Verbatim is the requirement that lets the renderer fold a child's page
+    through the same reducer as the parent's history, so the assertion is on
+    identity with the child's OWN reader — ids, timestamps, types and payloads
+    — and not on a rendering of them (`peek` is the counter-example: it drops
+    compaction and bookkeeping rows and flattens messages into strings).
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    transcript = Transcript(child_dir)
+    ids = [
+        (await transcript.append_message(Message.user(f"child row {index}"))).id
+        for index in range(3)
+    ]
+    name_child(parent_dir, child_dir)
+
+    result = await DesktopSessions(tmp_path).child_transcript(PARENT_ID, CHILD_ID)
+
+    expected = [
+        json.loads(row.to_json()) for row in read_transcript_page(child_dir, limit=100).entries
+    ]
+    assert result == {
+        "entries": expected,
+        "has_more": False,
+        "cursor_missing": False,
+        "state": "ready",
+    }
+    assert [row["id"] for row in result["entries"]] == ids
+    assert all(set(row) == {"id", "ts", "type", "payload"} for row in result["entries"])
+
+
+@pytest.mark.asyncio
+async def test_child_route_pages_backwards_and_reports_a_vanished_cursor(tmp_path):
+    """The envelope's paging rules hold on the CHILD's file, not the parent's."""
+    parent_dir, child_dir = subagent_child(tmp_path)
+    transcript = Transcript(child_dir)
+    ids = [
+        (await transcript.append_message(Message.user(f"child row {index}"))).id
+        for index in range(5)
+    ]
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+
+    tail = await pool.child_transcript(PARENT_ID, CHILD_ID, limit=2)
+    assert [row["id"] for row in tail["entries"]] == ids[-2:]
+    assert tail["has_more"] is True
+    assert tail["cursor_missing"] is False
+
+    older = await pool.child_transcript(PARENT_ID, CHILD_ID, before_id=ids[-2], limit=2)
+    assert [row["id"] for row in older["entries"]] == ids[-4:-2]
+    assert older["has_more"] is True
+
+    # A compaction replaces the JSONL atomically, so a cursor can vanish
+    # between two reads; `/history`'s answer to that is the current tail plus
+    # `cursor_missing`, and a child page must not invent a second one.
+    transcript.path.write_text(
+        TranscriptEntry("replacement", 1.0, ENTRY_MESSAGE, {"role": "user"}).to_json() + "\n"
+    )
+    replaced = await pool.child_transcript(PARENT_ID, CHILD_ID, before_id=ids[0], limit=100)
+
+    assert replaced["cursor_missing"] is True
+    assert [row["id"] for row in replaced["entries"]] == ["replacement"]
+    assert replaced["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_child_route_distinguishes_pending_ready_and_gone(tmp_path):
+    """Three states, three different answers, and only the filesystem knows.
+
+    `pending` and `gone` are the two absences a reader must not conflate: one
+    promises rows that may still arrive, the other is final. Neither is an
+    error — the roster still names the child, so the read is legal and the
+    ABSENCE is the answer.
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+
+    # The directory exists and nothing has been appended yet: the child may
+    # still speak, so this is `pending` — and a caller that paged into the
+    # absent file is told to reconcile, exactly as `/history` does.
+    assert await pool.child_transcript(PARENT_ID, CHILD_ID) == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "state": "pending",
+    }
+    paged = await pool.child_transcript(PARENT_ID, CHILD_ID, before_id="evicted")
+    assert paged["cursor_missing"] is True and paged["state"] == "pending"
+
+    # A transcript file that EXISTS with no rows is `ready`: an empty page and
+    # an unwritten child are different facts, and only one of them is worth
+    # re-probing.
+    (child_dir / TRANSCRIPT_FILENAME).write_text("")
+    ready = await pool.child_transcript(PARENT_ID, CHILD_ID)
+    assert ready == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "state": "ready",
+    }
+
+    # The directory itself gone is final, and still an ANSWER rather than a
+    # refusal: the parent's own roster is the evidence the child existed.
+    shutil.rmtree(child_dir)
+    gone = await pool.child_transcript(PARENT_ID, CHILD_ID)
+    assert gone == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "state": "gone",
+    }
+    # A caller that paged into a transcript which is no longer there is told to
+    # reconcile, exactly as the `pending` branch and `/history` do — the three
+    # answers to one question have to agree (review round 1, R1-3).
+    paged_gone = await pool.child_transcript(PARENT_ID, CHILD_ID, before_id="evicted")
+    assert paged_gone["cursor_missing"] is True
+    assert paged_gone["state"] == "gone"
+
+
+@pytest.mark.parametrize("case", REFUSAL_CASES)
+@pytest.mark.asyncio
+async def test_child_transcript_refuses_an_uncontained_pair(tmp_path, case):
+    pool, session_id, child_id = uncontained_pair(tmp_path, case)
+    with pytest.raises(SubagentChildUnavailable):
+        await pool.child_transcript(session_id, child_id)
+
+
+@pytest.mark.parametrize("case", REFUSAL_CASES)
+@pytest.mark.asyncio
+async def test_child_attachment_refuses_the_same_uncontained_pairs(tmp_path, case):
+    """The media route carries the identical gate, not a weaker one."""
+    pool, session_id, child_id = uncontained_pair(tmp_path, case)
+    with pytest.raises(SubagentChildUnavailable):
+        await pool.child_attachment(session_id, child_id, "f" * 32)
+
+
+@pytest.mark.asyncio
+async def test_child_attachment_serves_bytes_for_a_contained_child(tmp_path):
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    raw = b"\x89PNG\r\n\x1a\nchild-media"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+
+    data, mime_type = await DesktopSessions(tmp_path).child_attachment(
+        PARENT_ID, CHILD_ID, ref.digest
+    )
+
+    assert data == raw and mime_type == "image/png"
+    with pytest.raises(KeyError):
+        await DesktopSessions(tmp_path).child_attachment(PARENT_ID, CHILD_ID, "f" * 32)
+
+
+def test_child_attachment_digest_shape_is_enforced_by_the_route_declaration():
+    """Same traversal gate as the parent's route: a declared path pattern.
+
+    FastAPI answers a non-matching digest with 422 before the handler runs, so
+    a digest can never be a filename this code builds.
+    """
+    from local_operator.server.app import app
+
+    parameters = app.openapi()["paths"][
+        "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}"
+    ]["get"]["parameters"]
+    digest = next(parameter for parameter in parameters if parameter["name"] == "digest")
+    assert digest["required"] is True
+    assert digest["schema"]["pattern"] == "^[a-f0-9]{32}$"
+
+
+@pytest.mark.asyncio
+async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, monkeypatch):
+    """The boundary, on the wire: auth first, then the rows, then no-store.
+
+    This is the REAL-HTTP half — the route, the `require_desktop` dependency
+    and `managed_desktop_boundary` together. The adapter tests above prove the
+    containment proof; this proves a refusal REACHES a caller as the contract's
+    `404 child_not_found` rather than as a 500 or a bare 404 with no code.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    transcript = Transcript(child_dir)
+    ids = [
+        (await transcript.append_message(Message.user(f"child row {index}"))).id
+        for index in range(2)
+    ]
+    name_child(parent_dir, child_dir)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/transcript"
+
+    with TestClient(app) as client:
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+        forbidden = client.get(
+            path,
+            headers={"Authorization": "Bearer token", "Origin": "https://evil.example"},
+        )
+        assert forbidden.status_code == 403
+        headers = {"Authorization": "Bearer token"}
+        response = client.get(path + "?limit=1", headers=headers)
+        refused = client.get(
+            f"/v1/desktop/sessions/{PARENT_ID}/children/{UNNAMED_CHILD_ID}/transcript",
+            headers=headers,
+        )
+        not_a_child = client.get(
+            f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/transcript?limit=501",
+            headers=headers,
+        )
+        long_cursor = client.get(path + "?before_id=" + "a" * 129, headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()["result"]
+    assert body["state"] == "ready"
+    assert [row["id"] for row in body["entries"]] == ids[-1:]
+    assert body["has_more"] is True
+
+    # A 404 whose code is readable: "I cannot read that pair", retryable on the
+    # next pulse when the roster snapshot catches up.
+    assert refused.status_code == 404
+    assert refused.json()["detail"]["code"] == "child_not_found"
+    # Limits and cursors are the app's own bugs, never a user state.
+    assert not_a_child.status_code == 422
+    assert long_cursor.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    raw = b"\x89PNG\r\n\x1a\nchild-media-wire"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/attachments/{ref.digest}"
+
+    with TestClient(app) as client:
+        assert client.get(path).status_code == 401
+        headers = {"Authorization": "Bearer token"}
+        response = client.get(path, headers=headers)
+        refused = client.get(
+            f"/v1/desktop/sessions/{PARENT_ID}/children/{UNNAMED_CHILD_ID}"
+            f"/attachments/{ref.digest}",
+            headers=headers,
+        )
+        bad_digest = client.get(
+            f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/attachments/not-a-digest",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert response.content == raw
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert refused.status_code == 404
+    assert refused.json()["detail"]["code"] == "child_not_found"
+    assert bad_digest.status_code == 422
+
+
+async def legacy_roster(parent_dir: Path, *session_dirs: Path) -> None:
+    """Name children the way a PRE-sidecar runtime did: one transcript entry.
+
+    No sidecar, deliberately: that is the shape whose lack of a fork guard let a
+    fork inherit the original's children (review round 1, R1-1).
+    """
+    from local_operator.session.session import SUBAGENT_ROSTER_CUSTOM_TYPE
+
+    await Transcript(parent_dir).append_custom(
+        SUBAGENT_ROSTER_CUSTOM_TYPE,
+        {
+            "version": 1,
+            "generation": len(session_dirs),
+            "jobs": [],
+            "records": [
+                {"job_id": f"legacy-{index}", "label": "reviewer", "session_dir": str(directory)}
+                for index, directory in enumerate(session_dirs)
+            ],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fork_cannot_read_the_originals_children(tmp_path):
+    """A fork inherits the parent's TRANSCRIPT, so the roster needs its fork guard.
+
+    ``fork_session`` clones ``transcript.jsonl`` and leaves
+    ``subagent-roster.v1.json`` behind (``fork.EXCLUDED_SIDECARS``), so a legacy
+    ``subagent_roster`` entry rides into the fork VERBATIM — and this reader used
+    to accept it, letting the fork read the ORIGINAL's children through its own
+    route (review round 1, R1-1). The guard is the one every other reader of that
+    entry applies: accept it only when it was appended AFTER this session's fork
+    boundary.
+    """
+    from local_operator.fork import fork_session
+
+    parent_dir, child_dir = subagent_child(tmp_path)
+    await Transcript(child_dir).append_message(Message.user("child row"))
+    await legacy_roster(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+
+    # Positive control: the conversation that actually launched the child reads it.
+    assert (await pool.child_transcript(PARENT_ID, CHILD_ID))["state"] == "ready"
+
+    fork_id = await asyncio.to_thread(fork_session, tmp_path, PARENT_ID)
+    assert (tmp_path / "sessions" / fork_id / "origin.json").is_file()
+    with pytest.raises(SubagentChildUnavailable):
+        await pool.child_transcript(fork_id, CHILD_ID)
+
+    # A fork's OWN roster is still honoured — re-stamping the sidecar is what a
+    # current runtime does on its first roster move, so the legacy fallback is
+    # only what a fresh fork rides until then.
+    name_child(tmp_path / "sessions" / fork_id, child_dir)
+    assert (await pool.child_transcript(fork_id, CHILD_ID))["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_child_route_refuses_a_child_directory_that_escapes_the_store(tmp_path):
+    """The id cannot be a path, but the DIRECTORY it names can be a link.
+
+    ``sessions/`` is writable by anything running as the user, so
+    ``sessions/<12-hex>`` pointing outside the store would take the read — and
+    the origin check, which follows the link — with it while every id-shaped
+    clause above still passed (review round 1, R1-2). The target is resolved and
+    must stay inside the store, the same gate ``session/cleanup.py`` and the
+    legacy chat workspace route apply.
+    """
+    parent_dir, existing_child_dir = subagent_child(tmp_path)
+    # The link must OCCUPY the id's own path: that is the shape this refuses,
+    # and the fixture's real child directory has to make way for it.
+    shutil.rmtree(existing_child_dir)
+    outside = tmp_path / "outside" / CHILD_ID
+    outside.mkdir(parents=True)
+    mark_session_origin(outside, ORIGIN_SUBAGENT, label="reviewer")
+    (outside / TRANSCRIPT_FILENAME).write_text(
+        TranscriptEntry("sneaky", 1.0, ENTRY_MESSAGE, {"role": "user"}).to_json() + "\n"
+    )
+    link = tmp_path / "sessions" / CHILD_ID
+    link.symlink_to(outside, target_is_directory=True)
+    name_child(parent_dir, link)
+
+    with pytest.raises(SubagentChildUnavailable):
+        await DesktopSessions(tmp_path).child_transcript(PARENT_ID, CHILD_ID)
+
+
+@pytest.mark.asyncio
+async def test_child_route_refuses_a_non_directory_at_the_child_path(tmp_path):
+    """``gone`` means the directory is ABSENT; a file is not a child session.
+
+    A path that exists and is not a directory answered ``gone`` before this,
+    which reports a deletion that never happened and tells the reader the
+    absence is final (review round 1, R1-5).
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    shutil.rmtree(child_dir)
+    (tmp_path / "sessions" / CHILD_ID).write_text("not a session")
+    name_child(parent_dir, child_dir)
+
+    with pytest.raises(SubagentChildUnavailable):
+        await DesktopSessions(tmp_path).child_transcript(PARENT_ID, CHILD_ID)
+
+
+@pytest.mark.parametrize("limit", [0, -1, 501, 5000])
+@pytest.mark.asyncio
+async def test_child_transcript_refuses_a_limit_outside_the_page_ceiling(tmp_path, limit):
+    """The adapter guards its own argument, because a route is not its only caller.
+
+    The wire bound is the route's ``Query`` (a 422, asserted over HTTP above);
+    this keeps a direct caller — a test, a future internal one — from asking for
+    an unbounded page, and both read the same ``CHILD_PAGE_LIMIT`` so the number
+    exists once (review round 1, R1-6).
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    await Transcript(child_dir).append_message(Message.user("child row"))
+    name_child(parent_dir, child_dir)
+
+    with pytest.raises(ValueError):
+        await DesktopSessions(tmp_path).child_transcript(PARENT_ID, CHILD_ID, limit=limit)

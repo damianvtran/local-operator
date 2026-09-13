@@ -133,6 +133,46 @@ def child_tail_state(session_dir: Any) -> str:
     return "unknown"
 
 
+def restored_row_identity(job: Any, record: Any | None) -> dict[str, Any]:
+    """The child's session identity, for a row shape that can carry it.
+
+    A LIVE row is stamped from the comms node at snapshot time
+    (``frontend_state._with_lineage``): ``session_id`` and the wire
+    ``session_dir``. A RESTORED row was not — the runtime that knew the node is
+    gone, so both came back ``None`` on a cold conversation while the record
+    the row was resolved FROM carries the directory the whole time. That
+    contradicted the run sidebar's "onto every row, live or restored" and, worse,
+    left the child reader unable to open a restored conversation's children: the
+    renderer addresses a child by ``session_id`` and had nothing to address
+    (QA round 1, Q1-1).
+
+    ``session_id`` is the directory's NAME, which is what the live path stamps
+    too: ``SubagentComms.node`` derives it as ``record.session_dir.name``, and
+    ``harness/subagent.py`` creates children at ``sessions/<uuid[:12]>``, so the
+    directory name IS the child's session id.
+
+    Deliberately conditional on the row SHAPE. ``JobState`` (the wire/frontend
+    shape, ``extra="allow"``) declares both fields; ``AsyncJob`` (the owner's
+    manager row, ``extra="forbid"``) declares neither and reaches its child's
+    directory through the comms registry instead. ``model_copy(update=...)``
+    does not validate, so an unconditional update would write two non-fields
+    onto the owner's rows; this returns nothing for a shape that cannot hold
+    them, and the two callers of :func:`restored_job_row` keep one policy.
+    """
+    if record is None:
+        return {}
+    raw_dir = record_field(record, "session_dir")
+    if not raw_dir:
+        return {}
+    fields = set(getattr(type(job), "model_fields", {}) or {})
+    identity: dict[str, Any] = {}
+    if "session_dir" in fields:
+        identity["session_dir"] = str(raw_dir)
+    if "session_id" in fields:
+        identity["session_id"] = Path(str(raw_dir).rstrip("/")).name
+    return identity
+
+
 def restored_job_row(job: Any, record: Any | None) -> Any:
     """One non-terminal job row, resolved against the record and the child.
 
@@ -141,25 +181,43 @@ def restored_job_row(job: Any, record: Any | None) -> Any:
     ``restored`` and ``cut_off_cause``, so ``model_copy`` is the one update
     mechanism that works for both without a per-caller branch.
     """
+    identity = restored_row_identity(job, record)
     record_outcome = ""
     if record is not None:
         record_outcome = str(record_field(record, "outcome") or "")
     if record_outcome in _SETTLED_RECORD_OUTCOMES:
         return job.model_copy(
-            update={"status": record_outcome, "restored": True, "cut_off_cause": ""}
+            update={
+                "status": record_outcome,
+                "restored": True,
+                "cut_off_cause": "",
+                **identity,
+            }
         )
     tail = child_tail_state(record_field(record, "session_dir") if record is not None else None)
     if tail == "finished":
         # The child produced a settled answer; only its parent's record of that
         # was lost. Reporting the child as cut off would be a lie the panel then
         # offers to resume.
-        return job.model_copy(update={"status": "completed", "restored": True, "cut_off_cause": ""})
+        return job.model_copy(
+            update={
+                "status": "completed",
+                "restored": True,
+                "cut_off_cause": "",
+                **identity,
+            }
+        )
     # ``mid-turn`` and ``unknown`` land in the same place: the child has no
     # settled outcome of its own and cannot be running any more, so it stopped
     # under the process that owned it. One return rather than two identical
     # ones, so the fallthrough reads as intended (review round 1, NIT-1).
     return job.model_copy(
-        update={"status": "interrupted", "restored": True, "cut_off_cause": "owner-lost"}
+        update={
+            "status": "interrupted",
+            "restored": True,
+            "cut_off_cause": "owner-lost",
+            **identity,
+        }
     )
 
 
@@ -196,11 +254,15 @@ def resolve_restored_rows(jobs: Sequence[Any], records: Sequence[Any] = ()) -> l
             by_id[job_id] = record
     rows: list[Any] = []
     for job in jobs:
+        record = by_id.get(str(getattr(job, "id", "") or ""))
         status = str(getattr(job, "status", "") or "")
         if status == "running":
             if bool(getattr(job, "queued", False)):
                 continue
-            rows.append(restored_job_row(job, by_id.get(str(getattr(job, "id", "") or ""))))
+            rows.append(restored_job_row(job, record))
             continue
-        rows.append(job.model_copy(update={"restored": True}))
+        # A SETTLED row is restored too, so it carries the same identity: the
+        # child reader opens a child from any roster row, not only a running
+        # one (QA round 1, Q1-1).
+        rows.append(job.model_copy(update={"restored": True, **restored_row_identity(job, record)}))
     return rows

@@ -27,6 +27,7 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
     AttentionState,
+    ChildTranscriptPage,
     CommandReceipt,
     CreatedSession,
     DraftPreviewPayload,
@@ -46,8 +47,10 @@ from local_operator.server.utils.desktop_receipts import (
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import (
+    CHILD_PAGE_LIMIT,
     DesktopSessionBridge,
     DesktopSessions,
+    SubagentChildUnavailable,
     resolve_working_directory,
 )
 from local_operator.session.cold_model import synthesise_cold_state
@@ -240,6 +243,12 @@ def reply(result: Any) -> CRUDResponse[Any]:
 async def errors() -> AsyncIterator[None]:
     try:
         yield
+    except SubagentChildUnavailable as error:
+        # The child read route's containment refusal (design § 9.1). Not folded
+        # into the generic 404 below because the code is part of the contract:
+        # the reader distinguishes nothing from it, but it is retryable, and a
+        # client that cannot see WHY would have to guess whether to re-probe.
+        raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
     except KeyError:
         raise HTTPException(
             404, "Requested session, profile, team or subscription not found"
@@ -446,6 +455,79 @@ async def history(
 ):
     async with errors(), host(request).session(session_id) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/transcript",
+    response_model=CRUDResponse[ChildTranscriptPage],
+)
+async def child_transcript(
+    session_id: str,
+    child_id: str,
+    request: Request,
+    before_id: str | None = Query(default=None, max_length=128),
+    limit: int = Query(default=100, ge=1, le=CHILD_PAGE_LIMIT),
+):
+    """One page of a subagent's own transcript, read through its parent.
+
+    The sidebar's child reader, and the ONLY door to a child's conversation:
+    the renderer sends ids and never a ``session_dir``, so the backend (see
+    ``_contained_child_dir``) is what proves the child belongs to the named
+    parent, is a subagent rather than the user's own conversation or a fork,
+    and lives under ``sessions/``. Refusals are 404 ``child_not_found``.
+
+    The envelope is ``/history``'s, verbatim — ``entries`` are the child's raw
+    transcript rows — plus the derived ``state``. ``pending`` and ``gone`` are
+    answers, not errors: neither is a status the caller can act on, and both
+    must be distinguishable from a refusal or the panel would report a missing
+    child as "not yours".
+
+    Read-only in the strongest sense: no bridge, no runtime, no message
+    admission — a paused conversation answers exactly like a running one.
+    """
+    async with errors():
+        return reply(
+            await host(request).child_transcript(
+                session_id, child_id, before_id=before_id, limit=limit
+            )
+        )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}",
+    # Same declaration as the parent's route, and for the same reason: the
+    # response is raw bytes with the stored image's own type, which is not the
+    # CRUD envelope its neighbours return.
+    response_class=Response,
+)
+async def child_attachment(
+    session_id: str, child_id: str, digest: AttachmentDigest, request: Request
+):
+    """Raw bytes of an attachment referenced by a CHILD transcript's rows.
+
+    The parent's route cannot serve these: it takes the session whose transcript
+    holds the reference, and a child's rows reference attachments in the same
+    content-addressed store. Everything else is deliberately identical — the
+    digest is the traversal gate (declared in the path, so FastAPI refuses a
+    non-matching shape before the handler runs), the stored mime is allowlisted
+    rather than trusted, ``nosniff`` rides the response, and a missing
+    attachment is an ordinary 404.
+
+    The route's scope is its parent's: containment proves the caller may read
+    THIS child, and the store is shared across conversations by design, so the
+    digest is not partitioned per child. The bearer already authorises the whole
+    desktop surface; what this route must not become is a way to reach a child
+    that is not the named session's, which ``_contained_child_dir`` refuses.
+    """
+    async with errors():
+        data, mime_type = await host(request).child_attachment(session_id, child_id, digest)
+    return Response(
+        content=data,
+        media_type=(
+            mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
+        ),
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get(

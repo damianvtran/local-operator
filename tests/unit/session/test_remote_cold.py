@@ -633,6 +633,12 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
     Asserted on the state the widgets read, and asserted BEFORE anything binds
     a runtime, because "after the first message" is exactly the behaviour that
     was wrong.
+
+    The roster SIDECAR is written too, because a restored row's identity comes
+    from it: ``job1``'s record is what makes the row addressable (its
+    ``session_id`` is the child's own, and the run sidebar's child reader opens
+    a child by it), which is QA round 1's Q1-1 on the surface the renderer
+    reads.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
@@ -675,6 +681,33 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         FRONTEND_CHECKPOINT_CUSTOM_TYPE,
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
+    child_id = "abcdef012345"
+    child_dir = tmp_path / "sessions" / child_id
+    child_dir.mkdir(parents=True, exist_ok=True)
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+    from local_operator.session.session import (
+        SUBAGENT_ROSTER_SIDECAR,
+        _write_roster_sidecar,
+    )
+
+    mark_session_origin(child_dir, ORIGIN_SUBAGENT, label="auditor")
+    _write_roster_sidecar(
+        directory / SUBAGENT_ROSTER_SIDECAR,
+        {
+            "version": 1,
+            "generation": 1,
+            "jobs": [],
+            "accounting": [],
+            "records": [
+                {
+                    "job_id": "job1",
+                    "label": "auditor",
+                    "session_dir": str(child_dir),
+                    "outcome": "completed",
+                }
+            ],
+        },
+    )
 
     viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
@@ -686,6 +719,11 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         # A restored row has no in-process trajectory; the panel needs to know
         # that rather than rendering the child as an empty live job.
         assert state.jobs[0].restored is True
+        # And it addresses its child exactly as a LIVE row does: the comms node
+        # the runtime would have stamped these from is gone, but the roster
+        # record it was resolved from carries the directory.
+        assert state.jobs[0].session_id == child_id
+        assert state.jobs[0].session_dir == str(child_dir)
         assert [item.text for phase in state.todos for item in phase.items] == ["run the gate"]
         assert state.conversation_title == "Article search rollout"
         assert state.goal == "ship the rollout"
