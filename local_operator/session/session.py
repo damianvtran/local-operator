@@ -169,6 +169,7 @@ from local_operator.session.protocol import (
 # about one persisted row (UX review round 1, U2).
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
+from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
     open_todos,
@@ -1627,70 +1628,6 @@ def _read_roster_sidecar(path: Any) -> dict[str, Any] | None:
         return None
 
 
-def _parsed_usage(payload: dict[str, Any]) -> Usage | None:
-    """One persisted ``usage`` payload as a :class:`Usage`, or ``None``.
-
-    A transcript row is data from a previous process and may predate a field, so
-    a payload that no longer validates is dropped rather than raised: a status
-    readout must not be able to stop a session from opening. ``None`` simply
-    falls through to the next-newest reading, and then to the local estimate.
-    """
-    try:
-        return Usage.model_validate(payload)
-    except Exception:
-        logger.debug("dropping unparseable persisted usage payload", exc_info=True)
-        return None
-
-
-def _last_reported_usage(usages: Sequence[Usage | None]) -> Usage | None:
-    """The newest provider-reported :class:`Usage` in ``usages``, or ``None``.
-
-    Scans BACKWARDS and stops at the first hit: the newest reading is the only
-    one that describes the context as it now stands, and a resumed conversation
-    can hold hundreds of entries to walk past.
-
-    **Refuses any reading recorded before the newest compaction**, and that
-    exception is the whole reason this is a function rather than a one-line
-    scan. A compacted transcript replays as a summary marker followed by the
-    KEPT WINDOW, and those kept messages still carry the ``usage`` they were
-    given BEFORE the pass — figures describing a context that no longer exists,
-    which nothing supersedes when the session compacted and then exited.
-
-    Seeding from one is not a small error. Measured on a transcript that
-    compacted at 900k of a 1M window, the reading came back 900_000 against a
-    real 1_707 — 527x over, installed as EXACT so the correct local estimate
-    could never replace it, and handed to ``should_compact``, which would then
-    rewrite the user's history on the first turn after the resume.
-    Under-reporting was the bug this seeding fixed; this is the same lie
-    pointing the other way, and the compaction consequence makes it the more
-    expensive of the two.
-
-    The rule cannot be expressed on the replayed list alone. The marker sits at
-    the HEAD of it and the kept window FOLLOWS it, so "stop scanning backwards
-    at the marker" reads exactly backwards — the stale messages come first — and
-    "any marker disqualifies everything" throws away the legitimate case: a
-    session that compacted and then ran ten more turns has a perfectly good
-    newest reading, and refusing it would send every such resume back to the
-    local estimate for no reason.
-
-    So the boundary is taken from the TRANSCRIPT, whose entries are in append
-    order and therefore say which readings were recorded after the pass.
-    ``entries_after_compaction`` returns exactly those; a history with no
-    compaction returns all of them, which is the ordinary path.
-
-    ``None`` means "no usable reading here", a real state and distinct from
-    zero: a brand-new session, a conversation of nothing but user messages, a
-    provider that reports no usage, or a compacted history with no completed
-    turn since the pass. Callers must not collapse the two — a confident 0 on a
-    resumed session is the empty-context lie this exists to prevent — and
-    falling through to the local estimate is the right answer for all of them.
-    """
-    for usage in reversed(usages):
-        if usage is not None:
-            return usage
-    return None
-
-
 _render_compaction_marker = render_compaction_marker
 
 
@@ -2173,10 +2110,9 @@ class Session:
         # From the TRANSCRIPT, not from the replayed context: only append order
         # distinguishes a reading taken after the newest compaction from one the
         # pass invalidated, and the replayed list deliberately loses that (see
-        # ``Transcript.usages_since_compaction`` and ``_last_reported_usage``).
-        self._last_usage: Usage | None = _last_reported_usage(
-            [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
-        )
+        # ``Transcript.usages_since_compaction`` and
+        # ``usage_seed.last_reported_usage``).
+        self._last_usage: Usage | None = seed_reported_usage(transcript.usages_since_compaction())
         # Web-search spend the transcript already recorded, in the ``web_search``
         # tool rows' own ``search_cost`` details. Read here for the same reason
         # ``_last_usage`` is: a resumed conversation's searches were paid for

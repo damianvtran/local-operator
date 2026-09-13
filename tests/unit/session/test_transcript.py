@@ -1075,3 +1075,57 @@ async def test_a_reads_cost_row_is_recovered_with_its_own_ledger_key(tmp_path, t
     assert rows[0]["provider"] == "deepseek:read"
     assert rows[0]["kind"] == "read"
     assert rows[0]["usd"] == pytest.approx(0.002)
+
+
+@pytest.mark.asyncio
+async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> None:
+    """The cold reader's entry point and the owner's method are ONE rule.
+
+    ``usages_since_newest_shrink`` exists because a cold viewer holds only the
+    journal SUFFIX it read (``read_replay_suffix``), never a ``Transcript`` — and
+    it must still apply the same compaction/prune boundary the owner applies when
+    seeding a status readout. If the two ever drift, one conversation reports two
+    different contexts depending on which surface opened it, and the reading that
+    survives the drift picks the compaction trigger's figure (``Session._last_usage``)
+    for a session the desktop would describe differently.
+
+    Asserted at every boundary state the scan can meet, with the reading list
+    itself pinned so the equality cannot pass on two empty answers.
+    """
+    from local_operator.session.transcript import usages_since_newest_shrink
+
+    def both(transcript: Transcript) -> tuple[list[dict], list[dict]]:
+        entries = transcript.entries()
+        return usages_since_newest_shrink(entries), transcript.usages_since_compaction()
+
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_message(Message.user("q1"))
+    await transcript.append_message(Message.assistant("a1", usage=Usage(context_tokens=100_000)))
+    await transcript.append_message(Message.user("q2"))
+    kept = await transcript.append_message(
+        Message.assistant("a2", usage=Usage(context_tokens=200_000))
+    )
+
+    # No shrink yet: every reading in the file is on the live side.
+    module, method = both(transcript)
+    assert [usage["context_tokens"] for usage in module] == [100_000, 200_000]
+    assert module == method
+
+    # A compaction moves the boundary for both readers: readings preceding the
+    # marker describe the pre-pass context.
+    await transcript.append_compaction("summary of q1/a1", kept.id, 300_000)
+    await transcript.append_message(Message.assistant("a3", usage=Usage(context_tokens=300_000)))
+    module, method = both(transcript)
+    assert [usage["context_tokens"] for usage in module] == [300_000]
+    assert module == method
+
+    # A prune moves it again, without a marker of its own.
+    await transcript.append_prune(kept.id, "[pruned]")
+    module, method = both(transcript)
+    assert module == [] and method == module
+
+    # Folding the prune journal away (the on-disk form of the same file) is
+    # semantically invisible: the boundary stays where the prune was.
+    await transcript.compact_file(min_reclaim_bytes=1)
+    module, method = both(Transcript(tmp_path / "sess"))
+    assert module == [] and method == module
