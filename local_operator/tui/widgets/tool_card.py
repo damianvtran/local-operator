@@ -2053,25 +2053,33 @@ class ToolCard(ExpandableActionBlock):
         return row_indent(self._built_width)
 
     # -- rendering ----------------------------------------------------------
-    def refresh_row(self) -> None:
+    def refresh_row(self, width: int | None = None) -> None:
         """Repaint at the current width — the ledger's shared column moved.
 
         Public because the transcript owns the name column and has to be able to
         say "re-render, the spine changed"; everything else about the row is the
-        card's own business.
+        card's own business. ``width`` is the LANE the transcript published when
+        its own width changed (:meth:`TranscriptView._refit_ledger_lane`) — the
+        container's number, which outranks re-deriving one here because this
+        row's own `Resize` is the notification that cannot be relied on.
         """
-        self._refresh_row()
+        self._refresh_row(width)
 
-    def _refresh_row(self) -> None:
+    def _refresh_row(self, width: int | None = None) -> None:
         """Rebuild the card at its OWN width (D3).
 
-        Width resolution walks from the most authoritative source down: the
-        widget's laid-out size, its container, the app console, and only
-        then :data:`FALLBACK_WIDTH`. Reaching the last step means there is
-        no app to paint into yet, so the content is measured but not
-        applied: ``_row_count`` — which the spacing and scroll accounting
-        both read — stays truthful, and ``on_resize`` paints the real thing
-        the moment there is a real width.
+        Width resolution walks from the most authoritative source down: a lane
+        published by the container, the widget's laid-out size, its container,
+        the app console, and only then :data:`FALLBACK_WIDTH`. Reaching the
+        last step means there is no app to paint into yet, so the content is
+        measured but not applied: ``_row_count`` — which the spacing and scroll
+        accounting both read — stays truthful, and ``on_resize`` paints the real
+        thing the moment there is a real width.
+
+        A published lane that the row is ALREADY built at is a no-op: the
+        container broadcasts to every mounted row on a lane change, and the
+        rows that re-fitted themselves off their own `Resize` in the same pass
+        have nothing left to redo.
 
         Finalization is bypassed deliberately: a resize or an expand must be
         able to re-fit a settled card, and the content it produces is a pure
@@ -2086,6 +2094,8 @@ class ToolCard(ExpandableActionBlock):
         pointer crossing a card's edge, each reflowed the entire screen to
         repaint one row.
         """
+        if width is not None and width > 0 and width == self._built_width:
+            return
         # `fold_width(0)` walks size → container → the parent transcript's
         # scrollable content region, and returns 0 only when none of the three
         # can answer. That third rung is new and is what stops a card built
@@ -2095,7 +2105,7 @@ class ToolCard(ExpandableActionBlock):
         # re-fitted a frame later. The console rung is kept as the last resort
         # BEFORE the fallback because reaching it is also how this method
         # detects that there is no app to paint into at all.
-        width = self.fold_width(0)
+        width = self.fit_width(width)
         detached = False
         if width <= 0:
             try:
