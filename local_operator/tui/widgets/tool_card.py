@@ -156,6 +156,11 @@ COLLAPSE_HINT = "⟨collapse⟩"
 #: row, and the app already owns a bracket for "this is chrome, not content".
 NO_OUTPUT_NOTICE = "⟨no output⟩"
 RUNNING_NOTICE = "⟨still running⟩"
+#: The third answer: the call has been announced, the model has finished
+#: writing it, and it has not started executing. ``RUNNING_NOTICE`` would be a
+#: lie about a call nothing has run, and the point of the slot is to say which
+#: of the two waits the user is in.
+QUEUED_NOTICE = "⟨queued⟩"
 
 #: The same two answers at three cells, for a row too narrow to spell them.
 #: The feedback has to survive FURTHER DOWN the width ladder than the expand
@@ -168,11 +173,13 @@ RUNNING_NOTICE = "⟨still running⟩"
 #: content, and both inner glyphs are measured single-width below.
 TERSE_NO_OUTPUT_NOTICE = "⟨∅⟩"
 TERSE_RUNNING_NOTICE = "⟨⋯⟩"
+TERSE_QUEUED_NOTICE = "⟨⋯⟩"
 #: Full phrase -> glyph -> nothing, per notice. The row walks this in order
 #: and takes the first rung that fits.
 NOTICE_LADDER: dict[str, tuple[str, ...]] = {
     NO_OUTPUT_NOTICE: (NO_OUTPUT_NOTICE, TERSE_NO_OUTPUT_NOTICE),
     RUNNING_NOTICE: (RUNNING_NOTICE, TERSE_RUNNING_NOTICE),
+    QUEUED_NOTICE: (QUEUED_NOTICE, TERSE_QUEUED_NOTICE),
 }
 #: How long that answer stays on the row. Long enough to read at a glance,
 #: short enough that it is gone before the eye returns — it is feedback for
@@ -334,6 +341,20 @@ DURATION_COL = 5
 #: other width makes the row reflow on settling at narrow widths. Any
 #: replacement must keep that equality; assert it rather than eyeballing it.
 RUNNING_LABEL = "running"
+#: What a call that has been announced but NOT started puts in the status
+#: column (see ``_status_runs``). A state word rather than a clock, because
+#: there is no execution to time and the dictation clock it replaces has ended.
+#:
+#: One cell NARROWER than the settled spine the label above matches, and that
+#: is safe for a reason specific to this state: both of its transitions REPLACE
+#: the summary instead of re-budgeting one string. Entering it rebuilds the
+#: summary from the dictation facts (``mark_queued``), and leaving it — the
+#: call finally starting — rebuilds it from the call's arguments
+#: (``begin_running``). The equality the label above protects binds only where
+#: the summary is the same text on both sides of the width change, which is why
+#: a shadow of it here would buy nothing and cost a trailing cell that would
+#: push the whole status run one cell off the right edge.
+QUEUED_LABEL = "queued"
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
 #: Indent of the expanded output block, aligned under the tool name column.
@@ -1430,6 +1451,82 @@ class ToolCard(ExpandableActionBlock):
         self._apply_open_on_settle()
         self.finalize()
 
+    def mark_queued(self) -> None:
+        """The model stopped writing this call, and it has not started yet.
+
+        The state between ``composing`` and ``running``, and the ledger needed
+        it: a composing row is a PREDICTION that a call exists, and the
+        producer's terminal dictation frame says the prediction is final — the
+        call will execute, but not necessarily now. A batch whose second call is
+        ``exclusive`` behind a long ``shared`` sibling (a
+        ``wait(wait_ms=1800000)``) leaves it waiting for the sibling's whole
+        duration, and until this state existed the row went on saying
+        ``composing…`` — with a ticking clock — for the whole half-hour. That is
+        how it was reported.
+
+        Stays in ``_composing_cards``, which is the announcement registry: the
+        row is still waiting for its call to start (``on_tool_started`` adopts
+        it through ``_adopt_composing_card``), and a turn that dies before it
+        does must settle it as ``never sent · N composed`` rather than as an
+        interruption (``_retire_live_tool_cards``). A third registry would put
+        it outside both.
+
+        The clock STOPS here, and that is not cosmetic: nothing changes while
+        the call waits, so a ticking row would claim work is happening, and the
+        number it would report is a dictation duration that ended the moment
+        the model stopped writing — the operator's row read 1m58s of ``compose``
+        beside a sibling's 9m25s of real execution.
+        """
+        if self._state not in ("composing", "running"):
+            return
+        self._settle_live()
+        self._state = "queued"
+        # The dictation facts stay; the ``composing…`` boilerplate and its clock
+        # go, because the STATUS column now names the state and the clock it
+        # held has ended. ``_compose_facts`` is kept exactly equal to what the
+        # summary is built from — the invariant ``_build_row``'s shed ladder
+        # reads (see ``begin_running``): it sheds the label to keep the moving
+        # numbers, so a card whose summary no longer contains them must not
+        # carry them here.
+        self._compose_facts = _format_bytes(self._compose_bytes) if self._compose_bytes else ""
+        self._summary = self._compose_facts
+        self._refresh_row()
+
+    def mark_not_run(self, reason: str) -> None:
+        """The call will NEVER run: settle the row under the harness's reason.
+
+        A call parked at planning (an unknown tool, invalid arguments, a
+        duplicate id whose twin won the slot) or skipped by steering gets no
+        start and — deliberately — no end event either, because the API server
+        pairs tool records by id. Until the producer grew a terminal compose
+        frame, the row announcing such a call therefore sat ``composing…`` until
+        the TURN died and was then labelled ``interrupted``, which describes a
+        call that was not interrupted. This settles it when the verdict exists,
+        in the harness's own words (``Tool not found: wake``), as the error
+        class it is.
+
+        The summary keeps the ``never sent · N composed`` record the retirement
+        path already used for a composing row: the call was never sent to a
+        tool, and the size is how far the model got before it was told nothing
+        would receive the call.
+
+        No ``measured_s``: nothing executed, so there is no interval — and the
+        outcome column's blank is the honest reading rather than a lost number
+        (same asymmetry ``mark_interrupted`` documents).
+        """
+        self._settle_live()
+        size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
+        self._compose_facts = f"{size} composed"
+        self._summary = f"never sent · {self._compose_facts}"
+        self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
+        self._duration = None
+        self._state = "error"
+        self.remove_class("tool-running")
+        self.add_class("tool-error")
+        self._refresh_row()
+        self._apply_open_on_settle()
+        self.finalize()
+
     def mark_waiting(self) -> None:
         """Project a canonical pending gate without inventing execution events."""
         self._settle_live()
@@ -1465,11 +1562,13 @@ class ToolCard(ExpandableActionBlock):
         watched its own start still prints its own elapsed below, which is the
         one clock here that is true.
         """
-        was_composing = self._state == "composing"
+        was_composing = self._state in ("composing", "queued")
         self._settle_live()
         if was_composing:
             # The call was never sent, so the row must stop saying it is being
             # written. It keeps the size as a record of how far the model got.
+            # (`queued` is the same record one state later: the dictation is
+            # over, the call still never started, and the turn died first.)
             size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
             # Facts first, and `_compose_facts` set so the label-shed ladder can
             # reach this row too: gated on the composing STATE, the ladder built
@@ -1547,6 +1646,24 @@ class ToolCard(ExpandableActionBlock):
         """
         return self._started
 
+    @property
+    def state(self) -> str:
+        """Which state this row is in: ``running``/``composing``/``queued``/…
+
+        Exposed because a LIVE row is no longer necessarily an EXECUTING one:
+        ``queued`` is announced-and-not-started, and the app has to be able to
+        ask which of the two a card in its registry is — the working line
+        labels the turn from these cards, and the compose-adoption path must
+        not colour a row whose call has already started.
+
+        Read-only on purpose. Every transition belongs to one of the ``mark_*``
+        / ``restore`` methods, which also stop the clock, restyle the row and
+        re-derive the columns behind it; a writable state would let a caller
+        change the word without any of that and leave a card claiming one thing
+        while rendering another.
+        """
+        return self._state
+
     def restore(
         self,
         *,
@@ -1575,7 +1692,10 @@ class ToolCard(ExpandableActionBlock):
 
         ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
         for a call whose result is not in the transcript, which is what a
-        session killed mid-turn leaves behind — or ``"running"``.
+        session killed mid-turn leaves behind — or ``"running"``, or
+        ``"queued"`` for a call that was announced, dictated to completion and
+        never started (a batch queued behind a long sibling, or a turn that
+        died before its group ran).
 
         ``"running"`` exists for the same reason the other three do, one step
         further on. `subagent_view.entry_block` rebuilds a child's whole
@@ -1642,6 +1762,22 @@ class ToolCard(ExpandableActionBlock):
             if started_at is not None:
                 self._started = monotonic_from_epoch(started_at, clock=self._clock)
                 self._start_clock()
+            self._refresh_row()
+            return
+        if state == "queued":
+            # A call the durable tail cannot pair with a result AND whose start
+            # was never announced: the model finished dictating it and it is
+            # waiting its turn to execute (see ``mark_queued``). It is LIVE — the
+            # work may still come — so it wears the live tier and must not answer
+            # ``settled_rows()``, exactly as the arm above, and for the same
+            # reasons; only the clock differs, and it differs by having nothing
+            # to show. There is no ``started_at`` to seed from and no
+            # ``duration_s``: the dictation clock this state replaced on the live
+            # path belonged to the MODEL writing the call, and a replayed row
+            # never had one.
+            self.remove_class("tool-interrupted", "tool-error", "tool-success")
+            self.add_class("tool-running")
+            self._finalized = False
             self._refresh_row()
             return
         self.remove_class("tool-running")
@@ -1875,7 +2011,11 @@ class ToolCard(ExpandableActionBlock):
         clockless = self._state == "running" and self._started is None and started_at is None
         # Whether this call PROMOTES the row: the two things that decide whether
         # the spine may move because of it (see the invalidation at the end).
-        was_composing = self._state == "composing"
+        # ``queued`` counts, and it is the state that needs it most: a call that
+        # waited behind a long sibling spent that whole wait NOT contributing a
+        # name to the shared column (``contributes_name``), so the moment it
+        # starts is the moment a long MCP name has to widen that column.
+        was_composing = self._state in ("composing", "queued")
         # The name comes from the EXECUTION, not from the announcement. The first
         # compose event fires on the first name fragment — deliberately, so the
         # row appears immediately — and a provider that splits `write` into `wr`
@@ -1901,6 +2041,23 @@ class ToolCard(ExpandableActionBlock):
         else:
             self._started = None if clockless else self._clock()
         self._state = "running"
+        # A row this method adopts may have been SETTLED before its call
+        # started. Two routes reach here that way: a replayed row the reveal
+        # path ``restore``d from the transcript, and — since the producer grew
+        # terminal compose frames — a row a never-run verdict settled on one of
+        # two calls sharing an id, whose twin then executed. The live classes
+        # are ASSERTED rather than assumed for the reason the
+        # ``restore(state="running")`` arm documents: ``mark_done`` removes
+        # ``tool-running`` and nothing else, so a card that arrived wearing
+        # ``tool-error`` or ``tool-interrupted`` would keep that tint on the row
+        # the user is watching execute.
+        self.remove_class("tool-interrupted", "tool-error", "tool-success")
+        self.add_class("tool-running")
+        # Un-finalized for the same reason as the restore arm: a settled card
+        # answers ``settled_rows()``, and the transcript's spacing and scroll
+        # accounting read that number. Only the row's own repaint is at stake
+        # here, and every settle path finalizes again.
+        self._finalized = False
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row — including
         # taking the ARGUMENTS rather than the intent (see the constructor for
@@ -2172,17 +2329,23 @@ class ToolCard(ExpandableActionBlock):
     def _flash_notice(self) -> None:
         """Put the inert-row answer in the hint slot for a couple of seconds.
 
-        A call still being DICTATED has no output yet but will; a settled one
-        never will. Saying which is the difference between "wait" and "there is
-        nothing here", and the row is the only place the user is looking.
+        A call still being DICTATED has no output yet but will; a call QUEUED
+        behind a sibling has none yet either, for a different reason; a settled
+        one never will. Saying which is the difference between "wait" and "there
+        is nothing here", and the row is the only place the user is looking.
 
-        ``composing`` is now the ONLY live state that reaches here. A running
-        card expands — onto its command and its streamed output — so
+        ``composing`` and ``queued`` are the only live states that reach here. A
+        running card expands — onto its command and its streamed output — so
         ``activate`` toggles it rather than falling through to this, and the
-        `⟨still running⟩` answer belongs to the row that genuinely has nothing
+        ``⟨still running⟩`` answer belongs to the row that genuinely has nothing
         behind the affordance yet.
         """
-        self._notice = RUNNING_NOTICE if self._state == "composing" else NO_OUTPUT_NOTICE
+        if self._state == "composing":
+            self._notice = RUNNING_NOTICE
+        elif self._state == "queued":
+            self._notice = QUEUED_NOTICE
+        else:
+            self._notice = NO_OUTPUT_NOTICE
         self._refresh_row()
         if self._notice_timer is not None:
             self._notice_timer.stop()
@@ -3007,8 +3170,12 @@ class ToolCard(ExpandableActionBlock):
         """The single summary row — the ONE-LINE guarantee lives here."""
         dim = bindings.style("tool.row.dim")
         # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
-        # two-step fade this implements.
-        running = self._state in ("running", "composing")
+        # two-step fade this implements. `queued` is live but not executing, and
+        # it keeps the live fade deliberately: its row is still waiting for the
+        # work the call names, and dropping the green the moment dictation ended
+        # would read as the row having stopped — which is the impression the
+        # whole stuck-compose report is about.
+        running = self._state in ("running", "composing", "queued")
         # Liveness outranks identity: a live row keeps the fade's green, and
         # the category hue applies only once the row has settled. Two signals
         # on one span would mean the ledger said "what kind" and "is it live"
@@ -3139,7 +3306,12 @@ class ToolCard(ExpandableActionBlock):
                 row_chip = ""
         else:
             row_chip = ""
-        composed = self._compose_facts and self._state in ("composing", "interrupted")
+        composed = self._compose_facts and self._state in (
+            "composing",
+            "queued",
+            "interrupted",
+            "error",
+        )
         if composed:
             # The label is shed WHOLE before the facts are touched, the same
             # ladder this file uses for the key hints and the approval clause.
@@ -3217,11 +3389,14 @@ class ToolCard(ExpandableActionBlock):
         A call still being DICTATED must not: the name is model-controlled and
         arrives in fragments, so one announced 200-character name took the column
         to its cap, shifted every settled receipt beside it, and kept the width
-        after the row settled as `never sent`. The same argument the column already
-        makes for a pending approval — a name earns the column when the call it
-        names has actually started.
+        after the row settled as `never sent`. ``queued`` inherits that refusal
+        for the same reason it inherits the state: the call it names has not
+        started, so the name has not been earned yet — and the transition that
+        does earn it (`begin_running`) already invalidates the column for a row
+        arriving from either state. The same argument the column already makes
+        for a pending approval.
         """
-        return self._state != "composing" and self._summary[:10] != "never sent"
+        return self._state not in ("composing", "queued") and self._summary[:10] != "never sent"
 
     def _ledger_name_col(self) -> int:
         """The shared column's current width, or the fixed floor off-ledger."""
@@ -3267,6 +3442,17 @@ class ToolCard(ExpandableActionBlock):
             # At very narrow widths omit the label, never replace it with an
             # outcome glyph that falsely says the tool completed.
             text = "waiting" if not cap or cap >= len("waiting") else ""
+            return [(text, bindings.style("tool.status.running_duration"))]
+        if self._state == "queued":
+            # Announced, dictated, not started. The state word is the whole
+            # content: there is no duration to show (nothing ran) and no clock
+            # to keep (the dictation ended). It sits in the status column rather
+            # than the summary because the column is where the ledger says what
+            # a row is DOING, which is exactly the question this row could not
+            # answer before (see `mark_queued`). Shed whole below its width,
+            # never truncated into a meaningless fragment — and never replaced
+            # by an outcome glyph, which would claim the call completed.
+            text = QUEUED_LABEL if not cap or cap >= len(QUEUED_LABEL) else ""
             return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "composing":
             # Nothing has RUN, so there is no execution time to report. The

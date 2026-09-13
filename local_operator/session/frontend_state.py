@@ -74,12 +74,23 @@ FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 #: equality, so these have to be the same words the working line's own
 #: vocabulary uses rather than a private enum: `thinking` and `responding` are
 #: imported from ``harness/intent.py`` (the module that owns the label words)
-#: rather than restated here, and `composing`/`running` name the two states the
-#: tool ledger itself uses. A rename in either place must move together or the
-#: reader silently stops matching and every clock goes blank.
+#: rather than restated here, and `composing`/`queued`/`running` name the states
+#: the tool ledger itself uses. A rename in either place must move together or
+#: the reader silently stops matching and every clock goes blank.
+#:
+#: ``queued`` names the ledger's third live state — announced, dictation over,
+#: nothing started — and it is deliberately NOT folded here. The compose arm
+#: above folds `composing` off the announcements and keeps ONE zero for a
+#: batch's whole dictation, so a terminal frame leaves the folded phase where it
+#: was rather than opening an edge for this one. Nothing is lost by that: the
+#: working line's queued arm passes no clock at all
+#: (`OperatorApp._current_activity`), because there is no instant a "waiting to
+#: run" age could honestly count from — the call has not started, and the
+#: dictation clock that just ended measured the model writing, not the wait.
 ACTIVITY_PHASE_THINKING = ACTIVITY_THINKING
 ACTIVITY_PHASE_RESPONDING = ACTIVITY_RESPONDING
 ACTIVITY_PHASE_COMPOSING = "composing"
+ACTIVITY_PHASE_QUEUED = "queued"
 ACTIVITY_PHASE_RUNNING = "running"
 
 #: How many per-call billing receipts ``usage_components`` retains.
@@ -1752,11 +1763,21 @@ class FrontendSessionState(BaseModel):
     #: TRANSIENT by construction and bounded by the live batch: an entry is
     #: popped by the call's own end and the whole map is cleared at
     #: ``agent_start``/``agent_end``, so it neither grows with the conversation
-    #: nor outlives the turn. A call whose producer sent no epoch is
-    #: deliberately ABSENT rather than stamped with the fold instant — see
+    #: nor outlives the turn. A call whose producer sent no epoch is present
+    #: with ``None`` rather than stamped with the fold instant — see
     #: ``_fold_live_tool_starts``. It is stripped from the durable checkpoint
     #: for the same reason ``live_events`` is: there is nothing to restore.
-    live_tool_started_at: dict[str, float] = Field(default_factory=dict)
+    #:
+    #: ``float | None``, and the ``None`` is load-bearing rather than sloppy:
+    #: this map is asked TWO different questions — "when did this call start"
+    #: (a float, or nothing to count from) and "has this call started at all"
+    #: (membership). Answering the second by absence conflated a call queued
+    #: behind a sibling with one executing under a producer too old to stamp an
+    #: epoch, and a replayed row for the first was painted as though it were the
+    #: second — `running`, with no clock, on a call nothing had run. Membership
+    #: is now the start fact and the value its instant, which is what the replay
+    #: paths read.
+    live_tool_started_at: dict[str, float | None] = Field(default_factory=dict)
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
@@ -3157,7 +3178,7 @@ class FrontendStateStore:
             )
         return getattr(self._state, name)
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         """A COPY of the live-call start map, without cloning the whole state.
 
         The sibling of :meth:`read_field`, which cannot serve this one: that
@@ -3169,6 +3190,11 @@ class FrontendStateStore:
         component and trajectory row, which profiling one sidebar navigation
         measured at ~30 ms of a 135 ms frame. This is read once per tool start
         and once per switch, so the copy is a handful of floats.
+
+        Read BOTH halves of an entry: membership is "this call has STARTED"
+        (which a replay needs to tell a queued call from an executing one) and
+        the value is the instant to count from, ``None`` when the producer sent
+        no epoch and the row must therefore stay clockless.
         """
         return dict(self._state.live_tool_started_at)
 
@@ -3899,12 +3925,15 @@ class FrontendStateStore:
         Two deliberate omissions, both of which keep this from becoming an
         invention:
 
-        * a ``tool_execution_start`` carrying NO epoch contributes no entry.
-          The tempting default — the fold's own ``now`` — is precisely the
-          fabricated zero this whole path exists to refuse: for an attached
-          viewer it is its arrival instant dressed as the call's start, and it
-          would print a plausible wrong age where the widget's blank column
-          currently tells the truth.
+        * a ``tool_execution_start`` carrying NO epoch still contributes an
+          entry — with ``None``. The tempting default for its VALUE is the
+          fold's own ``now``, and that is precisely the fabricated zero this
+          whole path exists to refuse: for an attached viewer it is its arrival
+          instant dressed as the call's start, and it would print a plausible
+          wrong age where the widget's blank column currently tells the truth.
+          ``None`` records the fact the event does carry — the call STARTED —
+          without inventing the instant, so a replay can tell a clockless
+          running call from one that never started at all.
         * the map is cleared at BOTH ends of the turn (``agent_start`` and
           ``agent_end``) rather than left to the individual ends. A turn that
           dies without emitting every ``tool_execution_end`` is exactly the
@@ -3916,10 +3945,8 @@ class FrontendStateStore:
             return {"live_tool_started_at": {}} if state.live_tool_started_at else {}
         if isinstance(event, ToolExecutionStartEvent):
             epoch = getattr(event, "started_at_epoch", None)
-            if not isinstance(epoch, (int, float)):
-                return {}
             live = dict(state.live_tool_started_at)
-            live[event.tool_call_id] = float(epoch)
+            live[event.tool_call_id] = float(epoch) if isinstance(epoch, (int, float)) else None
             return {"live_tool_started_at": live}
         if isinstance(event, ToolExecutionEndEvent):
             if event.tool_call_id not in state.live_tool_started_at:
