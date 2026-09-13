@@ -27,9 +27,23 @@ from local_operator.model import catalogue, configure, discovery
 from local_operator.model.registry import deepseek_models
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import OpenAICompatClient
+from local_operator.providers.context import (
+    ContextBinding,
+    ContextTokenTracker,
+    measure_request,
+)
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.failover import ProviderError
-from local_operator.providers.replay import credential_scope
+from local_operator.providers.replay import (
+    REASONING_ECHO_PLACEHOLDER,
+    credential_scope,
+    native_payload,
+)
+
+#: The endpoint the chat body builder derives from the client's own base URL,
+#: spelled out because ``native_payload`` records it in the replay provenance
+#: and a mismatch there silently drops the recorded reasoning.
+DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +66,40 @@ def spec(effort="high"):
         reasoning_efforts=("none", "low", "high", "max"),
         reasoning_effort=effort,
     )
+
+
+def echo_spec(effort="high"):
+    """The same route WITH the capability ``build_model_spec`` derives for it.
+
+    Set by hand rather than resolved through ``build_model_spec`` so the wire
+    contract can be pinned without a model catalogue, a cache directory or a
+    live listing; the derivation itself is pinned in ``tests/unit/model``.
+    """
+    return spec(effort).model_copy(update={"requires_reasoning_echo": True})
+
+
+def native_turn(*, text="", reasoning=None, tool_calls=(), scope=None, model=None):
+    """An assistant turn carrying real recorded native state, as resume loads it.
+
+    The fingerprint and provenance fields are computed exactly as the wire
+    parser writes them, so a mismatch in the fixture would drop the reasoning
+    for real instead of failing an assertion here.
+    """
+    active = model or echo_spec()
+    scope = scope if scope is not None else credential_scope("fixture")
+    calls = [{"id": call.id, "name": call.name, "args": call.arguments} for call in tool_calls]
+    items = [{"reasoning_content": reasoning}] if reasoning is not None else []
+    return Message.assistant(
+        text,
+        tool_calls=list(tool_calls),
+        provider_payload=native_payload(
+            active, DEEPSEEK_ENDPOINT, "openai-chat", items, text, calls, scope
+        ),
+    )
+
+
+def assistant_entries(body):
+    return [m for m in body["messages"] if m.get("role") == "assistant"]
 
 
 def request(messages=None, effort="high", **kwargs):
@@ -563,3 +611,197 @@ async def test_other_compat_routes_keep_terminal_tolerance():
         req.model = req.model.model_copy(update={"provider": "openrouter"})
         events = [e async for e in client.stream(req, "fixture")]
         assert isinstance(events[-1], StreamEndEvent)
+
+
+# ---------------------------------------------------------------------------
+# The thinking-mode reasoning echo (ModelSpec.requires_reasoning_echo)
+# ---------------------------------------------------------------------------
+#
+# DeepSeek's thinking mode answers 400 -- "The `reasoning_content` in the
+# thinking mode must be passed back to the API" -- when ANY assistant turn in
+# the request carries no reasoning back, whatever the turn is (tool call, plain
+# text, truncated, imported). The harness cannot always supply it: the model
+# reasons on some turns and not others, and a dropped native payload leaves a
+# turn with nothing recorded. These tests pin the wire contract rather than the
+# failure, because the live 400 needs a real key and real money (the manual
+# recipe is in ``docs/evidence/deepseek-reasoning-echo``).
+
+
+def test_thinking_route_echoes_reasoning_on_every_assistant_turn():
+    """Every assistant turn leaves the builder with a non-blank echo."""
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    call = ToolCall(id="call_a", name="inspect", arguments={"path": "a"})
+    history = [
+        Message.user("inspect a, then summarise"),
+        # Reasoned and recorded: the real text must be what goes back.
+        native_turn(reasoning="read a first", tool_calls=[call]),
+        Message(role="tool", tool_call_id="call_a", content=[TextContent(text="found")]),
+        # Recorded under ANOTHER credential scope: replay is refused, so this
+        # turn has nothing to echo (the second way users meet this 400).
+        native_turn(
+            text="a is present",
+            reasoning="scope-bound thought",
+            scope=credential_scope("another-account"),
+        ),
+        Message.user("now summarise in one line"),
+        # A plain-text turn the model produced no reasoning for at all.
+        native_turn(text="a is present."),
+    ]
+
+    body = client._build_body(
+        ChatRequest(model=echo_spec(), messages=history, system_blocks=["Stable"]), scope=scope
+    )
+    entries = assistant_entries(body)
+
+    assert [entry.get("reasoning_content") for entry in entries] == [
+        "read a first",
+        REASONING_ECHO_PLACEHOLDER,
+        REASONING_ECHO_PLACEHOLDER,
+    ]
+    # The placeholder is a sentence, not a blank: blank is what 400s.
+    assert all(str(entry["reasoning_content"]).strip() for entry in entries)
+    # And it stops at the assistant turns: a user or tool entry carrying the
+    # field would be a key the validator has no meaning for.
+    assert all(
+        "reasoning_content" not in entry
+        for entry in body["messages"]
+        if entry.get("role") != "assistant"
+    )
+
+
+def test_thinking_route_echoes_tool_call_and_truncated_turns_and_drops_empty_ones():
+    """The echo covers every RENDERED assistant turn, and only those."""
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    call = ToolCall(id="call_b", name="inspect", arguments={"path": "b"})
+    history = [
+        Message.user("go"),
+        # Errored before a single token: the body drops this turn entirely, so
+        # there is nothing to echo (and nothing referencing it downstream).
+        Message.assistant("", stop_reason="error"),
+        Message.assistant("", stop_reason="aborted"),
+        # Tool-call turn with no reasoning recorded.
+        native_turn(tool_calls=[call]),
+        Message(role="tool", tool_call_id="call_b", content=[TextContent(text="found")]),
+        # Truncated mid-answer: replay refuses a ``length`` turn by contract.
+        Message.assistant("half a sen", stop_reason="length"),
+    ]
+
+    body = client._build_body(
+        ChatRequest(model=echo_spec(), messages=history, system_blocks=["Stable"]), scope=scope
+    )
+    entries = assistant_entries(body)
+
+    assert len(entries) == 2
+    assert all(entry["reasoning_content"] == REASONING_ECHO_PLACEHOLDER for entry in entries)
+    # The empty error/abort turns stayed dropped rather than gaining an echo.
+    assert not any(entry.get("content") == "" for entry in entries)
+
+
+def test_thinking_route_counts_the_echo_as_the_input_it_is():
+    """The placeholders are billed input, so the calibration counts them.
+
+    They are added by the BODY, after the replay count, and the API
+    concatenates them into the context it reads -- a calibration that ignored
+    them would under-report every request on this route.
+    """
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(tool_calls=[ToolCall(id="call_c", name="inspect", arguments={})]),
+        Message(role="tool", tool_call_id="call_c", content=[TextContent(text="found")]),
+        native_turn(text="done"),
+    ]
+    req = ChatRequest(model=echo_spec(), messages=history, system_blocks=["Stable"])
+    req.context_binding = ContextBinding(ContextTokenTracker(), measure_request(req))
+    client._build_body(req, scope=scope)
+
+    # Two blank turns at ``max(1, len // 4)`` each -- the one ruler for both the
+    # replayed reasoning and the echo ``bind_native_context`` adds here.
+    assert req.context_binding.measured.native_tokens == 2 * (len(REASONING_ECHO_PLACEHOLDER) // 4)
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai", "kimi", "xai"])
+def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch):
+    """No other route gains the field: the flag, not the provider, decides.
+
+    This is the regression guard. Every other provider's body must be exactly
+    what it was before the capability existed, on the same history that DeepSeek
+    would fill in -- including a route fronting the SAME weights, where the
+    aggregator normalises the echo itself (measured 200 without it).
+    """
+    client = OpenAICompatClient(f"https://{provider}.invalid/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(tool_calls=[ToolCall(id="call_d", name="inspect", arguments={})]),
+        Message(role="tool", tool_call_id="call_d", content=[TextContent(text="found")]),
+        native_turn(text="done"),
+    ]
+    req = ChatRequest(
+        model=spec().model_copy(update={"provider": provider, "model_id": "some/model"}),
+        messages=history,
+        system_blocks=["Stable"],
+    )
+
+    body = client._build_body(req, scope=scope)
+
+    assert all("reasoning_content" not in entry for entry in assistant_entries(body))
+    # And the capability, spelled out, is what drives it.
+    capable = client._build_body(
+        req.model_copy(
+            update={"model": req.model.model_copy(update={"requires_reasoning_echo": True})}
+        ),
+        scope=scope,
+    )
+    assert all(str(entry["reasoning_content"]).strip() for entry in assistant_entries(capable))
+
+
+def test_thinking_off_still_echoes_and_needs_no_special_case():
+    """``thinking: disabled`` accepts the echo too, so the rule stays total.
+
+    Measured live: with thinking disabled the API is lenient about the echo --
+    it accepts a body with it, without it, and with real reasoning. Applying the
+    echo unconditionally therefore keeps ONE invariant for this route (every
+    assistant turn echoes) rather than one that depends on the effort setting,
+    and it is what makes the bounded recovery's retry body legal as it stands.
+    """
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    history = [Message.user("go"), native_turn(text="done")]
+    body = client._build_body(
+        ChatRequest(model=echo_spec(effort="none"), messages=history, system_blocks=["Stable"]),
+        scope=scope,
+    )
+
+    assert body["thinking"] == {"type": "disabled"}
+    assert assistant_entries(body)[0]["reasoning_content"] == REASONING_ECHO_PLACEHOLDER
+
+
+def test_a_blank_echo_is_treated_as_missing():
+    """A stored empty or whitespace reasoning value still takes the placeholder.
+
+    The harness's own native state can hold a blank value where a reply carried
+    no reasoning, and the fix's rule is about what the provider READS: a body
+    that relies on a blank being accepted is relying on leniency no replica has
+    promised (see ``REASONING_ECHO_PLACEHOLDER``), so blank is filled in like an
+    absent key rather than passed through.
+    """
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(text="blank value", reasoning="", scope=scope),
+        native_turn(text="whitespace value", reasoning="   ", scope=scope),
+    ]
+
+    body = client._build_body(
+        ChatRequest(model=echo_spec(), messages=history, system_blocks=["Stable"]), scope=scope
+    )
+
+    assert [entry["reasoning_content"] for entry in assistant_entries(body)] == [
+        REASONING_ECHO_PLACEHOLDER,
+        REASONING_ECHO_PLACEHOLDER,
+    ]

@@ -222,6 +222,48 @@ CONNECTIVITY_CONTINUATION_PROMPT = (
 )
 
 
+#: The provider wording that means "this DeepSeek thinking-mode request never
+#: carried the reasoning back".
+#:
+#: Matched on the provider's OWN words, because it arrives as a plain 400 beside
+#: every other malformed-request refusal (and is classified as one). Both halves
+#: are required: ``reasoning_content`` alone is a field name every DeepSeek-shaped
+#: reply and error mentions, and "must be passed back" alone would match any
+#: provider demanding some other field back. The message this pins is, verbatim,
+#: "The `reasoning_content` in the thinking mode must be passed back to the API."
+_REASONING_ECHO_MARKERS = ("reasoning_content", "must be passed back")
+
+#: Turns this RUN has retried after such a refusal. One, not more: the retry
+#: changes the request's thinking mode, and a second attempt at the same body
+#: would only spend a call to be told the same thing.
+MAX_REASONING_ECHO_RETRIES = 1
+
+
+def _is_reasoning_echo_rejection(error: str | None) -> bool:
+    """Did the provider refuse this request for a missing reasoning echo?"""
+    if not error:
+        return False
+    text = error.lower()
+    return all(marker in text for marker in _REASONING_ECHO_MARKERS)
+
+
+def _thinking_off_effort(model: "ModelSpec") -> str | None:
+    """The ladder rung that switches thinking OFF for a model that supports it.
+
+    ``None`` when the model's ladder has no such rung, or when it is already on
+    it -- a retry that cannot change the body is a wasted provider call, so the
+    caller ends the turn instead. Reading the rung off the model's own ladder
+    rather than inventing a wire key keeps this loop free of provider knowledge:
+    the effort levels are shared vocabulary and each client spells the off state
+    its own way (the DeepSeek chat body renders ``thinking: {"type":
+    "disabled"}`` from it).
+    """
+    ladder = list(model.reasoning_efforts)
+    if "none" not in ladder or model.reasoning_effort == "none":
+        return None
+    return "none"
+
+
 def _lower_effort(model: "ModelSpec") -> str | None:
     """The effort one rung below ``model.reasoning_effort`` on its own ladder.
 
@@ -639,6 +681,11 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has retried with thinking turned OFF after DeepSeek
+        # refused a request for a missing reasoning echo. Run-scoped and topped
+        # up by nothing: the refusal is a property of what this run is sending,
+        # so a fresh allowance per turn would re-buy the same diagnosis.
+        reasoning_echo_retries = 0
         # Turns this run has continued after the network cut them short. Run-
         # scoped, not per-turn: a laptop carried between networks can interrupt
         # the same run more than once, and the budget bounds the RUN's total
@@ -956,6 +1003,58 @@ class AgentLoop:
                     new_messages.append(assistant)
 
                     if stop_reason in ("error", "aborted", "refusal"):
+                        # DeepSeek's thinking mode can refuse a request for a
+                        # missing reasoning echo even though the body echoes one
+                        # on every turn it has anything for (see
+                        # ``ModelSpec.requires_reasoning_echo``). That refusal is
+                        # recoverable rather than fatal: the same request with
+                        # thinking disabled answers 200 (measured live), so spend
+                        # one call on that instead of ending the turn.
+                        #
+                        # Gated on nothing having been SHOWN: the loop may only
+                        # replay a turn whose output the user has not read, and
+                        # a 400 arrives before the first byte. Gated on the model
+                        # capability as well as the wording, so an unrelated
+                        # provider echoing this text cannot disable a rung of its
+                        # own ladder.
+                        if (
+                            stop_reason == "error"
+                            and reasoning_echo_retries < MAX_REASONING_ECHO_RETRIES
+                            and not assistant.text.strip()
+                            and not assistant.tool_calls
+                            and config.model.requires_reasoning_echo
+                            and _is_reasoning_echo_rejection(stream_error)
+                        ):
+                            thinking_off = _thinking_off_effort(config.model)
+                            if thinking_off is not None:
+                                reasoning_echo_retries += 1
+                                # The refused turn must not reach the retry's
+                                # history: it carries nothing the user saw, and
+                                # the next request has to re-send the same
+                                # conversation that was just refused.
+                                if context.messages and context.messages[-1] is assistant:
+                                    context.messages.pop()
+                                if new_messages and new_messages[-1] is assistant:
+                                    new_messages.pop()
+                                config.model = config.model.model_copy(
+                                    update={"reasoning_effort": thinking_off}
+                                )
+                                # A ceiling as well as the snapshot: a host whose
+                                # resolver returns its OWN model would otherwise
+                                # put the retry straight back at the rung that was
+                                # just refused (the empty-truncation retreat sets
+                                # one for the same reason).
+                                effort_ceiling = thinking_off
+                                yield NoticeEvent(
+                                    text=(
+                                        "the provider refused this request for a "
+                                        "missing reasoning echo — retrying with "
+                                        "thinking disabled"
+                                    ),
+                                    kind="warning",
+                                )
+                                has_more_tool_calls = True
+                                continue
                         # Pair every dangling tool call so the wire stays legal.
                         # "refusal" rides this branch because it is terminal the
                         # same way an error is: the model declined, so there is
