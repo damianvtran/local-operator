@@ -48,6 +48,13 @@ from local_operator.evaluation.runner.model import (
     ModelUsage,
     StreamShape,
 )
+
+# Imported under its own name rather than re-spelled: the classifier keys a
+# rejection class on this exact phrase, and the decoder is the only thing that
+# emits it. A second literal here could drift from the sentence it matches.
+from local_operator.evaluation.runner.public_reply import (
+    _MISPLACED_REPLY_VERSION as _MISPLACED_REPLY_VERSION_MARKER,
+)
 from local_operator.evaluation.runner.public_reply import MAX_PUBLIC_OBSERVATIONS_CHARS
 from local_operator.evaluation.runner.public_reply import (
     MAX_REJECTED_REPLY_CHARS as _MAX_REJECTED_REPLY_CHARS,
@@ -316,6 +323,18 @@ def classify_rejection(reason: str) -> str:
         return "incomplete-json"
     if "unsupported model reply version" in reason:
         return "unsupported-reply-version"
+    if _MISPLACED_REPLY_VERSION_MARKER in reason:
+        # ``reply_version`` was found SOMEWHERE ELSE -- nested inside
+        # ``action_batch`` (or duplicated at both levels) -- rather than left
+        # out. Split out of ``envelope-shape`` because it is a different repair
+        # from a missing key (move this one, do not add another) and because
+        # the two were sharing one class in the bundles, which is how a seal
+        # repeated under this defect stayed invisible as a SUB-rate: the next
+        # arm has to be able to count misplaced-version traffic apart from the
+        # omissions it was previously merged with. The marker is emitted only
+        # by the decoder's misplaced branches, never derived from the model's
+        # wording, so a sealed artifact's class cannot change by being read.
+        return "env-version-misplaced"
     if (
         "reserved envelope" in reason
         or "model reply requires exactly" in reason
@@ -350,6 +369,12 @@ def classify_rejection(reason: str) -> str:
 #: 9/10 on the model that produced this corpus, and the adapter, empty-reply and
 #: second-batch messages name the limit, the alternative and the rule. Rewriting
 #: one of these would throw away the only part of this that was ever measured.
+#:
+#: ``env-version-misplaced`` is deliberately NOT here even though the decoder
+#: now names its defect: naming the misplaced key is only half the repair, and
+#: the half it cannot state -- the accepted LAYOUT -- is what this class needs,
+#: so its hint appends the schema-derived example on top of the preserved
+#: sentence (the ``out-of-frame-coordinate`` precedent).
 #:
 #: Every one of them is the harness's OWN sentence. A class whose diagnostic
 #: comes from a Pydantic rendering is never preserved: that rendering embeds
@@ -457,6 +482,17 @@ def rejection_hint(
 
     if class_key in _PRESERVED_HINTS:
         return reason
+    if class_key == "env-version-misplaced":
+        # Appended rather than replaced, as ``out-of-frame-coordinate`` does: the
+        # decoder's sentence already names the key that landed in the wrong
+        # place -- the half the model needs to recognise its own mistake -- and
+        # what it cannot state is the accepted envelope the key belongs in.
+        # ``_example_json`` derives that from the enforced schema against the
+        # observation in hand, so the hint cannot advertise a shape the decoder
+        # would refuse. The version-less plain batch is deliberately not offered
+        # here: a reply that already committed to the envelope would lose its
+        # notes by taking that route, and this defect is one key's position.
+        return f"{reason}. Reply with exactly this shape: {_example_json(surface, observation)}"
     if class_key == "leading-delimiter":
         # The half of the old ``malformed-json`` class whose reply could not be
         # READ AT ALL: the first byte is not the start of a JSON value, so the

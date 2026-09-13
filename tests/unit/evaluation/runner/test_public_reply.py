@@ -171,6 +171,53 @@ def test_legacy_trailing_envelope_cannot_supersede_current_decision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_misplaced_version_envelope_is_still_placeholdered_in_history(
+    tmp_path: Path,
+) -> None:
+    """The new class changes the HINT, never the history boundary.
+
+    A misplaced ``reply_version`` is the defect the misplaced-version class was
+    split out for, and the temptation it invites is to show the model its own
+    reply so it can see the nested key. That stays shut: the reply's unvalidated
+    notes are replaced by the placeholder before replay (the F1 barrier), and
+    the correction has to come from the hint's schema-derived example instead.
+    Pinned HERE, on the class whose repair most obviously looks like it needs
+    the reply, so the redaction barrier cannot be traded away later by a change
+    that appears to be about key layout.
+    """
+
+    note = "misplaced-version-note-must-not-enter-memory"
+    raw = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {
+                "actions": json.loads(type_payload(observation()))["actions"],
+                "reply_version": "1.0",
+            },
+            "public_observations": note,
+        }
+    )
+    stream = RecordingStream(raw)
+    client = _client(stream, tmp_path)
+    turns = [EpisodeTurn(observation=observation())]
+
+    with pytest.raises(DecisionRejected) as error:
+        await client.decide(observation(), turns)
+
+    assert error.value.class_key == "env-version-misplaced"
+    assert error.value.reply == REJECTED_PUBLIC_REPLY
+    assert "'reply_version' belongs at the top level of the envelope" in error.value.diagnostic
+
+    stream.reply = finish_payload(observation())
+    await client.decide(observation(), turns)
+    replay = "\n".join(message.text for message in stream.requests[-1].messages)
+
+    assert REJECTED_PUBLIC_REPLY in replay
+    assert note not in replay
+    assert "'reply_version' belongs at the top level of the envelope" in replay
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("escaped_keys", [False, True])
 async def test_rejected_envelope_notes_are_not_replayed_as_facts(
     tmp_path: Path,

@@ -158,6 +158,12 @@ _PRESERVED_MESSAGES = [
     # omitted, and recovered 9/10 against 4/10 for the bare rule.
     "model reply used the reserved envelope but carried 'action_batch', "
     "'reply_version'; omitted 'public_observations'.",
+    # The batch-level rule with the keys that landed in the batch NAMED. Still
+    # the harness's own sentence and still preserved: the naming is what makes
+    # it actionable, and this row pins that a later edit cannot quietly drop
+    # the names and leave the bare rule the model cannot act on.
+    "model reply action_batch requires exactly an actions array; it carried 1 "
+    "unexpected key(s): 'observation_id'",
     # The batch-level rules, also the harness's own sentences.
     "decision must carry a non-empty actions array",
     "decision carries a second action batch for the same observation; send one batch",
@@ -193,6 +199,178 @@ def test_a_measured_message_is_preserved_rather_than_paraphrased(reason: str) ->
         rejection_hint(key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE)
         == reason
     )
+
+
+#: The two shapes the misplaced-version class exists for, as the models wrote
+#: them: the full envelope with the version key duplicated inside
+#: ``action_batch`` (the shape both sealed DeepSeek episodes repeated), and the
+#: key nested inside ``action_batch`` with no top-level copy.
+_DUPLICATED_VERSION_BODY = json.dumps(
+    {
+        "reply_version": "1.0",
+        "action_batch": {"actions": [], "reply_version": "1.0"},
+        "public_observations": "",
+    }
+)
+_NESTED_VERSION_BODY = json.dumps(
+    {
+        "action_batch": {"actions": [], "reply_version": "1.0"},
+        "public_observations": "",
+    }
+)
+_OMITTED_VERSION_BODY = json.dumps({"action_batch": {"actions": []}, "public_observations": ""})
+#: A reserved key nested in ``action_batch`` that is NOT the version key, with
+#: the version key simply absent. Reachable in the paid corpora
+#: (``batch-minimax-m3-canary5/task_087`` and ``task_106``), and the reason the
+#: version-specific sentence may only fire for ``reply_version``: telling the
+#: model that ``reply_version`` is in the wrong place here names a key it never
+#: wrote, and takes the class key's measurement with it.
+_NESTED_NOTES_BODY = json.dumps({"action_batch": {"actions": [], "public_observations": "a note"}})
+
+#: The measured half of the envelope diagnostic, byte for byte. Measured on
+#: ``minimax/minimax-m3`` at 9/10 recovered against 4/10 for the bare rule, so it
+#: is never paraphrased -- the misplaced-version sentence reuses it verbatim as
+#: its prefix. Pinned literally because a reword here would silently discard the
+#: only measured correction in the class.
+_MEASURED_CARRIED_OMITTED = (
+    "model reply used the reserved envelope but carried 'action_batch', "
+    "'public_observations'; omitted 'reply_version'"
+)
+
+
+def _envelope_reason(body: str) -> str:
+    """The decoder's own refusal sentence for one envelope body."""
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(body)
+    return str(info.value)
+
+
+def test_the_two_carried_omitted_shapes_share_one_measured_sentence() -> None:
+    """The omitted-version wording is the measured one, and it is not reworded.
+
+    Both branches of the diagnostic build ``<carried>; <omitted>`` out of the
+    same helper, so the sentences are asserted to be one wording in two
+    spellings rather than two wordings that happen to look alike. The omitted
+    reply keeps it whole -- including the EITHER clause that offers the legacy
+    plain batch, which is the cheaper of the two legal shapes for a reply that
+    never committed to the envelope.
+    """
+
+    reason = _envelope_reason(_OMITTED_VERSION_BODY)
+    assert reason.startswith(_MEASURED_CARRIED_OMITTED)
+    assert '{"actions": [...]}' in reason
+    assert classify_rejection(reason) == "envelope-shape"
+
+
+def test_a_misplaced_reply_version_is_its_own_class() -> None:
+    """The defect the class split exists for: the key is in the wrong PLACE.
+
+    ``omitted 'reply_version'`` is true of the top level and was the whole
+    repair turn for replies that had actually nested the key, which is a rule
+    the model cannot act on -- it can see the key in what it sent. Both shapes
+    are one class, so the next arm's bundles can count the sub-rate apart from
+    the omissions it used to share ``envelope-shape`` with, and the hint states
+    the accepted layout rather than only the rule it already half-followed.
+
+    The version-less plain batch is deliberately NOT offered here: a reply
+    already inside the envelope would lose its notes by taking that route to
+    fix what is one key's position.
+    """
+
+    for body in (_DUPLICATED_VERSION_BODY, _NESTED_VERSION_BODY):
+        reason = _envelope_reason(body)
+        key = classify_rejection(reason)
+        hint = rejection_hint(
+            key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE
+        )
+
+        assert key == "env-version-misplaced", body
+        # (i) the key that landed in the wrong place is NAMED ...
+        assert "'reply_version'" in hint
+        # ... and so is the accepted LAYOUT it belongs in.
+        assert "belongs at the top level of the envelope" in hint
+        # (ii) the hint ends with the schema-derived canonical envelope.
+        assert '"reply_version": "1.0"' in hint
+        assert '"action_batch"' in hint and '"public_observations"' in hint
+        assert '{"actions": [...]}' not in hint
+
+
+def test_an_unnamed_but_nested_reserved_key_stays_in_envelope_shape() -> None:
+    """Only ``reply_version`` gets the dedicated class, and only when IT moved.
+
+    A nested reserved key is named, because the model cannot otherwise see which
+    key was in the wrong place -- but the reply's defect is still the envelope's
+    shape, so it stays ``envelope-shape`` and keeps the measured EITHER clause.
+    The class key is a MEASUREMENT as well as a hint: firing it for a key the
+    model never wrote both misdirects the repair and inflates the sub-rate the
+    next arm is meant to read.
+    """
+
+    reason = _envelope_reason(_NESTED_NOTES_BODY)
+    key = classify_rejection(reason)
+    hint = rejection_hint(
+        key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE
+    )
+
+    assert key == "envelope-shape"
+    assert "'public_observations'" in hint and "inside 'action_batch'" in hint
+    assert "'reply_version' belongs at the top level" not in hint
+    assert '{"actions": [...]}' in hint
+
+
+def test_the_misplaced_repair_keeps_the_measured_sentence_as_its_prefix() -> None:
+    """Extend the measured wording, never replace it.
+
+    The nested shape is the one that used to be answered with the carried/
+    omitted sentence, so the split must leave that sentence in place and add to
+    it. Its EITHER clause is the only part dropped, and only here: offering the
+    legacy plain batch to a reply that already used the envelope costs the
+    model its notes.
+    """
+
+    nested = _envelope_reason(_NESTED_VERSION_BODY)
+
+    assert nested.startswith(_MEASURED_CARRIED_OMITTED)
+    assert nested != _envelope_reason(_OMITTED_VERSION_BODY)
+    assert '{"actions": [...]}' not in nested
+
+
+def test_a_misplaced_version_hint_carries_no_model_supplied_value() -> None:
+    """Only key NAMES travel: never a Pydantic rendering, never a value.
+
+    The rejected reply is withheld from the repair turn (see
+    ``test_a_misplaced_version_envelope_is_still_placeholdered_in_history``),
+    and the hint must not smuggle it back in: an ``input_value=`` rendering or a
+    model-supplied scalar would re-open the replay channel that placeholder
+    closes -- and on this path a value can be a resolved secret.
+    """
+
+    body = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {
+                "actions": [
+                    {"kind": "type", "observation_id": "0" * 64, "text": "MODEL-SUPPLIED-TEXT"}
+                ],
+                "reply_version": "MODEL-SUPPLIED-VERSION",
+            },
+            "public_observations": "MODEL-SUPPLIED-NOTE",
+        }
+    )
+    reason = _envelope_reason(body)
+    hint = rejection_hint(
+        classify_rejection(reason),
+        reason=reason,
+        observation=observation(),
+        surface=LEGACY_ACTION_SURFACE,
+    )
+
+    for value in ("MODEL-SUPPLIED-TEXT", "MODEL-SUPPLIED-VERSION", "MODEL-SUPPLIED-NOTE"):
+        assert value not in hint
+    assert "input_value=" not in hint
+    assert "errors.pydantic.dev" not in hint
+    assert "[type=" not in hint
 
 
 def test_an_unrecognised_message_is_still_recordable_and_still_answered() -> None:
