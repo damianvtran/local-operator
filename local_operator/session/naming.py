@@ -678,22 +678,34 @@ async def _ask_for_title(
 
     Shared by :func:`generate_title`, :func:`generate_retitle` and
     :func:`refresh_title` so they have exactly one error policy between them.
-    There is no retry here and none underneath (the session marks the request
-    single-attempt), so the timeout is the entire budget.
+    There is no retry here, and the only one underneath is the failover
+    driver's single auth-class re-resolve (see
+    :attr:`~local_operator.harness.types.ChatRequest.isolated`), so the timeout
+    covers the whole budget either way.
 
     The two automatic callers collapse :data:`CALL_FAILED` back onto ``None``,
     which is what they have always done and still correct: a failed check and an
     unchanged subject are the same instruction to them. Only ``refresh_title``
     keeps the distinction, because only it has a user waiting for an answer.
+
+    A failure is swallowed — never into silence: it is logged (type and message,
+    never prompt content), because the module's contract is that its failures go
+    to the log file. A cancellation is not a failure and stays silent.
     """
     try:
         raw = await asyncio.wait_for(complete_fn(system, prompt), timeout)
     except asyncio.TimeoutError:
+        # A stall spends the whole budget and then some, and the callers above
+        # collapse it onto "no title" without a trace — the same diagnosability
+        # gap as the provider-failure arm, so it goes to the log too.
+        logger.warning("conversation naming call timed out after %.0fs", timeout)
         return CALL_FAILED
     except asyncio.CancelledError:
         # Swallowed, deliberately and load-bearingly: the automatic naming task
         # is DETACHED and routinely cancelled at shutdown, so propagating would
-        # surface a teardown traceback for a feature nobody waited on.
+        # surface a teardown traceback for a feature nobody waited on. It stays
+        # SILENT — a routine shutdown is not a failure, and a log line per
+        # session at exit would be noise.
         #
         # Reported apart from a timeout all the same, because a caller that IS
         # awaited (:func:`routed_refresh`) has the opposite obligation: a cancel
@@ -701,11 +713,16 @@ async def _ask_for_title(
         # outcome would answer a request nobody is listening to. It re-raises on
         # this sentinel; the detached callers collapse it like any failure.
         return CALL_CANCELLED
-    except Exception:
+    except Exception as exc:
         # EVERY provider failure, 429 included. The turn is running alongside
         # this call and must never learn it happened; the request is `isolated`
         # so the failure cannot have moved the turn's route or credential
-        # either. See ``ChatRequest.isolated``.
+        # either. See ``ChatRequest.isolated``. What the failure MUST leave
+        # behind is a log line — type and message only, never the prompt or any
+        # user content — because "sessions don't get named" is otherwise
+        # diagnosable only by analytics archaeology: a swallowed 401 from a
+        # stale pool row looks identical on screen to a declined rename.
+        logger.warning("conversation naming call failed: %s: %s", type(exc).__name__, exc)
         return CALL_FAILED
     return parse_title(str(raw or ""))
 

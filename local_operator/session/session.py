@@ -10229,15 +10229,17 @@ class Session:
         CONCURRENTLY with the turn, so the safety comes from the shape of the
         request instead of from the timing:
 
-        * ``isolated`` — one attempt, no fallback chain, no credential
-          rotation, no sticky-route read or write, no quota preflight, no
-          effort-boundary classification, a read-only credential resolve and
-          not the session's prompt cache key. See the field's docstring for the
-          six pieces of session-wide state that protects, and why each one
-          mattered.
+        * ``isolated`` — at most two attempts (the second only when a bearer
+          was rejected outright and a read-only re-resolve hiding it produced
+          a different one), no fallback chain, no credential rotation, no
+          sticky-route read or write, no quota preflight, no effort-boundary
+          classification, a read-only credential resolve and not the session's
+          prompt cache key. See the field's docstring for the six pieces of
+          session-wide state that protects, and why each one mattered.
         * ``replayable=False`` — deliberately the opposite of the compaction
           errand below. Replay exists so a stalled read does not permanently
-          lose an EXPENSIVE result; a title is worth one attempt and no more.
+          lose an EXPENSIVE result; a title is worth its one or two attempts
+          and no more (see ``isolated`` for the auth-shaped second one).
         * ``max_tokens`` — bounds a model that ignores the output format.
         * cheapest route available: the ``lo`` subagent tier when the operator
           has configured one, otherwise this session's model — either way
@@ -10268,8 +10270,9 @@ class Session:
             # errand consistent with the turn.
             #
             # The failure mode this protects is quiet: the errand is
-            # ``isolated`` with one attempt and no fallback, so a rejected
-            # request surfaces only as a conversation that never gets a title.
+            # ``isolated`` with no fallback (and at most one auth retry), so a
+            # rejected request surfaces only as a conversation that never gets
+            # a title.
             temperature=model.temperature,
             replayable=False,
             isolated=True,

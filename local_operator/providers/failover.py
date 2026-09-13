@@ -22,7 +22,14 @@ import inspect
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -2365,19 +2372,28 @@ async def stream_with_failover(
     primary_target = FallbackTarget(primary_selector, request.model.reasoning_effort)
 
     if request.isolated:
-        # DECORATION: one attempt on the model it named, and no reach into
-        # anything the concurrent turn depends on. Expressed by disabling retry
-        # rather than by a second code path, because "retry disabled" already
-        # means exactly the three things needed here — no fallback chain below,
-        # no transport-retry budget, and no credential rotation (every rotation
-        # `continue` sits behind a `retry.enabled` raise). Dropping the route
-        # state removes the fourth: a decorative call neither pins the session
-        # to a fallback nor clears a pin the turn is relying on. The fifth is
-        # not expressible here — the credential cascade takes routing decisions
-        # of its own on a read — so the resolve below is asked for read-only
-        # (`read_only=request.isolated`).
+        # DECORATION: at most one attempt on the model it named — with one
+        # sanctioned exception, the single auth re-resolve latched below — and
+        # no reach into anything the concurrent turn depends on. Expressed by
+        # disabling retry rather than by a second code path, because "retry
+        # disabled" already means exactly the three things needed here — no
+        # fallback chain below, no transport-retry budget, and no credential
+        # rotation (every rotation `continue` sits behind a `retry.enabled`
+        # raise; the auth exception does not rotate anything, it re-READS).
+        # Dropping the route state removes the fourth: a decorative call
+        # neither pins the session to a fallback nor clears a pin the turn is
+        # relying on. The fifth is not expressible here — the credential
+        # cascade takes routing decisions of its own on a read — so the resolve
+        # below is asked for read-only (`read_only=request.isolated`).
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
+
+    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
+    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
+    # walk: the errand makes at most two wire attempts in total, ever, and the
+    # second only when the read-only re-resolve produced a bearer that differs
+    # from the one the provider just rejected.
+    isolated_auth_resolved = False
 
     targets = [primary_target]
     if retry.enabled and retry.model_fallback:
@@ -2942,6 +2958,47 @@ async def stream_with_failover(
                         shortest_retry_after_ms or exc.retry_after_ms, exc.retry_after_ms
                     )
                 if not retry.enabled:
+                    if (
+                        request.isolated
+                        and not isolated_auth_resolved
+                        and (exc.auth_error or exc.status in (401, 403))
+                    ):
+                        # The one widening of the isolated budget, and it is
+                        # auth-shaped only. Deployment reality: a pool can
+                        # hold a stale key while the TURN beside us rotates
+                        # past it and stays healthy, so the errand's read-only
+                        # resolve keeps landing on the dead row (the pick is a
+                        # hash of the session id — re-firing the errand later
+                        # picks the same row) and every naming call for such a
+                        # session fails forever. One extra request, and only
+                        # here, buys the title back: a READ-ONLY re-resolve
+                        # with the rejected bearer hidden may serve the errand
+                        # from a sibling — the resolve's own sanctioned move
+                        # (see `_resolve_access_for_provider`) — while the
+                        # sticky pointer, the block list and the demotion set
+                        # stay exactly as they were, so the turn beside us
+                        # keeps resolving to precisely what it did before.
+                        # Non-auth failures (5xx, 429, request-kind, transport)
+                        # keep the exactly-one-attempt behaviour: a rate limit
+                        # says wait, and an errand must not.
+                        isolated_auth_resolved = True
+                        sibling = await _resolve_access_for_provider(
+                            auth,
+                            provider,
+                            session_id,
+                            state,
+                            exc,
+                            read_only=request.isolated,
+                            model_id=spec.model_id,
+                            scoped_blocks=retry.usage_aware_fallback,
+                        )
+                        if sibling is not None and sibling.access_token != key:
+                            # `retry_same_key` consumes the record just
+                            # resolved: the loop top then skips its own resolve
+                            # and fires this sibling directly.
+                            access = sibling
+                            retry_same_key = True
+                            continue
                     raise
                 if _same_credential_retry_allowed(
                     exc,
@@ -3300,6 +3357,15 @@ async def _resolve_access_for_provider(
     credential — and neither ``retry.enabled=False`` nor a dropped
     ``route_state`` is upstream of that. A decorative call resolves the account
     the turn is already on and decides nothing.
+
+    The one thing ``read_only`` DOES allow is answering a caller that comes
+    back with the bearer it was just handed rejected outright (``error`` set):
+    the last-chance leg then asks for a SIBLING by hiding the rejected bearer
+    from that single resolve instead of rotating onto it — see the resolver's
+    ``read_only`` branch. That is the isolated errand's one sanctioned second
+    attempt (deployment reality: pools contain stale keys, and one stale row
+    must not permanently silence a decorative call), and it still decides
+    nothing about routing.
     """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
@@ -3324,15 +3390,23 @@ async def _resolve_access_for_provider(
             flags["model_id"] = model_id
         return flags
 
-    async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
+    async def _access(
+        *, force_refresh: bool = False, exclude_keys: Collection[str] | None = None
+    ) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
-        return await oauth_store.get_oauth_access(
-            provider, session_id, **_model_flags(force_refresh)
-        )
+        flags = _model_flags(force_refresh)
+        if exclude_keys:
+            flags["exclude_keys"] = frozenset(exclude_keys)
+        return await oauth_store.get_oauth_access(provider, session_id, **flags)
 
-    async def _key(*, force_refresh: bool = False) -> str | None:
-        return await auth.get_api_key(provider, session_id, **_model_flags(force_refresh))
+    async def _key(
+        *, force_refresh: bool = False, exclude_keys: Collection[str] | None = None
+    ) -> str | None:
+        flags = _model_flags(force_refresh)
+        if exclude_keys:
+            flags["exclude_keys"] = frozenset(exclude_keys)
+        return await auth.get_api_key(provider, session_id, **flags)
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -3341,21 +3415,39 @@ async def _resolve_access_for_provider(
                 if record is None:
                     return await _key()
             elif ctx.last_chance:
-                # Family-scoped rotation blocks ride only with usage-aware
-                # routing: on the opt-out path no preflight probe exists to
-                # upgrade a family block to an account-wide one, so rotation
-                # keeps the pre-existing account-wide semantics there.
-                _rotate_sibling(
-                    auth,
-                    provider,
-                    session_id,
-                    ctx.error,
-                    ctx.previous_key,
-                    model_id if scoped_blocks else "",
-                )
-                record = await _access()
-                if record is None:
-                    return await _key()
+                if read_only:
+                    # The isolated errand's sibling leg. ``_rotate_sibling``
+                    # blocks or demotes the failing row and moves session
+                    # stickiness — routing decisions that belong to the TURN,
+                    # not to decoration running beside it — so under
+                    # ``read_only`` the sibling comes from the store hiding the
+                    # rejected bearer from THIS resolve alone
+                    # (``exclude_keys``): the sticky pointer, the block list and
+                    # the demotion set come out of the call exactly as they went
+                    # in. A store without exclusion support hands back the same
+                    # bearer, the driver's differs-check refuses the retry, and
+                    # the errand keeps its one-attempt budget — so legacy stores
+                    # keep today's behaviour rather than breaking.
+                    excluded = frozenset(k for k in (ctx.previous_key,) if k)
+                    record = await _access(exclude_keys=excluded or None)
+                    if record is None:
+                        return await _key(exclude_keys=excluded or None)
+                else:
+                    # Family-scoped rotation blocks ride only with usage-aware
+                    # routing: on the opt-out path no preflight probe exists to
+                    # upgrade a family block to an account-wide one, so rotation
+                    # keeps the pre-existing account-wide semantics there.
+                    _rotate_sibling(
+                        auth,
+                        provider,
+                        session_id,
+                        ctx.error,
+                        ctx.previous_key,
+                        model_id if scoped_blocks else "",
+                    )
+                    record = await _access()
+                    if record is None:
+                        return await _key()
             else:
                 record = await _access(force_refresh=True)
                 if record is None:
