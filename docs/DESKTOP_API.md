@@ -122,6 +122,72 @@ residency. The runtime's existing heartbeat re-evaluates expired leases and
 restores parked-gate OS fallback. A valid desktop notification lease suppresses
 that fallback, so one gate does not produce both an Electron and runtime toast.
 
+A lease is also the one signal that CREATES residency rather than only
+preserving it. While a live lease says `visible`, the HTTP bridge starts the
+session's runtime in the background (`refresh_watch`), because that is term 3 of
+the residency predicate's own premise: a user looking at the conversation is
+about to type, and paying the child spawn inside their first click is the stall
+this removes. A lease that says only `can_notify` creates nothing: it is
+delivery reachability, not attention, and it never did more than keep an
+already-running runtime warm.
+
+The bounds are the ones already in place rather than new ones, and they are
+worth stating exactly, because the trigger is now "a window nobody is clicking
+on":
+
+* **One runtime per session** — the engage path is shared, so a lease-driven
+  warm, an explicit `POST /warm`, and a command all serialise on the same lock
+  and the losers return at their own `is_cold` check. One WINNER, rather than
+  one spawn: the launch loop lets every contender spawn a candidate inside the
+  ~300 ms before the transcript lease is taken and the losers exit 0, so a
+  command landing in that window starts a doomed second candidate. That is the
+  launch loop's designed behaviour and predates this change.
+* **The lease is the lifetime.** The constant that decides how long the runtime
+  is kept is the runtime-side `DESKTOP_WATCH_LEASE_S` (45 s today), which the
+  bridge's own subscription lease `WATCH_TTL` happens to equal — same value by
+  agreement, not by construction, and they must not drift now that one of them
+  governs creation. Stop heartbeating and the lease expires, term 3 stops
+  counting the viewer, and the runtime's existing idle drain reaps it. The warm
+  itself dies with the bridge: it lives only while some user holds it (an open
+  event subscription), so a lease that arrives with no subscription is recorded
+  and creates nothing, exactly as `POST /warm` without one does.
+* **The aggregate is the number of FOCUSED windows, not one runtime.** `visible`
+  is `visibilityState === "visible" && hasFocus()` and the app mounts one
+  lease-bearing chat view per focused window, so one warm exists at a time
+  (~82 MB idle measured for the runtime, against the ~283 MB the reaper budgets
+  for one) while every session touched in the last ~48 s may hold one
+  transiently. This is why no cap is needed today — and the assumption is
+  load-bearing: a future that mounts several lease-bearing views at once (a
+  split pane, a per-pane lease, a "watching" surface that asserts `visible`
+  without focus) multiplies the residency by the number of panes and needs a
+  real cap.
+* **A failure is paced, not repeated per heartbeat.** The bridge keeps a live
+  lease's warm intent across attempts, but an attempt that actually ran waits
+  out a backoff (30 s doubling to a 120 s ceiling) before the next one, so a
+  session whose runtime cannot start does not spawn a child every beat. The
+  pace follows the ATTEMPT rather than its outcome, which is what covers a
+  runtime that comes up and then dies on every beat (a late boot failure): the
+  charge stands while the window is still looking, and the next beat finds the
+  viewer cold with the deadline still ahead. An attempt that was refused before
+  doing any work — the viewer is in owner recovery, or another engage is
+  already in flight — is retried at a 1 s poll instead, which is what carries
+  the warm across the recovery window a single attempt used to lose to. The
+  pace is dropped as soon as no live visible lease remains (the window was
+  hidden, navigated away from, or closed), so a viewer who returns is not
+  charged for the last intent's failures.
+* **A deliberately stopped session stays stopped.** `lop stop` (or a `/stop`
+  from another surface) ends the runtime whatever the presence says, and the
+  lease-driven warm refuses while the session is stopped — the same fact
+  `_recover_runtime` refuses on, so a focused window's beat cannot resurrect
+  the session the user just ended; `/resume` re-opens it, and only a user
+  action does. The limit of the guard is the marker's own: it is this facade's
+  own flag, OR the durable `stopped_at`, which is written only for a session
+  that HAS wakes — a stop from another surface on a wake-less session leaves no
+  trace, so the guard closes the common cases rather than the whole class. An
+  explicit `POST /warm` is still not gated: it is the keystroke path, a user
+  action, and it is the route that has always kept a stopped session's
+  `/resume` prompt honest by routing the send into it.
+
 `AttachedSession(surface="desktop")` carries this metadata through its existing
 runtime binding/recovery path. It goes cold rather than becoming the runtime
 in the HTTP process; reconnect does not resurrect an expired desktop lease. Its

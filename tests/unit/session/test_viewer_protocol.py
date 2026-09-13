@@ -1146,9 +1146,16 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # which is what decides whether re-dialling a clicked row is worth anything.
     # An owner ``Session`` is the thing that ends, so there is no record to read
     # back about itself and no un-bindable state to classify.
-    assert len(viewer_only) == 52, (
+    #
+    # 52 → 53 is the same reasoning once more: the lease-driven warm's retry
+    # loop needs ``recovering`` to tell a REFUSED engage (recovery owns the
+    # dial, no work done, no spawn to pace) from a FAILED one, and only a viewer
+    # can be in owner recovery at all — an owner `Session` has no lost owner to
+    # recover from, so the member is viewer-only by construction rather than by
+    # placement.
+    assert len(viewer_only) == 53, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 52, and the aggregate floor is set at 40 against that number. A "
+        "says 53, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
