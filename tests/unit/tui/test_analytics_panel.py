@@ -105,8 +105,14 @@ def test_format_cost_states():
     assert format_cost(agg(0, 0, 5)) == "$—"
     # Sub-cent keeps precision so a real spend is not rounded to zero.
     assert format_cost(agg(4_200, 3, 3)) == "$0.0042"
-    # Large sum abbreviates.
-    assert format_cost(agg(1_200_000_000, 5, 5)) == "$1.2k"
+    # Large sums NO LONGER abbreviate here: the same money reads ``$1200.00`` on
+    # this screen and on the band, because one ladder (``tui.costs.format_usd``)
+    # owns every money cell. The panel has no chart axis, so there is nowhere a
+    # ``$1.2k`` magnitude could live without disagreeing with the band.
+    assert format_cost(agg(1_200_000_000, 5, 5)) == "$1200.00"
+    # A nonzero amount below the ladder's resolution says so, rather than
+    # rounding to the ``$0.0000`` that reads as free.
+    assert format_cost(agg(1, 5, 5)) == "<$0.0001"
 
 
 def test_report_shows_cost():
