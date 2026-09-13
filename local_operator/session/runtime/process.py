@@ -809,9 +809,8 @@ async def amain() -> int:
 def main() -> int:
     # A child has no terminal and no inherited log stream — without this its
     # warnings (a failed prompt, a dead provider) vanish, which is how a
-    # silently-dropped turn went undiagnosed. Its own file is the right place
-    # (`paths.runtime_log_path`), not the daemon's launchd-owned `mobile.log`:
-    # `lop mobile logs` reads both.
+    # silently-dropped turn went undiagnosed. It writes a file of its own; why
+    # that is not the daemon's is the paragraph below.
     #
     # BOUNDED and quiet, unlike the `logging.basicConfig(level=INFO,
     # filename=...)` this replaces, which wrote an UNBOUNDED file and handed the

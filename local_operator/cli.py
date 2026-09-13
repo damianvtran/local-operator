@@ -3931,24 +3931,33 @@ def mobile_command(args: argparse.Namespace) -> int:
 
         log = mobile_install.log_path()
         runtime_log = runtime_log_path()
-        # Both writers, one command. The daemon and its runtime children keep
-        # separate files on purpose (see `paths.runtime_log_path` — a runtime must
-        # never rotate the launchd-owned file the daemon appends to), and an
-        # operator diagnosing a relay wants both streams in one view.
-        #
-        # `-F`, not `-f`, and both paths unconditionally. `-f` follows the fd it
-        # opened, so it never reads a file created after it started — normal on a
-        # freshly booted machine, where no runtime has run yet — and goes blind at
-        # the first rotation of the runtimes' bounded file, because bounding means
-        # renaming. Both were measured against the system `tail` in review. `-F`
-        # retries a missing path quietly and reopens on rename, which is exactly
-        # what a file that appears mid-session and then rotates needs; the
-        # pre-existing reason it was skipped (a bare `tail` errors on a missing
-        # operand) does not apply to `-F`.
         tail = ["tail", "-n", str(args.lines)]
         if args.follow:
+            # `-F`, not `-f`: follow by NAME. `-f` follows the fd it opened, so it
+            # never reads a file created after it started — the normal state on a
+            # machine whose daemons are up but whose runtimes have all exited — and
+            # it goes blind at the first rotation of the runtimes' bounded file,
+            # because bounding means renaming. Both were measured against the
+            # system `tail`. Both paths go in unconditionally HERE because `-F`
+            # retries a missing one quietly; a plain `tail` does not, so the
+            # non-following branch below filters to what exists.
+            # One limit of this argv that cannot be fixed from here, measured:
+            # BSD `tail` prints its `==> file <==` header when it OPENS a file, so
+            # a runtime log created after the follow started is read without a
+            # header and its lines sit under the daemon's. Attribution survives —
+            # every record names its logger, and a runtime names its own pid — and
+            # the alternative is a multiplexer of our own, which is not worth it
+            # for a header.
             tail.append("-F")
-        tail.extend([str(log), str(runtime_log)])
+            tail.extend([str(log), str(runtime_log)])
+            return subprocess.call(tail)
+        existing = [path for path in (log, runtime_log) if path.exists()]
+        if not existing:
+            # `tail` with no operand reads STDIN and would hang the command on a
+            # machine whose daemon has not written yet.
+            print(f"no log files yet: {log} (and {runtime_log})")
+            return 0
+        tail.extend(str(path) for path in existing)
         return subprocess.call(tail)
 
     if command == "password":
