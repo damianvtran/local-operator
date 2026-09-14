@@ -6,7 +6,6 @@ through HTTP requests instead of CLI.
 """
 
 import asyncio
-import os
 import secrets
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
@@ -33,7 +32,7 @@ from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import registry as serve_registry
-from local_operator.server.desktop import require_desktop
+from local_operator.server.desktop import desktop_posture, require_desktop
 from local_operator.server.routes import (
     agents,
     auth,
@@ -42,6 +41,7 @@ from local_operator.server.routes import (
     config,
     credentials,
     desktop_catalogues,
+    desktop_claim,
     desktop_lifecycle,
     desktop_profiles,
     desktop_radient,
@@ -389,8 +389,11 @@ def _legacy_gate_matchers() -> tuple[tuple[Pattern[str], frozenset[str]], ...]:
 def _legacy_desktop_gated(path: str, method: str) -> bool:
     """Whether this request sits behind the managed-mode desktop boundary.
 
-    Enforced only when a desktop token is configured, so a standalone legacy
-    server and every CLI/script client stay wire-compatible -- see
+    Enforced only while the desktop plane is governed — by the app's env
+    capability or by an accepted claim (``desktop_posture``) — so a standalone
+    legacy server and every CLI/script client stay wire-compatible until
+    something actually attaches, and a claim TIGHTENS the surface it finds
+    rather than inheriting the standalone posture. See
     :func:`managed_desktop_boundary`.
     """
     if path in _LEGACY_CONTROL_PATHS:
@@ -407,10 +410,12 @@ async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
     sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
     legacy_control = _legacy_desktop_gated(path, request.method)
-    # Explicit desktop-token mode must close the old mutation bypass too. A
-    # standalone legacy server remains wire-compatible unless opted into this
-    # mode; Electron moves these calls through the same main-process proxy.
-    if os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN") and legacy_control:
+    # Managed posture — the desktop app's env capability OR an accepted claim
+    # (`server/desktop.py`). A claim that turned the routers on but left this
+    # boundary standing on the environment would leave the legacy mutation
+    # bypass open on exactly the daemon the app had just attached to, which is
+    # the half of the bug the design's option A exists to close.
+    if desktop_posture().enabled and legacy_control:
         try:
             require_desktop(request)
         except HTTPException as error:
@@ -426,14 +431,17 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
     if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
-        os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN")
-        and _legacy_desktop_gated(request.url.path, request.method)
+        desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)
     ):
         return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
     return await request_validation_exception_handler(request, error)
 
 
 app.include_router(capabilities.router)
+# The way IN to a daemon the desktop app did not start. It carries no
+# `require_desktop` dependency on purpose (that is the deadlock the design
+# names): the gate is the record's 0600 key, checked inside the route.
+app.include_router(desktop_claim.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
@@ -469,16 +477,18 @@ async def desktop_origin_cors(request: Request, call_next):
     above it sees no ``Access-Control-Allow-Origin`` at all (verified, not
     assumed) and would silently strip nothing.
 
-    Scoped to the managed desktop posture. With no allowlist configured, a
-    standalone server keeps its historical wildcard CORS, so CLI clients,
-    scripts and existing embedders are untouched.
+    Scoped to the managed desktop posture (``desktop_posture``: the app's env
+    token, or an accepted claim and the origin it brought with it). With no
+    allowlist configured, a standalone server keeps its historical wildcard
+    CORS, so CLI clients, scripts and existing embedders are untouched.
     """
     response = await call_next(request)
-    allowed = {
-        item.strip()
-        for item in os.environ.get("LOCAL_OPERATOR_DESKTOP_ORIGINS", "").split(",")
-        if item.strip() and item.strip() != "null"
-    }
+    # The allowlist in force: the environment's, UNIONED with a claimed
+    # caller's own origin (see `desktop_posture`). So a claim both keeps this
+    # middleware from echoing arbitrary origins back to a page AND admits the
+    # app that claimed the plane — the two halves have to come from one value
+    # or the app would claim its way into a CORS wall of its own making.
+    allowed = desktop_posture().origins
     if not allowed:
         return response
     origin = request.headers.get("origin")
