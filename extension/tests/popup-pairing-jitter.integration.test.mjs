@@ -463,6 +463,126 @@ test("the error sits above the button that produced it (D2)", async () => {
   );
 });
 
+/* ------------------------------------------------------------------ J9 ---- */
+
+/** Every spelling of a viewport-relative unit this popup must not size anything
+ * with, and the scan that enforces it — shared by the guard below and by its
+ * coverage test, so the coverage cannot drift from the rule it covers.
+ *
+ * FOUR prefix families (bare, `d`, `s`, `l`) times six suffixes, and it is one
+ * character class per family rather than a hand-written list because the rule is
+ * "no viewport length", not "the ten spellings somebody thought of": `vb` is the
+ * viewport height in a horizontal writing mode, `dmin`/`dmax` are the dynamic
+ * viewport, and CSS units are case-insensitive so `100VH` is `100vh`. The first
+ * revision of this matcher listed ten units with no `i` flag, which left
+ * `dmax/dmin/vi/vb/dvi/svi/lvi/...` and every uppercase form GREEN — measured by
+ * mutating `.card`'s `max-height` in a copy of the tree (review round 1, MAJOR 1:
+ * 10 of 24 spellings caught).
+ *
+ * `cq*` is included on the same argument, not as a bonus: this stylesheet
+ * declares no `container-type`, and per CSS Containment a container unit with no
+ * eligible container queries the SMALL VIEWPORT — so `cqh` here IS `svh`. If a
+ * container is ever declared in this popup, revisit that family (they stop being
+ * the viewport's size at that point) rather than deleting the guard.
+ *
+ * `\d[\d.]*` rather than `[\d.]+`: a bare dot before a unit-ish token flags a
+ * legitimate selector (`.vmin-x{…}` -> `['.vmin']`, `.vh{}` -> `['.vh']`), and a
+ * guard that cries wolf on selectors is a guard that gets deleted.
+ */
+const VIEWPORT_UNITS = /\d[\d.]*(?:[dsl]?v|cq)(?:h|w|i|b|min|max)\b/gi;
+
+/** Strip comments, then list every viewport-unit token in `text`.
+ *
+ * Comments are stripped because these sources discuss the removed `100vh` at
+ * length and a guard that fails on its own explanation is a guard somebody
+ * deletes. The strip cannot rot silently either: that prose IS in the scanned
+ * files, so a strip that stopped working turns the guard red on its own. */
+function viewportUnits(text) {
+  return [...text.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(VIEWPORT_UNITS)].map((match) => match[0]);
+}
+
+test("nothing the popup ships sizes itself against the popup's own viewport (J9)", async () => {
+  // A Chrome action popup sizes its WINDOW to this document's content, so a
+  // viewport-relative length here is a length derived from the thing it decides.
+  // `.card` carried `max-height: calc(100vh - 20px)` (design D2's bounded card)
+  // and the feedback loop settled at the collapsed end, measured through the real
+  // toolbar path (chrome.action.openPopup(), no emulated viewport, Chrome 153):
+  // Chrome creates the window at an undersized height, the clamp then reads that
+  // height, the card is clamped to 5px, the document is 25px, and the window
+  // stays there — EVERY state painted as a 300x25 bar with its header band
+  // clipped to a sliver (card 5px, body scrollHeight 386).
+  //
+  // No other assertion in this repo can see that. scripts/popup-states-shot.mjs
+  // opens popup.html as a PAGE at 300x600, where `100vh` is the number the
+  // harness chose, and every stylesheet assertion in this file (the J1/J7 group
+  // above) compares popup.css against itself — a clamp that agrees with its own
+  // constant still collapses the window. So the rule is stated as a rule: the
+  // capped case is handled with `position: sticky` on .head/.foot, which cannot
+  // feed back into the window height, and Chrome's own popup clamp does the
+  // bounding.
+  //
+  // SCOPE: every source the popup's own document loads and executes — the
+  // stylesheet, the markup (which carries inline styles) and the classic
+  // pre-paint script, where a viewport unit would be EQUALLY circular: it writes
+  // the `#pending` pin that decides the window's first-paint size. This is how
+  // the defect shipped, so the guard reads all three rather than the one file it
+  // happened to arrive in.
+  const offenders = [];
+  for (const file of ["popup.css", "popup.html", "first-paint.js"]) {
+    const source = await readFile(join(HERE, "..", "src", "popup", file), "utf8");
+    for (const unit of viewportUnits(source)) offenders.push(`${file}: ${unit}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "the popup must not size anything against its own viewport: the popup window is sized FROM this " +
+      "document, so a viewport unit is circular and collapses the popup. Pin .head/.foot with position: " +
+      "sticky and let Chrome clamp the window instead.",
+  );
+});
+
+test("the J9 matcher catches every spelling of a viewport unit, and only those (J9)", () => {
+  // The guard is worth exactly its matcher's coverage, and review round 1 found
+  // the matcher narrower than the rule it stated: ten of the twenty-four
+  // spellings, no uppercase. Each of the missed ones re-creates the identical
+  // circular clamp, so every spelling is asserted HERE rather than trusted to a
+  // character class nobody re-derives.
+  for (const prefix of ["", "d", "s", "l"]) {
+    for (const suffix of ["h", "w", "i", "b", "min", "max"]) {
+      const unit = `${prefix}v${suffix}`;
+      assert.deepEqual(
+        viewportUnits(`.a { max-height: calc(100${unit} - 20px); }`),
+        [`100${unit}`],
+        `${unit} must be caught`,
+      );
+      const upper = unit.toUpperCase();
+      assert.deepEqual(
+        viewportUnits(`.a { max-height: calc(100${upper} - 20px); }`),
+        [`100${upper}`],
+        `${upper} is the same unit (CSS units are case-insensitive) and must be caught`,
+      );
+    }
+  }
+  // Container units, which query the small viewport here because no container is
+  // declared — see VIEWPORT_UNITS.
+  for (const suffix of ["h", "w", "i", "b", "min", "max"]) {
+    const unit = `cq${suffix}`;
+    assert.deepEqual(viewportUnits(`.a { height: 50${unit}; }`), [`50${unit}`], `${unit} must be caught`);
+  }
+  // The false positives, including the two the first revision's `[\d.]+` had:
+  // a bare dot is a class selector, not a number, and `px`/`ms`/`ch`/`rem` are
+  // not viewport-relative.
+  for (const clean of [
+    ".vmin-x { color: red; }",
+    ".vh { color: red; }",
+    ".a { width: 100px; height: 1.5rem; transition: 100ms; font-size: 2ch; }\n",
+    ".a { margin: 0; padding: 0 11.5px; }\n",
+    "/* 100vh is banned here */\n",
+  ]) {
+    assert.deepEqual(viewportUnits(clean), [], `must not be flagged: ${clean.trim()}`);
+  }
+});
+
 test("the first paint is pinned to the state this browser will actually reach (D1/D3-1)", async () => {
   // #pending paints on EVERY open, before render()'s awaits resolve, so its
   // pinned height decides how far the card travels. THREE pins now, not a
