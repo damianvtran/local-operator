@@ -417,6 +417,52 @@ async def test_force_still_refuses_a_stale_record_over_a_recycled_pid(no_signals
         pass
 
 
+def test_withdrawal_takes_back_only_this_ladders_own_rung_one_marker(tmp_path: Path) -> None:
+    """The refusal's withdrawal is targeted, not a blanket unlink.
+
+    A marker attests to an ACT, and the run it names may have several possible
+    authors: a concurrent ``lop stop`` from another terminal, a retry from the
+    same front end, the ladder's own later rung. Only THIS ladder's own rung-1
+    statement may be taken back on a refusal — a marker another killer staged
+    for the same run is evidence for a stop that really is happening, and a
+    later rung's marker is not this rung's to withdraw.
+    """
+    from local_operator.session.runtime.types import session_dir
+
+    record = SessionRecord(
+        pid=2**22 + 71,
+        kind="tui",
+        session_id="withdraw",
+        conversation_name="withdraw",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    conversation = session_dir(tmp_path, record.session_id)
+    conversation.mkdir(parents=True)
+
+    def staged(**overrides: Any) -> dict[str, Any]:
+        payload = control._stop_marker_payload(record, "socket", command="/stop")
+        payload.update(overrides)
+        return payload
+
+    # The markers that must SURVIVE the withdrawal, each for its own reason.
+    for label, payload in (
+        ("another killer's marker", staged(killer={"pid": os.getpid() + 1, "command": "/stop"})),
+        ("a later rung's marker", staged(rung="sigkill")),
+        ("another run's marker", staged(started_at=record.started_at + 5.0)),
+    ):
+        registry.write_stop_marker(conversation, payload)
+        control._withdraw_staged_stop_marker(record, tmp_path)
+        assert registry.read_stop_marker(conversation) is not None, label
+
+    # ...and the one it must withdraw: our own rung-1 statement for this run.
+    registry.write_stop_marker(conversation, staged())
+    control._withdraw_staged_stop_marker(record, tmp_path)
+    assert registry.read_stop_marker(conversation) is None
+
+
 def test_record_retired_reads_the_root_the_caller_injected(tmp_path: Path) -> None:
     """A stop's landing is decided against the root the caller TARGETED.
 
@@ -494,22 +540,38 @@ def test_the_marker_payload_names_the_run_the_rung_the_killer_and_the_build() ->
     assert payload["build"] == "0.54.39@dec7933"
 
 
-@pytest.mark.asyncio
-async def test_the_marker_is_staged_only_by_a_rung_that_acts(no_signals) -> None:
-    """A refusal leaves NO marker; the rung that fires leaves exactly one.
+class _AckingHandle(FakeHandle):
+    """A handle whose ``request_stop`` ACKS and then does not exit.
 
-    The invariant the whole change rests on: the file says "this rung of this
-    ladder took this runtime down", so a rung that never ran must not leave
-    one, or a later involuntary death of the same session would be narrated as
-    the user's own stop. The first half is the fresh-heartbeat refusal — the
-    socket is silent and identity cannot be confirmed, so the ladder declines
-    and nothing may be staged — and the second half is the same target under
-    ``--force``, which escalates to the signal rungs and stages the marker
-    naming the rung that acted.
+    The shape rung 1 reaches and the ladder then refuses: the op is answered
+    (a live, cooperative socket), the session keeps running, and the IDENTITY
+    gate is what stops the ladder — the ``/resume`` record-lag window the gate
+    exists for, where the record still names the previous session while the
+    process serves the new one. Unlike ``_StoppingHandle`` (which reports
+    itself exited, so the ladder calls the rung landed), this one stays alive,
+    which is the whole point: a refusal leaves a live target behind.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stops = 0
+
+    def request_stop(self) -> None:
+        self.stops += 1
+
+
+@pytest.mark.asyncio
+async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals) -> None:
+    """The rung that ACTS leaves exactly one marker, naming itself.
+
+    The other half of the invariant below: a rung that escalates must attest,
+    because at SIGKILL the target cannot. Driven through ``--force``, the route
+    that reaches the signal rungs against an in-process double whose socket
+    cannot be dialled into an identity answer.
     """
     from local_operator.session.runtime.types import session_dir
 
-    server, record = await _serve()
+    server, record = await _serve(handle=_NeverStopsHandle())
     try:
         target = _record_for(record, pid=os.getpid())
         target.heartbeat_at = time.time()
@@ -521,22 +583,16 @@ async def test_the_marker_is_staged_only_by_a_rung_that_acts(no_signals) -> None
         conversation.mkdir(parents=True, exist_ok=True)
 
         # A starved-but-fresh runtime: the dial says nothing, the heartbeat says
-        # it was alive moments ago, so no signal is safe yet.
+        # it was alive moments ago, so no signal is safe without --force.
         async def _never(*args: Any, **kwargs: Any) -> Any:
             return False, control._SOCKET_SILENT
 
         with mock.patch.object(control, "_confirmed_session_id", _never):
-            refused = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
-            assert refused.method == "refused"
-            assert no_signals[0] == []
-            assert (
-                registry.read_stop_marker(conversation) is None
-            ), "a refused stop must not attest to a stop that did not happen"
-
             stopped = await control.stop_session(
                 target, timeout_s=0.5, force=True, _root=config_dir()
             )
         assert stopped.method in ("sigterm", "sigkill")
+        assert no_signals[0] != []  # the force gate opened
         marker = registry.read_stop_marker(conversation)
         assert marker is not None, "the rung that acted must have staged its evidence"
         assert marker["rung"] == stopped.method
@@ -545,5 +601,77 @@ async def test_the_marker_is_staged_only_by_a_rung_that_acts(no_signals) -> None
         assert marker["killer"]["command"] == "control.stop_session"
         assert marker["pid"] == target.pid
         assert marker["started_at"] == target.started_at
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_stop_leaves_no_marker_and_the_death_stays_unattributed(
+    no_signals,
+) -> None:
+    """Rung 1 can ACK and the ladder still refuse — and then nothing is signed.
+
+    THE DEFECT THIS PINS: rung 1 stages its marker on the ack (the ack is what
+    sets the target's exit in motion), and the ladder may then refuse before
+    any signal — a socket that answers naming ANOTHER session id is a live
+    stranger (the ``/resume`` record-lag window), and a start-time proof can
+    fail. The target is left ALIVE with a durable marker keyed to its own run,
+    so its next, quite involuntary death would classify as the user's own stop:
+    the wrong-verdict class this evidence exists to remove, in the direction
+    that HIDES a crash.
+
+    The old version of this test could not see it: ``_serve()``'s default
+    ``FakeHandle`` has no ``request_stop``, so the stop op answered ``error``
+    and ``_graceful_stop`` returned BEFORE the staging line. Here the handle
+    acks (``stops == 1`` proves the staging path ran) and the refusal comes from
+    the real identity gate, then the run is classified.
+    """
+    import uuid
+
+    from local_operator.session.attention import AttentionStore, bootstrap_transcript
+    from local_operator.session.runtime.types import session_dir
+    from local_operator.session.transcript import Transcript
+
+    handle = _AckingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    session_id = "someone-elses-session"
+    dead_pid = 2**22 + 61  # no such process; the ladder's liveness is patched
+    try:
+        # The record claims a session the socket does not serve: the dial
+        # answers with the runtime's REAL id, which is exactly what the
+        # identity gate refuses on.
+        target = _record_for(record, pid=dead_pid, session_id=session_id)
+        registry.publish(target, root=config_dir())
+        conversation = session_dir(config_dir(), session_id)
+        transcript = Transcript(conversation)
+        await transcript.append_custom(
+            "attention_started",
+            {
+                "conversation_id": f"session/{session_id}",
+                # A real UUID: the store validates it, so a placeholder here
+                # would fail the classification rather than the assertion.
+                "token": str(uuid.uuid4()),
+            },
+        )
+
+        outcome = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
+
+        assert handle.stops == 1, "the rung-1 staging path must have run"
+        assert outcome.method == "refused"
+        assert "it serves session" in outcome.line
+        assert no_signals[0] == []  # nothing was signalled
+        assert registry.read_stop_marker(conversation) is None, (
+            "a refusal must withdraw the marker its own rung staged: the target is "
+            "still alive and its later death must not read as the user's own stop"
+        )
+
+        # ...and the death that comes later is still unattributed, which is what
+        # the withdrawal buys: the record names the run, the marker does not.
+        with mock.patch.object(registry, "pid_alive", lambda *a, **k: False):
+            result = bootstrap_transcript(transcript, AttentionStore(config_dir() / "a.db"))
+        assert result is not None
+        assert (result[0], result[1]) == ("error", "runtime-killed"), result
+        assert f"pid {dead_pid}" in result[2], result[2]
     finally:
         server.close()
