@@ -1657,6 +1657,73 @@ async def test_dispose_cancels_a_grant_parked_on_a_browser(
 
 
 @pytest.mark.asyncio
+async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The level arrives WITH the pair, so the first turn runs at the chosen depth.
+
+    ``build_model_spec`` seeds the model's OWN default level, and a pair-only
+    switch therefore replaces a chosen level with that seed — on the very send
+    that consumes the viewer's intent. Asserted on the SPEC THE SESSION
+    RECEIVES, because that is where the level either survives or is silently
+    lost, and against a control built the same way for the no-effort case: an
+    absent level must leave exactly the spec this RPC has always produced.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[tuple[Any, bool]] = []
+    # ``raising=False``: ``FakeSession`` deliberately has no ``set_model`` — this
+    # test is about what the HANDLE sends it.
+    monkeypatch.setattr(
+        session,
+        "set_model",
+        lambda spec, explicit=False: applied.append((spec, explicit)),
+        raising=False,
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", "max")
+    await handle.set_model("deepseek", "deepseek-flash")
+
+    assert [(spec.provider, spec.model_id, spec.reasoning_effort) for spec, _ in applied] == [
+        ("deepseek", "deepseek-flash", "max"),
+        (
+            "deepseek",
+            "deepseek-flash",
+            build_model_spec("deepseek", "deepseek-flash").reasoning_effort,
+        ),
+    ]
+    assert [explicit for _, explicit in applied] == [
+        True,
+        True,
+    ], "a switch is a deliberate choice, so a pinned fallback must be withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored level outliving its ladder lands on the nearest rung it can have.
+
+    The refusal belongs to the moment the user chooses (the create/preview
+    routes, 422); by the time a level reaches an owner it is a stored decision,
+    and failing the send over it would turn a stale record into a dead turn.
+    ``xhigh`` is on no ``deepseek-flash`` ladder, which tops out at ``max``.
+    """
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", "xhigh")
+
+    assert applied[0].reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
 async def test_model_saved_adopts_the_configured_default_on_a_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

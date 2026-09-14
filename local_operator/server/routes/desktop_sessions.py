@@ -22,6 +22,7 @@ from pydantic import (
 )
 from starlette.background import BackgroundTask
 
+from local_operator.harness.types import ModelSpec
 from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
@@ -115,10 +116,34 @@ class SessionTarget(Input):
     name: str = Field(min_length=1, max_length=128)
 
 
+class DraftModel(Input):
+    """The model a NEW conversation should be born on, plus its reasoning level.
+
+    Deliberately the SAME shape the canonical frontend state publishes for a
+    conversation's model (``selected_model``: ``provider``, ``model_id``,
+    ``reasoning_effort``), so the client hands back the row its own picker is
+    already showing rather than translating one vocabulary into another — a
+    second shape is how the chip and the model that answers come to disagree.
+
+    ``reasoning_effort=None`` means "no level chosen", which is the model's own
+    default. It is NOT the same as "this model has no ladder": the ladder check
+    is what refuses an unexpressible level below, and a model with an empty
+    ladder refuses every level but ``None``.
+    """
+
+    provider: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+    reasoning_effort: str | None = Field(default=None, max_length=32)
+
+
 class CreateSession(Input):
     request_id: RequestID
     cwd: str = Field(min_length=1, max_length=4096)
     target: SessionTarget | None = None
+    #: Omitted or null ⇒ today's behaviour, byte for byte: the session is born on
+    #: the configured default. This is the ONLY optional admission of the two
+    #: routes, and it is what lets an older client keep posting the old body.
+    model: DraftModel | None = None
 
 
 class DraftPreview(Input):
@@ -138,6 +163,90 @@ class DraftPreview(Input):
     request_id: RequestID
     cwd: str = Field(min_length=1, max_length=4096)
     target: SessionTarget | None = None
+    #: The same optional birth selection ``create`` accepts, resolved by the same
+    #: authority — the pane is asking the question it will ask for real on the
+    #: first send, so a body that may differ here would be a body that diverges.
+    model: DraftModel | None = None
+
+
+def _draft_model_spec(model: DraftModel) -> ModelSpec:
+    """The spec the first turn will actually run on, or a 422 saying why not.
+
+    REFUSED HERE, AT THE BOUNDARY, and never by silently degrading: the client
+    rendered a choice the user made, and answering with a different model than
+    the one it named is the failure this whole feature exists to remove. The
+    three refusals are the three ways a pick can fail to be servable:
+
+    * an unknown provider (``get_provider_definition``, which resolves the
+      registry's legacy aliases, so an alias is accepted exactly where the
+      engine accepts it and nowhere else);
+    * a model id the provider's catalogue does not serve — the same authority
+      the model picker paints from (:func:`discovery.offered_model_ids`), and no
+      refusal at all for a catalogue that cannot be enumerated offline (an
+      aggregator on a cold cache, a local endpoint): "we have not looked" is
+      not "it does not exist", and refusing on it would kill working picks;
+    * a ``reasoning_effort`` this model's ladder does not offer, including any
+      level at all on a model with no ladder — the ladder is read off the SAME
+      resolver the owner constructs its spec with (``build_model_spec``), so the
+      level accepted here is the level the first turn will send.
+
+    Runs OFF the event loop by its callers: it reads the catalogue cache and, for
+    a model the registry does not describe, resolves metadata (memoised, and
+    disk-cached in the common case the picker just filled it).
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.model.discovery import offered_model_ids
+    from local_operator.providers.registry import get_provider_definition
+
+    provider = model.provider.strip()
+    model_id = model.model_id.strip()
+    if get_provider_definition(provider) is None:
+        raise HTTPException(
+            422,
+            {
+                "code": "provider_unknown",
+                "message": f"'{provider}' is not a known provider.",
+            },
+        )
+    served = offered_model_ids(provider)
+    if served is not None and model_id not in served:
+        raise HTTPException(
+            422,
+            {
+                "code": "model_unknown",
+                "message": f"'{model_id}' is not a model {provider} serves.",
+            },
+        )
+    effort = (model.reasoning_effort or "").strip().lower()
+    try:
+        spec = build_model_spec(provider, model_id)
+    except Exception as error:  # noqa: BLE001 — a spec we cannot build is a 422, not a 500
+        raise HTTPException(
+            422,
+            {"code": "model_unavailable", "message": f"'{model_id}' could not be resolved."},
+        ) from error
+    if effort:
+        if not spec.reasoning_efforts:
+            raise HTTPException(
+                422,
+                {
+                    "code": "effort_unsupported",
+                    "message": f"{model_id} has no reasoning-effort levels",
+                },
+            )
+        if effort not in spec.reasoning_efforts:
+            raise HTTPException(
+                422,
+                {
+                    "code": "effort_unsupported",
+                    "message": (
+                        f"{model_id} accepts {', '.join(spec.reasoning_efforts)} "
+                        f"\u2014 not '{effort}'"
+                    ),
+                },
+            )
+        spec = spec.model_copy(update={"reasoning_effort": effort})
+    return spec
 
 
 class Image(Input):
@@ -355,10 +464,42 @@ async def search_sessions(
 
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
+    """Create a new conversation, optionally born on a chosen model and effort.
+
+    The selection is validated BEFORE the receipt is claimed, and the claim is a
+    durable write: a refusal has to leave the store exactly as it found it, and a
+    claimed-then-refused request would otherwise answer its own retry with
+    "outcome indeterminate" instead of the refusal. The chosen pair is then
+    passed to ``DesktopSessions.create``, which stores it in the session's own
+    marker — the record outlives this request, and the first engage reads it.
+
+    No ``model`` ⇒ the body, the marker and the launch are byte-for-byte today's.
+    """
+    spec = None
+    if body.model is not None:
+        # Off the loop: the catalogue it reads is a disk document, and for an
+        # unshipped model the metadata resolver may consult the provider.
+        spec = await asyncio.to_thread(_draft_model_spec, body.model)
+
     async def create():
         pool = host(request)
         target = body.target.model_dump() if body.target else None
-        session_id = await pool.create(body.cwd, target=target)
+        session_id = await pool.create(
+            body.cwd,
+            target=target,
+            # The NORMALISED triple, not the raw body: the marker is what a later
+            # engage re-resolves, so it stores the pair the validation just
+            # proved servable (provider alias resolved, level lowercased).
+            model=(
+                {
+                    "provider": spec.provider,
+                    "model_id": spec.model_id,
+                    "reasoning_effort": spec.reasoning_effort,
+                }
+                if spec is not None
+                else None
+            ),
+        )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
     async with errors():
@@ -427,7 +568,23 @@ async def preview_session(body: DraftPreview, request: Request):
                 target["kind"],
                 target["name"],
             )
-        state = await synthesise_cold_state(config_dir=pool.root, session_id="", cwd=body.cwd)
+        state = await synthesise_cold_state(
+            config_dir=pool.root,
+            session_id="",
+            cwd=body.cwd,
+            # The chosen selection, when there is one, is synthesised exactly as
+            # the first cold frame of the session it describes will be — same
+            # resolver, same metadata — so the pane's identity AND its spec
+            # (context window, effort ladder) are the ones the first turn gets
+            # rather than the configured default's. Still session-less and
+            # side-effect free: this is an INPUT, and the state below writes
+            # nothing (see the docstring above).
+            birth_model=(
+                await asyncio.to_thread(_draft_model_spec, body.model)
+                if body.model is not None
+                else None
+            ),
+        )
         sync = FrontendSync(
             epoch=state.epoch,
             sequence=state.sequence,

@@ -1506,8 +1506,18 @@ class AttachClient:
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         return await self._request("complete_aside", deadline_s=ASIDE_DEADLINE_S, turns=turns)
 
-    async def set_model(self, provider: str, model_id: str) -> str:
-        return await self._request("set_model", provider=provider, model_id=model_id)
+    async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
+        """Select a model on the owner, at ``effort`` when one was chosen.
+
+        The key is OMITTED when no level was chosen rather than sent as null, so
+        to an owner that predates it the frame is byte-identical to the one it
+        has always received (the dispatch reads the key it knows and ignores
+        the rest, and there is no protocol bump for an optional field).
+        """
+        fields: dict[str, Any] = {"provider": provider, "model_id": model_id}
+        if effort:
+            fields["effort"] = effort
+        return await self._request("set_model", **fields)
 
     async def set_effort(self, effort: str) -> str:
         return await self._request("set_effort", effort=effort)
