@@ -521,6 +521,45 @@ def test_starting_twice_binds_one_listener(viewer_root):
         server.close()
 
 
+def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root):
+    """A close must not inherit the remainder of the serve loop's wait.
+
+    ``close()`` joins the endpoint thread, and that thread used to decide
+    whether it had been asked to stop by re-checking the latch on a 200 ms
+    ``sleep``. Measured on the poll (n=15, isolated): median 214 ms, min 202 ms,
+    max 236 ms. It is on the app's unmount path, so EVERY TUI boot in the unit
+    suite paid it — which is what this repository's 8,000-boot TUI suite was
+    buying.
+
+    WALL time, deliberately, and not ``time.thread_time()``: the old cost was
+    blocked in a sleep, which consumes no CPU at all, so a CPU-time instrument
+    reports ~0 ms for exactly the code this test exists to reject. The ceiling is
+    half the poll interval, so no scheduling luck can let a poll through, and it
+    is ~12x the measured signal cost (~8 ms median), so it cannot flake.
+    """
+    server = _started(_Host(), viewer_root)
+
+    # Let the serve loop REACH its wait before timing the close, so the close lands
+    # MID-INTERVAL. Without this settle the assertion races the loop's phase:
+    # ``ready`` is set microseconds before the loop parks, so on a run where the
+    # thread is descheduled in between, ``close()`` sets the latch first, the
+    # loop's ``while not self._closed.is_set()`` is already false, it exits at
+    # once — and the OLD polling code returns in ~1 ms too. The test would then
+    # PASS against the bug it exists to reject: a silent false negative rather
+    # than a flake. Parked, the old poll deterministically still owes the rest of
+    # its 200 ms interval (~150 ms) and cannot meet the ceiling.
+    time.sleep(0.05)
+
+    started = time.monotonic()
+    server.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1, (
+        f"close() took {elapsed * 1000:.0f} ms — it is waiting out the serve loop's "
+        "wait instead of waking it (the old poll here measured 202-236 ms)"
+    )
+
+
 def test_close_removes_the_record(viewer_root):
     """A closed window must stop advertising a port nothing is listening on."""
     server = _started(_Host(), viewer_root)
@@ -530,9 +569,10 @@ def test_close_removes_the_record(viewer_root):
     server.close()
     server.close()  # idempotent
 
-    # Poll rather than assert once: the serve loop notices `_closed` on its own
-    # 200 ms tick and unpublishes from there, so a bare assertion races the
-    # teardown it is checking and would pass on the synchronous unlink alone.
+    # Poll rather than assert once: the assertion is about the loop's OWN
+    # teardown, which now runs promptly only because close() signalled it — a
+    # bare assertion would race it and would pass on the synchronous unlink
+    # alone, leaving the only assertion of the wake in the timing test above.
     deadline = time.time() + 5.0
     while path.exists() and time.time() < deadline:
         time.sleep(0.05)

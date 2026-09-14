@@ -75,6 +75,16 @@ _AUTH_TIMEOUT_S = 5.0
 #: magnitude against any real frame.
 _MAX_LINE_BYTES = 64 * 1024
 
+#: Serve-loop wait between close-latch re-checks. ``close()`` wakes the loop
+#: directly (``_wake_close_wait``), so this is a BACKSTOP rather than the
+#: mechanism: work is signalled, not polled — the same choice
+#: ``analytics/recorder.py`` makes when it wakes its writer with a queue
+#: sentinel instead of sleeping on a flag. A signal can still be missed (a
+#: close that lands before ``_serve`` published the event, or a loop that has
+#: already stopped), and a serve loop that parks forever would hang the join in
+#: ``close()`` and leak the listener, so the wait keeps a timeout.
+_CLOSE_WAIT_BACKSTOP_S = 0.2
+
 #: ``FOCUS_WINDOW_CAPABILITY`` is listed here so it stays importable from this
 #: module for the callers (and tests) that reach for it beside the endpoint
 #: advertising it. It is DEFINED in ``viewers`` because the client reads it
@@ -131,6 +141,13 @@ class ViewerServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._closed = threading.Event()
+        #: Loop-side wake for ``_closed``. Created ON the serve loop, awaited by
+        #: ``_serve`` and set by ``close()`` from whatever thread calls it, via
+        #: ``call_soon_threadsafe`` — an ``asyncio.Event`` may not be touched
+        #: from a foreign thread directly. ``None`` until ``_serve`` publishes
+        #: it, which is the state a close before the bind (or a failed bind)
+        #: sees; ``close()`` falls back to its join there.
+        self._close_event: asyncio.Event | None = None
         #: Set once the listener is bound and the record published, so a caller
         #: that needs the record to exist (a test, or a diagnostic) can wait
         #: for it rather than sleeping.
@@ -228,11 +245,26 @@ class ViewerServer:
             # anyway: the heartbeat retries the publish, and a transient ENOSPC
             # should not permanently cost the user click-through.
             logger.debug("viewer record publish failed", exc_info=True)
+        # Bound to a local as well as the attribute: the attribute is what
+        # ``close()`` signals, the local is what this loop waits on, so the wait
+        # cannot race a re-assignment of the attribute.
+        close_event = asyncio.Event()
+        # Published BEFORE ``ready`` so a ``close()`` that lands the instant a
+        # waiter sees the flag already has something to signal.
+        self._close_event = close_event
         self.ready.set()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             while not self._closed.is_set():
-                await asyncio.sleep(0.2)
+                # WAIT for the close signal rather than poll for it. The poll
+                # this replaces slept a full 200 ms, and `close()` — a blocking
+                # call on the app's unmount path — joined this thread, so every
+                # app teardown inherited the remainder of whichever interval it
+                # landed in: measured at ~205 ms of a 317 ms teardown, on every
+                # single TUI boot. The timeout is the backstop, not the read
+                # path; see ``_CLOSE_WAIT_BACKSTOP_S``.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(close_event.wait(), timeout=_CLOSE_WAIT_BACKSTOP_S)
         finally:
             await self._shutdown()
 
@@ -266,14 +298,43 @@ class ViewerServer:
         if self._closed.is_set():
             return
         self._closed.set()
+        self._wake_close_wait()
         thread = self._thread
         if thread is not None and thread.is_alive():
-            # The serve loop polls `_closed` every 200 ms and runs `_shutdown`
-            # itself. Join briefly so a clean exit really has released the
-            # port; a slow teardown must not hold up the app's own exit, and
-            # the daemon thread cannot outlive the process regardless.
+            # The serve loop runs `_shutdown` itself. `_wake_close_wait` above
+            # is what makes that immediate: without it this join waits out the
+            # rest of the loop's wait interval, which is the latency every TUI
+            # boot used to pay (``_CLOSE_WAIT_BACKSTOP_S``). The join stays as
+            # the BACKSTOP for a close that lands before `_serve` published the
+            # signal — `_close_event is None` then, so there is nothing to
+            # wake. It is also why a clean exit really has released the port
+            # before close returns; a slow teardown must not hold up the app's
+            # own exit, and the daemon thread cannot outlive the process
+            # regardless.
             thread.join(timeout=2.0)
         unpublish_viewer(self._record.pid, self._root)
+
+    def _wake_close_wait(self) -> None:
+        """Wake the serve loop parked on its close event. Safe from any thread.
+
+        ``call_soon_threadsafe`` is the only thread-safe way to touch another
+        loop's objects, and this must hold wherever `close()` is called from:
+        the app's unmount path, a teardown running on a signal handler's
+        thread, or the loop's own thread, where it just schedules for the next
+        iteration.
+
+        Both guards are load-bearing rather than defensive. `_close_event` is
+        None until `_serve` binds and publishes it, and a loop that has already
+        stopped raises ``RuntimeError`` from ``call_soon_threadsafe``. In either
+        case there is nothing parked to wake, and the 2.0 s join in `close()`
+        still covers the call — so this helper must never raise into a close.
+        """
+        event = self._close_event
+        loop = self._loop
+        if event is None or loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(event.set)
 
     # -- the wire -------------------------------------------------------------
 
