@@ -103,3 +103,21 @@ def terminal_is_foreground(env: Mapping[str, str] | None = None) -> bool:
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         _discovered_socket.cache_clear()
         return False
+
+
+def focus_is_measurable(env: Mapping[str, str] | None = None) -> bool:
+    """Whether :func:`terminal_is_foreground` MEASURES focus in this terminal.
+
+    Stated as its own predicate because one caller uses it as a FENCE. The
+    receipt contract only lets a completion be acknowledged by a foreground
+    interface, and the probe is the sole machine-checkable evidence of that on
+    macOS cmux. Elsewhere the probe answers from the environment instead of from
+    a measurement -- with no `CMUX_SURFACE_ID` it returns True precisely when no
+    `CMUX_*` variable is set, which says nothing about whether the terminal is
+    in front of the user -- so a fence that trusted it would mark results read on
+    a terminal sitting behind another window. Those terminals keep the stricter
+    evidence: a real focus report from Textual. Same reason the probe refuses a
+    surface id it cannot check on a non-darwin host.
+    """
+    env = os.environ if env is None else env
+    return bool(env.get("CMUX_SURFACE_ID")) and sys.platform == "darwin"
