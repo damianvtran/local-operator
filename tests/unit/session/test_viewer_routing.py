@@ -724,3 +724,111 @@ def test_a_bad_key_is_refused_without_a_reply(viewer_root):
         assert asyncio.run(probe()) == b"", "an authenticated reply must never follow a bad key"
     finally:
         server.close()
+
+
+def test_a_desktop_viewer_is_the_tiebreak_and_never_overrides_focus():
+    """DESIGN REVIEW M1: the desktop wins the NOTIFICATION, not the landing site.
+
+    §4.3 put `surface == "desktop"` ahead of `focused_at`, so a click on a
+    banner a TUI had raised switched the DESKTOP instead — yanking the user out
+    of the terminal they were sitting in and making them wait for a window to be
+    built, when the TUI that raised the banner could switch instantly. The
+    desktop preference now sits BETWEEN focus and pid: it decides a tie and
+    never outranks a window the user was actually in.
+    """
+    desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="x",
+        focused_at=100.0,
+    )
+    focused_tui = ViewerRecord(
+        pid=2, surface="tui", control_port=2, control_key="b", current_session="y", focused_at=500.0
+    )
+    assert choose_viewer([desktop, focused_tui], "wanted") is focused_tui
+
+    # Equally recent (both never focused) — now the desktop preference decides.
+    idle_desktop = ViewerRecord(
+        pid=9, surface="desktop", control_port=9, control_key="c", current_session="x"
+    )
+    idle_tui = ViewerRecord(
+        pid=3, surface="tui", control_port=3, control_key="d", current_session="y"
+    )
+    assert choose_viewer([idle_tui, idle_desktop], "wanted") is idle_desktop
+
+    # ...and pid still breaks a tie between two desktops, so a repeated click is
+    # stable rather than alternating.
+    second_desktop = ViewerRecord(
+        pid=4, surface="desktop", control_port=4, control_key="e", current_session="z"
+    )
+    assert choose_viewer([idle_desktop, second_desktop], "wanted") is second_desktop
+    assert choose_viewer([second_desktop, idle_desktop], "wanted") is second_desktop
+
+
+def test_an_already_displaying_viewer_beats_every_tiebreak():
+    """The cheapest outcome, and the one that does not disturb the scroll."""
+    showing = ViewerRecord(
+        pid=5, surface="tui", control_port=5, control_key="f", current_session="wanted"
+    )
+    desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="other",
+        focused_at=900.0,
+    )
+    assert choose_viewer([desktop, showing], "wanted") is showing
+
+
+def test_a_windowless_viewer_that_names_the_session_is_not_already_displaying():
+    """DESIGN REVIEW m2, the routing half.
+
+    Closing the last window on macOS leaves the app alive in the dock, and its
+    record may still name the conversation it was showing. Reading that id as
+    "already displayed" would answer the click with a no-op — nothing on screen,
+    no window, no switch — which is the reported defect rather than its fix.
+    """
+    windowless = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=False,
+    )
+    assert needs_switch(windowless, "wanted") is True
+    # It is still a CANDIDATE (its app can be told to recreate the window).
+    assert choose_viewer([windowless], "wanted") is windowless
+
+    windowed = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=True,
+    )
+    assert needs_switch(windowed, "wanted") is False
+
+
+def test_a_record_without_the_window_field_reads_as_having_one():
+    """Additive on the wire: an older build's record must keep working.
+
+    Every TUI is windowed, so the default has to be the permissive one — a
+    default of ``False`` would make every existing record's `current_session`
+    worthless and turn a click that used to be a no-op into a /resume.
+    """
+    record = ViewerRecord.from_json(
+        {
+            "pid": 1,
+            "surface": "tui",
+            "control_port": 1,
+            "control_key": "a",
+            "current_session": "s",
+        }
+    )
+    assert record.has_window is True
+    assert needs_switch(record, "s") is False
