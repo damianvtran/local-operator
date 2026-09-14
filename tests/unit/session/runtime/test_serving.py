@@ -201,6 +201,33 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
+
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
 
