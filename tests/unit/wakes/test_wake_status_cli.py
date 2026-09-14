@@ -56,6 +56,26 @@ def _args(**kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+def _status_block(out: str, label: str) -> str:
+    """One `wake status` line, with its hanging-indent continuations joined.
+
+    The surface folds prose at its label column (``_wrap_status``), so a line's
+    payload is spread over several physical lines; joining them keeps an
+    assertion about the SENTENCE rather than about the terminal width. Runs of
+    whitespace are collapsed for the same reason: the fold point moves with the
+    width, and a phrase that straddles it must stay assertable — CI's 80 columns
+    broke "could not reach a runtime" where a wider local terminal did not.
+    """
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(label))
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.startswith(" "):
+            break
+        block.append(line)
+    return " ".join(" ".join(block).split())
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -333,27 +353,7 @@ def test_status_reports_a_fire_that_could_not_be_delivered(
 
     out = capsys.readouterr().out
 
-    def _block(label: str) -> str:
-        """One `wake status` line, with its hanging-indent continuations joined.
-
-        The surface folds prose at its label column, so a line's payload is
-        spread over several physical lines; joining them keeps these assertions
-        about the SENTENCE rather than about the terminal width.
-        """
-        lines = out.splitlines()
-        start = next(i for i, line in enumerate(lines) if line.startswith(label))
-        block = [lines[start]]
-        for line in lines[start + 1 :]:
-            if not line.startswith(" "):
-                break
-            block.append(line)
-        # WHITESPACE IS COLLAPSED, because the fold is terminal-width dependent
-        # and a phrase must not be un-assertable just because it landed across a
-        # wrap point (CI's 80 columns broke "could not reach a runtime" where a
-        # wider local terminal did not).
-        return " ".join(" ".join(block).split())
-
-    retrying = _block("retrying:")
+    retrying = _status_block(out, "retrying:")
     assert "retrying:" in retrying, f"an owed fire was not reported: {out}"
     assert "statussess05" in retrying, retrying
     assert "nightly cleanup" in retrying, retrying
@@ -380,7 +380,12 @@ def test_status_says_an_undelivered_fire_is_still_owed(
     from local_operator.cli import wake_command
     from local_operator.wakes import deliveries
 
-    due = NOW_MS - 900_000
+    # A FRESH CLOCK, not the module-level NOW_MS: that one is captured at import,
+    # and a sharded CI run can execute this file minutes later — long enough to
+    # put the recorded next attempt in the past and turn the "next attempt" fact
+    # into a conversation about how slow the runner was.
+    now = int(time.time() * 1000)
+    due = now - 900_000
     _arm(
         tmp_path,
         "statussess06",
@@ -389,34 +394,14 @@ def test_status_says_an_undelivered_fire_is_still_owed(
     )
     for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
         deliveries.note_failure(
-            tmp_path, "statussess06", due, error="could not reach a runtime", now_ms=NOW_MS
+            tmp_path, "statussess06", due, error="could not reach a runtime", now_ms=now
         )
 
     assert wake_command(_args()) == 0
 
     out = capsys.readouterr().out
 
-    def _block(label: str) -> str:
-        """One `wake status` line, with its hanging-indent continuations joined.
-
-        The surface folds prose at its label column, so a line's payload is
-        spread over several physical lines; joining them keeps these assertions
-        about the SENTENCE rather than about the terminal width.
-        """
-        lines = out.splitlines()
-        start = next(i for i, line in enumerate(lines) if line.startswith(label))
-        block = [lines[start]]
-        for line in lines[start + 1 :]:
-            if not line.startswith(" "):
-                break
-            block.append(line)
-        # WHITESPACE IS COLLAPSED, because the fold is terminal-width dependent
-        # and a phrase must not be un-assertable just because it landed across a
-        # wrap point (CI's 80 columns broke "could not reach a runtime" where a
-        # wider local terminal did not).
-        return " ".join(" ".join(block).split())
-
-    line = _block("undelivered:")
+    line = _status_block(out, "undelivered:")
     assert "undelivered:" in line, f"an undelivered fire was not reported: {out}"
     assert "statussess06" in line, line
     assert f"{deliveries.UNDELIVERED_AFTER_ATTEMPTS} attempt(s)" in line, line
@@ -429,7 +414,13 @@ def test_status_says_an_undelivered_fire_is_still_owed(
     assert payload["undelivered"] == 1
     assert payload["deliveries"][0]["state"] == deliveries.STATE_UNDELIVERED
     assert payload["deliveries"][0]["attempts"] == deliveries.UNDELIVERED_AFTER_ATTEMPTS
-    assert payload["deliveries"][0]["next_attempt_in_s"] > 0
+    # A NEXT ATTEMPT IS SCHEDULED, asserted on the record rather than only on the
+    # rendered offset: the JSON field is a difference against the read clock, so
+    # the property that matters is that the record carries a next attempt after
+    # its last one.
+    stored = deliveries.read_delivery(tmp_path, "statussess06")
+    assert stored is not None and stored["next_attempt_ms"] > stored["last_attempt_ms"], stored
+    assert payload["deliveries"][0]["next_attempt_in_s"] is not None
 
 
 def test_list_marks_an_owed_fire_as_retrying(

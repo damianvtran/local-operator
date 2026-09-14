@@ -465,20 +465,25 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
         return True
 
 
-def _load_deliveries(
-    config_dir: Path, index: dict[str, dict[str, Any]]
-) -> dict[str, dict[str, Any]]:
-    """The delivery ledger, reconciled against the index it is about.
+def _load_state(
+    config_dir: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Read the index and the ledger in ONE thread hop, reconciled together.
 
-    Read whole (one small file per session that has an undelivered fire — the
-    common case is an empty directory) and reconciled here rather than at each
-    reader, so every decision the sweep makes sees the same ledger.
+    ONE hop, not two. This runs once per slice pass, in a process whose whole
+    justification is staying cheap, and the two reads must agree anyway: the
+    ledger is reconciled against the index it was read WITH, so reading them
+    apart would let a pass decide on an index its records were not checked
+    against. The ledger is one small file per session with an undelivered fire —
+    an empty directory on a healthy machine.
     """
     from local_operator.wakes.deliveries import read_deliveries
+    from local_operator.wakes.store import read_index
 
+    index = read_index(config_dir)
     deliveries = read_deliveries(config_dir)
     _reconcile_deliveries(config_dir, index, deliveries)
-    return deliveries
+    return index, deliveries
 
 
 def _reconcile_deliveries(
@@ -914,11 +919,8 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
     it drives a :class:`_Sweeper` directly so a slow engagement cannot hold
     the loop (see that class for why).
     """
-    from local_operator.wakes.store import read_index
-
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
-    index = await asyncio.to_thread(read_index, config_dir)
-    deliveries = await asyncio.to_thread(_load_deliveries, config_dir, index)
+    index, deliveries = await asyncio.to_thread(_load_state, config_dir)
     sweeper = _Sweeper()
     sweeper.sweep(config_dir, index, moment, deliveries=deliveries)
     return await sweeper.drain()
@@ -1066,11 +1068,8 @@ async def _should_retire(config_dir: Path) -> bool:
     steps (they are consecutive statements), short enough that retirement on a
     genuinely empty index is still prompt.
     """
-    from local_operator.wakes.store import read_index
-
     await asyncio.sleep(min(SLICE_S, MAX_SLEEP_S))
-    index = await asyncio.to_thread(read_index, config_dir)
-    deliveries = await asyncio.to_thread(_load_deliveries, config_dir, index)
+    index, deliveries = await asyncio.to_thread(_load_state, config_dir)
     return not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries)
 
 
@@ -1091,13 +1090,10 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     :class:`_Sweeper`). Awaiting them here is what made a 6-session
     all-timeout sweep block for 540 s in round 1.
     """
-    from local_operator.wakes.store import read_index
-
     sweeper = _Sweeper()
     try:
         while True:
-            index = await asyncio.to_thread(read_index, config_dir)
-            deliveries = await asyncio.to_thread(_load_deliveries, config_dir, index)
+            index, deliveries = await asyncio.to_thread(_load_state, config_dir)
             if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
                 if once:
                     # `--once` IS THE DIAGNOSTIC, so it must not be the quiet
@@ -1145,8 +1141,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # Recomputed from the index AFTER the sweep started, so a schedule
             # an already-finished runtime advanced is reflected rather than
             # re-read stale.
-            index = await asyncio.to_thread(read_index, config_dir)
-            deliveries = await asyncio.to_thread(_load_deliveries, config_dir, index)
+            index, deliveries = await asyncio.to_thread(_load_state, config_dir)
             if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
                 continue  # retirement is decided at the top, with its grace
 
