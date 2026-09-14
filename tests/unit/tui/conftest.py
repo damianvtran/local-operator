@@ -350,11 +350,23 @@ def restore_upstream_xterm_parser() -> Iterator[None]:
     the parser is clean asserts it itself (``gated`` does).
 
     No-op on an already-clean class, so an ordinary test pays a dict lookup.
+
+    The decoder factory is the second process-global patch with the same shape
+    and the same reason: ``run_tui`` also points
+    ``textual.drivers.linux_driver.getincrementaldecoder`` at
+    ``input_decode``'s non-fatal decoder, so a test that awaits the real
+    ``run_tui`` would otherwise leave every later test on this worker decoding
+    stdin through it. Harmless in production and in most tests — the decoder is
+    a strict superset of the stdlib one — but the decode tests have to start
+    from the unpatched module to prove the install actually installs, exactly
+    like the gate's tests above.
     """
+    from local_operator.tui.input_decode import uninstall_nonfatal_stdin_decode
     from local_operator.tui.terminal_modes import uninstall_pixel_mouse_gate
 
     yield
     uninstall_pixel_mouse_gate()
+    uninstall_nonfatal_stdin_decode()
 
 
 class StyledTranscriptApp(App[None]):
