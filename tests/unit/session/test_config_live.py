@@ -545,6 +545,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: file drives. Both are covered where they live: the resume behaviour in the
 #: TUI suite, the gate policy in ``tests/unit/session/runtime/test_parked_gates.py``.
 #:
+#: ``desktop`` is here for the ``runtime`` reason exactly: its one key is read
+#: at CLICK time, by the notification's click handler, which is a fresh process
+#: macOS handed an activation and has no ``Session`` at all. There is nothing
+#: for a probe in this file to watch move. Its live read is
+#: ``tui/resume_click.py::_configured_launch_command``, covered by
+#: ``tests/unit/tui/test_resume_click.py`` (the argv it builds from a set
+#: command, the discovery order when it is unset, and the fall-through).
+#:
 #: ``keymap`` is host-owned in the same sense as ``appearance``, and more
 #: strictly: a hotkey is a ``BindingsMap`` entry on the ``OperatorApp``, and a
 #: ``Session`` has no bindings at all, so there is no session attribute for a
@@ -554,7 +562,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: (``tests/unit/tui/test_keymap_pilot.py``), which asserts the same two
 #: directions this file does: a write from another process reaches a running
 #: app, and a write from the /settings page in THIS process moves this pane.
-HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap"}
+HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap", "desktop"}
 
 
 def _live_sections() -> set[str]:

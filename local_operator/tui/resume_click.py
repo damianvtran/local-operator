@@ -39,6 +39,14 @@ app is a viewer and is reached by rung 1 — including the macOS case where it
 has no window, which its record reports and `needs_switch` honours. Rung 2 is
 strictly about a process that does not exist yet.
 
+**AND ANY TEST THAT DRIVES ``open_session`` MUST DOUBLE RUNG 2.** It is not a
+hypothetical hazard: rung 2 looks for ``local-operator-ui`` on ``PATH``, which on
+the machine this was written on FOUND IT, so a unit test of the terminal rung
+launched the operator's real desktop app and left it running. Two tests in
+``tests/unit/tui/test_notify.py`` predate the rung and now stub it out
+(``_no_desktop_app``), and the e2e click test doubles both lower rungs before
+the ladder runs. Do the same rather than trusting that nothing is installed.
+
 **DISCOVERY HAS TO BE LOUD, which is why rung 2 does not use
 ``spawn_detached``.** ``spawn_detached`` reports only whether a child was
 STARTED, and a launcher that is not installed starts fine and exits 1 — so a
