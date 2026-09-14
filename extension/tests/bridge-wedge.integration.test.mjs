@@ -29,7 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SRC = resolve(HERE, "..", "src");
+const SRC = process.env.BRIDGE_SOURCE || resolve(HERE, "..", "src");
 const REAL_SETTLE = join(SRC, "settle.ts");
 const REAL_TAB_GROUPS = join(SRC, "tab-groups.ts");
 
@@ -878,5 +878,74 @@ test("X4 a socket constructor that throws leaves the worker able to dial again",
     console.warn = realWarn;
     if (worker) await worker.close();
     delete globalThis.chrome;
+  }
+});
+
+// Microtask/I/O barriers, not elapsed-time assertions: the fixture's shortened
+// deadline is advanced explicitly, while the underlying cosmetic call remains
+// unresolved. A baseline allSettled without a deadline cannot pass these rows.
+const flushPerformance = () => new Promise(resolve => setImmediate(resolve));
+
+test("cosmetic silence cannot strand the cold worker dial", async t => {
+  const calls = [];
+  let release;
+  const stuck = new Promise(resolve => { release = resolve; });
+  installChrome({ overrides: { action: { setBadgeText: () => { calls.push("badge"); return stuck; } } } });
+  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "synthetic-fixture" }, configurable: true });
+  const wires = [];
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    readyState = 1;
+    constructor(url) { wires.push(url); queueMicrotask(() => this.onopen?.()); }
+    send() {}
+    close() {}
+  };
+  t.mock.method(console, "warn", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let worker;
+  try {
+    worker = await load(`export * from ${JSON.stringify(join(SRC, "worker.ts"))};`);
+    await flushPerformance();
+    assert.ok(calls.length, "startup reached the stalled badge");
+    assert.equal(wires.length, 0);
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(wires.length, 1, "bounded cosmetics must release the real cold-start connect");
+    const count = calls.length;
+    release(); await flushPerformance();
+    assert.equal(calls.length, count, "late completion must not launch retry writes");
+    assert.equal(wires.length, 1);
+  } finally {
+    release(); await flushPerformance();
+    t.mock.timers.reset();
+    if (worker) await worker.close();
+  }
+});
+
+test("cosmetic silence cannot withhold an already-durable consent ACK", async t => {
+  let release;
+  const stuck = new Promise(resolve => { release = resolve; });
+  const { store, chrome } = installChrome();
+  const module = await load(`export * from ${JSON.stringify(join(SRC, "origins.ts"))};`);
+  t.mock.method(console, "warn", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const entry = await module.loaded.raiseAccessRequest(new URL("https://example.test"), "synthetic-owner");
+    chrome.action.setBadgeText = () => stuck;
+    let ack;
+    const decision = module.loaded.resolveOrigin("https://example.test", "once", entry.entryId).then(value => { ack = value; });
+    await flushPerformance();
+    assert.equal(store.accessQueue.length, 0, "queue removal persisted before cosmetics");
+    assert.equal(Object.values(store.onceGrants).length, 1, "grant committed before ACK");
+    assert.equal(Object.values(store.onceGrants)[0].requester, "synthetic-owner");
+    assert.equal(ack, undefined);
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(ack, true, "a cosmetic hang must not misreport a committed decision");
+    await decision;
+    release(); await flushPerformance();
+    assert.equal(Object.values(store.onceGrants).length, 1, "no retry/double grant after late badge completion");
+  } finally {
+    release(); await flushPerformance();
+    t.mock.timers.reset();
+    await module.close();
   }
 });
