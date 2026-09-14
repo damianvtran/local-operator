@@ -706,6 +706,90 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
     assert "x.py" not in raised.value.actionable
 
 
+def test_spawn_runtime_carries_a_chosen_birth_effort_to_the_child(tmp_path, monkeypatch) -> None:
+    """The chosen REASONING LEVEL reaches the child's environment with the pair.
+
+    Same reason as the argv test above: every other caller monkeypatches
+    ``_spawn_runtime`` away, so the line that exports the birth selection is
+    pinned by nothing while the whole suite stays green. The level must ride the
+    ENVIRONMENT (the child is CONSTRUCTED on it, so its first state, its first
+    provider call and the selection row it journals at admission all agree)
+    rather than being applied afterwards over the model RPC, which would leave
+    the child briefly on the model's seeded default.
+
+    The inherited-value half is not decoration: a cell run from inside another
+    session inherits that session's spawn flags, and a stale
+    ``LOP_MOBILE_CHILD_EFFORT`` would silently level a fresh conversation from a
+    sibling that finished hours ago (the failure AGENTS.md records for these
+    prefixes costing two QA rounds a false result).
+    """
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: list[dict[str, str]] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded.append(kwargs.get("env") or {})
+        return _Popen()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("LOP_MOBILE_CHILD_EFFORT", "stale-from-a-sibling")
+    monkeypatch.setenv("LOP_MOBILE_CHILD_PROVIDER", "stale")
+
+    chosen = ModelSpec(provider="deepseek", model_id="deepseek-flash", reasoning_effort="max")
+    force = launch_module._spawn_runtime(
+        "sess-effort1",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=chosen,
+        model_selection_override=True,
+    )
+    capture = getattr(force, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # No level chosen (the CLI's ``--model`` birth, every older caller): the key
+    # must be ABSENT, not empty, or the child would be handed a blank level.
+    plain = launch_module._spawn_runtime("sess-effort2", str(tmp_path), defer_materialise=True)
+    capture = getattr(plain, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # A pick that named a MODEL and no LEVEL (review round 1, R1): the pair rides,
+    # the level does not — and the inherited ``stale-from-a-sibling`` above must
+    # not survive it either, or a conversation born on "this model, no level"
+    # silently inherits a sibling's reasoning level instead of resolving the
+    # machine's configured ``model_effort``.
+    pair_only = launch_module._spawn_runtime(
+        "sess-effort3",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=ModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        model_selection_override=True,
+    )
+    capture = getattr(pair_only, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    assert recorded[0]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
+    assert recorded[0]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
+    assert recorded[0]["LOP_MOBILE_CHILD_EFFORT"] == "max"
+    assert recorded[0]["LOP_MODEL_SELECTION_OVERRIDE"] == "1"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[1]
+    assert recorded[2]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
+    assert recorded[2]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[2]
+    assert "LOP_MOBILE_CHILD_PROVIDER" not in recorded[1]
+    assert "LOP_MODEL_SELECTION_OVERRIDE" not in recorded[1]
+
+
 def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     tmp_path, monkeypatch
 ) -> None:

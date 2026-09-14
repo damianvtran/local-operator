@@ -1490,6 +1490,707 @@ async def test_a_preview_refuses_a_working_directory_that_does_not_exist(draft_a
     assert not (root / "sessions").exists()
 
 
+# -- the draft's chosen model and reasoning effort (draft_selection) ----------------
+#
+# A new-conversation pane renders the identity the FIRST turn will use. These
+# tests hold the two halves of that promise together: the readings the pane
+# shows (preview), and the session actually being BORN on the same choice
+# (create's marker, the cold viewer, and the engage).
+
+#: A choice that differs from the configured default in BOTH halves, so a test
+#: that accidentally reads config cannot pass. ``deepseek-flash`` is a shipped
+#: registry row, so resolution needs no network and the refusal path below is
+#: exercised by the ids that are NOT in the shipped catalogue.
+CHOSEN_MODEL = {"provider": "deepseek", "model_id": "deepseek-flash", "reasoning_effort": "max"}
+CONFIGURED = {"hosting": "anthropic", "model_name": "claude-sonnet-5"}
+
+
+def draft_model(provider: str = "deepseek", model_id: str = "deepseek-flash", effort=None):
+    return {"provider": provider, "model_id": model_id, "reasoning_effort": effort}
+
+
+@pytest.mark.asyncio
+async def test_a_draft_preview_resolves_the_requested_selection(draft_api) -> None:
+    """The pane's readings are the ones the first turn will get, not config's.
+
+    Both halves matter and they come from different sources: the IDENTITY from
+    the requested pair, the SPEC (context window, effort ladder) from the same
+    metadata resolver a real cold open uses. A preview that showed the config
+    default would hand the user a chip naming a model that never answers.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": CHOSEN_MODEL},
+    )
+    assert result.status_code == 200
+    snapshot = result.json()["result"]["frontend"]["snapshot"]
+    model = snapshot["selected_model"]
+    assert model["provider"] == "deepseek" and model["model_id"] == "deepseek-flash"
+    assert (
+        model["reasoning_effort"] == "max"
+    ), "the pane must show the chosen LEVEL, not the model's seed"
+    assert snapshot["effective_model"]["reasoning_effort"] == "max"
+    # The spec the first turn gets: the real ladder and window, not the default's.
+    assert tuple(model["reasoning_efforts"]) == ("none", "low", "high", "max")
+    assert model["context_window"] == 1000000
+    assert not (root / "sessions").exists(), "a preview still costs nothing durable"
+
+
+@pytest.mark.asyncio
+async def test_a_preview_that_omits_the_selection_is_byte_for_byte_todays_answer(draft_api) -> None:
+    """``model`` is OPTIONAL: omitting it changes nothing a client can observe.
+
+    The frozen contract is that a body without the field behaves as it always
+    did — the same identity, no new refusal, nothing durable — and this pins it
+    against the same body with an explicit ``null``, which is the spelling a
+    client that always sends the key would produce.
+
+    What DID change, deliberately and in one direction only: the SPEC the pane
+    publishes is now the configured pair resolved through its own metadata, so the
+    effort LADDER and LEVEL are answered instead of being left empty. That is the
+    operator's own report (an empty ladder hides the strip's effort chip and makes
+    the picker unreachable on every new conversation), and the frame the UI swaps
+    in at send answers the same fields — see
+    ``test_an_unpicked_draft_answers_the_ladder_and_level_it_will_run_at``.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    omitted = await client.post(
+        "/v1/desktop/sessions/preview", json={"request_id": str(uuid.uuid4()), "cwd": str(root)}
+    )
+    explicit_null = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": None},
+    )
+
+    assert omitted.status_code == explicit_null.status_code == 200
+    assert omitted.json() == explicit_null.json()
+    snapshot = omitted.json()["result"]["frontend"]["snapshot"]
+    model = snapshot["selected_model"]
+    assert model["model_id"] == "claude-sonnet-5", "the configured identity, untouched"
+    assert model["reasoning_efforts"], "the ladder is answered, not left empty"
+    assert model["reasoning_effort"] == "high", "the seeded rung, since no level is configured"
+    assert not (root / "sessions").exists(), "omitting the field is still free"
+
+
+#: Every way a draft selection can be refused, one per clause of the contract.
+#: ``effort_unsupported`` appears twice on purpose: a laddered model that does
+#: not offer the level, and a model with NO ladder, which must not accept one at
+#: all (offering ``none`` to a non-reasoning model is the same claim as offering
+#: ``high``).
+REFUSED_DRAFT_MODELS = [
+    (draft_model("nope-provider", "whatever"), "provider_unknown"),
+    (draft_model("anthropic", "claude-opus-9"), "model_unknown"),
+    (draft_model("deepseek", "deepseek-flash", "turbo"), "effort_unsupported"),
+    (draft_model("anthropic", "claude-opus-5", "xhighz"), "effort_unsupported"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,code", REFUSED_DRAFT_MODELS)
+async def test_a_draft_selection_the_engine_could_not_serve_is_refused(
+    draft_api, model, code
+) -> None:
+    """One 422 per way a pick can fail, and NOTHING durable on either route.
+
+    Refusing rather than degrading is the point: the client rendered a choice
+    the user made, so answering with a different model is the disagreement this
+    feature exists to remove. The refusal must also land BEFORE the create
+    route's receipt claim — a claim is a durable write, and a claim left by a
+    refused request answers its own retry with "outcome indeterminate".
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    request_id = str(uuid.uuid4())
+
+    preview = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": request_id, "cwd": str(root), "model": model},
+    )
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": request_id, "cwd": str(root), "model": model},
+    )
+
+    assert preview.status_code == 422, preview.text
+    assert created.status_code == 422, created.text
+    assert preview.json()["detail"]["code"] == code
+    assert created.json()["detail"]["code"] == code
+    assert not (root / "sessions").exists(), "a refusal must not create a draft"
+
+    # The same request id is still UNCLAIMED, so the corrected retry is the
+    # create it should be rather than a conflict over a claim nobody finished.
+    retry = await client.post(
+        "/v1/desktop/sessions", json={"request_id": request_id, "cwd": str(root)}
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["result"]["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_an_effort_on_a_model_with_no_ladder_is_refused(draft_api) -> None:
+    """A model that offers no levels must not accept one.
+
+    Separate from the parametrised ladder case because the LADDER is empty here
+    rather than merely missing the level: accepting ``none`` would put a "do not
+    reason" claim on a band for a turn that cannot express it.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": draft_model("ollama", "llama3", "low"),
+        },
+    )
+    assert result.status_code == 422, result.text
+    assert result.json()["detail"]["code"] == "effort_unsupported"
+
+
+def _marker(root: Path, session_id: str) -> dict[str, Any]:
+    return json.loads((root / "sessions" / session_id / "desktop.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_a_created_drafts_choice_is_stored_additively(draft_api) -> None:
+    """The marker gains the choice WITHOUT changing the document it already was.
+
+    Additivity is the whole backwards-compatibility contract: every reader of
+    ``desktop.json`` in this tree reads keys it knows, and a marker written by
+    any earlier build must keep loading. So the same create is run twice — with
+    and without a selection — and the no-selection document is asserted to be
+    exactly the one that build wrote, key for key.
+    """
+    _client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    pool = DesktopSessions(root)
+
+    chosen = await pool.create(str(root), model=dict(CHOSEN_MODEL))
+    plain = await pool.create(str(root))
+
+    stored = _marker(root, chosen)
+    assert stored == {"version": 1, "cwd": str(root.resolve()), "model": CHOSEN_MODEL}
+    assert _marker(root, plain) == {"version": 1, "cwd": str(root.resolve())}
+
+
+@pytest.mark.asyncio
+async def test_a_created_drafts_choice_is_what_a_snapshot_reports(draft_api) -> None:
+    """The stored choice reaches the COLD VIEWER a real open builds.
+
+    This is the path the pane takes the moment it stops being a draft: the
+    route writes the marker, and the first snapshot of that session is answered
+    by an ``AttachedSession.cold`` synthesised from it. A choice that survived
+    create but not the open would be a chip that names one model while the first
+    turn runs another.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(root),
+            "model": dict(CHOSEN_MODEL),
+        },
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    state = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]
+    model = state["selected_model"]
+    assert model["provider"] == "deepseek" and model["model_id"] == "deepseek-flash"
+    assert model["reasoning_effort"] == "max"
+    assert state["effective_model"]["model_id"] == "deepseek-flash"
+    # The spec a cold frame carries comes from the same synth the preview used,
+    # so the draft chip and the first real frame cannot disagree.
+    assert tuple(model["reasoning_efforts"]) == ("none", "low", "high", "max")
+
+
+@pytest.mark.asyncio
+async def test_the_conversations_own_selection_outranks_the_one_it_was_born_on(draft_api) -> None:
+    """A conversation the user later switched must NOT be dragged back.
+
+    The birth choice is only ever a seed. Once the session's own journal carries
+    a selection — a v2 row, written by its leased owner — that row IS the
+    answer, whatever the marker still says. This is the failure mode the
+    override exists to avoid: a resume that re-applied the birth model would
+    silently undo every switch the user made.
+    """
+    from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
+
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": dict(CHOSEN_MODEL)},
+    )
+    session_id = created.json()["result"]["session_id"]
+    await Transcript(root / "sessions" / session_id).append_custom(
+        SELECTED_MODEL_CUSTOM_TYPE,
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": "low"},
+    )
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert (model["provider"], model["model_id"]) == ("anthropic", "claude-opus-5")
+    assert model["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored",
+    [
+        draft_model("anthropic", "claude-opus-9", "high"),
+        draft_model("vanished-provider", "claude-opus-5", "high"),
+    ],
+)
+async def test_a_marker_naming_a_vanished_model_degrades_to_the_default(draft_api, stored) -> None:
+    """A stored PAIR that no longer resolves must cost a default, never an open.
+
+    A marker outlives the catalogue that produced it: a provider can be removed
+    from the registry, an id can be retired. Neither may fail a resume — the
+    conversation still opens, on the configured default, which is exactly
+    today's behaviour for a session with no choice.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    session_id = await DesktopSessions(root).create(str(root))
+    marker = root / "sessions" / session_id / "desktop.json"
+    marker.write_text(json.dumps({"version": 1, "cwd": str(root), "model": stored}))
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert (model["provider"], model["model_id"]) == ("anthropic", "claude-sonnet-5")
+
+
+@pytest.mark.asyncio
+async def test_a_marker_naming_a_retired_level_clamps_within_the_model(draft_api) -> None:
+    """A level the ladder no longer offers lands on the nearest rung it does.
+
+    Clamped rather than refused or dropped, and NOT escalated to the config
+    default: the model is still served, the conversation is still this user's
+    choice, and ``resolve_effort_in`` is the same clamp the owner applies when a
+    carried level outlives its route. ``deepseek-flash``'s table default is
+    ``high``, so the unrankable word degrades there rather than to ``None``.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    session_id = await DesktopSessions(root).create(str(root))
+    marker = root / "sessions" / session_id / "desktop.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cwd": str(root),
+                "model": draft_model("deepseek", "deepseek-flash", "turbo"),
+            }
+        )
+    )
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert model["model_id"] == "deepseek-flash"
+    assert model["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_a_pick_that_names_no_level_does_not_invent_one(draft_api) -> None:
+    """Choosing a MODEL is not choosing a LEVEL (review round 1, R1).
+
+    ``build_model_spec`` seeds the model's own default rung — ``high`` for
+    ``deepseek-flash`` — and a seed that reaches the marker becomes a PIN: the
+    plane exports it as ``LOP_MOBILE_CHILD_EFFORT`` and the first turn takes it
+    over the machine's configured ``model_effort``. A level nobody chose must not
+    silently replace the one they configured, so the marker records ``null`` while
+    the pane and the launch both resolve the machine's configured level — exactly
+    what a session with no pick at all resolves. The pair is still the user's; only
+    the level is theirs to leave alone.
+
+    The route half and the resolver half are BOTH asserted, because either alone
+    re-pins the seed: the route would store it, or the resolver would seed it back
+    from ``build_model_spec`` on the way in.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config({**CONFIGURED, "model_effort": "low"})
+    session_id = await DesktopSessions(root).create(str(root), model=draft_model())
+
+    stored = _marker(root, session_id)["model"]
+    assert stored == {
+        "provider": "deepseek",
+        "model_id": "deepseek-flash",
+        "reasoning_effort": None,
+    }, "a level the user never named must not be stored as if they had"
+
+    birth = module.draft_birth_selection(root, session_id)
+    assert birth is not None
+    assert (birth.provider, birth.model_id) == ("deepseek", "deepseek-flash")
+    # The machine's configured level, CLAMPED into the pick's ladder — not the
+    # model's seeded rung ("high") and not an absent one. The seed matters: it is
+    # what the owner's pair-only model RPC would reseat the conversation on, so a
+    # null level here would be the R1 defect arriving by another road.
+    assert birth.reasoning_effort == "low"
+    assert tuple(birth.reasoning_efforts) == ("none", "low", "high", "max")
+
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert (model["provider"], model["model_id"]) == ("deepseek", "deepseek-flash")
+    assert model["reasoning_effort"] == "low"
+    assert model["context_window"] == 1000000
+
+    # The DRAFT PREVIEW must agree with the frame the UI swaps it for, from the
+    # same resolution: a pane reading "no level" while the first turn runs at the
+    # configured one is the flicker ``finishDraft`` makes visible.
+    preview = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": draft_model()},
+    )
+    assert preview.status_code == 200, preview.text
+    pane = preview.json()["result"]["frontend"]["snapshot"]["selected_model"]
+    assert pane["reasoning_effort"] == model["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    [
+        "not json at all",
+        '["a", "list"]',
+        '{"version": 1, "model": "deepseek/deepseek-flash"}',
+        '{"version": 1, "model": {"provider": 7, "model_id": "deepseek-flash"}}',
+        '{"version": 1, "model": {"provider": "deepseek", "model_id": ""}}',
+        '{"version": 1}',
+    ],
+)
+async def test_a_marker_this_code_cannot_read_costs_the_choice_not_the_session(
+    draft_api, document
+) -> None:
+    """The marker is untrusted input, and an unreadable one must not fail an open.
+
+    A hand edit, an interrupted write or an older build can shape ``desktop.json``
+    arbitrarily, and the value read out of it decides which model the child
+    runtime runs on. ``stored_draft_model`` re-checks every field for that reason;
+    this pins the OBSERVABLE consequence: no birth seed, the session still opens,
+    and it opens on the configured default — today's behaviour for a session with
+    no choice (review round 1, R3).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    session_id = await DesktopSessions(root).create(str(root))
+    (root / "sessions" / session_id / "desktop.json").write_text(document)
+
+    assert module.draft_birth_selection(root, session_id) is None
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert (model["provider"], model["model_id"]) == ("anthropic", "claude-sonnet-5")
+
+
+@pytest.mark.asyncio
+async def test_a_marker_that_cannot_be_READ_AT_ALL_also_costs_only_the_choice(draft_api) -> None:
+    """The other unreadable-marker shape: a path that is not a readable file.
+
+    ``read_desktop_marker`` swallows ``OSError`` (a directory where the document
+    should be, a permission the owner lost, a marker deleted mid-write) and answers
+    ``None`` rather than propagating. The same rule as the malformed documents
+    above has to hold on this path too, because it is the one a half-written marker
+    takes.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    session_id = await DesktopSessions(root).create(str(root))
+    marker = root / "sessions" / session_id / "desktop.json"
+    marker.unlink()
+    marker.mkdir()
+
+    assert module.draft_birth_selection(root, session_id) is None
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert (model["provider"], model["model_id"]) == ("anthropic", "claude-sonnet-5")
+
+
+@pytest.mark.asyncio
+async def test_a_marker_with_an_unreadable_level_keeps_the_pair_and_drops_the_level(
+    draft_api,
+) -> None:
+    """A readable PAIR with an unusable level is not a discarded choice.
+
+    The level is the only field allowed to disappear: the pair still resolves, so
+    the conversation still opens on the model the user picked, at the level the
+    machine resolves — and NOT at the unreadable value, nor at the model's seed.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    session_id = await DesktopSessions(root).create(str(root))
+    (root / "sessions" / session_id / "desktop.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cwd": str(root),
+                "model": draft_model("deepseek", "deepseek-flash", 7),
+            }
+        )
+    )
+
+    birth = module.draft_birth_selection(root, session_id)
+    assert birth is not None and birth.model_id == "deepseek-flash"
+    # ``CONFIGURED`` names no ``model_effort``, so the machine's resolution IS the
+    # model's own default rung — the level a launch that named no level would use.
+    # The unreadable 7 is nowhere in it.
+    assert birth.reasoning_effort == "high"
+    snapshot = await client.get(f"/v1/desktop/sessions/{session_id}")
+    model = snapshot.json()["result"]["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert model["model_id"] == "deepseek-flash"
+    assert model["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_both_routes_answer_the_same_refusal_for_a_body_bad_in_two_ways(draft_api) -> None:
+    """One body, one answer, whichever route is asked (review round 1, R4).
+
+    Both routes are documented as answering the same refusals; that is only true
+    if they also agree on WHICH one a body bad in two ways gets. So the same body —
+    a working directory that does not exist AND a provider that does not — is sent
+    to both, and the create route must also leave the request unclaimed: a refusal
+    that writes the receipt would answer its own retry with "outcome
+    indeterminate" instead of the refusal.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    request_id = str(uuid.uuid4())
+    body = {
+        "request_id": request_id,
+        "cwd": str(root / "does-not-exist"),
+        "model": draft_model("no-such-provider", "no-such-model", "high"),
+    }
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    previewed = await client.post("/v1/desktop/sessions/preview", json=body)
+    assert created.status_code == 409, created.text
+    assert previewed.status_code == 409, previewed.text
+    assert created.json()["detail"] == previewed.json()["detail"]
+
+    # Unclaimed: the corrected retry of the SAME id is a create, not a conflict.
+    corrected = await client.post(
+        "/v1/desktop/sessions", json={"request_id": request_id, "cwd": str(root)}
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["result"]["replayed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_create_answers_its_receipt_even_if_the_cwd_is_gone(
+    draft_api, tmp_path
+) -> None:
+    """A retry of a request that SUCCEEDED is answered, not refused (round 2, R7).
+
+    The four admissions run above the receipt claim so a refusal cannot claim a
+    request id. The cost of putting them there is that they must NOT run for a
+    request whose first attempt already created the session: the client the
+    at-most-once contract exists for is the one whose response was lost, and
+    answering it with "choose an existing working directory" turns a success into
+    a failure. The probe is what keeps the claim's meaning — a recorded key is
+    answered from its receipt, admissions and all.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    request_id = str(uuid.uuid4())
+    body = {"request_id": request_id, "cwd": str(workdir)}
+
+    first = await client.post("/v1/desktop/sessions", json=body)
+    assert first.status_code == 200, first.text
+    session_id = first.json()["result"]["session_id"]
+
+    workdir.rmdir()
+    replay = await client.post("/v1/desktop/sessions", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"]["session_id"] == session_id
+    assert replay.json()["result"]["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_at_the_model_admission_writes_nothing(draft_api) -> None:
+    """The model admission runs BEFORE the target's registry build (round 2, R8).
+
+    ``validate_target`` needs an ``AgentRegistry``, whose constructor materialises
+    ``<config>/agents``. Running the target admission first therefore made a body
+    refused at the MODEL step — which writes nothing at all — leave a directory
+    behind, while the docstring and the docs both said a refusal writes nothing.
+    Ordering the pure reads ahead of it is what makes that sentence true; both
+    routes keep the same order, so they still answer the same refusal (R4).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    assert not (root / "agents").exists()
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "agent", "name": "manager"},
+        "model": {"provider": "no-such-provider", "model_id": "x"},
+    }
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    previewed = await client.post("/v1/desktop/sessions/preview", json=body)
+    assert created.status_code == 422, created.text
+    assert previewed.status_code == 422, previewed.text
+    assert created.json()["detail"]["code"] == "provider_unknown"
+    assert created.json()["detail"] == previewed.json()["detail"]
+    assert not (root / "agents").exists(), "a refusal left <config>/agents behind"
+
+
+def test_the_previews_model_read_does_not_materialise_a_config_directory(tmp_path) -> None:
+    """``birth_effort_for`` reads the config WITHOUT creating it (round 2, Q-R2-3).
+
+    ``ConfigManager``'s loader mkdirs the directory it is pointed at, and the
+    preview is documented as side-effect free. Through HTTP the directory always
+    exists, so the write was unreachable by accident rather than by construction;
+    a root that does not exist has no configured level, which is the honest
+    answer.
+    """
+    root = tmp_path / "absent" / "deeper"
+    spec = desktop_sessions._preview_birth_model(
+        root, desktop_sessions.DraftModel(provider="deepseek", model_id="deepseek-flash")
+    )
+    assert spec.model_id == "deepseek-flash"
+    assert not root.exists(), "the config read created the directory it was pointed at"
+
+
+@pytest.mark.asyncio
+async def test_a_pick_with_no_level_matches_the_cold_frame_when_nothing_is_configured(
+    draft_api,
+) -> None:
+    """The two readers agree when the machine configures NO level (round 2, R6).
+
+    With no ``model_effort`` the level a birth RUNS at is the model's own seeded
+    rung, and that is the case round 1 broke: the preview resolved through the
+    seed-CLEARED spec (the marker's value) instead of the seeded one, so it said
+    "no level" while the cold frame and the first turn said ``high``. ``CONFIGURED``
+    carries no ``model_effort`` deliberately — with one set the defect is
+    invisible, which is why the round-1 guard beside this one could not see it.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": draft_model()},
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+
+    stored = _marker(root, session_id)["model"]
+    assert stored["reasoning_effort"] is None, "the marker stores the CHOICE, not the level"
+
+    frame = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]
+    frame_model = frame["payload"]["frontend"]["snapshot"]["selected_model"]
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": draft_model()},
+    )
+    pane_model = pane.json()["result"]["frontend"]["snapshot"]["selected_model"]
+
+    assert frame_model["reasoning_effort"] == "high"
+    assert pane_model["reasoning_effort"] == frame_model["reasoning_effort"]
+    assert pane_model["reasoning_efforts"] == frame_model["reasoning_efforts"]
+
+
+@pytest.mark.asyncio
+async def test_an_unpicked_draft_answers_the_ladder_and_level_it_will_run_at(draft_api) -> None:
+    """A draft that chose NO model still answers its effort reading (round 2).
+
+    The operator's report: on a fresh conversation the effort reading was hidden and
+    the picker unreachable, because the pane's ``selected_model`` carried an empty
+    ladder and no level — a config-only projection — and the desktop strip gates its
+    effort chip and its picker on exactly those fields. The ladder is a
+    MODEL-derived field (``ModelSpec.reasoning_efforts``), so the draft's own
+    resolution can answer it, and it must: the frame the UI swaps in at send answers
+    it too, or the reading changes under the user.
+
+    The WINDOW is deliberately not asserted equal here: it is model-derived in both
+    readings, but a real cold open may apply ACCOUNT metadata and a window the plan
+    scopes, and this op must not read account metadata (see the module docstring).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(
+        {"hosting": "deepseek", "model_name": "deepseek-flash"}
+    )
+    body = {"request_id": str(uuid.uuid4()), "cwd": str(root)}
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    pane_model = pane.json()["result"]["frontend"]["snapshot"]["selected_model"]
+    assert (pane_model["provider"], pane_model["model_id"]) == ("deepseek", "deepseek-flash")
+    assert pane_model["reasoning_efforts"], "the ladder is what gates the strip's effort chip"
+    assert tuple(pane_model["reasoning_efforts"]) == ("none", "low", "high", "max")
+    assert pane_model["reasoning_effort"] == "high"
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    session_id = created.json()["result"]["session_id"]
+    frame = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]
+    frame_model = frame["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert frame_model["reasoning_efforts"] == pane_model["reasoning_efforts"]
+    assert frame_model["reasoning_effort"] == pane_model["reasoning_effort"]
+
+
+@pytest.mark.asyncio
+async def test_the_cold_viewer_is_told_the_stored_choice_and_only_for_a_new_conversation(
+    draft_api, monkeypatch
+) -> None:
+    """Spy on the ONE call that turns the marker into a birth sample.
+
+    Three cases, and the two negative ones are the ones that carry the risk: a
+    session with no stored choice must engage exactly as it did before this
+    feature existed (``initial_model=None``, no override), and a session whose
+    journal already answers the question must NOT be handed a birth sample at
+    all — the override is what would drag a switched conversation back.
+    """
+    from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
+
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    seen: list[dict[str, Any]] = []
+    real = module.AttachedSession.cold
+
+    async def spy(cls, session_id, **kwargs):
+        seen.append(kwargs)
+        return await real.__func__(cls, session_id, **kwargs)
+
+    monkeypatch.setattr(module.AttachedSession, "cold", classmethod(spy))
+
+    chosen = await DesktopSessions(root).create(str(root), model=dict(CHOSEN_MODEL))
+    plain = await DesktopSessions(root).create(str(root))
+    switched = await DesktopSessions(root).create(str(root), model=dict(CHOSEN_MODEL))
+    await Transcript(root / "sessions" / switched).append_custom(
+        SELECTED_MODEL_CUSTOM_TYPE,
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": "low"},
+    )
+    for session_id in (chosen, plain, switched):
+        assert (await client.get(f"/v1/desktop/sessions/{session_id}")).status_code == 200
+
+    assert len(seen) == 3, seen
+    birth = seen[0]["initial_model"]
+    assert birth is not None and (birth.provider, birth.model_id) == ("deepseek", "deepseek-flash")
+    assert birth.reasoning_effort == "max", "the chosen LEVEL must ride with the pair"
+    assert seen[0]["model_selection_override"] is True
+    assert seen[1]["initial_model"] is None
+    assert seen[1]["model_selection_override"] is False
+    assert seen[2]["initial_model"] is None, "the journal owns this conversation's selection"
+    assert seen[2]["model_selection_override"] is False
+
+
 # -- the child transcript route (design § 9.1) --------------------------------
 #
 # A new READ PATH ACROSS A TRUST BOUNDARY, so these tests are about what the

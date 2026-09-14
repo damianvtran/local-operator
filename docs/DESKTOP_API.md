@@ -296,11 +296,86 @@ origin metadata remain authoritative; no `desktop` origin hides the session from
 terminal/phone lists. Older sessions use their saved frontend checkpoint cwd,
 falling back to the parent of the config root when no cwd was retained.
 
+**A new conversation can be born on a chosen model and reasoning level.**
+`model` is an **optional, additive** field of both `POST /v1/desktop/sessions`
+and its `preview` twin, carrying the same three fields the canonical frontend
+state publishes for a conversation's model — `{provider, model_id,
+reasoning_effort}` — so a picker row can be handed back unmodified.
+`reasoning_effort: null` means "no level chosen", not "this model has no
+ladder": the conversation is then born on the configured `model_effort` (clamped
+to the model's ladder), so a level nobody picked is never stored and never
+replaces the machine's configured one.
+
+- **Omitted or null ⇒ unchanged.** The body, the `desktop.json` marker (still
+exactly `{version, cwd}`) and the launch are byte-for-byte what an earlier
+client produced.
+- **A pick of a model with no level is not a pick of a level.** The marker
+records `reasoning_effort: null`, and the pane, the child's construction and the
+first turn's admission row all resolve the machine's configured `model_effort`
+(clamped into the picked model's ladder) — exactly what a launch that named no
+model resolves. The model's own default rung is a seed, not a choice: it is never
+STORED. It IS carried when the machine configures no level, because it is then the
+machine's own resolution — and it has to travel explicitly rather than be left
+out, because the birth sample rides the owner's model RPC as well as the spawn
+environment and that RPC rebuilds the spec from the model's metadata, reseating
+the conversation on the seed.
+- **Rendered before it is refused, never after.** An unknown provider, a model
+id the provider's catalogue does not serve, a pair that cannot be resolved into
+a spec, or a level the model's ladder does not offer is refused with `422`
+(`detail.code` ∈ `provider_unknown`, `model_unknown`, `model_unavailable`,
+`effort_unsupported`) on **both** routes, which apply the same admissions in the
+same order — working directory, model, target — and so answer the same refusal
+for the same body. Refusals happen before anything the REQUEST would write,
+including the create route's receipt claim, so a corrected retry of the same
+`request_id` still creates. Two scopes are stated rather than implied: the
+directory and model admissions are pure reads (a `stat`; the catalogue and the
+metadata cache), while the target admission builds the registries `create` would
+build anyway, and on a fresh root that materialises `<config>/agents` — the same
+carve-out the `preview` route documents. A retry of a request that SUCCEEDED is
+answered from its receipt without re-running any admission, so a working
+directory that has since vanished does not turn a success into a failure. A
+catalogue that cannot be enumerated offline (an aggregator on a cold cache, a
+local endpoint) is not a refusal: an unserved pair then surfaces at the first
+turn, exactly as it does today.
+- **Preview answers the readings for the conversation that would be created** —
+the identity *and* the spec the first turn will run on, from the same synthesis a
+cold open uses — while staying session-less and side-effect free: no directory, no
+marker, no receipt row. With a `model` that is the picked pair at the level it will
+run at; with **no** `model` it is the CONFIGURED pair, resolved through the same
+model metadata, so the effort ladder and the level are answered for an unpicked
+draft too. (A config-only projection answered an empty ladder and no level, which
+hid the desktop strip's effort chip and left its picker unreachable on every new
+conversation.) Which field is whose, stated precisely: the LADDER
+(`reasoning_efforts`) and the LEVEL are MODEL-derived and answered here; the
+WINDOW is model-derived here but ACCOUNT-derived in a real cold open, which may
+apply account metadata (`resolve_context_metadata`) and a window the account's plan
+scopes. A draft must not read account metadata at all (a synthetic stickiness key
+would move a real account's stickiness), so an account-scoped window can still
+differ between this payload and the first cold frame.
+- **Create stores the choice in the marker** (additively, under `model`), and
+the FIRST turn is born on it: the plane seeds the cold viewer from the marker,
+which carries it into the spawn (`LOP_MOBILE_CHILD_PROVIDER`/`_MODEL`/`_EFFORT`
+plus the explicit-selection override), so the constructed spec, the first
+frontend snapshot, the first provider request and the selection row journalled
+at admission all agree. The choice is stored in **normalised** form (provider
+alias resolved, level lowercased).
+- **The journal wins.** The seed applies only while the conversation has no
+selection of its own; once its leased owner has journalled one — including a
+later `/model` switch — re-opening or resuming resolves from the journal and the
+birth seed is not re-applied. A marker naming a pair or level that no longer
+exists degrades to the configured default (or the nearest rung of the model's
+remaining ladder) rather than failing an open.
+- Advertised as `features.draft_selection: 1`. A client that does not see it must
+keep a draft's model and effort chips **inert** rather than dispatching into a
+`422`; `features.draft_preview` alone means the backend can only *report* the
+readings.
+
 | Endpoint | Request | Result inside `CRUDResponse.result` |
 | --- | --- | --- |
 | GET `/v1/desktop/sessions` | `limit` 1..500, default100 | `{sessions: [...]}` canonical rows plus explicit desktop drafts |
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
-| POST `/v1/desktop/sessions` | `{request_id, cwd}` | `{session_id}`; cwd must exist |
+| POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
+| POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |

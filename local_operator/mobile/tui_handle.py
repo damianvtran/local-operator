@@ -561,8 +561,23 @@ class TuiSessionHandle(SessionHandle):
         return str(await self._on_app(schedule))
 
     async def set_model(self, provider: str, model_id: str) -> str:
+        return await self.set_model_effort(provider, model_id, None)
+
+    async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
+        """Select a model on the TUI-hosted session, and its level if one came.
+
+        Two slash commands rather than one because that is what this owner's
+        control surface is: the TUI applies a model and an effort through
+        separate commands, and ``/effort`` validates the level against the model
+        it has just been switched to. The effort half runs only when a level was
+        chosen, so a model-only switch — every caller before the draft's chips
+        existed — runs exactly the one command it always ran.
+        """
+
         def apply() -> None:
             self._app._run_slash_command(f"/model {provider}/{model_id}")
+            if effort:
+                self._app._run_slash_command(f"/effort {effort}")
 
         await self._on_app(apply)
         self._refresh_state()

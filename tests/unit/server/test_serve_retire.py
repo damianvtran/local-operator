@@ -757,7 +757,10 @@ def test_the_create_route_does_not_call_every_failure_a_retirement(
     """
 
     class Boom(DesktopSessions):
-        async def create(self, cwd: str, *, target: Any = None) -> str:
+        async def create(self, cwd: str, *, target: Any = None, model: Any = None) -> str:
+            # ``model`` because ``main``'s draft-pane route now passes the birth
+            # selection through here (see ``DesktopSessions.create``): the mirror
+            # is about the ERROR the adapter raises, not about that parameter.
             raise ValueError("something else went wrong")
 
     from local_operator.server.app import app

@@ -58,6 +58,32 @@ class DesktopReceipts:
                 db.execute("INSERT INTO receipts VALUES (?, ?, NULL)", (key, fingerprint))
         return None
 
+    def recorded(self, key: str) -> bool:
+        """Has ``key`` already been claimed, WITHOUT claiming it or writing.
+
+        WHY a separate read: the create route's pre-flight admissions have to be
+        skipped for a request whose first attempt already succeeded, or a retry
+        would be REFUSED (a directory that has since vanished, a model that has
+        since been retired) instead of answered from its receipt — turning a
+        success into a failure for the client the at-most-once contract exists for
+        (review round 2, R7).
+
+        It opens the store READ-ONLY on purpose: ``_db`` creates the file and
+        chmods it, and a probe that runs before a refusal must write nothing. An
+        absent store, and a store with no receipts table yet, both record nothing.
+        """
+        if not self.path.exists():
+            return False
+        with closing(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=10)) as db:
+            try:
+                row = db.execute("SELECT 1 FROM receipts WHERE id = ?", (key,)).fetchone()
+            except sqlite3.OperationalError:
+                # No table yet, or a write lock held elsewhere: "nothing recorded"
+                # is the safe answer — the caller then runs the admissions and
+                # ``run`` owns the claim, including its conflict semantics.
+                return False
+        return row is not None
+
     def _finish(self, key: str, result: dict[str, Any]) -> None:
         with closing(self._db()) as db, db:
             db.execute("UPDATE receipts SET result = ? WHERE id = ?", (json.dumps(result), key))

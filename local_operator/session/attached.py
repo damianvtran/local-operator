@@ -2803,7 +2803,20 @@ class AttachedSession:
             return
         if client is None or self._recovering or self.is_cold:
             raise ConnectionError(_MODEL_INTENT_PENDING)
-        await client.set_model(requested.provider, requested.model_id)
+        # The chosen reasoning level rides WITH the pair rather than in a second
+        # RPC, and that is a correctness requirement rather than tidiness: the
+        # owner's ``set_model`` rebuilds the spec from the model's own metadata,
+        # which seeds the model's DEFAULT level, and ``Session.set_model``
+        # assigns that spec before its same-pair early return — so a pair-only
+        # switch would silently replace the level this viewer was born with,
+        # on the very send that consumes the intent. Sent only when a level was
+        # chosen, so every caller who chose none (the CLI's ``--model`` birth,
+        # and every older client) sends exactly the frame it always sent.
+        requested_effort = getattr(requested, "reasoning_effort", None)
+        if requested_effort:
+            await client.set_model(requested.provider, requested.model_id, requested_effort)
+        else:
+            await client.set_model(requested.provider, requested.model_id)
         self._model_selection_override = False
 
     async def _bind_to(
@@ -4378,12 +4391,28 @@ class AttachedSession:
             and not self._model_selection_override
             and (
                 self._birth_model is None
-                or (self._birth_model.provider, self._birth_model.model_id)
-                != (selected.provider, selected.model_id)
+                # Compared as the TRIPLE: the level is part of the sample. A
+                # successor seeded from a pair-only record is constructed with no
+                # ``LOP_MOBILE_CHILD_EFFORT`` and silently drops to its own
+                # resolved level (review round 1, R2) — so a level-only change on
+                # an attached owner refreshes the sample too.
+                or (
+                    self._birth_model.provider,
+                    self._birth_model.model_id,
+                    self._birth_model.reasoning_effort,
+                )
+                != (selected.provider, selected.model_id, selected.reasoning_effort)
             )
             and get_provider_definition(selected.provider) is not None
         ):
-            self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
+            # Carry the level the owner actually reported: the sample exists so a
+            # successor can be constructed on what this conversation was running,
+            # and "which model" without "at which effort" is half of that.
+            self._birth_model = ModelSpec(
+                provider=selected.provider,
+                model_id=selected.model_id,
+                reasoning_effort=selected.reasoning_effort,
+            )
         if changed_fields is None or "jobs" in changed_fields:
             self.jobs.replace(state.jobs)
             self._subagent_comms.replace(state.jobs)
