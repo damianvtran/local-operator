@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -242,15 +243,28 @@ class ServeRecord:
     #: ``update.install_kind()``: ``uv-tool`` / ``pipx`` / ``pip`` / ``editable``
     #: / ``unknown``. Tells the updater both how to update and whether it may.
     install_kind: str
-    #: Is the desktop plane live right now, i.e. was
-    #: ``LOCAL_OPERATOR_DESKTOP_TOKEN`` set for this process. A daemon started
-    #: by the app is not the same animal as one a person started from a shell,
-    #: and the difference is not otherwise visible from outside the process.
+    #: Is the desktop plane governed RIGHT NOW, i.e. did the desktop app start
+    #: this daemon (``LOCAL_OPERATOR_DESKTOP_TOKEN`` in its environment) or has
+    #: an app claimed it since. A daemon started by the app is not the same
+    #: animal as one a person started from a shell, and the difference is not
+    #: otherwise visible from outside the process.
+    #:
+    #: Refreshed by the claim when it is accepted (``routes/desktop_claim.py``
+    #: republishes through the record's own publisher), so it is not a
+    #: boot-time snapshot: a reader that saw ``false`` and finds ``true`` here
+    #: is looking at a daemon whose plane was claimed in between, which is
+    #: also why its ``claim_key`` is spent. Regenerating the record to refresh
+    #: it would RE-MINT that key and destroy the app's proof of ownership, so
+    #: nothing may refresh this field by rebuilding the record.
     desktop: bool
-    #: Reserved for the claim handshake (a later PR mints it; ``""`` means no
-    #: claim governs this daemon). Present now, before anything writes it, so
-    #: that PR does not have to change this schema and every reader written
-    #: against this one already drops it correctly.
+    #: Reserved for the claim handshake: minted by :func:`build_record` at
+    #: startup and published in this record, ``""`` when the desktop app itself
+    #: started the daemon (an env token already governs the plane) or when the
+    #: reader is looking at a record from a build that predates the handshake.
+    #: Its ONLY lawful channel is this file: a reader that has the record can
+    #: already attach to the user's sessions, so publishing it here hands that
+    #: principal no new class of secret, while a page in a browser — which can
+    #: read no files — can neither see it nor guess it.
     claim_key: str = ""
     #: When this record was first written, and when its owner last proved it
     #: was alive. ``heartbeat_at`` is stamped by every write (the shared
@@ -279,7 +293,7 @@ class ServeRecord:
 
 
 def build_record(
-    *, instance_id: str, announced: tuple[str, int], desktop_token_set: bool | None = None
+    *, instance_id: str, announced: tuple[str, int], desktop_governed: bool | None = None
 ) -> ServeRecord:
     """Assemble the record for THIS process, reading identity fresh.
 
@@ -294,19 +308,40 @@ def build_record(
     other importer of this module (a reader, a test of the record shape) should
     not pay for ``importlib.metadata`` and ``urllib``.
 
-    ``desktop_token_set`` is a test seam — the desktop plane's own predicate is
-    the environment, and a test must be able to pin the answer without
-    mutating the process's environment for every other test in the worker.
+    ``desktop_governed`` is a test seam for the record's ``desktop`` field. The
+    desktop plane's own predicate is
+    :func:`~local_operator.server.desktop.desktop_posture`, which a test cannot
+    pin without mutating the process's environment for every other test in the
+    worker. The seam is named for the POSTURE rather than for the variable that
+    usually produces it, because the field it pins is true of two different
+    daemons: one the app started, and one an app claimed. Passing ``False`` for
+    a governed plane therefore publishes a record whose ``desktop`` and
+    ``claim_key`` contradict each other — a state a test may construct, never
+    one production can be in.
+
+    **The claim key is minted HERE, and only when the plane is nobody else's**
+    (``desktop_posture().enabled`` false). Two reasons for the placement: the
+    key is the daemon's, not the HTTP app's — a record is written by the serve
+    process and read by a stranger, and the key must exist from the instant the
+    record is published or a UI that discovers the daemon in the same
+    millisecond could find a record with nothing to claim; and the condition is
+    the desktop plane's own, asked of the desktop module rather than restated,
+    so a daemon the desktop app started (env capability present) publishes
+    ``""`` and can never be claimed out from under it.
+
+    ``secrets.token_urlsafe(32)`` is 256 bits from the OS CSPRNG, the same
+    primitive ``session/runtime/types.py`` mints ``control_key`` with. It is
+    published ONLY through the record — never logged, never returned by a
+    route, never written to a second file — because the record's
+    ``0600``-under-``0700`` permissions ARE the authorization story (see
+    ``server/desktop.py``'s module docstring).
     """
+    from local_operator.server.desktop import desktop_posture
     from local_operator.update import install_kind, installed_build
 
     host, port = announced
     build = installed_build()
-    desktop = (
-        bool(os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"))
-        if desktop_token_set is None
-        else desktop_token_set
-    )
+    governed = desktop_posture().enabled if desktop_governed is None else desktop_governed
     return ServeRecord(
         pid=os.getpid(),
         host=_dialable_host(host),
@@ -316,7 +351,10 @@ def build_record(
         source_ref=build.source_ref,
         prefix=sys.prefix,
         install_kind=install_kind().value,
-        desktop=desktop,
+        desktop=governed,
+        # ``""``, never a regenerated key: an env-governed daemon has no claim
+        # to publish, and a reader must be able to tell that from a key.
+        claim_key="" if governed else secrets.token_urlsafe(32),
     )
 
 

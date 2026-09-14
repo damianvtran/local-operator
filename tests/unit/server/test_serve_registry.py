@@ -359,3 +359,62 @@ def test_a_wildcard_bind_is_recorded_as_the_loopback_it_is_dialable_on() -> None
 def test_build_record_reports_the_desktop_plane_as_unset(monkeypatch) -> None:
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN", raising=False)
     assert serve_registry.build_record(instance_id="x", announced=("127.0.0.1", 1)).desktop is False
+
+
+def test_a_daemon_nobody_owns_publishes_a_claim_key(tmp_path: Path, monkeypatch) -> None:
+    """The other half of the handshake: the key exists exactly where the record
+    exists, and nowhere else a reader could pick it up.
+
+    ``build_record`` mints it rather than the HTTP app, because a UI that
+    discovers a daemon in the same instant the record appears must find a key
+    already there — a record published without one would be a daemon the app
+    can see and still not attach to, which is the failure this change removes.
+    """
+    from local_operator.server import desktop
+
+    monkeypatch.delenv(desktop.TOKEN_ENV, raising=False)
+    monkeypatch.setattr(desktop, "_CLAIMED", None)
+
+    record = serve_registry.build_record(instance_id="minted", announced=("127.0.0.1", 58474))
+    assert record.desktop is False
+    # 32 random bytes, base64url-encoded, unpadded.
+    assert len(record.claim_key) == 43
+    assert serve_registry.build_record(
+        instance_id="minted-again", announced=("127.0.0.1", 58474)
+    ).claim_key not in {"", record.claim_key}
+
+    path = serve_registry.publish(record, root=tmp_path)
+    assert json.loads(path.read_text())["claim_key"] == record.claim_key
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_daemon_the_app_started_publishes_no_claim_key(monkeypatch) -> None:
+    """Nothing to claim: the environment already governs this plane, and a key
+    would invite a second principal to take a daemon the app is driving."""
+    from local_operator.server import desktop
+
+    monkeypatch.setenv(desktop.TOKEN_ENV, "desktop-token")
+    monkeypatch.setattr(desktop, "_CLAIMED", None)
+
+    record = serve_registry.build_record(instance_id="appowned", announced=("127.0.0.1", 1234))
+    assert record.desktop is True
+    assert record.claim_key == ""
+
+
+def test_the_claim_key_is_never_logged(monkeypatch, caplog) -> None:
+    """The record is the key's only channel, so no log line may carry it."""
+    import logging
+
+    from local_operator.server import desktop
+
+    monkeypatch.delenv(desktop.TOKEN_ENV, raising=False)
+    monkeypatch.setattr(desktop, "_CLAIMED", None)
+    probe = "log-capture-probe"
+
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger("local_operator.server").debug("capture %s", probe)
+        record = serve_registry.build_record(instance_id="minted", announced=("127.0.0.1", 1))
+
+    messages = "\n".join(r.getMessage() for r in caplog.records) + caplog.text
+    assert probe in messages, "log capture is not working; the assertion below is vacuous"
+    assert record.claim_key not in messages
