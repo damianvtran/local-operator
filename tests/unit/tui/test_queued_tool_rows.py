@@ -23,6 +23,7 @@ the reveal path's own tests live beside this file.
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -49,7 +50,7 @@ from local_operator.session.frontend_state import (
     FrontendStateStore,
 )
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.events import EventController, TurnBoundaryEnd
+from local_operator.tui.events import EventController, ToolEnded, TurnBoundaryEnd
 from local_operator.tui.widgets.tool_card import ToolCard
 
 from .test_app_pilot import FakeSession, _factory
@@ -713,3 +714,157 @@ async def test_a_queued_row_is_retired_as_never_sent_when_the_turn_dies() -> Non
         row = _rows_for(app, "wake")[0]
         assert "never sent" in row and "14 B composed" in row, row
         assert "queued" not in row
+        # The outcome column stays BLANK. `mark_interrupted` used to print this
+        # row's own age there — `_elapsed` measures from the moment the ROW was
+        # built, i.e. the dictation plus the whole queue, printed in the column
+        # where the sibling's real execution time lives; at the reported
+        # half-hour wait the two endings of one fact disagreed (`never sent`
+        # beside `⊘ 30m`). `mark_not_run` blanks the same number for the same
+        # reason, and both rows now agree: nothing executed, so there is no
+        # interval to draw.
+        assert "⊘" in row, row
+        assert re.search(r"\d+(?:\.\d+)?s\b", row) is None, row
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: what the terminal frame hands over, and what it clears
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_that_is_the_only_frame_keeps_the_size_it_carried() -> None:
+    """The terminal frame is the whole dictation on some surfaces.
+
+    The live relay keeps one compose frame per call, in place, and the reconnect
+    seed keeps exactly one entry per call id — so a viewer whose interim frames
+    were compacted away, or that learns the call from the seed at all (attach,
+    sidebar switch, `/resume`), receives this frame and NOTHING else. It carries
+    the final `argument_bytes`, and a row born from it has never been through
+    `set_composing`: without the value the row printed `nothing composed` over a
+    frame that said how far the model got — the same lie as the ticking clock,
+    one state later.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        controller = EventController(session, app)
+        app._controller = controller
+
+        controller._on_event(
+            ToolCallComposeEvent(
+                tool_call_id="call_solo",
+                tool_name="mystery",
+                argument_bytes=12,
+                dictation_complete=True,
+                not_run_reason="Tool not found: mystery",
+            )
+        )
+        await _parked(pilot)
+
+        rows = [row for row in _rows_for(app, "mystery") if "never sent" in row]
+        assert rows, _rows(app)
+        assert "12 B composed" in rows[0], rows
+        assert "nothing composed" not in rows[0], rows
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_replaying_a_never_run_verdict_keeps_the_size_too() -> None:
+    """The same ending on a surface that becomes visible AFTER it.
+
+    The seed is the real one — the producer's own events folded through the real
+    ``FrontendStateStore`` — and it retains exactly ONE compose entry per call
+    id, which for a never-run call IS the terminal frame. The live row's size
+    came from frames the joiner never receives, so this is the frame that has to
+    carry it: the two surfaces must paint the same words AND the same number.
+
+    Reachability caveat, stated rather than implied: the switch path replays with
+    `settled_tools` = the transcript's own results, and a never-run call is in
+    that set once its synthetic result is persisted — the row is then painted
+    from the transcript and this frame is skipped. The SEED path exercised here
+    (restore_live_projection, `settled_tools` empty) is the attach and
+    sidebar-switch case, where the owner's live projection is what the new
+    surface folds.
+    """
+    turn = StrandedTurn(offer_wake=False)
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="p", cwd="/r"))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        controller = EventController(session, app)
+        app._controller = controller
+        turn.start()
+
+        live: list[dict[str, Any]] = []
+        while True:
+            event = await asyncio.wait_for(turn.queue.get(), timeout=30)
+            if event is None:
+                raise AssertionError(f"the turn ended too early: {turn.seen}")
+            store.observe_event(None, event)
+            if isinstance(event, ToolCallComposeEvent) and getattr(event, "not_run_reason", None):
+                live = list(store.state.live_events)
+                break
+
+        seeded = [item for item in live if item.get("tool_call_id") == WAKE_ID]
+        assert seeded, "the seed retains the call's terminal frame"
+        assert not [
+            item for item in seeded if item.get("type") == "tool_execution_start"
+        ], "nothing has started it: that is the fact the row must render"
+
+        controller.restore_live_projection(
+            SimpleNamespace(streaming=True, generation=1, live_events=live), set(), set()
+        )
+        await _parked(pilot)
+
+        rows = [row for row in _rows_for(app, "wake") if "never sent" in row]
+        assert rows, _rows(app)
+        assert "14 B composed" in rows[0], rows
+        assert "nothing composed" not in rows[0], rows
+
+        turn.release.set()
+        await turn.finish()
+
+
+@pytest.mark.asyncio
+async def test_an_end_for_a_call_still_being_announced_clears_that_registry() -> None:
+    """A settled card must not be left where the DEATH PASS can relabel it.
+
+    `_retire_live_tool_cards` is deliberately unconditional: it marks everything
+    still in `_composing_cards` as `interrupted` when the turn dies. A queued row
+    now sits in that registry for a sibling's whole execution group — the
+    reported half-hour — so an end arriving ahead of its start (a relay out of
+    order, a replay) has to settle the card AND take it out of the registry, or
+    the death pass overwrites an outcome that really happened.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        card = ToolCard("call_q", "wake", {"text": "30m"})
+        app._append_block(card)
+        app._composing_cards["call_q"] = card
+        card.set_composing(14, "wake")
+        card.mark_queued()
+
+        app.post_message(
+            ToolEnded(
+                ToolExecutionEndEvent(
+                    tool_call_id="call_q",
+                    tool_name="wake",
+                    result=ToolResult(
+                        tool_call_id="call_q",
+                        tool_name="wake",
+                        content=[TextContent(text="scheduled")],
+                    ),
+                )
+            )
+        )
+        await _parked(pilot)
+
+        assert app._composing_cards == {}, "the outcome took it out of the registry"
+        assert card.state == "success"
+
+        app.post_message(TurnBoundaryEnd())
+        await _parked(pilot)
+        assert card.state == "success", "the death pass cannot reach a settled card"

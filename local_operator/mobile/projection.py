@@ -1196,13 +1196,26 @@ class ProjectionFold:
             # ``isinstance`` check, so an older runtime's frame carries the
             # defaults (`False`/`None`) and takes the composing path below —
             # today's behaviour, unchanged.
+            #
+            # A row that has already STARTED outgrows the whole announcement,
+            # and the TUI returns from its handler for exactly this case (its
+            # running registry). The phone needs the guard too: a replayed
+            # terminal frame for a call whose twin's start already landed would
+            # otherwise relabel a running row `failed` — or, because the
+            # terminal frame also carries `dictation_complete`, walk it BACK to
+            # `queued`. Note the arms are exclusive on purpose: falling through
+            # to them is the bug, not the fallback.
+            started = row.tool_state in ("running", "done", "failed")
             if event.not_run_reason:
-                row.tool_state = "failed"
-                row.error = _compact(event.not_run_reason, 200)
-                # The reason in the one-line summary too: the row is all a
-                # phone shows by default, and "this call never ran, here is
-                # why" is the whole content of that fact.
-                row.summary = row.error
+                if not started:
+                    row.tool_state = "failed"
+                    row.error = _compact(event.not_run_reason, 200)
+                    # The reason in the one-line summary too: the row is all a
+                    # phone shows by default, and "this call never ran, here is
+                    # why" is the whole content of that fact.
+                    row.summary = row.error
+            elif started:
+                pass
             elif event.dictation_complete:
                 row.tool_state = "queued"
                 row.summary = event.intent or f"waiting to run {event.tool_name}"
@@ -1214,6 +1227,14 @@ class ProjectionFold:
         elif isinstance(event, ToolExecutionStartEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
             row.tool_state = "running"
+            # The failure TEXT goes with the failure STATE. This row may have
+            # been settled by a never-run verdict before its call started — two
+            # calls sharing an id, the loser settling the row and the winner
+            # running it — and the renderer draws `error` as a red danger line
+            # inside the expansion for ANY state, so the phone would otherwise
+            # keep `Duplicate call id '…' skipped.` over a row that succeeded,
+            # and `hasDetails` true because of it.
+            row.error = ""
             row.summary = _summarize_args(event.tool_name, event.args)
             row.intent = event.intent or row.intent
             self._tool_started_at[event.tool_call_id] = time.monotonic()

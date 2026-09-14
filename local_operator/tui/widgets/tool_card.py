@@ -160,7 +160,15 @@ RUNNING_NOTICE = "⟨still running⟩"
 #: writing it, and it has not started executing. ``RUNNING_NOTICE`` would be a
 #: lie about a call nothing has run, and the point of the slot is to say which
 #: of the two waits the user is in.
-QUEUED_NOTICE = "⟨queued⟩"
+#:
+#: NOT the state's own word, which is where this rung started: the status column
+#: one cell away already says ``queued``, and two identically-worded runs two
+#: cells apart read as a repaint fault rather than as an answer — the same class
+#: the working line's docstring cites for ``· compacting context…`` sitting
+#: above ``· compacting context``. The slot answers a CLICK ("why did nothing
+#: expand?"), so it names the wait in the family's own vocabulary:
+#: ``still running`` → ``waiting``.
+QUEUED_NOTICE = "⟨waiting⟩"
 
 #: The same two answers at three cells, for a row too narrow to spell them.
 #: The feedback has to survive FURTHER DOWN the width ladder than the expand
@@ -174,6 +182,14 @@ QUEUED_NOTICE = "⟨queued⟩"
 TERSE_NO_OUTPUT_NOTICE = "⟨∅⟩"
 TERSE_RUNNING_NOTICE = "⟨⋯⟩"
 TERSE_QUEUED_NOTICE = "⟨⋯⟩"
+#: The two live rungs are the SAME three cells on purpose. At that width the
+#: slot has room for one answer — "not yet" — and which of the two waits the
+#: user is in is already on the row, one column to the right, as the status
+#: word (``running`` / ``queued``). A distinct glyph would exist to re-encode a
+#: distinction the row makes by itself, in the one place with no room to spell
+#: it out; the full rungs stay distinct above because there the slot has to
+#: answer in words.
+#:
 #: Full phrase -> glyph -> nothing, per notice. The row walks this in order
 #: and takes the first rung that fits.
 NOTICE_LADDER: dict[str, tuple[str, ...]] = {
@@ -1492,7 +1508,7 @@ class ToolCard(ExpandableActionBlock):
         self._summary = self._compose_facts
         self._refresh_row()
 
-    def mark_not_run(self, reason: str) -> None:
+    def mark_not_run(self, reason: str, argument_bytes: int | None = None) -> None:
         """The call will NEVER run: settle the row under the harness's reason.
 
         A call parked at planning (an unknown tool, invalid arguments, a
@@ -1513,8 +1529,24 @@ class ToolCard(ExpandableActionBlock):
         No ``measured_s``: nothing executed, so there is no interval — and the
         outcome column's blank is the honest reading rather than a lost number
         (same asymmetry ``mark_interrupted`` documents).
+
+        ``argument_bytes`` is the terminal compose frame's own final count, and
+        the row takes it when it carries one. It has to be HANDED OVER rather
+        than inherited from the frames before it, because the terminal frame is
+        often the ONLY frame a surface sees: the live relay keeps one compose
+        frame per call, in place, and the reconnect seed keeps exactly one entry
+        per call id — so a row born from the seed has never been through
+        :meth:`set_composing` at all, and would print ``nothing composed`` over
+        a frame that carried the true size. (``set_composing`` cannot be the
+        fix there: it early-returns for a row already in a latched state.)
         """
         self._settle_live()
+        if argument_bytes:
+            # A zero is left alone: an earlier frame that measured nothing and a
+            # frame that carries nothing agree, and a terminal frame for a call
+            # with an empty payload must not erase a size a live frame already
+            # measured.
+            self._compose_bytes = int(argument_bytes)
         size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
         self._compose_facts = f"{size} composed"
         self._summary = f"never sent · {self._compose_facts}"
@@ -1577,7 +1609,20 @@ class ToolCard(ExpandableActionBlock):
             # from 40 columns down.
             self._compose_facts = f"{size} composed"
             self._summary = f"never sent · {self._compose_facts}"
-        self._duration = self._elapsed()
+            # The outcome column stays BLANK for this row. ``_elapsed`` here
+            # measures from the moment the ROW was built — `ToolCard.__init__`
+            # takes its own zero — so on this branch it is the dictation plus
+            # whatever queue the call waited in, i.e. an execution interval is
+            # the one thing it is not; at the half-hour queue the operator
+            # reported, this column printed the wait beside a row that says
+            # `never sent`. `mark_not_run` blanks the same number for the same
+            # reason, and the two endings of one fact must agree. Blank rather
+            # than lost: nothing on this surface ever knew this call's zero.
+            self._duration = None
+        else:
+            # A row that watched its own START has a true interval, and prints
+            # it.
+            self._duration = self._elapsed()
         self._state = "interrupted"
         self._interrupt_label = "cut off" if cut_off else "interrupted"
         self.remove_class("tool-running")
@@ -2053,6 +2098,14 @@ class ToolCard(ExpandableActionBlock):
         # the user is watching execute.
         self.remove_class("tool-interrupted", "tool-error", "tool-success")
         self.add_class("tool-running")
+        # The failure TEXT goes with the failure TINT. A row revived by this
+        # method may have been settled as an error first (a never-run verdict on
+        # one of two calls sharing an id, whose twin then executed) — leaving
+        # `_error` set would keep the danger line from the verdict inside the
+        # expansion, over a call that is running fine, and keep `hasDetails`
+        # true because of it. Not visible on the summary today, which is why it
+        # is cleared here rather than left as a trap.
+        self._error = ""
         # Un-finalized for the same reason as the restore arm: a settled card
         # answers ``settled_rows()``, and the transcript's spacing and scroll
         # accounting read that number. Only the row's own repaint is at stake
