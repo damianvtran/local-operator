@@ -42,6 +42,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
     from local_operator.secrets.session import SessionRegistration
+    from local_operator.session.runtime.publication import PublicationGate
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -237,7 +238,7 @@ class ServingSessionHandle(SessionHandle):
     #: — an attribute that existed only on the instance would read as a
     #: capability the handle cannot answer, which is the defect class that guard
     #: exists to catch. See ``create_session`` for what waits on it.
-    mcp_publication_gate: asyncio.Event | None = None
+    mcp_publication_gate: PublicationGate | None = None
 
     def __init__(
         self,
@@ -249,7 +250,7 @@ class ServingSessionHandle(SessionHandle):
         approval_pinned: bool = False,
         install_gates: bool = True,
         config_dir: Path | None = None,
-        mcp_publication_gate: asyncio.Event | None = None,
+        mcp_publication_gate: PublicationGate | None = None,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -4388,6 +4389,7 @@ async def spawn_owned_session(
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
+    from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
@@ -4396,12 +4398,14 @@ async def spawn_owned_session(
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on
-    # the loop that will also set it (this process's one asyncio loop), so both
-    # ends of the latch are the same loop and no cross-thread wake-up is
-    # implied. It travels two ways: into ``create_session`` (where the wiring
-    # task waits on it) and onto the handle (where ``RuntimeServer._serve``
-    # finds it via ``_open_mcp_wiring_gate``).
-    mcp_publication_gate = asyncio.Event()
+    # the loop that will also wait on it (this process's one asyncio loop), so
+    # the waiting end and the opening end agree without anyone having to check.
+    # It travels two ways: into ``create_session`` (where the wiring task waits
+    # on it) and onto the handle (where ``RuntimeServer._serve`` finds it via
+    # ``_open_mcp_wiring_gate``). The latch itself owns the cross-thread hop, so
+    # a runtime that opens it from another thread still wakes the task —
+    # see :mod:`local_operator.session.runtime.publication`.
+    mcp_publication_gate = PublicationGate()
 
     # The owner's saved tool-approval default. The TUI reads the SAME key at
     # boot (OperatorApp._load_approvals_default) and adopts ``auto`` as

@@ -116,8 +116,16 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
+    # Patch the name the CALLER resolves, not the one the function is defined in.
+    # ``job_stats`` looks ``job_cost`` up in its own module globals, so a patch on
+    # ``tui.costs.job_cost`` — or on ``model.costs.job_cost``, where the function
+    # lives after the import move — binds a name nothing calls and the trap
+    # silently never fires. It had been pointed at ``tui.costs`` since before that
+    # move and was dead in both places (review round 1, R1), which is why the
+    # positive control below exists: a guard that cannot fire is
+    # indistinguishable from a pass.
     monkeypatch.setattr(
-        "local_operator.model.costs.job_cost",
+        "local_operator.tui.widgets.subagent_panel.job_cost",
         lambda *_args, **_kwargs: pytest.fail("viewer priced"),
     )
     row = JobState(
@@ -130,6 +138,14 @@ async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
     stats = await asyncio.to_thread(job_stats, row)
     assert stats.cost == 0.412
     assert stats.context_tokens == 113735
+
+    # POSITIVE CONTROL: a row the panel must PRICE (no resolved knowledge on it)
+    # reaches the trapped call, so the assertion above is a statement about the
+    # pricing path rather than about a disconnected patch. In-process, because the
+    # expectation is about the trap firing and not about thread plumbing.
+    unpriced = JobState(id="unpriced", type="task", usage=Usage(context_tokens=10))
+    with pytest.raises(pytest.fail.Exception):
+        job_stats(unpriced)
     unknown = row.model_copy(
         update={"direct_cost": None, "direct_cost_knowledge": CostKnowledge.UNKNOWN}
     )

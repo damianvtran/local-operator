@@ -1457,6 +1457,15 @@ class RuntimeServer:
         parameter: the runtime did not create the session and has no other
         business naming its wiring.
 
+        WHAT THE LATCH IS, AND WHAT IT GUARANTEES: it is a
+        :class:`~local_operator.session.runtime.publication.PublicationGate`,
+        which binds the loop its waiting task runs on and hops with
+        ``call_soon_threadsafe`` when it is opened from anywhere else. So this
+        method is correct from the runtime's own thread (thread mode, via
+        ``start()``) as well as from the session's — the cross-thread case is
+        the latch's business rather than a caller's, which is the point of
+        using that class instead of a bare ``asyncio.Event``.
+
         WHY IT EXISTS: the deferred wiring task's first instruction is a
         synchronous import of the MCP SDK. A task starts at the loop's next free
         instant, which in ``process.amain`` is the inbox drain BEFORE this
@@ -1483,23 +1492,26 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
-        # Port 0: the OS picks; the record carries the number. Binding
-        # loopback only is the security invariant of the whole design.
-        self._server = await asyncio.start_server(
-            self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
-        )
-        port = self._server.sockets[0].getsockname()[1]
-        self._record.control_port = port
         try:
+            # Port 0: the OS picks; the record carries the number. Binding
+            # loopback only is the security invariant of the whole design.
+            self._server = await asyncio.start_server(
+                self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
+            )
+            port = self._server.sockets[0].getsockname()[1]
+            self._record.control_port = port
             self._publisher = RecordPublisher(self._record, self._config_root)
         finally:
-            # THE RECORD EXISTS AS OF HERE (or could not be written at all).
-            # Both cases must release the deferred MCP wiring: on the happy
-            # path that is what makes the wiring ride the record instead of
-            # racing it, and on the failure path it is the difference between
-            # late MCP tools and none ever (the exception itself still
-            # propagates and takes the child down, so this is insurance rather
-            # than a recovery path). See ``RuntimeServer._open_mcp_wiring_gate``.
+            # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
+            # not only the happy one. The record is written inside
+            # ``RecordPublisher.__init__``, so on the success path this is
+            # genuinely post-publication; a bind that raises reaches here too,
+            # and that case matters because ``_run`` (thread mode) swallows the
+            # exception and the process lives on — with no record and, without
+            # this, a latch shut for the session's life. MCP late beats MCP
+            # never, and the release cannot mask the failure: the exception
+            # still propagates.
+            # See ``RuntimeServer._open_mcp_wiring_gate``.
             self._open_mcp_wiring_gate()
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.

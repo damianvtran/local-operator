@@ -160,7 +160,13 @@ def _kill_runtime(config_dir: Path, session_id: str) -> None:
 def _one_run(
     client: Any, base: str, workspace: Path, config_dir: Path, index: int
 ) -> dict[str, Any]:
-    """One new conversation, one first send, both response bodies kept."""
+    """One new conversation, one first send, both response bodies kept.
+
+    The host load is sampled per run and travels WITH the row, because a first
+    send measured at load 10 and one at load 200 are not the same measurement and
+    the difference is invisible after the fact (review round 1, R5).
+    """
+    loadavg = os.getloadavg()[0] if hasattr(os, "getloadavg") else float("nan")
     created = client.post(
         "/v1/desktop/sessions",
         json={"request_id": str(uuid.uuid4()), "cwd": str(workspace)},
@@ -179,6 +185,7 @@ def _one_run(
         "run": index,
         "session_id": session_id,
         "first_send_ms": first_send_ms,
+        "loadavg": round(loadavg, 1),
         "create_status": created.status_code,
         "create_body": created_body,
         "send_status": sent.status_code,
@@ -190,6 +197,26 @@ def _one_run(
     }
     _kill_runtime(config_dir, session_id)
     return result
+
+
+def _git_rev() -> str:
+    """The exact commit under test, recorded next to the numbers (R5).
+
+    A first-send figure is only comparable to another campaign's when the tree
+    that produced it is in the artefact; best-effort, so a missing ``git``
+    reports ``unknown`` rather than failing a measurement.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -215,6 +242,12 @@ def main() -> int:
         help="declare an MCP server (mcpx: HTTP on a closed port) or none",
     )
     parser.add_argument("--json", type=str, default="", help="write raw results here")
+    parser.add_argument(
+        "--label",
+        type=str,
+        default="",
+        help="free-form note recorded WITH the numbers (see bench_cold_engage.py)",
+    )
     args = parser.parse_args()
 
     import httpx
@@ -266,7 +299,7 @@ def main() -> int:
                     print(
                         f"  run {index + 1}/{args.runs}: first send = "
                         f"{row['first_send_ms']} ms  (create {row['create_status']}, "
-                        f"send {row['send_status']})",
+                        f"send {row['send_status']}, load {row['loadavg']})",
                         flush=True,
                     )
     finally:
@@ -283,8 +316,14 @@ def main() -> int:
                 os.environ[key] = value
 
     stats = _summarize(rows)
+    rev = _git_rev()
+    stats["rev"] = rev
+    stats["label"] = args.label
     print("\n--- first POST /messages wall time (ms) ---")
     print(f"  mcp variant: {args.mcp_variant}")
+    print(f"  measured tree: {rev[:9]}")
+    if args.label:
+        print(f"  label: {args.label}")
     for key, value in stats.items():
         print(f"  {key:<8} {value}")
     for row in rows:

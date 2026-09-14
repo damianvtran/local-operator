@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from local_operator.providers.auth_store import AuthStore
     from local_operator.session.goal import GoalState
     from local_operator.session.protocol import SessionProtocol
+    from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session.session import Session
     from local_operator.skills.discovery import Skill
     from local_operator.skills.index import SkillIndex
@@ -2713,14 +2714,31 @@ def attach_config_watch(session: Session, config_dir: Path) -> None:
 #: ``import mcp`` 8.3 s, and a loop-gap probe over the same wiring measured the
 #: event loop BLOCKED for 10.38 s of a 10.41 s span. The wiring is import time,
 #: not I/O, which is why ordering alone cannot make it cheap.
-_MCP_WIRING_IMPORTS = (
-    "local_operator.session.mcp_status",
-    "local_operator.mcp",
-    "local_operator.mcp.manager",
-    "mcp",
-    "mcp.types",
-    "mcp.client.stdio",
-    "mcp.client.streamable_http",
+_MCP_WIRING_IMPORTS: tuple[str, ...] = (
+    (
+        # ``wire_mcp_into_session``'s OWN function-local imports. They are not in the
+        # factory's warm list because nothing else on the boot path wants them.
+        "local_operator.session.mcp_status",
+        "local_operator.mcp",
+    )
+    + tuple(
+        # ... DERIVED from the factory's own warm list rather than restated. The two
+        # lists describe the same import chain, and a second hand-maintained copy is
+        # how they would drift: add a module to the wiring and the loop stall comes
+        # back silently, with every gate still green because the correspondence is
+        # what proves the warm covers the wiring's synchronous prefix.
+        name
+        for name in _WARM_IMPORTS
+        if name == "mcp" or name.startswith("local_operator.mcp")
+    )
+    + (
+        # The SDK submodules the discovery path imports from INSIDE functions, so
+        # they are paid on the first connect rather than at package import and the
+        # factory's list cannot see them.
+        "mcp.types",
+        "mcp.client.stdio",
+        "mcp.client.streamable_http",
+    )
 )
 
 
@@ -2764,7 +2782,7 @@ async def create_session(
     cwd: str | None = None,
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
-    mcp_publication_gate: "asyncio.Event | None" = None,
+    mcp_publication_gate: "PublicationGate | None" = None,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -2808,17 +2826,23 @@ async def create_session(
     wiring starts where ``serving.spawn_owned_session`` says it should —
     after the record, riding it.
 
-    ``None`` means NO GATE, which is what keeps this from stranding the hosts
-    that never publish a runtime record at all: the TUI's in-process Session,
-    every unit test below this layer, and the exec paths. There the task is
-    dispatched ungated, exactly as it was before this parameter existed. A
-    gate is only ever passed by a caller that also guarantees a publisher.
+    ``None`` means NO GATE, and that default is the whole safety of this change:
+    a latch that applied to a caller which never publishes a record would park
+    its MCP wiring for the session's life — MCP silently never wired, which is
+    the failure the latch exists to prevent, arrived at from the other side. So
+    the gate is only ever created by ``spawn_owned_session``, the one spawn site
+    whose runtime publishes.
 
-    Either way the task warms the MCP import chain in a WORKER THREAD before it
-    wires (``_warm_mcp_wiring_imports``). That is not an optimisation beside the
-    gate; it is what makes the gate deliver anything, and it helps the ungated
-    TUI too, for the same reason: the wiring is imported modules rather than
-    I/O, so on the loop it is not slow, it is exclusive.
+    Who exercises the ungated path in this tree: ``tests/`` (it is the default),
+    and two operator scripts that build an in-process Session for a screenshot
+    or a cleanup sweep (``scripts/evidence_session_cleanup.py``,
+    ``scripts/cleanup_notice_shot.py``). The TUI process does NOT — on this
+    release its owner path is gone from ``lop`` (see ``cli.py``'s "THE OWNER
+    PATH IS GONE" note, which says the TUI process never builds a ``Session``)
+    and no TUI code passes ``defer_mcp_wiring=True``, so nothing about the
+    TUI's own import behaviour changes here. The ungated branch is kept as the
+    default because it is the honest answer for a caller with no publisher,
+    not because a TUI depends on it.
 
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
@@ -2922,13 +2946,19 @@ async def create_session(
     # front end with a full-screen terminal reads session.mcp_startup instead
     # of being written over by a stderr warning.
     #
-    # DEFERRED wiring is the TUI boot path's opt-in (``defer_mcp_wiring``):
-    # the session returns immediately and the same wiring runs as a background
+    # DEFERRED wiring is the runtime child's opt-in (``defer_mcp_wiring``): it
+    # was written for the TUI's in-process Session, which this release no longer
+    # builds in that process at all (``cli.py``: the owner path is gone from
+    # ``lop``). The caller that matters today is the runtime child, and the gate
+    # it passes below is what keeps the wiring off the record's own publication
+    # path.
+    #
+    # The session returns immediately and the same wiring runs as a background
     # task. The task is tracked on the session's dispose hooks so a quit
     # mid-wiring cancels it (a ``disconnect_all`` on a half-wired manager is
     # exactly the teardown the manager already handles); nothing else differs —
     # the outcome lands in ``session.mcp_startup`` and the settle sink fires
-    # when the TUI has installed it, which is the same late-attach the 250 ms
+    # when a front end has installed it, which is the same late-attach the 250 ms
     # gate already produces for slow OAuth servers.
     if defer_mcp_wiring:
 

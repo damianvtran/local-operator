@@ -70,6 +70,7 @@ import json
 import os
 import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
@@ -83,8 +84,9 @@ from typing import Any
 # venv"). Without this a benchmark run in a worktree silently measures main.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+#: The child-side instrument. It is COPIED into each run's temp root before use
+#: (see ``_one_run``), so nothing on ``PYTHONPATH`` points into this repo.
 SITE_DIR = Path(__file__).resolve().parent / "cold_engage_site"
-MCP_STUB = SITE_DIR / "mcp_stub.py"
 
 #: The repo's own idle cold-engage figure, for the anchored projection.
 IDLE_ANCHOR_MS = 1146.0
@@ -118,7 +120,7 @@ def _seed_config(config_dir: Path) -> None:
     manager.update_config({"hosting": "test", "model_name": "test-model"})
 
 
-def _write_mcp_config(root: Path, variant: str) -> None:
+def _write_mcp_config(root: Path, variant: str, stub: Path) -> None:
     """A `.mcp.json` declaring one server, for the `mcp` and `mcpx` variants.
 
     Two transports, because they separate two different costs:
@@ -127,14 +129,36 @@ def _write_mcp_config(root: Path, variant: str) -> None:
       immediate, so what is left is the SDK import and the config parse: the
       cost ANY declared server pays before the 250 ms startup gate can help.
     * ``mcp`` — a stdio stub that never answers ``initialize``, which adds the
-      spawn and the handshake attempt on top.
+      spawn and the handshake attempt on top. ``stub`` is the PER-RUN COPY of
+      the instrument, so the run's own config never points back into the repo.
     """
     if variant == "mcpx":
         entry: dict[str, Any] = {"type": "http", "url": "http://127.0.0.1:1/mcp"}
     else:
-        entry = {"command": sys.executable, "args": ["-u", str(MCP_STUB)]}
+        entry = {"command": sys.executable, "args": ["-u", str(stub)]}
     payload = {"mcpServers": {"bench-slow": entry}}
     (root / ".mcp.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _git_rev() -> str:
+    """The exact commit under test, recorded next to the numbers.
+
+    These figures are only comparable to another campaign's when the rev is in
+    the artefact rather than in someone's memory of which worktree produced them
+    (review round 1, R5). Best-effort: a missing ``git`` or an unpacked tree
+    reports ``unknown`` instead of failing the measurement.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
 
 
 class Timeline:
@@ -353,8 +377,14 @@ async def _one_run(variant: str, index: int) -> dict[str, Any]:
     config_dir = root / ".local-operator"
     config_dir.mkdir(parents=True, exist_ok=True)
     _seed_config(config_dir)
+    # A COPY of the instrument, not the repo's own directory: PYTHONPATH then
+    # never holds a path inside the tree, so the child cannot import ``scripts/``
+    # by accident and the run leaves nothing behind but its temp root. (Review
+    # round 1, R9: the prose said "copied" while the code did not.)
+    site = root / "_site"
+    shutil.copytree(SITE_DIR, site)
     if variant != "base":
-        _write_mcp_config(root, variant)
+        _write_mcp_config(root, variant, site / "mcp_stub.py")
 
     saved = {k: os.environ.get(k) for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH")}
     _strip_inherited()
@@ -363,7 +393,7 @@ async def _one_run(variant: str, index: int) -> dict[str, Any]:
     # The child's instrument. PYTHONPATH survives `-P` (which strips only the
     # implicit cwd entry), so `sitecustomize` import time is the earliest point
     # we can mark inside the child.
-    os.environ["PYTHONPATH"] = str(SITE_DIR)
+    os.environ["PYTHONPATH"] = str(site)
     os.environ["LOP_BENCH_ROLE"] = "child"
     os.environ["LOP_BENCH_TIMELINE"] = str(root / "child.jsonl")
 
@@ -875,6 +905,16 @@ async def _main() -> int:
         help="comma-separated variants to interleave (base, mcpx, mcp)",
     )
     parser.add_argument("--json", type=str, default="", help="write raw results here")
+    parser.add_argument(
+        "--label",
+        type=str,
+        default="",
+        help=(
+            "free-form note recorded WITH the numbers, for a run whose tree is "
+            "not the checked-out HEAD (e.g. a pre-fix arm measured by checking "
+            "``local_operator/`` out of the parent commit)"
+        ),
+    )
     args = parser.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -897,6 +937,11 @@ async def _main() -> int:
         print(f"  (desktop_sessions pre-warm skipped: {type(exc).__name__}: {exc})")
 
     _instrument_parent()
+
+    rev = _git_rev()
+    print(f"  measured tree: {rev[:9]}", flush=True)
+    if args.label:
+        print(f"  label: {args.label}", flush=True)
 
     rows: list[dict[str, Any]] = []
     for index in range(args.pairs):
@@ -932,6 +977,8 @@ async def _main() -> int:
             )
 
     summary = _print_summary(rows, variants)
+    summary["rev"] = rev
+    summary["label"] = args.label
     loads = [r["loadavg"] for r in rows if isinstance(r.get("loadavg"), float)]
     if loads:
         print(

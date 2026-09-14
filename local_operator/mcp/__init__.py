@@ -48,8 +48,39 @@ _MANAGER_EXPORTS = frozenset({"McpManager", "McpLoadResult"})
 
 
 def __getattr__(name: str) -> Any:
+    """Resolve the deferred exports, and keep module attribute access working.
+
+    TWO THINGS BEYOND THE RE-EXPORT, both of which the eager import used to give
+    away for free and neither of which has a caller in this tree — they are here
+    so a future one does not meet a surprise:
+
+    * ``local_operator.mcp.manager`` was an ATTRIBUTE of this package, because
+      importing the name above imported the submodule. Reaching a submodule
+      through its package is ordinary Python, so it still resolves here.
+    * An ABSENT dependency must read as "no such attribute" rather than as an
+      import error: ``getattr(local_operator.mcp, "McpManager", None)`` and
+      ``hasattr`` are the shapes a capability probe uses, and the manager is an
+      optional extra. A ``ModuleNotFoundError`` escaping a probe would turn
+      "this machine has no MCP SDK" into a crash in the prober. The manager's
+      own ``MCP_SDK_MISSING_ERROR`` path is unaffected — it is reached through
+      ``local_operator.mcp.manager``, a real import that is expected to fail
+      loudly where the SDK is genuinely required.
+
+    The remaining accepted loss is documented rather than fixed:
+    ``typing.get_type_hints`` on a function in this module cannot resolve a
+    ``McpManager`` annotation, because the name is not in module globals until
+    something touches the attribute. Nothing calls it; fixing it would mean
+    keeping the eager import this block exists to remove.
+    """
+    if name == "manager":
+        import importlib
+
+        return importlib.import_module("local_operator.mcp.manager")
     if name in _MANAGER_EXPORTS:
-        from local_operator.mcp.manager import McpLoadResult, McpManager
+        try:
+            from local_operator.mcp.manager import McpLoadResult, McpManager
+        except ImportError as exc:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
 
         # Cache into the module dict so the LOOKUP happens once per process
         # rather than once per access; ``__getattr__`` is only consulted for a
