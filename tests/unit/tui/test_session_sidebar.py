@@ -529,13 +529,21 @@ async def test_list_window_current_cursor_and_footer_are_independent():
             "esc return" in lines[-1]
         ), "the page counter displaced the only named exit (design round D4)"
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
-        # Unfocused and paginated, unchanged: the position plus the hide key.
+        # Unfocused and paginated: the position plus the way INTO the keyboard
+        # mode (U1). The counter used to leave a full list naming the entry
+        # nowhere — a whole-frame search for `f9`/`focus` found nothing at
+        # 120x40 or 70x24, so the only route in was advertised solely by the
+        # copy the counter had displaced. `ctrl+b hide` is what gives way when
+        # both do not fit, so the assertion is the rule rather than one string.
         sidebar.blur()
         await pilot.pause()
         assert not sidebar.has_focus, "premise: the list no longer holds the keyboard"
-        assert sidebar.render().plain.splitlines()[-1] == (
-            f"1–{sidebar.page_size}/101 · ctrl+b hide"
-        )
+        unfocused_footer = sidebar.render().plain.splitlines()[-1]
+        assert unfocused_footer.startswith(f"1–{sidebar.page_size}/101"), unfocused_footer
+        assert (
+            "f9 focus" in unfocused_footer
+        ), "a full list names no way into the list's keyboard mode (U1)"
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
         sidebar.show_error("read failed")
         assert sidebar.entries
         assert sidebar.render().plain.splitlines()[-1] == "Refresh failed"
