@@ -626,10 +626,7 @@ class DesktopSessionBridge:
         ):
             return
         try:
-            from local_operator.notifications import (
-                NOTIFICATION_CONTRACT_VERSION,
-                compose,
-            )
+            from local_operator.notifications import notification_payload
 
             # The LIVE name wins over the sidecar: a rename reaches frontend
             # state before it reaches `title.json`, and `compose` falls back to
@@ -642,41 +639,25 @@ class DesktopSessionBridge:
             # `compose` reads up to 128 KiB for the title and 64 KB for the
             # preview, and `refresh_attention` runs on the event loop. Off-loop
             # for the same reason the store read above is.
-            composed = await asyncio.to_thread(
-                compose,
+            #
+            # THE PAYLOAD IS BUILT BY THE SHARED BUILDER, not inline. The feed
+            # ships the same payload for the same completion and the desktop
+            # collapses the pair on `dedupe_key`; two dict literals would be one
+            # field away from two banners for one turn. The bridge takes the
+            # default `focus_policy` (`when_unfocused`) because this stream
+            # exists only while an app is DISPLAYING the session — the card is
+            # on screen already, so a banner on top of it is the interruption
+            # the policy exists to prevent. The feed derives `always` instead:
+            # its frames are about sessions nobody is looking at.
+            payload = await asyncio.to_thread(
+                notification_payload,
                 state["kind"],
                 session_dir=self.root / "sessions" / self.session_id,
+                token=token,
+                session_id=self.session_id,
                 session_name=session_name,
             )
-            self.publish(
-                "notification",
-                {
-                    "contract": NOTIFICATION_CONTRACT_VERSION,
-                    "kind": composed.kind,
-                    "title": composed.title,
-                    "status": composed.status,
-                    "body": composed.body,
-                    "body_is_snippet": composed.body_is_snippet,
-                    # Additive since the first draft of this frame; a renderer
-                    # that does not know the field simply shows the body, which
-                    # is already the right thing to do with it.
-                    "body_is_failure": composed.body_is_failure,
-                    "title_is_session_name": composed.title_is_session_name,
-                    # Keyed on the DURABLE completion token rather than on this
-                    # bridge's sequence: `acquire()` mints a new epoch and
-                    # resets `sequence` to 0 after a detached interval, so a
-                    # seq-keyed dedupe re-toasts the same completion on every
-                    # reconnect. The prefix is the frame's own kind (round 1,
-                    # n1): a token has exactly one kind, so it costs nothing,
-                    # and a store or dedupe-map dump no longer reads as an
-                    # error banner mislabelled `complete:`.
-                    "dedupe_key": f"{composed.kind}:{self.session_id}:{token}",
-                    "completion_token": token,
-                    "session_name": composed.title if composed.title_is_session_name else None,
-                    "focus_policy": "when_unfocused",
-                },
-                replay=False,
-            )
+            self.publish("notification", payload, replay=False)
         except Exception:  # noqa: BLE001 — chrome must not cost the attention poll
             logger.debug("notification compose failed for %s", self.session_id, exc_info=True)
 
