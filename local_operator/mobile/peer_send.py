@@ -391,7 +391,12 @@ async def _spool_quiet_note(
     )
     if not written:
         raise RuntimeError("could not spool the message for that session")
-    return "spooled (will be read when the session next opens)"
+    # The SAME two receipts the draining runtime answers with, imported rather
+    # than restated: a sender deciding whether to re-issue must read one
+    # vocabulary whether the target was cold or draining (design round 1, D4).
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    return SPOOL_RECEIPT_NOTE
 
 
 async def deliver_peer_message(

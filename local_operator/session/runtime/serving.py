@@ -43,6 +43,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
     from local_operator.secrets.session import SessionRegistration
+    from local_operator.session.errors import RuntimeRetiring
     from local_operator.session.runtime.publication import PublicationGate
 
 from local_operator.mobile.command_reservation import CommandReservations
@@ -1211,12 +1212,27 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
-    def _retiring_refusal(self) -> str:
-        """The refusal an admission gets once this runtime has committed to leaving."""
-        return (
-            f"the session runtime is retiring ({self._retiring_cause}); the message "
-            "was not admitted — send it again and the next engage runs the new build"
-        )
+    @staticmethod
+    def _retiring_refusal() -> RuntimeRetiring:
+        """The refusal an admission gets once this runtime has committed to leaving.
+
+        A TYPED admission category (``session.errors``), not a bare
+        ``RuntimeError``: the sentence is user-facing copy that must be rebuilt
+        on the far side of the transport like every other refusal, and the
+        client has to be able to BRANCH on it — the TUI's claim over the refused
+        message (it was never delivered, so its painted row is withdrawn and the
+        text handed back) hangs on recognising this exact case (design round 1,
+        D1; UX round 1, U1).
+
+        The wording lives with the category; this is only the accessor, so the
+        text cannot be composed in two places. The import is FUNCTION-LOCAL for
+        the reason this file imports ``session.errors`` that way everywhere
+        else: the module is tiny, the call is rare, and a module-scope import
+        here re-sorts the runtime-server import block around it.
+        """
+        from local_operator.session.errors import RuntimeRetiring
+
+        return RuntimeRetiring()
 
     async def _spool_for_successor(
         self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]
@@ -1254,13 +1270,18 @@ class ServingSessionHandle(SessionHandle):
         tells it to send again, which is the same contract every other admission
         gets once a runtime is leaving.
         """
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+        from local_operator.session.runtime.inbox import (
+            SPOOL_RECEIPT_NOTE,
+            SPOOL_RECEIPT_WAKE,
+            InboxLine,
+            append_inbox,
+        )
 
         session = getattr(self, "_session", None)
         transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
         directory = getattr(transcript, "directory", None)
         if directory is None:
-            raise RuntimeError(self._retiring_refusal())
+            raise self._retiring_refusal()
         try:
             written = await asyncio.to_thread(
                 append_inbox,
@@ -1277,11 +1298,9 @@ class ServingSessionHandle(SessionHandle):
             logger.warning("could not spool a peer message for the successor", exc_info=True)
             written = False
         if not written:
-            raise RuntimeError(self._retiring_refusal())
+            raise self._retiring_refusal()
         logger.info("session runtime: spooled a peer message for the successor")
-        if wake:
-            return "spooled (the next runtime to open the session runs it)"
-        return "spooled (will be read when the session next opens)"
+        return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
 
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
@@ -1681,7 +1700,7 @@ class ServingSessionHandle(SessionHandle):
             # later by the dispose that is already on its way, after the
             # provider has been paid for whatever it managed to stream.
             self._command_reservations.reject(command_id)
-            raise RuntimeError(self._retiring_refusal())
+            raise self._retiring_refusal()
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             self._command_reservations.reject(command_id)
             raise RuntimeError(
@@ -2086,7 +2105,7 @@ class ServingSessionHandle(SessionHandle):
                 return await self._spool_for_successor(
                     text, mode=mode, wake=wake, sender=sender or {}
                 )
-            raise RuntimeError(self._retiring_refusal())
+            raise self._retiring_refusal()
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}
         )
