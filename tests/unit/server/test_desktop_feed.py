@@ -568,7 +568,12 @@ def test_the_feed_acquires_no_bridge_and_spawns_no_runtime(tmp_path):
 
 
 def _live_threads() -> set[int]:
-    return {thread.ident for thread in threading.enumerate() if thread.is_alive()}
+    """Live thread ids. ``Thread.ident`` is ``int | None`` until it has run."""
+    return {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.is_alive() and thread.ident is not None
+    }
 
 
 def test_the_presence_lease_is_never_read_as_a_watch_lease(tmp_path):
