@@ -705,11 +705,65 @@ def test_only_the_hosting_that_names_itself_is_stripped(hosting: str) -> None:
 def test_an_unknown_id_still_takes_the_unknown_sentinel(model: str) -> None:
     """The 128k fallback must stay reachable rather than weakened into a lie.
 
-    The retry is bounded by a SHIPPED row, so an id nothing knows — however it
-    is spelled — keeps returning ``unknown_model_info`` and its -1 sentinels;
-    ``build_model_spec``'s 128k normalisation is the honest answer there.
+    The retry is bounded by the dispatch chain's own answer, so an id nothing
+    knows — however it is spelled — keeps returning ``unknown_model_info`` and
+    its -1 sentinels; ``build_model_spec``'s 128k normalisation is the honest
+    answer there.
     """
     assert get_model_info("deepseek", model) is unknown_model_info
+
+
+def test_the_openai_branchs_miss_shape_is_preserved() -> None:
+    """``openai`` indexes its map directly, so its miss is a ``KeyError``.
+
+    That shape is a contract: ``configure._registry_fallback`` catches it, and a
+    bare unshipped openai id must keep failing exactly as it did before the
+    qualified-id retry existed — while the QUALIFIED spelling of a shipped id
+    must resolve like the bare one rather than raising.
+    """
+    assert get_model_info("openai", "gpt-4o").id == "gpt-4o"
+    assert get_model_info("openai", "openai/gpt-4o").id == "gpt-4o"
+
+    with pytest.raises(KeyError):
+        get_model_info("openai", "no-such-openai-model")
+    with pytest.raises(KeyError):
+        get_model_info("openai", "openai/no-such-openai-model")
+
+
+def test_the_oauth_spelling_of_the_token_plan_hosting_resolves_too() -> None:
+    """R2: the retry must not be gated on a table that omits a supported alias.
+
+    ``alibaba-token-plan-oauth`` is answered by the dispatch chain under the
+    CANONICAL ``alibaba-token-plan`` rows, so the qualified spelling used to miss
+    while the bare id resolved — the same defect one supported hosting over.
+    Gating the retry on the chain's own answer (the unknown sentinel) rather than
+    on ``_STATIC_MODEL_MAPS`` is what closes it, without adding the alias key to
+    a map that is documented walk-safe for ``static_models``.
+    """
+    bare = get_model_info("alibaba-token-plan-oauth", "deepseek-v4-flash-0731")
+    qualified = get_model_info(
+        "alibaba-token-plan-oauth", "alibaba-token-plan-oauth/deepseek-v4-flash-0731"
+    )
+
+    assert bare.context_window == 1_000_000
+    assert bare is not unknown_model_info
+    assert qualified.context_window == bare.context_window
+    assert qualified.id == bare.id
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lmstudio"])
+def test_a_local_models_own_name_is_never_stripped(provider: str) -> None:
+    """A local runtime's ids are the SERVER's names, not a provider namespace.
+
+    Both Ollama and LM Studio will serve an owner-prefixed HuggingFace name, so
+    stripping a leading ``<hosting>/`` there would ask the endpoint for a
+    different model.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    spec = build_model_spec(provider, f"{provider}/hf.co/owner/model:Q4")
+
+    assert spec.model_id == f"{provider}/hf.co/owner/model:Q4"
 
 
 def test_the_anthropic_family_resolver_and_template_still_answer() -> None:
@@ -764,6 +818,37 @@ def test_the_spec_built_from_a_qualified_id_carries_the_real_window(
     assert qualified.context_window == bare.context_window
     assert bare.max_output_tokens == 393_216
     assert qualified.max_output_tokens == bare.max_output_tokens
+
+
+def test_the_spec_canonicalises_a_qualified_model_name_for_the_wire(
+    offline_resolution,
+) -> None:
+    """R1: the wire's model field must be the id the provider actually serves.
+
+    ``build_model_spec`` is the ONE boundary every path builds a spec through, so
+    it is where the ``provider/model`` selector spelling is canonicalised. The
+    body is rendered through the real client, because ``spec.model_id`` is not a
+    label — it is literally what the request carries. Measured live against
+    ``api.deepseek.com``: the bare spelling answers HTTP 200 and the qualified
+    one HTTP 400 ("The supported API model names are deepseek-flash,
+    deepseek-v4-pro, but you passed deepseek/deepseek-flash.").
+    """
+    from local_operator.harness.types import ChatRequest, Message, TextContent
+    from local_operator.providers.clients import OpenAICompatClient
+
+    client = OpenAICompatClient("https://api.deepseek.com")
+    seen = []
+    for model_id in ("deepseek-flash", "deepseek/deepseek-flash"):
+        spec = build_model_spec("deepseek", model_id)
+        body = client._build_body(
+            ChatRequest(
+                model=spec, messages=[Message(role="user", content=[TextContent(text="hi")])]
+            )
+        )
+        seen.append(body["model"])
+        assert spec.model_id == "deepseek-flash"
+
+    assert seen == ["deepseek-flash", "deepseek-flash"]
 
 
 @pytest.mark.parametrize("provider", ["radient", "openrouter"])
