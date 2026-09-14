@@ -354,6 +354,29 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # measurements and the fallback behaviour. CI is exempt from the CPU share (a
 # dedicated runner has no contention to protect against) and keeps every core.
 #
+# THE CAP WAS TITRATED ON 2026-09-13/14 and it had been too TIGHT: at this host's
+# chronic 4,500-5,500 MB of available memory the reserved floor was binding on
+# every run and resolved 3 workers on 14 cores that sat 0-2.5% busy. Interleaved
+# A/B waves of 3 concurrent instances of tests/unit/tui/test_slash_echo.py (a
+# boot-bound slice) at real fleet depth measured median per-instance wall time
+# 313.3 / 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s
+# at cap 8: 6 is 28-40% faster than 3 for ~12% more CPU, 8 is 9% better than 6
+# for 16% more. Hence the reserve (`min(3072, total/8)` -> `min(2048, total/18)`)
+# and the per-worker charge (600 -> 400 MB) moved, while the CPU share and the
+# 2..8 clamp did not, and the four documented CI runner shapes resolve exactly
+# as before. conftest.py carries the full table.
+#
+# The hook prints ONE stderr line naming the terms that produced the count, and
+# the size of the live suite fleet alongside them. That line is what turns "3
+# workers on a 14-core machine" into a diagnosis in one reading; silence it with
+# `PYTEST_QUIET_WORKER_CAP=1`. It never writes to stdout, which `-q` output is
+# parsed from, and the fleet size it reports is NOT used to compute the cap: a
+# divisor over both arms was implemented and measured on 2026-09-13 and rejected
+# (it floors every suite at 2 workers here and cost 45% wall time at identical
+# CPU) - conftest.py's module docstring carries the numbers so it is not
+# re-tried without them. The count itself is unchanged by the reporting; the
+# only behavioural change here is the titrated pair of constants above.
+#
 # `auto` must stay literal here: an explicit `-n N` in addopts would make both
 # the hook and the env var inert.
 #   PYTEST_XDIST_AUTO_NUM_WORKERS=N  per-session override, honoured unclamped.
