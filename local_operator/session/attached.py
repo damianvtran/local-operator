@@ -2118,6 +2118,25 @@ class AttachedSession:
         return self._engage_in_flight()
 
     @property
+    def cwd(self) -> str:
+        """Where this session works — and where its next runtime will start.
+
+        The SAME value :meth:`set_working_directory` moves, exposed because a
+        reader that must resolve a relative path or decide a no-op has to read
+        it, and a second resolution rule beside ``_cwd`` is how the two answers
+        drift. The desktop move route is that reader: ``/move ../sibling``
+        resolves against THIS value, and "you are already here" compares against
+        it, so both questions have one source.
+
+        A VIEWER'S value, and deliberately NOT ``DesktopSessionBridge.cwd``: the
+        bridge field is set once at construction and read once at ``acquire``,
+        so after a move it holds the directory the session LEFT until the move
+        route tells it otherwise — a reader that resolved against that copy
+        would answer relative paths from the wrong base.
+        """
+        return self._cwd
+
+    @property
     def engage_in_flight(self) -> bool:
         """Whether an engage is running that another caller would have to join.
 

@@ -376,6 +376,7 @@ readings.
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
+| POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move` |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
@@ -404,6 +405,38 @@ for a retry of the **same** operation. Answer `request_id` is instead the pendin
 gate's opaque ID, and answer `epoch` is the **runtime** epoch from frontend state,
 not the HTTP stream epoch. Approval booleans and question indices are strict.
 Answer bodies are never retained in the HTTP receipt journal or echoed back.
+
+### Moving a live session (`POST .../{id}/working-directory`)
+
+A live session's working directory can be changed with the route the terminal's
+`/move` is built on: one shared implementation, so both surfaces answer "where
+does this session work" the same way. `cwd` may be relative or carry `~`, and it
+resolves against the **session's** current directory (not the server process's),
+so `../sibling` means what the user sees. `outcome` is `cold` (nothing was
+running; the next engage spawns in the new directory), `rebound` (a runtime was
+retired and its successor is owed) or `unchanged` (the session was already
+there; nothing was written and nothing was retired). A refusal is a 409 carrying
+the session's own sentence — mid-turn, a runtime too old to be moved, work that
+arrived during the retire, an absent or unenterable directory.
+
+Two facts a client must not assume away. **Durability:** the new directory is
+written to this session's `desktop.json` marker and to the bridge's own `cwd`
+*before* any runtime is retired, so a server restart or a bridge eviction resumes
+the session where it was moved to; a refused move restores both, leaving all
+three copies agreeing. **Re-engage:** the successor is started by the retire
+frame on the bridge, not by this request — the runtime leaves by the `retiring`
+route (never `stopping`), which flips the viewer cold and engages a replacement
+easily, and the successor's own bind is what publishes the new `frontend.cwd`
+that settles the working-directory chip. A client therefore paints its own
+optimistic value and lets the stream confirm it, rather than treating this
+receipt as proof that the successor is up.
+
+The route is advertised as `features.session_move`. A renderer that does not see
+that key keeps its read-only working-directory chip; a typed `/move <path>` must
+report the same degradation rather than firing a request such a backend answers
+with a 404. `move` itself is NOT an owner command: a bare `/move` still answers a
+`native_action` with destination `session.move`, which asks the renderer to open
+its picker and claims nothing ran.
 
 `GET /v1/desktop/sessions/search` is the CLI's `/resume` search over HTTP: the
 same `local_operator.session.session_search` implementation the TUI picker and

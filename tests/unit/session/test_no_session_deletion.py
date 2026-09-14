@@ -302,6 +302,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "temp FILE -> config.yml",
     ),
+    # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
+    # the marker FILE beside the transcript, whose name is the fixed
+    # `DESKTOP_MARKER_NAME` basename joined onto the session directory the bridge
+    # already holds — and only in the case where the refused move found no marker
+    # there at all, so the unlink restores that absence. No caller input becomes
+    # part of the path, and the target is that one FILE, never a directory.
+    (
+        "local_operator/server/utils/desktop_sessions.py::move_session.restore_marker",
+        "<path>.unlink",
+        "the <sessions>/<id>/desktop.json FILE this call's own move created",
+    ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
         "os.replace",

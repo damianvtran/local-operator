@@ -635,13 +635,17 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
                 # A directory the scan established is a subagent/hidden session
                 # cannot carry a desktop marker, so the stat below asks a
                 # question whose answer is already known. ``desktop.json`` has
-                # exactly ONE writer — ``DesktopSessions.create`` in
-                # ``server/utils/desktop_sessions.py`` — which mints a fresh
-                # ``uuid4`` directory and never writes an origin marker into it;
-                # nothing anywhere adds a desktop marker to a directory that
-                # already exists. Skipping these is HALF the saving of the
-                # inode-qualified scan, because the hidden population is ~91% of
-                # the store and every one of them landed here.
+                # exactly ONE WRITER FUNCTION — ``write_desktop_marker`` in
+                # ``server/utils/desktop_sessions.py`` — reached by two CALLERS:
+                # ``DesktopSessions.create``, which mints a fresh ``uuid4``
+                # directory, and the move route, which rewrites the marker of an
+                # EXISTING user session. Neither ever adds a marker to a
+                # directory that is hidden or a child of one, which is the
+                # property this skip relies on: a move can only touch a
+                # directory the catalogue already shows as a session.
+                # Skipping these is HALF the saving of the inode-qualified scan,
+                # because the hidden population is ~91% of the store and every
+                # one of them landed here.
                 if entry.name in hidden:
                     continue
                 try:

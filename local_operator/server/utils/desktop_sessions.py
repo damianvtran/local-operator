@@ -13,6 +13,7 @@ import base64
 import contextlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -21,9 +22,10 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from anyio import CancelScope
+from fastapi import HTTPException
 
 from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
@@ -34,6 +36,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
+from local_operator.server.models.desktop_sessions import MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
@@ -51,6 +54,19 @@ from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     Transcript,
     read_transcript_page,
+)
+
+# The move shares the TUI's own `/move` machinery rather than a second resolver:
+# `expand_path` resolves a relative target against the SESSION's directory and
+# keeps symlinks, which is the rule a move must follow (`resolve_working_directory`
+# below deliberately resolves against THIS process's cwd, which is right for
+# `sessions.create`, whose session does not exist yet, and wrong for a move).
+# The module is widget-free by design, so a non-Textual frontend can reuse it.
+from local_operator.tui.move_targets import (
+    expand_path,
+    format_label,
+    remember_recent,
+    validate_target,
 )
 
 logger = logging.getLogger(__name__)
@@ -287,6 +303,165 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     return spec
 
 
+def write_desktop_marker(
+    path: Path, directory: Path, *, model: dict[str, Any] | None = None
+) -> None:
+    """Write the desktop draft marker in the session directory ``path``.
+
+    ONE WRITER FUNCTION, TWO CALLERS, and that is why it exists as a function.
+    ``catalog.py`` justifies skipping a stat in its scan with "``desktop.json``
+    has exactly ONE writer — ``DesktopSessions.create``"; a move is the second
+    CALLER, and what keeps that scan's saving sound is that no other module ever
+    writes this file. Factoring the write out keeps the claim true in the form
+    the scan can still benefit from — and the comment there now states it that
+    way, because a stale "exactly one writer" is a lie the next reader believes.
+
+    Synchronous, because both callers already hop to a worker thread for it
+    (``asyncio.to_thread``): the desktop route is on the event loop and this is
+    a filesystem write. The bytes are the contract ``locate()`` reads back
+    (``{"version": 1, "cwd": …}``) and 0600 is its permission — a directory
+    name is the user's data like any other.
+
+    ``model`` is the DRAFT's chosen model (:data:`DRAFT_MODEL_KEY`), written only
+    when the caller has one. A move has no opinion about the model and passes the
+    one it read back, because ``cwd`` is the only field it is changing: a writer
+    that reproduced the whole document from its own arguments would silently drop
+    the choice the window made, which is the failure the additive-key comment on
+    :data:`DRAFT_MODEL_KEY` exists to prevent.
+    """
+    marker = path / DESKTOP_MARKER_NAME
+    payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
+    if model is not None:
+        payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+    marker.write_text(json.dumps(payload))
+    marker.chmod(0o600)
+
+
+async def move_session(bridge: DesktopSessionBridge, requested: str) -> MoveReceipt:
+    """Point a desktop session at ``requested``; own every side effect of doing so.
+
+    Validation, durability and the retire are ONE ordering, which is why this is
+    a function rather than three calls in the route. The order is the rule
+    :meth:`AttachedSession.set_working_directory` already states for ``_cwd``
+    ("the field is set FIRST, before joining… so the successor cannot be engaged
+    before the field it reads is set") applied to the two other copies of that
+    field: the session's durable marker and the bridge's own ``cwd``. A
+    successor spawned mid-move reads the marker when this bridge has been
+    evicted and the bridge field when it has not, so both must be set before the
+    retire makes either reachable.
+
+    The three copies are kept AGREEING, and the previous bytes are what makes
+    that possible: a refused retire (a turn that arrived during it, a runtime
+    too old to move, a lost socket) restores the marker and the bridge field, so
+    a failure leaves the session working where it did rather than half moved.
+    """
+    remote = bridge.remote
+    assert remote is not None, "a move runs against an acquired bridge"
+    # The VIEWER's live value, not ``bridge.cwd``: the bridge field is written by
+    # THIS function and read at `acquire()`, so after a first move it is the
+    # older of the two and a relative path resolved from it would name the wrong
+    # sibling.
+    previous = remote.cwd
+    try:
+        directory = validate_target(expand_path(requested, cwd=previous))
+    except OSError as error:
+        # A path on an unmounted volume, or a symlink loop. The TUI answers this
+        # class of case in the same words (``_apply_move``), and it is NOT left to
+        # the route's ``errors()`` ladder: that ladder has no OSError clause, so
+        # an unmounted volume would reach the user as a 500.
+        raise HTTPException(409, f"cannot move to {requested}: {error}") from None
+
+    resolved = str(directory)
+    label = format_label(directory)
+    if os.path.normpath(resolved) == os.path.normpath(previous):
+        # NOTHING is written and nothing is retired. This is the TUI's "already in
+        # ~/x", and it is also what makes a retried move idempotent: the receipt
+        # journal admits a second POST with the same request id, and a move that
+        # had already landed must not retire the runtime a second time.
+        # ``will_wait`` is False rather than sampled: no transition is about to
+        # happen, so there is no wait for it to have been a hint about.
+        return MoveReceipt(cwd=resolved, label=label, outcome="unchanged", will_wait=False)
+
+    # Sampled BEFORE the call, exactly as ``_apply_move`` does, because after it
+    # the answer is about a transition that has already happened — and this is a
+    # HINT for an operator reading a receipt, never a gate.
+    will_wait = remote.move_will_wait()
+
+    # DURABILITY FIRST, the marker before the bridge field, and both before the
+    # retire. `locate()` prefers the marker over the canonical checkpoint when
+    # this bridge has been evicted or the HTTP server restarted; the bridge field
+    # is what a re-``acquire()`` on THIS bridge passes to ``cold(cwd=…)``.
+    marker_dir = bridge.root / "sessions" / bridge.session_id
+
+    def read_marker() -> bytes | None:
+        try:
+            return (marker_dir / DESKTOP_MARKER_NAME).read_bytes()
+        except OSError:
+            # A session old enough to predate the marker, or an unreadable
+            # directory. `None` is the honest "there was nothing there", and the
+            # rollback below then removes what this call created.
+            return None
+
+    def restore_marker(previous_bytes: bytes | None) -> None:
+        marker = marker_dir / DESKTOP_MARKER_NAME
+        try:
+            if previous_bytes is None:
+                marker.unlink(missing_ok=True)
+                return
+            marker.write_bytes(previous_bytes)
+            marker.chmod(0o600)
+        except OSError:
+            # A rollback that cannot run is worth a line in the log and NOT a
+            # second exception: the refusal that caused it is what the user has
+            # to see, and raising here would replace that sentence with a
+            # filesystem error. The consequence is named because it is real —
+            # the durable copy now says where the session is NOT, and only a
+            # successful move will fix it.
+            logger.warning(
+                "could not restore the desktop marker for %s; a later acquire may "
+                "resume in the refused directory",
+                bridge.session_id,
+                exc_info=True,
+            )
+
+    # The draft's stored model is CARRIED ACROSS, never re-derived: a move
+    # changes ``cwd`` and nothing else, and the model key is the window's choice
+    # for a conversation that has not run yet (``draft_birth_selection``). Read
+    # through the same helpers every other marker reader uses, so a marker this
+    # route could not parse degrades here exactly as it does there.
+    previous_model = await asyncio.to_thread(
+        lambda: stored_draft_model(read_desktop_marker(marker_dir))
+    )
+    previous_marker = await asyncio.to_thread(read_marker)
+    await asyncio.to_thread(write_desktop_marker, marker_dir, directory, model=previous_model)
+    bridge.cwd = resolved
+    try:
+        # The receipt's ``outcome`` IS this call's return vocabulary: the facade
+        # documents exactly ``"cold"`` and ``"rebound"`` and nothing else, and
+        # ``MoveReceipt`` spells the same two words plus the route-level
+        # ``"unchanged"`` above. The cast narrows a ``str`` the protocol cannot
+        # express (``RemoteSession.set_working_directory -> str``) to the Literal
+        # the wire model owns, rather than the model being widened to ``str`` and
+        # losing the fact a renderer switches on.
+        outcome = cast(Literal["cold", "rebound"], await remote.set_working_directory(resolved))
+    except BaseException:
+        # BaseException, not Exception: a CANCELLED move is the same hazard as a
+        # refused one — the retire may already be in flight while this call's
+        # caller went away — and `set_working_directory` rolls its own field back
+        # on the same terms (review MINOR-2 there). Restoring the OTHER two copies
+        # is this function's half of that invariant.
+        await asyncio.to_thread(restore_marker, previous_marker)
+        bridge.cwd = previous
+        raise
+
+    # Best effort by contract, and off the loop because it is a read, a write and
+    # an atomic replace. Sharing the recents list with the TUI is a bonus of
+    # sharing the file, not the point of writing it here.
+    await asyncio.to_thread(remember_recent, bridge.root, directory)
+
+    return MoveReceipt(cwd=resolved, label=label, outcome=outcome, will_wait=will_wait)
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -386,6 +561,33 @@ class DesktopSessionBridge:
                     self.sequence = 0
                     self.replay.clear()
                     self.replay_bytes = 0
+                    # The engage's refresh hook, installed HERE because this is the only
+                    # seam that owns this facade for its whole life.
+                    #
+                    # WHY IT IS NEEDED AT ALL: `retiring` means "a successor is owed,
+                    # engage one" — the frame a move ends with, and a client-side build
+                    # refresh too — and the facade answers it with `_go_cold(refresh=True)`,
+                    # which fires this callback. The TUI installs one
+                    # (`_on_runtime_refreshed`); without one the desktop viewer simply sat
+                    # cold until the user's next send engaged, so a moved session's chip
+                    # stayed on the OLD directory with nothing to settle it. (A
+                    # WHOLE-DAEMON retirement is a different case with its own mechanism,
+                    # `server/retire.py`: the callback still fires there and declines in
+                    # `_schedule_warm`, because the daemon leaving needs no successor
+                    # spawned inside it.) Nothing else can take this job:
+                    # `attach_existing()` only adopts an EXISTING owner record (there is
+                    # none after a retire), and warm()/prompt()/command only re-engage when
+                    # the user next acts.
+                    #
+                    # WHY THE CALLBACK AND NOT "warm() after the move route returns": at
+                    # the moment `set_working_directory` returns, the outgoing client is
+                    # usually STILL connected (`retire_now` is acked before the EOF), so an
+                    # engage issued there samples `is_cold` as False and returns without
+                    # doing anything — silently. This callback runs on the exact frame
+                    # that flips the viewer cold, which is the only moment that is not a
+                    # race. It fires from `_on_disconnected` inside the client's pump, i.e.
+                    # on the event loop, so `_schedule_warm` may create its task directly.
+                    remote.set_refresh_callback(self._on_runtime_retired)
                     self.unsubscribers = [
                         remote.subscribe(self._event),
                         remote.subscribe_frontend(self._frontend).unsubscribe,
@@ -1297,6 +1499,41 @@ class DesktopSessionBridge:
         assert remote is not None
         if not remote.is_cold:
             return "warm"
+        self._schedule_warm()
+        return "warming"
+
+    def _schedule_warm(self) -> None:
+        """Start this session's speculative engage, unless one is already owed.
+
+        THE BODY OF :meth:`warm`, factored out for its SECOND caller: the retire
+        frame (:meth:`_on_runtime_retired`). Both callers need exactly the same
+        guards and the same one-task discipline — a copy of them beside
+        ``warm()`` is how two answers to "does this session need a runtime"
+        drift apart. A method of its own rather than a flag on ``warm()``
+        because a retire has no response to compose and no state to report: its
+        caller is a frame handler, not a route.
+
+        Returns nothing, deliberately. What an engage becomes is not knowable
+        here (that is `warm()`'s own docstring), and the retire path has nobody
+        to tell either way.
+
+        IT ASKS :meth:`assert_admitting` ITSELF rather than relying on its
+        callers, because one of them is a frame handler with no refusal to
+        compose: a daemon latched for retirement must not start a session
+        runtime from EITHER caller (``warm``'s own docstring states why). The
+        ``DaemonRetiring`` that raises is each caller's to handle — the route
+        answers its named 503, the lease loop ends its intent, and
+        :meth:`_on_runtime_retired` declines, because a daemon being replaced
+        owes this viewer no successor.
+        """
+        self.assert_admitting()
+        remote = self.remote
+        # ``None`` only while detached. `_detach()` clears the facade and cancels
+        # any task this could have started, so a frame arriving after it must not
+        # re-arm a spawn with no viewer left to release it — the leak the
+        # ``warm_task`` field is spent to prevent.
+        if remote is None or not remote.is_cold:
+            return
         # TWO conditions, because they answer different questions and the
         # second is not implied by the first. `engage_in_flight` samples the
         # facade's bind lock; this one asks whether THIS BRIDGE already owns a
@@ -1310,9 +1547,50 @@ class DesktopSessionBridge:
         # warm be retried, which matters because a failed engage leaves the
         # viewer cold and the next keystroke should be free to try again.
         if remote.engage_in_flight or (self.warm_task is not None and not self.warm_task.done()):
-            return "warming"
+            return
         self.warm_task = asyncio.create_task(remote.warm_runtime())
-        return "warming"
+
+    def _on_runtime_retired(self) -> None:
+        """The runtime retired itself; engage its successor now.
+
+        Reached from ``AttachedSession._go_cold(refresh=True)``, i.e. from the
+        ``retiring`` frame, which the runtime sends with THE SAME MEANING for a
+        move and for a client-side build refresh: "a successor is owed; engage
+        one". The TUI has answered it since the build-refresh work landed
+        (``_on_runtime_refreshed``, installed at the same seam); the desktop had
+        no callback installed at all, so a retired runtime left the viewer cold
+        and the chip showing the OLD directory until the user's next send
+        happened to engage — the gap this feature's own move exposed.
+
+        A MOVE IS THE CASE THIS EXISTS FOR, AND IT IS THE ONE NOBODY ELSE
+        COVERS. A whole-daemon retirement (``server/retire.py``, a build update)
+        has its own mechanism and this callback deliberately declines during it:
+        ``_schedule_warm`` asks ``assert_admitting`` and the daemon being
+        replaced needs no successor spawned inside it. A session runtime retired
+        by the VIEWER — which is exactly what a move is — has nothing else: the
+        daemon is healthy, nobody is going to replace it, and the successor is
+        owed by this frame alone.
+
+        EAGER rather than lazy, for the reason the TUI is: the next prompt would
+        engage anyway (``_ensure_bound``), but nothing on the desktop surface
+        repaints the chip in the meantime, and the successor's own bind is what
+        publishes the new ``frontend.cwd``. Deferring the engage defers the one
+        event that settles the chip.
+
+        Runs ON THE EVENT LOOP, which is what lets it create a task directly:
+        it is called by the attach client's pump (`_on_disconnected` → this),
+        an async method on the loop thread. Cancellation stays correct because
+        the task it may create is the bridge's own ``warm_task``, which
+        ``_detach()`` cancels.
+        """
+        try:
+            self._schedule_warm()
+        except DaemonRetiring:
+            # The DAEMON is going, not just this runtime: it latched for
+            # retirement and a replacement is on its way. Engaging here would
+            # spawn a runtime whose viewer follows it onto a dead address, and
+            # the app reconnects to whatever replaces the daemon instead.
+            logger.debug("not re-engaging %s; the daemon is retiring", self.session_id)
 
     async def _expire_watches(self) -> None:
         while True:
@@ -1918,12 +2196,11 @@ class DesktopSessions:
             # ``cwd`` by key. A stored pair is what makes the choice survive the
             # window that chose it — the record outlives the request, and the
             # first turn is born from it (``draft_birth_selection``).
-            marker = path / DESKTOP_MARKER_NAME
-            payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
-            if model is not None:
-                payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
-            marker.write_text(json.dumps(payload))
-            marker.chmod(0o600)
+            #
+            # Through the shared writer, which carries the model key too, so the
+            # MOVE route's second call site and this one cannot disagree about
+            # the bytes, the mode or the fields.
+            write_desktop_marker(path, directory, model=model)
 
         await asyncio.to_thread(persist)
         return session_id

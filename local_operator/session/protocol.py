@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 116 public members and a POSITIVE
+    than stylistic. This protocol carries 117 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -600,8 +600,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     session code memory joined the session contract with ``variables_op``, 115
     once the retention predicate's clone-free ``has_running_job`` joined the
     per-frame reads, 116 once ``mcp_credentials_op`` joined
-    ``ViewerSessionProtocol``), so recompute it rather than adjusting it by the
-    size of your own change.
+    ``ViewerSessionProtocol``, 117 once a move needed the viewer's own ``cwd``),
+    so recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -1119,6 +1119,17 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def move_will_wait(self) -> bool:
         """Whether a move would block on an in-flight turn."""
+        ...
+
+    @property
+    def cwd(self) -> str:
+        """Where this session works, i.e. what :meth:`set_working_directory` moves.
+
+        Declared for the same reason as :attr:`engage_in_flight` below: the move
+        route resolves a relative target against this value and compares against
+        it to decide a no-op, so a rename on the facade must be a type error
+        rather than a silently stale base for every path a user types.
+        """
         ...
 
     async def warm_runtime(self) -> None:
