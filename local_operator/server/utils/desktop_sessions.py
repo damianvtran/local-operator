@@ -38,6 +38,7 @@ from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import load_catalog
+from local_operator.session.cold_model import resolve_birth_effort
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
@@ -199,48 +200,6 @@ def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] |
     }
 
 
-def birth_effort_for(spec: ModelSpec, chosen: str | None, root: Path) -> str | None:
-    """The level a birth on ``chosen`` will RUN at, from a spec and the machine.
-
-    TWO callers need this answer and must not answer it twice: the desktop plane,
-    which seeds a real session out of its marker (:func:`draft_birth_selection`),
-    and the DRAFT PREVIEW, which reports the readings the first turn will get
-    before any session exists. A second policy would show the pane's effort chip
-    flicker at ``finishDraft`` — the same defect class ``session.cold_model``
-    exists to remove.
-
-    Three cases, in order:
-
-    * a level was CHOSEN: clamped against this spec's ladder (``resolve_effort_in``)
-      rather than refused. The marker is a durable record and the catalogue moves
-      under it, so a level the route can no longer express must land on the nearest
-      rung it can rather than reach the child as one it would 400 on; the route
-      refuses such a level at the moment it is CHOSEN (422).
-    * no level was chosen and the machine CONFIGURES one (``model_effort``): that
-      level, clamped into the picked model's ladder — i.e. exactly what a launch
-      that named no model resolves for itself, so picking a model alone never
-      silently replaces the configured level with the model's seeded rung.
-    * no level was chosen and the config expresses no opinion: the spec's own
-      seeded rung, which is what the child would construct for itself anyway, and
-      which the caller must therefore carry explicitly — the birth sample travels
-      the owner's model RPC as well as the spawn environment, and that RPC rebuilds
-      the spec from the model's metadata, reseating the conversation on the seed.
-      Carrying the seed is what makes it a no-op instead of a reseat.
-
-    Every return is a rung THIS spec's ladder accepts, or ``None`` (nothing to
-    send) — the membership contract ``resolve_effort_in`` documents.
-    """
-    from local_operator.config import ConfigManager
-    from local_operator.model.effort import configured_effort, resolve_effort_in
-
-    if chosen:
-        return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, chosen)
-    configured = configured_effort(ConfigManager(config_dir=root))
-    if configured:
-        return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, configured)
-    return spec.reasoning_effort
-
-
 def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     """The selection a session was CREATED on, or ``None`` to use today's answer.
 
@@ -304,9 +263,13 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     # The level the first turn will RUN at: the stored choice clipped to today's
     # ladder, or — for a marker that stored ``null`` ("this model, no level") — the
     # machine's configured level, and the model's own seed only when the config has
-    # no opinion. See :func:`birth_effort_for`, which the preview route calls too so
-    # the pane and the first cold frame cannot disagree.
-    resolved = birth_effort_for(spec, choice["reasoning_effort"], root)
+    # no opinion. See :func:`session.cold_model.resolve_birth_effort` — the ONE
+    # resolver, which the preview answers through the same synthesis, so the pane and
+    # the first cold frame cannot disagree.
+    #
+    # ``spec`` still carries its SEED here (it is ``build_model_spec``'s result),
+    # which that function's third case requires.
+    resolved = resolve_birth_effort(spec, choice["reasoning_effort"], root)
     if resolved != spec.reasoning_effort:
         spec = spec.model_copy(update={"reasoning_effort": resolved})
     return spec
