@@ -288,27 +288,21 @@ def _hosting_qualified_bare_id(hosting: str, model: str) -> Optional[str]:
     working resolve: ``deepseek/deepseek-flash`` under ``openrouter`` would come
     back wearing DeepSeek's direct-route window and prices.
 
+    Local runtimes are excluded outright. Their ids are the SERVER'S own names
+    rather than a namespace — Ollama and LM Studio both serve owner-prefixed
+    HuggingFace names — so a leading segment there is part of the model and
+    stripping it would send a different model name to the endpoint.
+
     The trailing id must be non-empty: a bare ``"deepseek/"`` is a malformed id,
     not a qualified one, and it must fall through to the unknown sentinel rather
     than resolving to something by accident.
     """
+    if hosting in LOCAL_PROVIDER_IDS:
+        return None
     prefix = f"{hosting}/"
     if model.startswith(prefix) and len(model) > len(prefix):
         return model[len(prefix) :]
     return None
-
-
-def _has_shipped_row(hosting: str, model: str) -> bool:
-    """Whether this module SHIPS a row for exactly ``(hosting, model)``.
-
-    Read off :data:`_STATIC_MODEL_MAPS` — the table :func:`static_models`
-    exposes — instead of calling the lookup: the aggregators and local runtimes
-    answer EVERY id with a placeholder (they ship no rows by design, the live
-    listing is authoritative), and an answer that exists is not evidence of a
-    row. This is the predicate that bounds the qualified-id retry in
-    :func:`get_model_info` to resolutions that do not already work.
-    """
-    return model in _STATIC_MODEL_MAPS.get(hosting, {})
 
 
 def get_model_info(hosting: str, model: str) -> ModelInfo:
@@ -335,10 +329,18 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     vendor-namespaced ids untouched.
 
     Order: the exact spelling first, then ONE retry with a leading ``<hosting>/``
-    removed, then the provider's own fallback. The retry runs only where the
-    exact spelling found no SHIPPED row (see :func:`_has_shipped_row`), so every
-    resolution that succeeds today — including an aggregator's placeholder and a
-    local runtime's own row — is returned unchanged.
+    removed, then the exact spelling's own answer. The retry is gated on the
+    DISPATCH CHAIN'S OWN ANSWER — it runs only where the exact spelling returned
+    the unknown sentinel (or, on the ``openai`` branch, raised its ``KeyError``)
+    — deliberately rather than on a second table of hostings. A table is a second
+    source of truth that can omit a spelling the chain answers for: it already
+    did, for ``alibaba-token-plan-oauth``, whose rows live under the canonical
+    ``alibaba-token-plan`` id and which both the chain and ``static_models``
+    answer for under either spelling. Gating on the answer keeps the two in step
+    by construction, and it preserves every resolution that succeeds today for
+    free: the aggregators and local runtimes never return the sentinel (they
+    answer every id with a placeholder by design), so their answers are returned
+    unchanged.
 
     Args:
         hosting (str): The hosting provider name (e.g., "openai", "google").
@@ -353,15 +355,36 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
         ValueError: If the hosting provider is unsupported.
     """
     bare_id = _hosting_qualified_bare_id(hosting, model)
-    if bare_id is None or _has_shipped_row(hosting, model):
+    info = _dispatch_or_none(hosting, model)
+    if info is None or info is unknown_model_info:
+        # No row for this spelling — the two shapes a miss arrives in. Retry
+        # ONCE with the leading `<hosting>/` removed when there is one, and only
+        # a RETRY THAT ANSWERS replaces the result: a retry that also comes back
+        # unknown leaves the exact spelling's own answer standing, so the honest
+        # sentinel is never traded for a different unknown.
+        if bare_id is not None:
+            retried = _dispatch_or_none(hosting, bare_id)
+            if retried is not None:
+                return retried
+    if info is not None:
+        return info
+    # The `openai` branch indexes its map directly, so an unshipped id arrives as
+    # a KeyError; `configure._registry_fallback` catches it today. Re-raised
+    # rather than converted into an answer, so a bare unshipped openai id keeps
+    # failing exactly as it did.
+    raise KeyError(model)
+
+
+def _dispatch_or_none(hosting: str, model: str) -> Optional[ModelInfo]:
+    """The dispatch chain's answer, with the ``openai`` branch's miss as ``None``.
+
+    One place that knows a miss can arrive in two shapes, so the retry above and
+    the re-raise below cannot disagree about which one they are looking at.
+    """
+    try:
         return _dispatch_model_info(hosting, model)
-    if _has_shipped_row(hosting, bare_id):
-        return _dispatch_model_info(hosting, bare_id)
-    # Neither spelling is a row we ship (or the hosting has no table at all, as
-    # the aggregators and local runtimes do not): the exact spelling's own
-    # answer stands, so `unknown_model_info` for a genuinely unknown id and an
-    # aggregator's placeholder are both exactly what they were before.
-    return _dispatch_model_info(hosting, model)
+    except KeyError:
+        return None
 
 
 def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
@@ -372,7 +395,8 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
     branch behaves exactly as it did when it was :func:`get_model_info`'s whole
     body. ``openai`` is the one branch that indexes its map directly, so an
     unshipped id still arrives as a ``KeyError`` — ``configure._registry_fallback``
-    catches that today, and the retry above must not turn it into an answer.
+    catches that today, and :func:`get_model_info` re-raises it rather than
+    turning it into an answer.
     """
     model_info = unknown_model_info
 
