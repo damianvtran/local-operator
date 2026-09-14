@@ -43,9 +43,43 @@ refresh timers. Compare sustained baseline/fixed runs on the same host, not
 idle-host extrapolations. Synthetic job clock fields can change byte widths;
 report delta byte ranges and identical roster/retention sizes alongside results.
 
-The production fix reuses follower rows, narrows retention reads, and coalesces
-per-source callbacks. It does **not** move ingestion/reduction off Textual's loop
-or bound full-detail subscriptions by visibility.
+The production fix reuses follower rows, narrows retention reads, coalesces
+per-source callbacks, and stops the producer shipping a whole retained window as
+a "replacement" when the owner evicted at the cap. It does **not** move
+ingestion/reduction off Textual's loop or bound full-detail subscriptions by
+visibility, and the wire measurements below are why the latter is not needed.
+
+## The measured pair
+
+Baseline `origin/main` (`8853f0fbf`, `/tmp/lo-tui-base-b44`) against this branch,
+both on the capped workload, 6 children × 500 retained rows per attached session,
+60 injected characters, 100 delta rounds per session at the producer's own 50 ms
+cadence, continuous redraw. The run's `provenance.modules` asserts which tree each
+cell resolved from:
+
+| N | before FPS | after FPS | before p95 key→paint | after p95 | delta bytes | CPU ms/delta | replacement jobs/frame |
+|---|---|---|---|---|---|---|---|
+| 1 | 6.53 | 56.42 | 297 ms | 35 ms | 681,253 → 6,468 | 50.79 → 1.52 | 6 → 0 |
+| 6 | 1.28 | 56.23 | 1,724 ms | 24 ms | 681,253 → 6,468 | 47.31 → 0.66 | 6 → 0 |
+| 12 | 0.59 | 55.10 | 3,466 ms | 19 ms | 681,253 → 6,468 | 49.28 → 0.62 | 6 → 0 |
+
+The before column is the defect: at the cap the producer marked every child a
+"replacement" and shipped all 500 rows per job per frame, so throughput FELL as
+sources were added and the loop spent ~50 ms of CPU per delta before painting.
+After the fix a frame carries the one appended row per child and the achieved rate
+is flat in N. `window_s` was 6.4/28.8/60.5 s before against 5.1/5.1/5.4 s after:
+the unoptimised cells needed the round budget's whole tail to deliver 100 rounds.
+
+What this pair is NOT: the parked-source lane. These cells deliver every job's
+detail on every delta, which is the all-watched case; on a real connection the
+owner drops unwatched trajectories first. Measured on the wire, a parked capped
+rotation costs ~3,785 B/delta (constant, min = max) and ~0.10 ms of owner relay
+per delta, so twelve parked sources cost ~1.2 ms of loop CPU per wave — under 1 %
+of a loop. Watching all six children instead costs ~207,043 B and ~6.4 ms per
+delta, i.e. ~2.5 MB and ~77 ms per wave at twelve sources. That is why this
+change fixes the producer's window rather than adding a summary stream: the parked
+lane was never the problem, and a second subscription would have duplicated a
+projection the transport already performs.
 
 ## Historical natural-demand baseline (not capacity FPS)
 
