@@ -59,31 +59,44 @@ body {
 
 /* A card, by the system's Card/panel reading: 10px radius, ONE hairline, and
  * NO shadow. Elevation is the --surface-on---paper step plus the hairline. */
-/* Bounded to the viewport, and a column, so a tall card SCROLLS ITS BODY
- * instead of running off the bottom of the popup.
+/* NOTHING here may read `100vh`, and that is load-bearing rather than stylistic.
  *
- * Chrome applies the browser's default zoom to extension popups and caps the
- * popup at 600 device px, so zoom shrinks the CSS viewport (600 -> 480 at 125%,
- * 400 at 150%). With the card free-flowing, the tallest state lost its last
- * element off-screen: the `unresponsive` card's manual chrome://extensions
- * fallback — by this card's own reasoning the CERTAIN remedy, the one that
- * worked on 2026-09-11 when a reload did not — was clipped 63px at 125% and
- * 143px at 150% (design D2). The whole page scrolled, so the header and footer
- * left too and nothing on screen indicated more content below.
+ * The card used to carry `max-height: calc(100vh - 20px)` so that a card taller
+ * than the popup's cap would scroll its BODY with the header pinned (design D2).
+ * In a popup that is CIRCULAR: Chrome sizes the popup WINDOW to the document's
+ * content, so `100vh` is the height of the very thing the clamp decides. Driven
+ * through the real toolbar path (chrome.action.openPopup(), no emulated
+ * viewport, Chrome 153) the loop settles at the collapsed end, because Chrome
+ * creates the window at an undersized height: the clamp then reads that height,
+ * the card is clamped to 5px, the document is 25px tall, and the window stays
+ * there. EVERY card rendered as a 300x25 dark bar — the 2px --tone rule with the
+ * header band clipped to a sliver — unpaired, disconnected and paired alike.
  *
- * Scrolling the BODY rather than the page keeps the wordmark and the Settings
- * link pinned, which is what makes the scroll legible as "there is more card"
- * instead of "the popup is cut off". `min-height: 0` on the body is load-bearing
- * — a flex child's default `min-height: auto` refuses to shrink below its
- * content, so without it the body never scrolls and the overflow is unchanged. */
+ * An explicit viewport cannot show this: scripts/popup-states-shot.mjs opens
+ * popup.html as a page at 300x600, so `100vh` there is a number the harness
+ * chose, and every card measured there was 258-531px, i.e. under the clamp
+ * anyway. The capture was honest about what it set and blind to what a popup's
+ * `100vh` actually is.
+ *
+ * The property D2 wanted is carried by `position: sticky` on the header and
+ * footer instead (see .head/.foot). Chrome caps a popup at 600 DEVICE px and
+ * scrolls the DOCUMENT past that, and a sticky header stays on screen through
+ * that scroll: measured on the wedged consent card, header y=0 at scrollTop=88
+ * where it left the viewport at y=-75 without it. Sticky is also the only form
+ * of this that survives zoom, where the cap is 600 device px and the CSS
+ * viewport is therefore 600/zoom — a length the stylesheet cannot know.
+ *
+ * `overflow: clip`, not `hidden`: both clip children to the 10px radius, but
+ * `hidden` makes the card a scroll container, and a sticky child of a scroll
+ * container sticks to THAT container — which never scrolls — so the header
+ * would stop being sticky exactly in the capped case that needs it. */
 .card {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 20px);
   background: var(--surface);
   border: 1px solid var(--hairline-strong);
   border-radius: 10px;
-  overflow: hidden;
+  overflow: clip;
   margin: 10px;
 }
 /* The one spend of colour: a 2px status rule along the card's top edge, read as
@@ -97,7 +110,11 @@ body {
   background: var(--tone, var(--hairline-strong));
 }
 
-/* Header band on --sunken with a bottom hairline — the callback page's .head. */
+/* Header band on --sunken with a bottom hairline — the callback page's .head.
+ * Sticky so it survives the document scroll of a capped popup (see .card).
+ * `top: -1px` cancels the card's own 1px border, so the band ends up flush with
+ * the viewport's top edge instead of leaving a hairline of card above it. The
+ * background is opaque, so scrolled content cannot show through the band. */
 .head {
   display: flex;
   align-items: center;
@@ -105,6 +122,9 @@ body {
   padding: 12px 16px;
   border-bottom: 1px solid var(--hairline);
   background: var(--sunken);
+  position: sticky;
+  top: -1px;
+  z-index: 1;
 }
 /* The shared vector mark, stroked in currentColor pinned to --ink. Never
  * tinted by state: the software's identity must not look conditional. */
@@ -127,10 +147,6 @@ body {
 
 .body {
   padding: 18px 16px 16px;
-  /* See .card: the scrolling region. `min-height: 0` overrides the flex
-   * default that would otherwise refuse to shrink below the content height. */
-  min-height: 0;
-  overflow-y: auto;
 }
 .head,
 .foot {
@@ -643,10 +659,16 @@ input:disabled {
   text-wrap: pretty;
 }
 
-/* Footer link in the muted-dim register, above a hairline. */
+/* Footer link in the muted-dim register, above a hairline. Sticky for the same
+ * reason as the header, and on a --surface ground so the card's content cannot
+ * show through it once it is pinned over that content. */
 .foot {
   padding: 10px 16px;
   border-top: 1px solid var(--hairline);
+  background: var(--surface);
+  position: sticky;
+  bottom: -1px;
+  z-index: 1;
 }
 .foot a {
   font-size: 12px;

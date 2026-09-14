@@ -87,17 +87,22 @@ function installDomStub() {
         (node._handlers[event] ||= []).push(handler);
       },
       // Records HOW focus was called. `preventScroll` is the whole D7/U8 fix:
-      // focusing inside a scroll container scrolls it, which put the title and
-      // the danger banner above the fold at zoom. A stub that ignores the
-      // options object cannot tell the fix from its absence.
+      // focusing an element below the fold scrolls its scroll container to
+      // reveal it, which put the title and the danger banner above the fold at
+      // zoom. A stub that ignores the options object cannot tell the fix from
+      // its absence.
       focus: (options) => {
         node._focusCalls.push(options ?? null);
         globalThis.document.activeElement = node;
         // The real container scrolls to reveal the focused element unless the
-        // caller opts out — modelled so the assertion is on the OUTCOME
-        // (where the card sits) rather than on the argument alone.
-        const body = nodes.get("__body");
-        if (body && !(options && options.preventScroll)) body.scrollTop = body._maxScroll ?? 0;
+        // caller opts out — modelled so the assertion is on the OUTCOME (where
+        // the card sits) rather than on the argument alone. The container is the
+        // DOCUMENT: popup.css no longer bounds the card to the viewport (a
+        // popup's `100vh` is its own window height, so the bound collapsed the
+        // popup), and Chrome scrolls the page past its 600px cap — `.body` is
+        // not a scroll container any more.
+        const scroller = globalThis.document.scrollingElement;
+        if (scroller && !(options && options.preventScroll)) scroller.scrollTop = scroller._maxScroll ?? 0;
       },
       replaceChildren: (...kids) => {
         node.children = kids;
@@ -121,9 +126,13 @@ function installDomStub() {
     return node;
   };
   for (const id of IDS) nodes.set(id, make(id));
-  // The scroll container the bounded card introduced. `_maxScroll` stands in
-  // for a card taller than the viewport, which is the only condition under
+  // The page scroller popup.ts resets for a fresh prompt. `_maxScroll` stands in
+  // for a card taller than the popup's cap, which is the only condition under
   // which focus-scrolling is observable at all.
+  const scroller = make("__scroller");
+  scroller._maxScroll = 139;
+  // The body node stays in the stub because popup.html ships a `.body`, even
+  // though nothing scrolls it since the card stopped being viewport-bounded.
   const bodyNode = make("__body");
   bodyNode._maxScroll = 139;
   nodes.set("__body", bodyNode);
@@ -147,6 +156,7 @@ function installDomStub() {
     addEventListener: () => {},
     documentElement: make("html"),
     body: make("body"),
+    scrollingElement: scroller,
     activeElement: null,
   };
   globalThis.window = { close: () => {}, matchMedia: () => ({ matches: false, addEventListener: () => {} }) };
@@ -1137,19 +1147,19 @@ test("a fresh prompt opens at the top of its card, not scrolled past its banner 
     await tick(30);
 
     const scope = nodes.get("origin-scope");
-    const body = globalThis.document.querySelector(".body");
+    const scroller = globalThis.document.scrollingElement;
     assert.equal(nodes.get("origin-wedge").classList.contains("hidden"), false, "precondition: the banner is up");
 
     // The keyboard landing point is unchanged — the fix must not cost it.
     assert.ok(scope._focusCalls.length > 0, "the scope select is still focused for the keyboard");
     assert.equal(globalThis.document.activeElement, scope, "and it really holds focus");
 
-    // THE DEFECT: focusing inside the scroll container scrolled the card to its
+    // THE DEFECT: focusing below the fold scrolled the card's container to its
     // maximum, putting the title and the whole danger banner above the fold at
     // >=125% zoom — a zoomed user saw an ordinary consent prompt with live
     // Allow/Deny and no sign their answer could not land.
     assert.equal(
-      body.scrollTop,
+      scroller.scrollTop,
       0,
       "the card must open at its top: the question and the banner qualifying it are the first things to read",
     );
