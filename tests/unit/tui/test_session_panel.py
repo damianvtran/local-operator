@@ -2078,6 +2078,41 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
     assert not any("nested" in r for r in section)
 
 
+def test_a_money_record_with_no_counted_calls_still_gets_its_row():
+    """Q3: the money decides whether a row exists, not the call counts.
+
+    ``{"micro": 500000, "calls": 0}`` is a turn-end remainder — money with no
+    per-call accrual, which ``SessionSpend.adjust``'s own docstring names. The
+    round-1 gate on ``calls`` hid it, so the row simply vanished while the record
+    held a figure and the band could paint a bound above it.
+    """
+    report = _tree_report()
+    remainder = replace(runtime(), spend_micro=500_000, spend_knowledge="exact")
+    row = next(
+        line
+        for line in build_session_report(report, remainder, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "$0.50" in row, row
+    assert "500,000 μ$" in row, row
+
+
+def test_an_unknown_record_signs_no_delta():
+    """Q4: an unknown record has nothing sound to compare the ledger against.
+
+    Signing ``Δ record -0.100000`` beside a ``$—`` treats the unknown as
+    ``$0.000000`` and reports the ledger's whole sum as a difference from it —
+    a comparison against a figure the row above just said it cannot state.
+    """
+    report = _tree_report()
+    unknown = replace(runtime(), spend_micro=0, spend_knowledge="unknown")
+    text = build_session_report(report, unknown, width=120).plain
+    assert "Record total" in text and "$—" in text, text
+    # The ledger still gets its own row; only the difference is withheld.
+    assert "Ledger total" in text, text
+    assert "Δ" not in text, text
+
+
 def test_an_unknown_record_reads_as_no_figure_and_never_as_a_marked_one():
     """Q1 and §8.2: nothing priceable is ``$—``, and ``≥$—`` is impossible.
 

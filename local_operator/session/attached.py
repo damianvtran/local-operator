@@ -1545,20 +1545,18 @@ class AttachedSession:
         # the lower-bound mark. A figure whose provenance cannot be ordered is a
         # figure we cannot certify, so silence and a bare number are both claims
         # the artifacts do not support.
-        if spend is not None and spend.calls:
+        if spend is not None:
             known = state.cumulative_parent_cost is not None
             record_is_newer = self._cold_record_is_newer()
             if not known or record_is_newer is True:
-                # ``priced_calls == 0`` is the UNKNOWN state, NOT a zero total
-                # (QA round 1, Q1): a session whose every call was unpriceable
-                # has no figure to show, and design §8.2 spells that ``$—``.
-                # Publishing ``0.0`` made the band drop the cell entirely (its
-                # zero policy: a confident ``$0.0000`` over billed tokens) while
-                # ``/analytics`` printed ``$—`` for the same state. The same
-                # rule covers the record that is NEWER and unpriced: it cannot
-                # certify a figure, so the cell stops asserting one rather than
-                # repeating the older artifact's number.
-                changes["cumulative_parent_cost"] = spend.usd if spend.priced_calls else None
+                # ``published_usd`` is the ONE derivation of what a record may
+                # paint: the figure, or ``None`` for money we cannot state
+                # (nothing priceable). Never a zero total standing in for a
+                # figure, and never hidden because the counts look empty — a
+                # record holding a turn-end remainder has ``calls == 0`` and
+                # real money (QA round 1 Q1, round 2 Q3, policy: the money
+                # decides and the counts only describe provenance).
+                changes["cumulative_parent_cost"] = spend.published_usd()
                 changes["cost_knowledge"] = spend.knowledge()
             elif record_is_newer is None and self._cold_money_disagrees(spend, state):
                 from local_operator.session.frontend_state import CostKnowledge

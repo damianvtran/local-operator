@@ -1119,6 +1119,64 @@ def _cold_open(
     return asyncio.run(open_cold())
 
 
+def test_money_decides_and_the_counts_only_describe_provenance() -> None:
+    """The policy behind QA round 2's Q1/Q3 and review R3-1.
+
+    Money is ``micro > 0``: a record can hold a turn-end remainder with
+    ``calls == 0`` (``adjust``'s docstring: money, not a provider call), and one
+    can be adopted from a store mid-turn with ``micro > 0, calls == 0``. Gating a
+    figure on the counts hid that money on both surfaces and let the band paint a
+    one-receipt floor ABOVE it.
+
+    UNKNOWN is reserved for money we cannot state at all: nothing priced AND
+    something unpriced. A zero total from priced calls is a figure we CAN state
+    (a free model), and an empty record is not unknown either — it is nothing,
+    which every surface omits.
+    """
+    remainder = SessionSpend(micro=500_000, calls=0)
+    assert remainder.has_money and remainder.knowledge() is CostKnowledge.EXACT
+    assert remainder.published_usd() == 0.5, "money with no counted calls is still money"
+
+    adopted = SessionSpend(micro=2_000_000, calls=0, priced_calls=0)
+    assert adopted.has_money and adopted.knowledge() is CostKnowledge.EXACT, "R3-1"
+    assert adopted.published_usd() == 2.0
+
+    unpriceable = SessionSpend(micro=0, calls=1, priced_calls=0, unpriced_calls=1)
+    assert not unpriceable.has_money
+    assert unpriceable.knowledge() is CostKnowledge.UNKNOWN
+    assert unpriceable.published_usd() is None, "none is 'cannot state', not 'zero'"
+
+    free = SessionSpend(micro=0, calls=2, priced_calls=2)
+    assert free.knowledge() is CostKnowledge.EXACT, "a known zero is not unknown"
+    assert free.published_usd() == 0.0
+
+    empty = SessionSpend()
+    # An accumulator with no accruals knows nothing (UNKNOWN, the pre-existing
+    # semantics), but it is not MONEY WE CANNOT STATE: every surface omits it
+    # rather than printing `$—`, which is what `unknown_money` distinguishes.
+    assert empty.knowledge() is CostKnowledge.UNKNOWN and not empty.unknown_money
+    assert not empty.has_money and empty.published_usd() == 0.0
+
+
+def test_a_money_record_with_no_counted_calls_reaches_the_cold_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """QA round 2, Q3 on the cold path: the remainder money is what is painted.
+
+    ``session.adjust_spend(500_000)`` — what the store calls at turn end — writes
+    ``{"micro": 500000, "calls": 0, ...}``. Both surfaces used to hide it, and the
+    cold band called the session ``$—`` while ``restored_spend()`` held the figure.
+    """
+    record = SessionSpend(micro=500_000, calls=0, writer="qa:probe").to_details()
+    viewer = _cold_open(
+        tmp_path, "coldremainder1", [(SESSION_SPEND_CUSTOM_TYPE, record)], monkeypatch
+    )
+    state = viewer.frontend_state
+    assert state.cumulative_parent_cost == 0.5, "the record's money, not a hidden zero"
+    assert state.cost_knowledge is CostKnowledge.EXACT
+    assert viewer.restored_spend() is not None and viewer.restored_spend().micro == 500_000
+
+
 def test_the_newer_money_artifact_decides_the_cold_figure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

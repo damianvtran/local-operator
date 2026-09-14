@@ -61,6 +61,12 @@ __all__ = [
 #: 50 µ$ is $0.00005, the rounding boundary of ``{"$%.4f"}``.
 _SUB_CENT_VISIBLE_MICRO = 50
 
+#: THE spelling for "money we cannot state", shared by the surfaces that can
+#: show it. It lives here beside ``LOWER_BOUND_MARK`` for the same reason: two
+#: literals for one honesty vocabulary is how the band and ``/session`` came to
+#: disagree about the same state (QA round 1 Q1, round 2 Q1/Q3).
+UNKNOWN_COST_CELL = "$—"
+
 #: THE lower-bound mark, shared by every surface that has to say "this figure
 #: cannot be whole". It lives here rather than on the band because the band and
 #: ``/session`` both draw it, and two spellings of the same honesty vocabulary is

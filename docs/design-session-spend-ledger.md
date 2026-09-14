@@ -1211,6 +1211,40 @@ from re-filling the cell — and `/session` spells the same state `$—` with no
 rung. `≥$—` remains impossible by construction: the mark is only applied to a
 figure that exists, so an unknown sum has nothing to qualify.
 
+19. **The money decides, the counts only describe provenance** (QA round 2 Q1/Q3,
+review R3-1). Three surfaces — the cold seed, the store's publish path and the
+live band — each decided for themselves whether a record's figure was visible,
+and gated it on `calls`. That is wrong for a state this accumulator documents:
+`SessionSpend.adjust`'s own docstring says a turn-end remainder "is money, not a
+provider call, so it must not move `calls`", and a store adopted mid-turn records
+`micro: 2000000, calls: 0` — so `calls` hid real money on both surfaces, and
+in-process the band then fell through to the one-receipt floor and painted `≥$2.10`
+ABOVE the record's own `$0.50`. The rules that replaced it, in one place:
+
+- **`SessionSpend.has_money` is `micro > 0`** and is THE gate for whether a money
+  row exists, on every surface. `calls`/`priced_calls` are provenance.
+- **`SessionSpend.published_usd()` is THE derivation of what a surface may paint**:
+  the figure, or `None` for money we cannot state. The cold seed, `refresh`'s
+  canonical publish, the adopt-time restore and the band all read it, so one
+  journal has one spelling whether it is opened cold or with a runtime.
+- **UNKNOWN means money we cannot state**, and is derived from the money, not the
+  counts: `micro == 0` with an unpriced call and no priced one. Deriving it from
+  `priced_calls == 0` (the first version) called an adopted session unknown while
+  its record held $2.00 and hid the figure (R3-1). A zero total from priced calls
+  is a figure we can state; an empty record is nothing at all, which every surface
+  omits — not `$—`.
+- **The reconciliation row omits its Δ when the record is unknown** (QA round 2,
+  Q4): a signed Δ against a `$—` silently substitutes `$0.000000` for the unknown
+  and reports the ledger's whole sum as a difference from it.
+- **`≥$—` stays impossible** for the same reason as before: the mark is only ever
+  applied to a figure that exists, and the unknown spelling comes from ONE
+  constant (`costs.UNKNOWN_COST_CELL`) both the band and `/session` read.
+
+The assertion that keeps this honest is not per-surface: **one journal, opened cold
+and in-process, must spell the same money** —
+`test_one_journal_spells_the_same_cold_and_in_process` drives the three states a
+record can be in (remainder, adopted, unpriceable) through both paths.
+
 ## 13. What I could not settle from the code, and what would settle it
 
 1. **SETTLED — measured 2026-09-13, and T7 is DROPPED as a result.** The

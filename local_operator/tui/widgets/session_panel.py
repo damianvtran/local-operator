@@ -58,6 +58,7 @@ from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
 from local_operator.tui.costs import (
     LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
     MoneyFigure,
     SearchSpendSnapshot,
     combined_spend,
@@ -218,12 +219,23 @@ class SessionDiagnostics:
             context_is_estimate=getattr(state, "context_is_estimate", None),
             generation=getattr(state, "generation", None),
             epoch=getattr(state, "epoch", None),
-            # ``calls`` is the same gate the band applies by construction: a
-            # record with no calls holds no money, so this screen has nothing
-            # durable to add and omits the row rather than printing ``$0.00``
-            # beside a band that shows no cell at all (QA round 1, Q1).
-            spend_micro=(spend.micro if spend is not None and spend.calls else None),
-            spend_knowledge=(spend.knowledge().value if spend is not None and spend.calls else ""),
+            # The MONEY decides whether a row exists, never the call counts:
+            # ``has_money`` is ``micro > 0``, and a record can hold a turn-end
+            # remainder with ``calls == 0`` (QA round 2, Q3 -- the round-1 gate on
+            # ``calls`` hid exactly that money on both surfaces). An UNKNOWN
+            # record still gets its row, because "we cannot state this" is a fact
+            # worth printing; a record holding nothing at all gets none, matching
+            # the band's no-cell behaviour instead of ``$0.00``.
+            spend_micro=(
+                spend.micro
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else None
+            ),
+            spend_knowledge=(
+                spend.knowledge().value
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else ""
+            ),
         )
 
 
@@ -1167,10 +1179,11 @@ def _draw_recorded_usage(
         if state == "unknown":
             # §8.2: nothing priceable is ``$—``, never ``$0.00``. It carries no
             # mark and no micro rung either, because ``≥$—`` is a contradiction
-            # -- there is no figure for a bound to qualify (QA round 1, Q1).
+            # -- there is no figure for a bound to qualify (QA round 1, Q1). The
+            # spelling is the band's own constant, so the two cannot drift.
             body.kv(
                 "Record total",
-                "$—",
+                UNKNOWN_COST_CELL,
                 notes=("nothing priceable · this session", "this session"),
             )
         else:
@@ -1192,9 +1205,19 @@ def _draw_recorded_usage(
         # observer that can see a call whose persist was lost -- so naming the
         # difference is the honest move, while quietly switching either figure for
         # the other would hide the one signal that says a write was dropped.
+        # Q4: with an UNKNOWN record there is nothing sound to compare against —
+        # the row above says "we cannot state this figure", so signing a Δ against
+        # it would silently substitute ``$0.000000`` for the unknown and report the
+        # ledger's whole sum as a difference from it. The ledger keeps its own row;
+        # only the difference is withheld.
         ledger = report.aggregate
         ledger_micro = getattr(ledger, "cost_micro", None) if ledger is not None else None
-        if ledger is not None and ledger.cost_is_known and isinstance(ledger_micro, int):
+        if (
+            state != "unknown"
+            and ledger is not None
+            and ledger.cost_is_known
+            and isinstance(ledger_micro, int)
+        ):
             # BOTH figures are printed from their exact integer micro-USD, and the
             # Δ is their exact difference, so the arithmetic on screen checks out
             # (D3). The first version printed the ledger at 2dp and the Δ from the

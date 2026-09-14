@@ -347,16 +347,67 @@ class SessionSpend:
         and a sum over rows a compaction or prune removed can never be whole
         (FLOOR). UNKNOWN takes precedence over both because ``≥ unknown`` is a
         contradiction — a fully-unpriced session renders ``$—`` with no mark.
+
+        UNKNOWN is derived from the MONEY, not from the call counts (review
+        R3-1): it means "there is money here we cannot state", which is
+        ``micro == 0`` **and** an unpriced call and **no** priced one. Deriving it
+        from ``priced_calls == 0`` alone called a session that ADOPTED a store
+        mid-turn unknown while its record held $2.00, and hid the figure. A total
+        of exactly zero with priced calls is a figure we can state (a free
+        model), and a record with money and no counted calls is one we can state
+        too — the turn-end remainder this accumulator documents.
         """
         from local_operator.session.frontend_state import CostKnowledge
 
-        if self.priced_calls == 0:
+        if self.micro == 0 and not self.priced_calls:
+            # Two shapes, one answer: a call we could not size puts NO money in
+            # the accumulator (that is the `$—` state), and an accumulator with no
+            # accruals yet knows nothing either — both spell `$—`, and the
+            # surfaces distinguish them by `unknown_money` rather than by
+            # re-deriving the counts.
             return CostKnowledge.UNKNOWN
         if self.unpriced_calls:
             return CostKnowledge.PARTIAL
         if self.floor:
             return CostKnowledge.FLOOR
         return CostKnowledge.EXACT
+
+    @property
+    def unknown_money(self) -> bool:
+        """A call happened and left NOTHING we can state in the accumulator.
+
+        The state design §8.2 spells ``$—``: money exists in principle (calls were
+        made) but the record cannot state a figure, because nothing was priced.
+        Distinct from an empty accumulator (no calls at all), which every surface
+        omits rather than calling unknown, and from a known ZERO (calls priced at
+        nothing — a free model), which is a figure we can state (QA round 2 Q3).
+        """
+        return self.micro == 0 and self.calls > 0 and not self.priced_calls
+
+    @property
+    def has_money(self) -> bool:
+        """Does this record hold a figure at all?
+
+        THE gate for whether a money row exists, on every surface: money is
+        ``micro > 0``, never a call count. ``calls == 0`` with money in the
+        accumulator is a state this class documents — ``adjust`` says a turn-end
+        remainder "is money, not a provider call, so it must not move ``calls``",
+        and a store adopted mid-turn records ``micro: 2000000, calls: 0`` (review
+        R3-1). Gating on ``calls`` hid that money on both surfaces and let the
+        band paint a one-receipt floor ABOVE it (QA round 2, Q3).
+        """
+        return self.micro > 0
+
+    def published_usd(self) -> float | None:
+        """What a surface may PAINT for this record: the figure, or ``None``.
+
+        ``None`` does not mean "no money" — that is a zero total, which the
+        band's zero policy drops and which every surface omits. It means "money
+        we cannot state", and it exists so the cold seed, the store's publish
+        path and the live band reach ONE answer from ONE journal (QA round 1 Q1
+        and round 2 Q3 both came from those three disagreeing).
+        """
+        return None if self.unknown_money else self.usd
 
     # -- persistence ------------------------------------------------------
 
