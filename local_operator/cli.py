@@ -3233,9 +3233,34 @@ def sessions_command(args: argparse.Namespace) -> int:
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
         if show_why:
-            line += f" {(why.get(row['session_id']) or '')[:WHY_COLUMN_WIDTH]:<{WHY_COLUMN_WIDTH}}"
+            cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
+            line += f" {cell:<{WHY_COLUMN_WIDTH}}"
         print(line)
     return 0
+
+
+def _clamp_reason_cell(summary: str) -> str:
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH`, marked when it had to cut.
+
+    A silent slice is indistinguishable from a complete sentence, and this
+    column's whole purpose is to answer "why did this session die". A slice at
+    exactly the width used to drop the last word (``CUT_OFF_UNKNOWN`` is 58
+    cells, so the row ended ``...the cause could not be `` with ``determined``
+    gone) and read as a finished sentence that happens to stop mid-clause. The
+    previous worst case, the involuntary ``runtime-killed`` reason at 47 cells,
+    filled the column exactly — which is why nothing clipped until this branch
+    added a longer reason, so the marker is what keeps the next longer sentence
+    honest rather than what fixes one string.
+
+    The ellipsis is INSIDE the budget, so the table's fixed width and every
+    other row's columns are unchanged; a summary that already fits is returned
+    byte-for-byte, because a fitting cell must not pay for a cut that did not
+    happen. The full sentence stays one flag away in ``--json``'s
+    ``completion_reason``, which is what this column is a summary OF.
+    """
+    if len(summary) <= WHY_COLUMN_WIDTH:
+        return summary
+    return summary[: WHY_COLUMN_WIDTH - 1] + "…"
 
 
 def _wake_create(args: argparse.Namespace) -> int:
