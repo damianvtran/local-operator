@@ -41,7 +41,10 @@ by any page the user visited. Accepting a claim puts this process into the same
 managed posture the app imposes when it starts the backend itself, so
 ``/v1/agents``, ``/v1/jobs``, ``/v1/schedules``, ``/v1/config``,
 ``/v1/credentials`` and ``/v1/models`` become bearer-gated for every other
-local caller and the wildcard CORS echo is dropped for foreign origins. The
+local caller, and the wildcard CORS echo is dropped for foreign origins once
+the claim has installed an allowlist (a claim that presented no Origin — a
+native main-process caller — leaves the historical wildcard-echo behaviour on
+NON-control paths, which the gated families above no longer include). The
 accepted cost is named in the design (rollout risk 1): a local ``curl`` script
 against a claimed daemon starts seeing 401.
 """
