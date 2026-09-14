@@ -44,12 +44,12 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
-from local_operator.session.runtime.viewers import ViewerRecord
 from local_operator.session.runtime.presence import (
     delivery_path,
     desktop_delivery_present,
     reset_cache,
 )
+from local_operator.session.runtime.viewers import ViewerRecord
 
 pytestmark = pytest.mark.e2e
 
