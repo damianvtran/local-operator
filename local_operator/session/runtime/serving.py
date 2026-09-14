@@ -3177,6 +3177,7 @@ class ServingSessionHandle(SessionHandle):
         cannot drift into two different answers.
         """
         from local_operator.session.frontend_state import (
+            context_block_numbers,
             format_context_tokens,
             format_window,
         )
@@ -3210,7 +3211,12 @@ class ServingSessionHandle(SessionHandle):
             rows.append(("Last cache read (exact)", format_context_tokens(int(data["cache_read"]))))
         return SlashResult(
             kind="block",
-            data={"type": "context", "items": rows, "title": "Estimated next request"},
+            data={
+                "type": "context",
+                "items": rows,
+                "title": "Estimated next request",
+                "numbers": context_block_numbers(data, total),
+            },
         )
 
     def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:

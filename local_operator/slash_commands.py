@@ -366,11 +366,19 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # which is why it takes no argument at all: there is one answer, and making
     # someone name it would be a gate in front of a command that has one.
     #
-    # No `desktop_destination`: every field it renders is a fact about THIS
-    # process and THIS host (install prefix, pids, RSS, the in-memory subagent
-    # graph), so a desktop surface pointed at it would describe the machine the
-    # host runs on rather than the one the user is asking about. Like `/context`
-    # it needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    # No `desktop_destination` used to live here, because every field it
+    # renders is a fact about THIS process and THIS host (install prefix, pids,
+    # RSS, the in-memory subagent graph), so a desktop surface pointed at it
+    # would describe the machine the host runs on rather than the one the user
+    # is asking about. The destination now EXISTS and that caveat survives as
+    # the PANEL'S HOST LABEL rather than as a reason to withhold the row: the
+    # desktop normally talks to a loopback backend on the same machine, but the
+    # transport is a URL (`LOCAL_OPERATOR_DESKTOP_BACKEND_URL`), so the panel
+    # names what it is showing as "the machine this app is connected to". The
+    # destination is `info`, served by `GET /v1/desktop/info`.
+    #
+    # Like `/context` it needs no `native_action` branch or `OWNER_COMMANDS`
+    # entry: it is a read-only view with no owner execution.
     SlashCommand(
         "info",
         # "running sessions", not "sessions": `/analytics` describes past
@@ -378,6 +386,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # sit in one picker where the shared word read as the same thing (UX
         # round 1, U9). One word buys the distinction.
         "Install, version, and running sessions on this machine",
+        desktop_destination="info",
         # NO ALIASES, deliberately — `version`/`about` were added for UX round 1
         # U8 and reverted the same round. The claim that alias rows "cost no
         # space" is false here: the picker measures ONE name column across every

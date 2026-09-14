@@ -35982,6 +35982,8 @@ class OperatorApp(App[None]):
         )
 
     def _context_slash_result(self, SlashResult: Any) -> Any:
+        from local_operator.session.frontend_state import context_block_numbers
+
         data = self._context_breakdown()
         if data is None:
             return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
@@ -36005,7 +36007,17 @@ class OperatorApp(App[None]):
             rows.append(("Last cache read (exact)", format_context_tokens(data["cache_read"])))
         return SlashResult(
             kind="block",
-            data={"type": "context", "items": rows, "title": "Estimated next request"},
+            data={
+                "type": "context",
+                "items": rows,
+                "title": "Estimated next request",
+                # The same figures the rows were formatted from, unformatted, so
+                # a panel draws a bar instead of parsing "~12.3k". Shared with
+                # the detached runtime's handler (`session/runtime/serving.py`)
+                # through `context_block_numbers` — this block is built by BOTH
+                # hosts and the two must not answer with different numbers.
+                "numbers": context_block_numbers(data, total),
+            },
         )
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
