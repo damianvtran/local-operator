@@ -4942,14 +4942,19 @@ def test_a_local_server_serving_the_weights_is_left_alone(provider):
 def test_the_direct_route_contract_cannot_be_dropped_by_omission():
     """A spec built OUTSIDE ``build_model_spec`` behaves identically to one built by it.
 
-    The capability and the ladder used to be locals in ``build_model_spec``, so
-    the same ``(provider, model_id)`` behaved differently depending on who built
-    the spec: echo off is the HTTP 400 the capability exists to prevent, and an
-    empty ladder is what stops the thinking-off retreat, so a dropped-flag spec
-    lost BOTH halves of the recovery at once. The field shows what that costs --
-    76 sessions carry the refusal wording -- so the derivation now runs at
-    ``ModelSpec`` construction and this pins it against the builder rather than
-    against a literal.
+    The echo capability used to be a local in ``build_model_spec``, so the same
+    ``(provider, model_id)`` behaved differently depending on who built the spec:
+    echo off is the HTTP 400 the capability exists to prevent. The field shows
+    what that costs -- 76 sessions carry the refusal wording -- so the echo is now
+    derived at ``ModelSpec`` construction and this pins it against the builder
+    rather than against a literal.
+
+    The EFFORT LADDER is deliberately NOT part of this hook, and this test pins
+    that too: the ladder is what decides whether the status band paints an effort
+    segment at all, and the cold viewer and draft preview render specs built by
+    this path, so deriving it here moved a rendered surface for a backend fix.
+    It keeps its one owner, ``build_model_spec``, which is also the only site that
+    can see a provider listing.
     """
     for provider, model_id in (
         ("deepseek", "deepseek-flash"),
@@ -4961,8 +4966,8 @@ def test_the_direct_route_contract_cannot_be_dropped_by_omission():
         built = ModelSpec(provider=provider, model_id=model_id)
         assert built.requires_reasoning_echo is True
         assert built.requires_reasoning_echo is derived.requires_reasoning_echo
-        assert built.reasoning_efforts == derived.reasoning_efforts
-        assert built.reasoning_efforts == ("none", "low", "high", "max")
+        assert derived.reasoning_efforts == ("none", "low", "high", "max")
+        assert built.reasoning_efforts == (), "the hook leaves the ladder to the builder"
 
 
 def test_the_construction_time_derivation_leaves_every_other_route_alone():
@@ -4994,8 +4999,14 @@ def test_the_construction_time_derivation_leaves_every_other_route_alone():
         built = ModelSpec(provider=provider, model_id=model_id)
         assert built.requires_reasoning_echo is False, (provider, model_id)
         assert built.reasoning_efforts == (), (provider, model_id)
-    # ...while a route whose spec carries its OWN ladder keeps it: the listing
-    # that spoke is authoritative, and the fill only answers an ABSENT one.
+    # ...and the hook does not touch the ladder for a route it DOES derive the
+    # echo for, so the four documented direct ids come out with no ladder from a
+    # direct construction -- whichever route, the ladder is the builder's.
+    for model_id in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"):
+        built = ModelSpec(provider="deepseek", model_id=model_id)
+        assert built.requires_reasoning_echo is True, model_id
+        assert built.reasoning_efforts == (), model_id
+    # ...while a caller's OWN ladder is still carried through untouched.
     kept = ModelSpec(
         provider="openrouter", model_id="deepseek/deepseek-v4.1-flash", reasoning_efforts=("low",)
     )
@@ -5006,9 +5017,9 @@ def test_a_wire_model_spec_round_trip_keeps_the_derived_contract():
     """The viewer/attached facades carry specs as JSON; the contract survives it.
 
     ``FrontendModelSpec`` is what a cold viewer, the desktop draft preview and
-    the runtime's own state snapshots exchange, and a deserialised spec that
-    lost the capability would put the viewer's spec and the runtime's out of
-    step -- which is the divergence this whole derivation exists to remove.
+    the runtime's own state snapshots exchange, and a deserialised spec that lost
+    the capability would put the viewer's spec and the runtime's out of step --
+    which is the divergence this whole derivation exists to remove.
     """
     from local_operator.session.frontend_state import FrontendModelSpec
 
@@ -5016,10 +5027,50 @@ def test_a_wire_model_spec_round_trip_keeps_the_derived_contract():
         provider="deepseek", model_id="deepseek-flash", reasoning_effort="high"
     )
     assert wire.requires_reasoning_echo is True
-    assert wire.reasoning_efforts == ("none", "low", "high", "max")
     restored = FrontendModelSpec.model_validate(wire.model_dump(mode="json"))
     assert restored.requires_reasoning_echo is True
-    assert restored.reasoning_efforts == wire.reasoning_efforts
+
+
+def test_a_defaults_excluding_dump_survives_a_stated_false():
+    """A stated "no echo" survives the dump shape that drops defaults (review MINOR-1).
+
+    The hook's escape hatch is a STATED ``False``, and a plain ``bool`` default
+    cannot tell that statement apart from an absent field once a persister dumps
+    with ``exclude_defaults=True``: the ``False`` IS the default, so it is dropped
+    and the re-validated spec derives the echo back on. The field's default is
+    therefore ``None`` -- "nobody stated a value" -- which ``False`` is no longer
+    equal to, so the statement survives the trip. No production caller dumps
+    ``ModelSpec`` this way today (``session/transcript.py``'s
+    ``exclude_defaults`` is for ``Message``), which is exactly why the guard is a
+    test rather than a code path: the next persister would have landed on it.
+    """
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    stated_off = ModelSpec(provider="deepseek", model_id="deepseek-flash").model_copy(
+        update={"requires_reasoning_echo": False}
+    )
+    assert stated_off.requires_reasoning_echo is False
+    dropped = stated_off.model_dump(mode="python", exclude_defaults=True)
+    assert "requires_reasoning_echo" in dropped, "the statement must not look like a default"
+    assert ModelSpec.model_validate(dropped).requires_reasoning_echo is False
+    assert FrontendModelSpec.model_validate(dropped).requires_reasoning_echo is False
+    # ...and the same dump shape still DERIVES for a spec that stated nothing.
+    assert (
+        ModelSpec.model_validate(
+            ModelSpec(provider="deepseek", model_id="deepseek-flash").model_dump(
+                mode="python", exclude_defaults=True
+            )
+        ).requires_reasoning_echo
+        is True
+    )
+    # An explicit ``None`` is the other spelling of "unstated", and it resolves to
+    # a real bool rather than leaking a third state to every reader.
+    assert (
+        ModelSpec(
+            provider="deepseek", model_id="deepseek-flash", requires_reasoning_echo=None
+        ).requires_reasoning_echo
+        is True
+    )
 
 
 def test_the_legacy_escape_hatch_for_a_hand_built_spec_still_works():

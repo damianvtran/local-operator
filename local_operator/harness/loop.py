@@ -1248,6 +1248,15 @@ class AgentLoop:
                         # gated on nothing having been SHOWN: a 400 arrives
                         # before the first byte, and a turn the user has already
                         # read may not be replayed.
+                        #
+                        # ``not assistant.tool_calls`` is that gate, and it means
+                        # a refusal that arrives AFTER streamed tool-call deltas
+                        # gets no recovery at all -- inherited from the retreat
+                        # below, not introduced here, and recorded on the PR as
+                        # not addressed. A turn whose call is already on screen
+                        # (or executing) is no more replayable than one with text,
+                        # so lifting it is a design question about partial calls
+                        # rather than a line to change.
                         if (
                             stop_reason == "error"
                             and reasoning_echo_fill_retries < MAX_REASONING_ECHO_FILL_RETRIES
