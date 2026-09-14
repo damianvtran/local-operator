@@ -347,7 +347,11 @@ def test_status_reports_a_fire_that_could_not_be_delivered(
             if not line.startswith(" "):
                 break
             block.append(line)
-        return " ".join(block)
+        # WHITESPACE IS COLLAPSED, because the fold is terminal-width dependent
+        # and a phrase must not be un-assertable just because it landed across a
+        # wrap point (CI's 80 columns broke "could not reach a runtime" where a
+        # wider local terminal did not).
+        return " ".join(" ".join(block).split())
 
     retrying = _block("retrying:")
     assert "retrying:" in retrying, f"an owed fire was not reported: {out}"
@@ -406,7 +410,11 @@ def test_status_says_an_undelivered_fire_is_still_owed(
             if not line.startswith(" "):
                 break
             block.append(line)
-        return " ".join(block)
+        # WHITESPACE IS COLLAPSED, because the fold is terminal-width dependent
+        # and a phrase must not be un-assertable just because it landed across a
+        # wrap point (CI's 80 columns broke "could not reach a runtime" where a
+        # wider local terminal did not).
+        return " ".join(" ".join(block).split())
 
     line = _block("undelivered:")
     assert "undelivered:" in line, f"an undelivered fire was not reported: {out}"
