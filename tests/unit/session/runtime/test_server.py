@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
 import threading
 import time
 from typing import Any, cast
@@ -644,19 +645,16 @@ async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its
     blocked in a sleep, which consumes no CPU, so a CPU-time instrument would
     report ~0 ms for exactly the code this test exists to reject.
 
-    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. The 50 ms settle that aims each
-    close at the middle of the loop's wait is a phase GUESS, not a
-    synchronisation: a descheduled serve thread can still be short of its park
-    when the close lands, and then the latch is already set, the loop never
-    waits, and even the POLLED code returns in ~1 ms — a silent false negative,
-    not a flake. That is why the bound is the MINIMUM of five closes, each
-    against a fresh runtime: one starved round cannot carry the verdict, and
-    five consecutive starved rounds would be needed for a false pass. The
-    ceiling is half the poll interval, so a parked poll cannot meet it, but its
-    margin to the FIXED code is scheduling-dependent rather than generous:
-    measured on a loaded dev host (load 162-212, n=15) the signalled close was
-    1.0 ms median with a 9.3 ms worst sample, i.e. ~10x headroom at worst. CI's
-    dedicated runner is the safer environment for that bound.
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. Identical in shape to the viewer
+    endpoint's test: same 50 ms phase GUESS, same five fresh servers, same
+    MEDIAN aggregate and the same reason for it — a single starved round on the
+    polled code returns in ~1 ms and must not carry the verdict, while a single
+    slow round on the fixed code must not false-fail it. The reasoning and its
+    load measurements are stated ONCE, in
+    ``test_viewer_routing.test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll``;
+    this loop's own numbers only: on a loaded dev host a single round reached
+    ~101 ms, ABOVE the 100 ms ceiling, so there is no per-round margin here
+    either — the aggregate is what carries the test (measured medians 1-7 ms).
 
     Thread mode specifically, because the in-process path never parks in
     ``_closed_wait``: it schedules its teardown on the owning loop and has no
@@ -677,7 +675,7 @@ async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its
             # floor the base arm owes — measured with the 50 ms cadence, the old
             # code came in at 101-103 ms against the 100 ms ceiling, one
             # scheduling nudge away from the false pass this test exists to
-            # prevent. Polling at 5 ms keeps the base arm at ~145-153 ms.
+            # prevent. Polling at 5 ms keeps the base arm at ~140-190 ms.
             deadline = asyncio.get_running_loop().time() + 5.0
             while True:
                 found = registry.scan()
@@ -687,13 +685,25 @@ async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its
                     raise AssertionError("runtime never published a live record")
                 await asyncio.sleep(0.005)
 
+            # The live record proves a listener was PUBLISHED, not that it
+            # ANSWERS: dial the port it advertises, so a round whose listener
+            # died after publishing cannot pass while measuring nothing.
+            # CONNECTED is what the record exists for; closing without a frame
+            # registers no client (the daemon path only runs after a successful
+            # auth).
+            probe_reader, probe_writer = await asyncio.open_connection(
+                "127.0.0.1", found[0][0].control_port, limit=1 << 20
+            )
+            probe_writer.close()
+            await probe_writer.wait_closed()
+
             # The record proves the listener is PUBLISHED, not that the loop has
             # parked in ``_closed_wait()`` — ``_serve`` publishes first and parks
             # after — so the loop's phase must still be settled before timing or
             # the close can land before it parks: the latch is then already set
             # when the loop gets there, it never waits, and the POLLED code
-            # returns in ~1 ms too (the false negative the minimum below exists
-            # to average out). Parked, the poll owes the rest of a 200 ms
+            # returns in ~1 ms too (the false negative the median above exists
+            # to absorb). Parked, the poll owes the rest of a 200 ms
             # interval and cannot meet the ceiling. Awaited, not ``sleep``: the
             # runtime owns its own thread and loop, and the test has no reason to
             # block its own.
@@ -705,14 +715,15 @@ async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its
         finally:
             runtime.close()
 
-    fastest = min(samples)
-    assert fastest < 0.1, (
-        f"the fastest of {len(samples)} parked closes took {fastest * 1000:.0f} ms "
-        f"(round {samples.index(fastest)}) — close() is waiting out the serve "
-        "loop's wait instead of waking it. Samples (ms): "
-        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, even "
-        "the pre-fix poll is expected near 145-153 ms measured through this "
-        "test's own 50 ms settle, so no round here was woken early "
+    aggregate = statistics.median(samples)
+    assert aggregate < 0.1, (
+        f"the median of {len(samples)} parked closes took {aggregate * 1000:.0f} ms "
+        "— close() is waiting out the serve loop's wait instead of waking it. "
+        "Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, the "
+        "pre-fix poll measured through this test's own 50 ms settle lands in "
+        "139.5-191.2 ms (median ~151 ms, n=50), so a median under the ceiling "
+        "needs three of these five rounds woken early — the loop is not waiting "
         "(server.close -> _request_close -> _wake_close_wait -> _closed_wait)."
     )
 
