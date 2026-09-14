@@ -217,6 +217,57 @@ EXPECTED = [
 ]
 
 
+#: The three SEQUENCE classes the clamp has to measure as units rather than as
+#: characters: a VS16 selection (``\u2764\ufe0f`` is one 2-cell glyph from two code
+#: points), a keycap sequence (``1\ufe0f\u20e3``), and a ZWJ family cluster (five
+#: code points, one 2-cell glyph).
+VS16 = "\u2764\ufe0f"
+KEYCAP = "1\ufe0f\u20e3"
+FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+
+
+#: Rows whose text columns and WHY reason carry those sequences.
+#:
+#: Deliberately NOT folded into ``FIXTURE``: that set is the ASCII equivalence
+#: witness's input, and "the output did not move" is only a meaningful claim over
+#: ASCII — the cell rule is SUPPOSED to differ from the character rule here. They
+#: are a separate set because the round-2 review found the per-character measure
+#: by running exactly these values, and the guard could not see it: no fixture row
+#: carried a sequence, so the failing case lived only in the reviewer's hands
+#: (review round 2, M1). A class of input with no fixture row is a class the suite
+#: cannot defend.
+GLYPH_FIXTURE: list[tuple[Any, str]] = [
+    (
+        _Record(
+            pid=5150,
+            kind="tui",
+            session_id="facedeadbeef",
+            conversation_name=VS16 * 20,  # 40 cells into a 24-cell column
+            cwd="/tmp/probe/glyphs",
+            model_label=KEYCAP * 14,  # 28 cells into a 24-cell column
+            started_at=NOW - 1800.0,
+            heartbeat_at=NOW - 3.6,
+            pending=VS16 * 5,  # 10 cells into an 8-cell column
+        ),
+        "live",
+    ),
+    (
+        _Record(
+            pid=5151,
+            kind="exec",
+            session_id="facedeadcafe",
+            conversation_name=FAMILY * 13,  # 26 cells into a 24-cell column
+            cwd="/tmp/probe/family",
+            model_label=FAMILY * 15,  # 30 cells into a 24-cell column
+            started_at=NOW - 60.0,
+            heartbeat_at=NOW - 1.0,
+            pending=FAMILY * 3,  # 6 cells, inside the 8-cell column
+        ),
+        "live",
+    ),
+]
+
+
 def _install_fixture(monkeypatch: Any) -> None:
     from local_operator.info import collect as collect_mod
     from local_operator.mobile import resources
@@ -819,18 +870,24 @@ def _cells_span(line: str, start: int, width: int) -> str:
     name it once any cell is wide. This is what lets an assertion say "this column
     holds these 24 cells" for a CJK row, which is the only way to check that a
     clamped cell did not shift its neighbours.
-    """
-    from rich.cells import cell_len
 
+    It walks GRAPHEMES, with rich's own splitter — the first version walked
+    characters and measured each with ``cell_len(char)``, which is the same
+    per-character mistake the clamp itself had (review round 2, M1): it started
+    8 cells late on a VS16 row, because a selection sequence measures 1 cell per
+    character and 2 as a unit. A cell walk has to use the unit the table does.
+    """
+    from rich.cells import split_graphemes
+
+    spans, _total_cells = split_graphemes(line)
     used = 0
     kept = ""
-    for char in line:
-        size = cell_len(char)
+    for span_start, span_end, span_width in spans:
         if used >= start + width:
             break
-        if used + size > start:
-            kept += char
-        used += size
+        if used + span_width > start:
+            kept += line[span_start:span_end]
+        used += span_width
     return kept
 
 
@@ -847,7 +904,7 @@ def test_ascii_rows_still_render_by_the_character_rule(
     ASCII character, it fails.
 
     The fixture is a real witness rather than a trivial one: "Investigate request
-    latency" and "anthropic/claude-sonnet-4-6" are 28 characters against a
+    latency" and "anthropic/claude-sonnet-4-6" are 27 characters against a
     24-character column, and NEEDS holds exactly its 8.
     """
     import argparse
@@ -1021,3 +1078,116 @@ def test_fit_and_pad_are_the_character_rule_for_ascii() -> None:
             fitted = cli._fit_cell(value, width)
             assert fitted == value[:width], (value, width, fitted)
             assert cli._pad_cell(fitted, width) == f"{fitted:<{width}}", (value, width)
+
+
+def test_sequence_glyphs_are_measured_as_units_not_characters() -> None:
+    """Review round 2, M1 and M2 — the per-character measure, on its own cases.
+
+    These are the exact inputs the reviewer ran: rich applies the VS16 upgrade and
+    the ZWJ collapse only when it measures a STRING, so a loop advancing by
+    ``cell_len(char)`` mis-measured both in opposite directions — a 40-cell
+    selection sequence came back UNCUT against a 24-cell budget (worse than the
+    character rule it replaced, which clipped it), and a family cluster was
+    charged about three times its width, leaving a third of the column used.
+
+    Pinned as a bound over every class and width rather than on one string,
+    because the defect was a MEASURE and any of them could drift back.
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    measured = {
+        "selection": cell_len(VS16),
+        "keycap": cell_len(KEYCAP),
+        "family": cell_len(FAMILY),
+    }
+    assert measured == {"selection": 2, "keycap": 2, "family": 2}, measured
+    assert len(VS16) == 2 and len(FAMILY) == 5, "and each is more than one character"
+
+    # M1: over budget in both directions of the old error.
+    assert cell_len(cli._fit_cell(VS16 * 20, 24)) == 24, "was returned UNCUT at 40 cells"
+    assert cell_len(cli._fit_cell(KEYCAP * 20, 8)) == 8, "was returned at 16 cells"
+    # M2: the collapse is no longer charged per code point — 47 cells of family
+    # used to come back with 16 of them filled.
+    assert cell_len(cli._cut_to_cells(FAMILY * 20, 47)) == 40, cell_len(
+        cli._cut_to_cells(FAMILY * 20, 47)
+    )
+    assert cell_len(cli._fit_cell(FAMILY * 20, 24)) == 24, "the column is not a third used"
+
+    for value in (VS16 * 20, KEYCAP * 20, FAMILY * 20):
+        for width in (cli.NEEDS_COLUMN_WIDTH, cli.CONVERSATION_COLUMN_WIDTH, 47):
+            fitted = cli._fit_cell(value, width)
+            assert cell_len(fitted) <= width, (value[:4], width, cell_len(fitted))
+            assert cell_len(fitted) > 0 or width == 0
+
+    # The marked cell too: a reason over the budget is clamped AND marked, with the
+    # marker inside the budget and no joiner left dangling by the cut.
+    for reason in (VS16 * 30, KEYCAP * 30, FAMILY * 30):
+        cell = cli._clamp_reason_cell(reason)
+        assert cell.endswith("…"), repr(cell)
+        assert cell_len(cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(cell), repr(cell))
+        assert not cell[:-1].endswith("\u200d"), repr(cell)
+
+
+def test_sequence_glyph_rows_keep_the_table_header_width(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """The property a reader sees, on the classes that had no fixture row.
+
+    The helper-level pins above are what let M1 through: a helper can be measured
+    correctly and the assembled row still be wrong, which is exactly what the
+    review measured (header 118 with rows 142/142/138 at the previous head). So
+    this drives the real command over rows whose text columns carry a VS16
+    selection, a keycap sequence and a ZWJ family — plus a WHY reason built from
+    the same classes — and pins the row-level invariant: every row is exactly as
+    wide as its header, and each clamped cell is inside its own column.
+    """
+    import argparse
+
+    from rich.cells import cell_len
+
+    from local_operator import cli
+    from local_operator.session.runtime import registry
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(registry, "scan", lambda root=None: GLYPH_FIXTURE)
+    _seed_outcome(tmp_path, "facedeadbeef", kind="error", reason=VS16 * 30, cause="future-cause")
+    _seed_outcome(tmp_path, "facedeadcafe", kind="error", reason=FAMILY * 30, cause="future-cause")
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    header, *lines = capsys.readouterr().out.splitlines()
+    assert "WHY" in header, header
+    assert len(lines) == len(GLYPH_FIXTURE), (len(lines), len(GLYPH_FIXTURE))
+
+    needs_at = header.index("NEEDS")
+    conversation_at = header.index("CONVERSATION")
+    model_at = header.index("MODEL")
+    why_at = header.index("WHY")
+
+    for line in lines:
+        assert cell_len(line) == cell_len(header), (cell_len(line), cell_len(header), line)
+
+    # Each clamped cell is inside its column, and the sequences are whole ones —
+    # a clamp may not split a VS16 selection from its base or a family cluster.
+    selection, family = lines
+    assert _cells_span(selection, conversation_at, cli.CONVERSATION_COLUMN_WIDTH) == VS16 * 12
+    assert _cells_span(selection, model_at, cli.MODEL_COLUMN_WIDTH) == KEYCAP * 12
+    assert _cells_span(selection, needs_at, cli.NEEDS_COLUMN_WIDTH) == VS16 * 4
+    assert _cells_span(family, conversation_at, cli.CONVERSATION_COLUMN_WIDTH) == FAMILY * 12
+    assert _cells_span(family, model_at, cli.MODEL_COLUMN_WIDTH) == FAMILY * 12
+    # A value already inside its column is returned untouched, sequence intact,
+    # and padded by the column's remaining CELLS: 6 cells of family plus 2.
+    assert _cells_span(family, needs_at, cli.NEEDS_COLUMN_WIDTH) == FAMILY * 3 + "  "
+
+    for line in lines:
+        # The span covers the padded column, so the padding comes off before the
+        # cell's own shape is asserted.
+        reason_cell = _cells_span(line, why_at, cli.WHY_COLUMN_WIDTH).rstrip()
+        assert reason_cell.endswith("…"), repr(reason_cell)
+        assert cell_len(reason_cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(reason_cell), reason_cell)
+        assert not reason_cell[:-1].endswith("\u200d"), repr(reason_cell)
