@@ -307,7 +307,13 @@ SLASH_COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand(
         "sidebar",
-        "Show or hide active and recent conversations",
+        # `focus` is named because it is the only way into the list's keyboard
+        # mode now that a pointer press no longer takes it (design round D1),
+        # and because the panel's own footer advertises it: a description that
+        # omitted the argument told a user the command had none. 49 cells — the
+        # description column wraps past ~55, which would render a phantom
+        # command name in `/help` (see the `/copy` note above).
+        "Show or hide conversations; 'focus' keys the list",
         desktop_destination="sessions.sidebar",
     ),
     SlashCommand(

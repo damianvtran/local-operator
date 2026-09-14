@@ -21,6 +21,14 @@ True while an approval, an ask picker, the aside, or the focused sidebar owns
 the keyboard — so those four surfaces are unprotected on the click and Tab
 routes.
 
+WHAT CHANGED FOR THE SIDEBAR AFTERWARDS (design round D1/D2). The list is no
+longer one of the surfaces that must keep the keyboard: a pointer press on it
+never moves focus (``SessionSidebar.FOCUS_ON_CLICK = False``), and its claim in
+``_focus_is_claimed()`` is SOFT, so the composer's own chrome may take the
+keyboard back from it. The test below that used to assert the opposite now pins
+the new rule; the live-prompt, pushed-screen, full-page-mode and read-only cases
+are unchanged and still refuse.
+
 WHY THE DOCK CLICK REACHES A LIVE PROMPT AT ALL. ``#prompt-host`` is mounted
 INSIDE ``#input-dock`` (app.py, ``compose``), so the approval card and the ask
 picker are DESCENDANTS of the container whose ``on_click`` now grabs focus.
@@ -211,8 +219,23 @@ async def test_a_dock_click_leaves_a_multi_select_answerable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_dock_click_does_not_steal_focus_from_the_sidebar() -> None:
-    """The F9 sidebar is a focused surface with its own arrow-key navigation."""
+async def test_a_dock_click_returns_the_keyboard_from_the_lists_soft_claim() -> None:
+    """The F9 list's claim is SOFT: the composer's own chrome may take the keyboard.
+
+    REVERSED BY DESIGN (design round D2), and this test was the one pinning the
+    old rule — "a dock click does not steal focus from the sidebar". The rule
+    was wrong in the direction that hurts: measured on the design round's
+    frames, a click on the dock's padding cells — the chevron cell included —
+    changed 0 cells while the list held the keyboard, and the next key was still
+    discarded, recreating for the list exactly the dead zone
+    ``ComposerDock``'s docstring records removing for the ToolCard.
+
+    A claim belongs in ``_focus_is_claimed`` only if taking the keyboard would
+    destroy keys the claimant needs. This list answers arrows/enter with its own
+    bindings while it has focus and needs no key to stay usable, so it is not
+    one of those; a live prompt, a pushed screen, a full-page mode and a
+    read-only composer all are, and the tests above/below keep them refusing.
+    """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
@@ -221,14 +244,17 @@ async def test_a_dock_click_does_not_steal_focus_from_the_sidebar() -> None:
         for _ in range(3):
             await pilot.pause()
         assert app._session_sidebar.has_focus, "premise: the sidebar holds focus"
+        assert app._focus_is_claimed() is False, "premise: the list's claim is SOFT"
 
         await pilot.click(offset=_dock_pad(app))
         for _ in range(3):
             await pilot.pause()
 
-        assert (
-            app._session_sidebar.has_focus
-        ), "a dock click took the keyboard off the focused sidebar"
+        editor = app.query_one(Editor)
+        assert app.focused is editor, "the composer's own chrome did not take the keyboard back"
+        await pilot.press("Z")
+        await pilot.pause()
+        assert editor.text == "Z", "the key after the dock click never reached the composer"
 
 
 @pytest.mark.asyncio
