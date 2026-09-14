@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import builtins
 import io
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -81,13 +82,41 @@ async def _call(
     return await tools[name].execute("call-1", args, None, None, context)  # type: ignore[operator]
 
 
+def _reference_text(data: bytes) -> str:
+    """The whole-file path's decode: strict, falling back to replacement."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace")
+
+
 def _reference_lines(data: bytes) -> list[str]:
     """``str.splitlines`` over the whole decoded file: the semantics to match."""
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
-    return text.splitlines()
+    return _reference_text(data).splitlines()
+
+
+#: A break at the very END of the file. ``splitlines`` emits no trailing empty
+#: line for it, so the last line it produces was closed by that break rather
+#: than by EOF — which is exactly what decides whether the scanner may stop
+#: early instead of learning the total.
+_TRAILING_BREAK_RE = re.compile("[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]$")
+
+
+def _window_stops_early(data: bytes, end: int | None) -> bool:
+    """Whether the scan may stop as soon as this window is complete.
+
+    ``_stream_text_window`` stops on the break that closes line ``end``: at
+    that point nothing left in the file can still enter the window, so the
+    only thing a longer pass adds is the exact total. A last line with no
+    break behind it is closed by the EOF pass instead, and that pass already
+    knows the total. Open-ended windows have no bound at all.
+    """
+    if end is None:
+        return False
+    lines = _reference_lines(data)
+    if end > len(lines):
+        return False
+    return len(lines) > end or bool(_TRAILING_BREAK_RE.search(_reference_text(data)))
 
 
 def _reference_rendering(data: bytes, spec: str, path: Path) -> str:
@@ -242,10 +271,13 @@ async def test_oversized_file_with_mixed_line_endings_matches_splitlines(
 
 
 @pytest.mark.asyncio
-async def test_small_file_ranged_read_is_byte_identical_to_the_whole_file_path(
+async def test_small_file_ranged_read_is_byte_identical_to_the_pre_change_ranged_path(
     tools, context, tmp_path
 ) -> None:
-    # A small file must render exactly what it rendered before it was streamed,
+    # A small file must render exactly what the pre-streaming RANGED path
+    # rendered (references built from that path's primitives — see
+    # ``_reference_rendering``; the whole-file path numbers from line 1 and owns
+    # the structural-summary branch, so it is NOT the comparison here),
     # including the window that spills past the output budget ("1-3000" here):
     # that is the case where a premature stop in the scan, or a number column
     # sized from the kept lines, would change the bytes.
@@ -288,7 +320,9 @@ def test_stream_text_window_agrees_with_splitlines_for_every_window(
     COUNTED, because the clamp footer reports how many lines remain in the
     file. That is why "is the last line open?" cannot be read off the retained
     body — that body is empty for exactly those lines, and reading it there
-    lost the final line of a file with no trailing break.
+    lost the final line of a file with no trailing break. A bounded window that
+    completes before EOF is the one case where the count is deliberately NOT
+    known (``None``) and the caller re-counts — see ``_window_stops_early``.
     """
     monkeypatch.setattr(builtin, "_RANGED_READ_CHUNK_BYTES", chunk)
     expected = _reference_lines(payload)
@@ -296,7 +330,12 @@ def test_stream_text_window_agrees_with_splitlines_for_every_window(
         binary, kept, window, total = builtin._stream_text_window(io.BytesIO(payload), start, end)
         windowed = expected[max(start, 1) - 1 : end]
         assert binary is False
-        assert total == len(expected), (payload, chunk, start, end)
+        assert total == (None if _window_stops_early(payload, end) else len(expected)), (
+            payload,
+            chunk,
+            start,
+            end,
+        )
         assert window == len(windowed), (payload, chunk, start, end)
         assert kept == windowed, (payload, chunk, start, end)
 
@@ -315,6 +354,86 @@ async def test_line_count_is_right_when_the_file_has_no_trailing_break(
 
     assert result.is_error is False
     assert "of 3000 lines not shown" in result.text
+
+
+# ---------------------------------------------------------------------------
+# the seeded property test
+# ---------------------------------------------------------------------------
+
+
+#: Atoms the fuzz draws from: the whole separator set ``str.splitlines`` knows,
+#: multi-byte characters, and filler. Deliberately NUL-free, so every payload is
+#: text and the binary classification stays out of the property under test.
+_FUZZ_ATOMS = [
+    "a",
+    "b",
+    " ",
+    "é",
+    "漢",
+    "\n",
+    "\r",
+    "\r\n",
+    "\v",
+    "\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+]
+
+
+def _fuzz_payload(rng: random.Random) -> bytes:
+    return "".join(rng.choice(_FUZZ_ATOMS) for _ in range(rng.randrange(1, 40))).encode("utf-8")
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 5, 64, 65536])
+def test_seeded_fuzz_agrees_with_splitlines_in_both_scan_modes(
+    monkeypatch: pytest.MonkeyPatch, chunk: int
+) -> None:
+    """Seeded property test: the scanner vs ``str.splitlines``, both modes.
+
+    The fuzz that validated the original scanner (1 010 664 comparisons) lived
+    in a /tmp script, so the headline equivalence claim was not checkable from
+    the repo. This is the committed subset, seeded and bounded well under the
+    ~5 s budget: random payloads drawn from the full separator set and
+    multi-byte characters, seven window shapes on each, in BOTH scan modes —
+    a bounded window (the early-exit scan) and a full scan (open-ended, plus
+    the ``count_only`` recovery pass the clamp path uses). Payloads stay under
+    the retention budget, so ``kept`` must be the window verbatim. A failure
+    reports only the ``(chunk, payload, start, end)`` repro.
+    """
+    monkeypatch.setattr(builtin, "_RANGED_READ_CHUNK_BYTES", chunk)
+    rng = random.Random(0x5EED ^ chunk)
+    for _ in range(24):
+        payload = _fuzz_payload(rng)
+        expected = _reference_lines(payload)
+        last = len(expected)
+        shapes = [
+            (1, None),
+            (1, 1),
+            (2, 4),
+            (1, last),
+            (last, last),
+            (max(last - 1, 1), None),
+            (last + 1, None),
+        ]
+        for start, end in shapes:
+            windowed = expected[max(start, 1) - 1 : end]
+            repro = (chunk, payload, start, end)
+            binary, kept, window, total = builtin._stream_text_window(
+                io.BytesIO(payload), start, end
+            )
+            assert (binary, window, kept) == (False, len(windowed), windowed), repro
+            assert total == (None if _window_stops_early(payload, end) else last), repro
+            # Full scan, retention off: the recovery pass must report the exact
+            # total and retain nothing, whatever the window shape.
+            binary2, kept2, window2, total2 = builtin._stream_text_window(
+                io.BytesIO(payload), start, end, count_only=True
+            )
+            assert (binary2, kept2, window2) == (False, [], 0), repro
+            assert total2 == last, repro
 
 
 # ---------------------------------------------------------------------------
@@ -483,10 +602,74 @@ async def test_ranged_read_never_loads_the_whole_file(
     # One bounded chunk per iteration, never a size the file dictates.
     assert all(size_arg == builtin._RANGED_READ_CHUNK_BYTES for _, size_arg, _ in streamed)
     assert max(length for _, _, length in streamed) <= builtin._RANGED_READ_CHUNK_BYTES
-    # ... and it is a real forward pass over the file, not a lucky short read.
-    assert sum(length for _, _, length in streamed) == size
+    # The rendered head fits the output budget, so no footer exists and the
+    # exact total is unused: the scan stops once line 5 is closed and the file
+    # is NOT read to the end. (Before the early exit this equalled ``size``.)
+    assert size > builtin._RANGED_READ_CHUNK_BYTES
+    assert sum(length for _, _, length in streamed) <= builtin._RANGED_READ_CHUNK_BYTES
     # The image sniff reads its header window and no more.
     assert all(length <= media._SNIFF_BYTES for label, _, length in calls if label == "media.open")
+
+
+#: blocks written by the early-exit guard: 512 x 256 KiB = 128 MiB, i.e. ~2000
+#: reads of the 64 KiB chunk size. The guard needs a file far larger than one
+#: chunk — a full pass over it would blow the assertion by ~2000x — but the
+#: ~100 ms it takes to write belongs in every suite run, so it is sized well
+#: below the "few hundred MB" of the manual measurement.
+_HUGE_FILE_BLOCKS = 512
+
+
+@pytest.mark.asyncio
+async def test_bounded_window_read_stops_before_the_file_ends(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A tiny bounded window must cost O(chunk), not O(file).
+
+    ``range="1-5"`` on a 128 MiB file is the shape the operator asked for. The
+    rendered five lines fit the output budget, so the clamp footer — the only
+    consumer of the exact line total — cannot exist and the scan is allowed to
+    stop at line 5. Remove the early exit in ``_stream_text_window`` and the
+    scan reads the whole file: ``read_total`` becomes ``size`` and this fails.
+    """
+    path = tmp_path / "huge.txt"
+    line = b"x" * 63 + b"\n"  # exactly one 64-byte line
+    block = line * 4096  # 256 KiB per write
+    with path.open("wb") as handle:
+        for _ in range(_HUGE_FILE_BLOCKS):
+            handle.write(block)
+    size = path.stat().st_size
+    assert size > 100 * builtin._RANGED_READ_CHUNK_BYTES, "the guard must not be vacuous"
+    calls = _instrument_reads(monkeypatch)
+
+    result = await _call(tools, "read", {"path": "huge.txt", "range": "1-5"}, context)
+
+    assert result.is_error is False, result.text
+    assert _parse_numbered(result.text) == [(n, "x" * 63) for n in range(1, 6)]
+    streamed = [call for call in calls if call[0] == "path.open"]
+    read_total = sum(length for _, _, length in streamed)
+    assert read_total <= builtin._RANGED_READ_CHUNK_BYTES, read_total
+    assert read_total < size // 100
+
+
+@pytest.mark.asyncio
+async def test_clamped_bounded_window_still_reports_the_exact_total(
+    tools, context, tmp_path
+) -> None:
+    """A window whose head IS clamped recovers the file's exact line count.
+
+    This is the other half of the early exit: the scan stopped at line 200, so
+    nothing has counted the remaining 44 800 lines, yet the footer has to name
+    the real total. The snapshot's count-only pass over the same bytes is what
+    makes that exact, and ``None`` must never reach the footer.
+    """
+    path = tmp_path / "big.txt"
+    path.write_bytes(PLAIN_BYTES)
+
+    result = await _call(tools, "read", {"path": "big.txt", "range": "1-200"}, context)
+
+    assert result.is_error is False, result.text
+    assert "of 45000 lines not shown" in result.text, result.text
+    assert "None" not in result.text
 
 
 @pytest.mark.asyncio
@@ -503,6 +686,9 @@ async def test_open_ended_ranged_read_stays_bounded_on_a_large_file(
     assert result.is_error is False
     streamed = [call for call in calls if call[0] == "path.open"]
     assert max(length for _, _, length in streamed) <= builtin._RANGED_READ_CHUNK_BYTES
+    # No bound to stop at — the window IS the tail — so this one really does
+    # scan to EOF: a real forward pass, not a lucky short read. Contrast
+    # ``test_bounded_window_read_stops_before_the_file_ends``.
     assert sum(length for _, _, length in streamed) == size
     # The window is the whole tail of the file; what is retained is bounded by
     # the clamp budget, not by the window.
