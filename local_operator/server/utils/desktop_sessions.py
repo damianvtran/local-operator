@@ -589,7 +589,35 @@ class DesktopSessionBridge:
         cursor = state["snapshot"].get("history_cursor")
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
         if cursor:
-            history = await self.history(through_id=cursor)
+            # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
+            # cursor above, and that is the fix rather than a detail: this is a
+            # read of the TRANSCRIPT, while ``history_cursor`` is a FRONTEND
+            # refresh watermark -- ``transcript.entries()[-1].id`` as of the
+            # owning store's last ``refresh_from_session``
+            # (``frontend_state.py``), which a turn advances only at its message,
+            # tool and turn boundaries and which a checkpoint persists verbatim.
+            #
+            # Bounding one source's read by another source's watermark silently
+            # LOSES rows. Any row durable past the watermark is outside the page,
+            # and because the bound row itself is still on disk
+            # ``read_transcript_page`` reports no ``cursor_missing`` -- so a
+            # reader that reconciles only for an empty page or a missing cursor
+            # (the desktop client does exactly that) accepts the short page as
+            # complete and never learns the rows exist. Measured on the reported
+            # flow: a steer drained mid-turn pins the watermark at the steer row,
+            # every later row of that turn is then outside the page, and the user
+            # sees a transcript that stops at their own steer. A viewer that lost
+            # its owner (`_can_go_cold`) or a state restored from a checkpoint
+            # that predates the rows reaches the same short page with no error.
+            #
+            # The cursor keeps its real job -- the ``live_cursor`` dedupe
+            # watermark on the wire, and the pairing field for the very same
+            # unbounded read the ``/history`` route already serves -- so nothing
+            # is dropped from the contract by not truncating at it. Reads are
+            # bounded by their OWN source's cut: see ``read_transcript_page``
+            # for the inclusive-boundary rule it still applies when a caller
+            # asks for one.
+            history = await self.history()
         return {
             "session_id": self.session_id,
             "epoch": epoch,

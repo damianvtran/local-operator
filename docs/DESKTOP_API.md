@@ -302,9 +302,15 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 2. If retained, ordered frames after the supplied receipt cursor are replayed.
    This includes semantic `event` frames already covered by newer paint state.
 3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold}`. Its
-   history page ends inclusively at the captured canonical history cursor, not
-   at a newer tail read after an await. Missing replaced cursor produces
-   `cursor_missing:true` and an empty page; use `/history` to reconcile that gap.
+   history page is the transcript's durable tail, read once for this frame — the
+   same read `/history` serves — so it carries every row committed before the
+   read, including rows written since the last frontend refresh or checkpoint.
+   `frontend.snapshot.history_cursor` / `live_cursor` are the DEDUPE watermark
+   for the paired state, never a visibility boundary for the page: truncating the
+   page at them silently dropped durable rows whenever a turn was mid-flight (the
+   steer-drain case) or the viewer's state predated the rows, with no
+   `cursor_missing` to signal it. An empty page (a state with no cursor at all)
+   still means "reconcile through `/history`".
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
