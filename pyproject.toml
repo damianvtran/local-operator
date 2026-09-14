@@ -356,14 +356,15 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 #
 # THE CAP WAS TITRATED ON 2026-09-13/14 and it had been too TIGHT: at this host's
 # chronic 4,500-5,500 MB of available memory the reserved floor was binding on
-# every run and resolved 3 workers on 14 cores that sat 0-2.5% busy. Interleaved
+# every run and resolved 3 workers at 4,964-5,313 MB (2 at 4,500-4,848 MB, 4
+# above ~5,472 MB) on 14 cores that sat 0-2.5% busy. Interleaved
 # A/B waves of 3 concurrent instances of tests/unit/tui/test_slash_echo.py (a
 # boot-bound slice) at real fleet depth measured per-instance wall time 313.3 /
 # 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s at cap 8:
 # 6 beat 3 in that run and 8 beat 6 by 9%. An independent A/B (review round 1,
 # 2026-09-14) reproduced the ORDERING but not the magnitude - 15-16% against a
-# different baseline - so the direction is what this file claims and no
-# percentage range is quoted anywhere.
+# different baseline - so the direction is what this file claims: the percentage
+# those waves produced is withdrawn and is not quoted anywhere here.
 #
 # Hence the reserve CAP moved (`min(3072, total/8)` -> `min(2048, total/8)`; the
 # 1/8 fraction is unchanged, so every small-host floor is exactly what it was)
@@ -372,9 +373,11 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # earlier revision halved it to 400 MB, which the per-worker RSS measurement then
 # refused - the heavy corner of this suite peaked at a 441.5 MB worker process
 # tree at cap 6, so 400 would have sat below the draw it has to cover. The
-# release therefore raises this host's chronic-resolution count by one worker
-# (3 -> 4), from the reserve cap alone. conftest.py carries the full table and
-# the measurement.
+# release therefore raises this host's chronic-resolution count from the reserve
+# cap alone: from the released constants' 2 / 2 / 3 / 3 / 3 / 4 to 3 / 4 / 4 /
+# 4 / 4 / 4 at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB available - one
+# worker at 4,964-5,313 MB, TWO at 4,848 MB, and none at 5,555 MB, where both
+# constant sets resolve 4. conftest.py carries the full table and the measurement.
 #
 # The hook prints ONE stderr line naming the terms that produced the count, and
 # the size of the live suite fleet alongside them. That line is what turns "3
@@ -388,7 +391,8 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # and rejected (it floors every suite at 2 workers here and cost 45% wall time at
 # identical CPU) - conftest.py's module docstring carries the numbers so it is
 # not re-tried without them. The count itself is unchanged by the reporting; the
-# only behavioural change here is the titrated pair of constants above.
+# only behavioural change here is the rewritten reserve cap above (the per-worker
+# charge and the 1/8 fraction did not move).
 #
 # `auto` must stay literal here: an explicit `-n N` in addopts would make both
 # the hook and the env var inert.

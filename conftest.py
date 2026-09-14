@@ -128,7 +128,10 @@ and the three instances' total CPU:
 * cap 3 (what this host resolved): 313.3 s, 225.2 s over two rounds; 118.4 s and
   107.8 s of CPU.
 * cap 6: 188.9 s, 161.6 s, 188.7 s over three rounds; 129.2 s, 123.9 s, 129.5 s.
-  **28-40% faster per instance for ~12% more CPU**, in that run.
+  Faster per instance in that run at ~12% MORE CPU. No percentage from these
+  waves is quoted here or in the docs: the independent A/B below measured 15-16%
+  against a different baseline and did not reproduce the magnitude, so the claim
+  is the direction only.
 * cap 8: 171.3 s (one paired round); 150.2 s of CPU. 9% faster than cap 6 for
   16% more CPU - it does NOT clear the >=15% bar that would justify a wider run,
   so the 2..8 clamp and the 0.5 CPU share are untouched.
@@ -137,27 +140,30 @@ and the three instances' total CPU:
 smaller figure is the one to plan with.** An independent A/B (review round 1,
 2026-09-14) ran fresh interleaved waves on a host carrying 24-36 sibling pytest
 processes. It reproduced the ordering - cap 6 was never worse than cap 3, pooled
-per-instance medians 139.3 s against 165.9 s - but at **15-16%, not 28-40%**, and
-against a different baseline (its cap-3 arm measured 157-182 s where the waves
-above measured 225-313 s). Absolute wall times taken minutes apart on a box with
-a live fleet of unknown depth are not comparable, which is exactly why the
-28-40% range was not reproducible and is gone from the docs. What both runs
-agree on, and all that is claimed here: 6 beats 3 on this host, and the CPU the
-raised arm spends is real - ~11% more in the waves above, ~33% more in the
-independent one. The mechanism is the reason to believe it at all: the suite is
-wait-bound, so extra workers hide latency until the machine stops absorbing
-them.
+per-instance medians 139.3 s against 165.9 s - but at **15-16%**, and against a
+different baseline (its cap-3 arm measured 157-182 s where the waves above
+measured 225-313 s). Absolute wall times taken minutes apart on a box with a
+live fleet of unknown depth are not comparable, which is why the waves above
+produced no reproducible magnitude: **their percentage is withdrawn and is quoted
+nowhere in this file or in the docs**, and the only figure that survives anywhere
+is the independent run's 15-16%, carried as one measurement rather than as a
+headline. What both runs agree on, and all that is claimed here: 6 beats 3 on
+this host, and the CPU the raised arm spends is real - ~11% more in the waves
+above, ~33% more in the independent one. The mechanism is the reason to believe
+it at all: the suite is wait-bound, so extra workers hide latency until the
+machine stops absorbing them.
 
-**What ships is a 3 -> 4 raise on this host, not a 3 -> 6 one.** The titration
-above shows the OLD resolution was too tight and that more workers pay on this
-wait-bound suite; it does not measure 4. An earlier revision bought the count 6
-by halving ``_MB_PER_WORKER``, which the per-worker RSS measurement then
+**What ships is the reserve cap alone - one more worker at 4,964-5,313 MB and two
+more at 4,848 MB - not the 3 -> 6 raise an earlier revision bought.** The
+titration above shows the OLD resolution was too tight and that more workers pay
+on this wait-bound suite; it does not measure 4. An earlier revision bought the
+count 6 by halving ``_MB_PER_WORKER``, which the per-worker RSS measurement then
 refused - the charge would have sat BELOW the peak tree it has to cover - so the
-whole raise comes from the reserve cap instead and lands one worker higher than
-before. Stated plainly because the smaller step is the honest one: the
-measurement supports 6 workers being faster than 3, and it supports the reserve
-cap having been the binding term; it does not support a 400 MB charge, so the
-charge did not move.
+whole raise comes from the reserve cap instead, and where it lands is the
+per-availability table above. Stated plainly because the smaller step is the
+honest one: the measurement supports 6 workers being faster than 3, and it
+supports the reserve cap having been the binding term; it does not support a
+400 MB charge, so the charge did not move.
 
 Swap and free memory are NOT the discriminator, and are no longer quoted as one.
 ``vm.swapusage``'s counter moves GIGABYTES in either direction on its own under
@@ -170,9 +176,12 @@ free-memory minima were not lower than the current arm's (4,499 / 4,595 MB at ca
 6 against 4,518 / 4,160 MB at cap 3). CPU time and the free-memory minima carry
 the decision; the raised arm is bounded, not proven harmless.
 
-At this host's chronic 4,500-5,500 MB of available memory the resolution is
-therefore **4** (5,313 MB buys ``min(2,656, 3,265) // 600``), up from the 3 the
-released reserve cap produced. Only the reserve CAP moved (3,072 -> 2,048 MB;
+Across this host's chronic 4,522-5,555 MB of available memory the shipped
+constants resolve **3 / 4 / 4 / 4 / 4 / 4** where the released ones gave
+**2 / 2 / 3 / 3 / 3 / 4** (4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB): the
+raise is **two** workers at 4,848 MB, one at 4,522 MB and at 4,964-5,313 MB, and
+none at 5,555 MB, where both constant sets resolve 4.
+Only the reserve CAP moved (3,072 -> 2,048 MB;
 the 1/8 fraction is unchanged, so every small-host floor is exactly what it was);
 ``_MB_PER_WORKER`` stays at 600 because the measurement says it must. See their
 own comments, and `_MB_PER_WORKER`'s for what bounds the ~1,090 MB outlier.
@@ -448,13 +457,18 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #:   * peak aggregate across all 6 workers: **1,647.3 MB**, including the
 #:     children and app processes the suite spawns.
 #:   * a narrower run of the same spawn-heavy files without the TUI slice peaked
-#:     at 284 MB per worker and 1,240 MB aggregate, so the TUI slice is what
-#:     moves the per-worker peak.
+#:     at 284 MB per worker and 1,240 MB aggregate. An independent re-measurement
+#:     (QA, review round 2) did NOT reproduce that ordering - its no-TUI peak sat
+#:     above its own full-corner passes - so this run claims no cause for the
+#:     peak, and nothing here depends on one either way.
 #:
-#: 600 is therefore **1.36x over the measured peak tree** (600 / 441.5), which is
-#: the margin to reason about - NOT the 2.5x a "226-262 MB clean worker" figure
-#: suggests, because that figure excludes exactly the draws this constant has to
-#: survive.
+#: 600 is therefore **1.36x over the heaviest draw observed** (600 / 441.5),
+#: which is the margin to reason about - NOT the 2.5x a "226-262 MB clean worker"
+#: figure suggests, because that figure excludes exactly the draws this constant
+#: has to survive. Scope, because the number invites the wrong reading: 441.5 MB
+#: is the peak of ONE heavy corner (3.4% of the tree) sampled every 1.5 s, so it
+#: refutes a 400 MB charge - three workers in that run peaked at or above 400 -
+#: without calibrating the suite. It is not the envelope's denominator.
 #:
 #: WHY IT IS 600 AND NOT 400 (review round 1). An earlier revision of this change
 #: lowered it to 400 on evidence that measured a 137 MB/worker average from ONE
@@ -473,11 +487,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: A count of N is only ever produced on a host with **at least 1,200 x N MB of
 #: available memory** - the budget is ``min(0.5*available, available - reserve)``,
 #: so ``budget >= 600N`` forces ``available >= 1,200N`` - which is >= 9,600 MB at
-#: the 2..8 clamp's ceiling of 8 workers. A worker drawing the 1,090 MB case at 8
+#: the 2..8 clamp's ceiling of 8 workers. Read the inequality for what it bounds:
+#: the memory the host had FREE when it chose N, not what N workers then claim
+#: (eight workers each drawing a ~1,090 MB case is ~8.7 GB of worker RSS against
+#: a 4.8 GB budget at that crossover). One worker drawing the 1,090 MB case at 8
 #: workers puts ~1,090 + 7 x 250 MB of worker RSS on a host that had >= 9.6 GB
 #: free when it chose 8, and the memory arm is recomputed per run from *current*
-#: pressure, so a shrinking host hands out fewer workers instead of more. What is
-#: NOT claimed is that the charge covers that case.
+#: pressure, so a shrinking host hands out fewer workers instead of more - which
+#: is the bound that actually holds. What is NOT claimed is that the charge
+#: covers that case.
 #:
 #: The asymmetry is what keeps the envelope where it is: under-provisioning costs
 #: wall time on a wait-bound suite, over-provisioning costs the whole machine a
@@ -589,7 +607,10 @@ _AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 #: the cap either way, so the suite held a flat 3,072 MB per process out of a
 #: budget that is 50% of *available* memory - and with `available` chronically at
 #: 4,500-5,500 MB the reserve was binding on every single run (the crossover is
-#: 2x the reserve = 6,144 MB, and this host lives below it). That is how 5 GB of
+#: 2x the reserve = 6,144 MB, and this host lives below it). What it resolved
+#: across that band was 2 workers at 4,500-4,848 MB, 3 at 4,964-5,313 MB and 4
+#: above ~5,472 MB - too tight exactly where the fleet spends its time, which is
+#: what the titration measured. That is how 5,140 MB of
 #: free memory became `min(2,570, 2,068)` = 2,068 MB = 3 workers. 2,048 MB still
 #: holds a real floor out of the budget - it is 1/18 of this host's 36 GB, i.e.
 #: about 2 GB, NOT the "18 GB" an earlier revision of this comment claimed (the
@@ -768,11 +789,13 @@ def _count_live_sibling_suites() -> int | None:
 
     COST, because it runs before any test in every suite: one ``ps -A -w -w``
     over a full process table, measured 64-430 ms here (median 90 ms across 15
-    runs, 973 processes on the box at load ~140) and 0.42-1.36 s during review
-    round 1's heavier stretch. So the figure to plan with is a few hundred ms on
-    a loaded machine, NOT the sub-100 ms an idle host suggests - and it is why
-    the answer is cached per process rather than recomputed, and why the probe
-    failure path degrades to ``unknown`` instead of retrying.
+    runs, 973 processes on the box at load ~140), 0.42-1.36 s in review round 1's
+    heavier stretch, and 1.570 s at load 84 in round 2 - higher than that stretch,
+    on a lighter fleet. So the range to plan with is **0.1-1.6 s** on a loaded
+    machine, a few hundred ms in the typical case, NOT the sub-100 ms an idle host
+    suggests - and it is why the answer is cached per process rather than
+    recomputed, and why the probe failure path degrades to ``unknown`` instead of
+    retrying.
 
     A process counts when ALL of these hold:
 

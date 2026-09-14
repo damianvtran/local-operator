@@ -100,9 +100,14 @@ def _resolve(
     """Run the hook against a fully synthetic machine.
 
     Every input the hook reads is pinned here - core count, both memory probes,
-    the fleet probe, and the three environment variables - so the result is a
+    the fleet probe, and the four environment variables - so the result is a
     pure function of the arguments and identical on a 2-vCPU runner and a
-    14-core laptop.
+    14-core laptop. ``PYTEST_QUIET_WORKER_CAP`` is scrubbed with the rest even
+    though it changes only the reporting, not the count: this module asserts on
+    the report, and a developer who follows the PR's own advice ("silence it
+    with PYTEST_QUIET_WORKER_CAP=1") would otherwise see 9 failures from a green
+    tree. It is the same fixture-level fix AGENTS.md documents for
+    AWS_DEFAULT_PROFILE - the local shell must not decide what the tests see.
 
     ``siblings`` defaults to 0, i.e. a solo machine. Pinning it keeps every
     assertion in this file independent of how many sibling suites happen to be
@@ -116,7 +121,14 @@ def _resolve(
     monkeypatch.setattr(module, "_total_memory_mb", lambda: total_mb)
     if siblings is not None:
         monkeypatch.setattr(module, "_live_sibling_suites", lambda: siblings)
-    for name in ("CI", "LOCAL_OPERATOR_AGENT_SHELL", "PYTEST_XDIST_AUTO_NUM_WORKERS"):
+    for name in (
+        "CI",
+        "LOCAL_OPERATOR_AGENT_SHELL",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+        # Read from the module rather than spelled out so the name cannot drift
+        # out of step with the hook's own constant.
+        module._QUIET_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     for name, value in (env or {}).items():
         monkeypatch.setenv(name, value)
@@ -383,14 +395,24 @@ def test_the_reserve_fraction_keeps_the_small_host_floor(
     visible where the reserve is large and the host is not - a 16 GB box:
     1/8 holds 2,048 MB, 1/18 only 910 MB.
 
-    At 3,500 MB free on 4 cores (CPU arm 4) that is 2 workers against 4. The
-    smaller reserve buys two workers by promising the machine 1,138 MB less
-    breathing room, which is the trade this change was NOT supposed to make: the
-    reserve's job is the anti-swap floor underneath the per-worker charge, and
-    1/18 would have cut it on exactly the hosts with the least headroom while
-    leaving this laptop's own 2,048 MB cap intact.
+    WHY 3,600 MB and not 3,500 MB: this assertion has to be one a fraction cut
+    CANNOT satisfy, and 3,500 MB was not. There ``min(1,750, 3,500 - 2,048) =
+    1,452`` and ``min(1,750, 3,500 - 910) = 1,750`` both floor to 2 workers
+    under a 600 MB charge, so a reverted fraction left the behavioural
+    assertion passing and only the constant pin below failing. 3,600 MB is the
+    first availability on a 16 GB host where the two diverge: 1/8 leaves 1,552
+    MB (2 workers), 1/18 leaves 1,800 MB (3). That is one worker, and the
+    earlier version of this docstring claimed "2 workers against 4" - which
+    needed the withdrawn 400 MB charge and was wrong under it too (that charge
+    gives 3 against 4: it moves the level of both arms, not their difference).
+    The cost of the cut is unchanged and is the real reason to refuse it: 1/18
+    promises the machine 1,138 MB less breathing room on exactly the hosts with
+    the least headroom, while leaving this laptop's own 2,048 MB cap intact.
     """
-    assert _resolve(hook_module, monkeypatch, cpus=8, available_mb=3500, total_mb=16384) == 2
+    # Behaviour first, at an availability where a fraction cut changes the
+    # count (1/18 resolves 3 here). The constant below is a second check naming
+    # what was cut, not the only thing standing in for it.
+    assert _resolve(hook_module, monkeypatch, cpus=8, available_mb=3600, total_mb=16384) == 2
     assert hook_module._MEMORY_RESERVE_FRACTION == 8
 
 
@@ -527,10 +549,12 @@ def test_total_memory_probe_reads_this_host(hook_module: types.ModuleType) -> No
 #: constants - ``min(2,500, 5,000 - 2,048)`` = 2,500 MB of budget, over 600 MB
 #: per worker - that resolves 4 workers against a 7-worker CPU arm, so the memory
 #: arm is the one that decides. The raise over the released constants is one
-#: worker (3 -> 4), from the reserve cap alone; the A/B behind it measured cap 6
-#: against cap 3 (15-16% on the independent A/B, 28-40% in the first one), so
-#: quote the DIRECTION and never the range - see ``conftest.py``'s module
-#: docstring for why the count is 4 and not the 6 the earlier revision bought.
+#: worker at 4,964-5,313 MB free and two at 4,848 MB, from the reserve cap alone;
+#: the A/B behind it measured cap 6 against cap 3 and only its DIRECTION
+#: reproduced (15-16% on the independent pass, against a different baseline;
+#: the first pass's own percentage is withdrawn), so quote the direction and
+#: never a headline range. See ``conftest.py``'s module docstring for the full
+#: table and for why the count is 4 and not the 6 the earlier revision bought.
 _CHRONIC_PRESSURE_MB = 5000
 #: Below the reserve, where ``_MIN_WORKERS`` is the term that decides.
 _FLOOR_BINDING_MB = 1000
@@ -641,10 +665,19 @@ def test_the_worker_cap_report_can_be_silenced(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``PYTEST_QUIET_WORKER_CAP=1`` leaves the count alone and prints nothing."""
-    monkeypatch.setenv(hook_module._QUIET_ENV, "1")
+    """``PYTEST_QUIET_WORKER_CAP=1`` leaves the count alone and prints nothing.
+
+    Set through ``_resolve``'s ``env`` rather than by hand: the fixture scrubs
+    this variable with the rest (see its docstring), so an ambient value cannot
+    reach the hook and only an explicit one can.
+    """
     resolved = _resolve(
-        hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB, siblings=3
+        hook_module,
+        monkeypatch,
+        cpus=14,
+        available_mb=_CHRONIC_PRESSURE_MB,
+        siblings=3,
+        env={hook_module._QUIET_ENV: "1"},
     )
     assert resolved == 4
     assert capsys.readouterr().err == ""
@@ -664,9 +697,21 @@ def test_the_quiet_flag_is_read_as_a_flag_not_as_set_at_all(
     likely to reach for when they want the report BACK - so the escape hatch
     read as broken in exactly the direction that is hardest to notice (the run
     looks normal, it just says nothing). A flag is read as a flag.
+
+    Passed through ``_resolve``'s ``env`` for the same reason as the test above:
+    the fixture owns this variable so that a developer's exported value cannot
+    decide what the module asserts.
     """
-    monkeypatch.setenv(hook_module._QUIET_ENV, value)
-    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB) == 4
+    assert (
+        _resolve(
+            hook_module,
+            monkeypatch,
+            cpus=14,
+            available_mb=_CHRONIC_PRESSURE_MB,
+            env={hook_module._QUIET_ENV: value},
+        )
+        == 4
+    )
     assert "pytest worker cap: 4" in capsys.readouterr().err
 
 
@@ -900,12 +945,20 @@ def test_the_released_constants_resolve_four_at_measured_availability(
     """At the four availabilities the A/B measured, the memory arm allows 4.
 
     ``min(0.5 * a, a - 2048) // 600``: 2,482-2,777 MB of budget, and the CPU arm
-    (7) stays clear of it, so memory is still the binding term and the raise from
-    the released 3 is bought from the reserve CAP rather than from the cores or
-    from the per-worker charge. 4, NOT the 6 an earlier revision bought by halving
-    that charge: the per-worker RSS measurement (see ``_MB_PER_WORKER`` in
-    ``conftest.py``) put the peak worker tree at 441.5 MB, above 400, so the
-    charge stays at 600 and the count follows it down.
+    (7) stays clear of it, so memory is still the binding term and the raise is
+    bought from the reserve CAP rather than from the cores or from the per-worker
+    charge. 4, NOT the 6 an earlier revision bought by halving that charge: the
+    per-worker RSS measurement (see ``_MB_PER_WORKER`` in ``conftest.py``) put the
+    peak worker tree at 441.5 MB, above 400, so the charge stays at 600 and the
+    count follows it down.
+
+    These rows are NOT all one-worker raises over the released constants. The
+    released file (600 / 3,072 / 8) resolves 3 at 4,964 / 5,140 / 5,313 MB and 4
+    at 5,555 MB, so three of them buy one worker and 5,555 buys none; the
+    two-worker row, 4,848 MB, is pinned in
+    `test_the_titration_did_not_overshoot_or_undershoot` below. The per-row
+    baseline is 2 / 2 / 3 / 3 / 3 / 4 released against 3 / 4 / 4 / 4 / 4 / 4
+    shipped at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB.
     """
     workers = _resolve(hook_module, monkeypatch, cpus=14, available_mb=available_mb)
     assert workers == 4, f"at {available_mb} MB available"
@@ -919,11 +972,12 @@ def test_the_titration_did_not_overshoot_or_undershoot(
     4,522 MB is the lowest `available` any A/B wave measured, and 3 is what the
     shipped constants buy there (``min(2,261, 2,474) // 600``) - the raise must
     not be tuned so hard that a *worse* machine is handed more workers than a
-    better one, and at this level the reserve still takes the host back to the
-    count the released constants gave. At the other end, 8,498 MB and 24,000 MB
-    must both resolve the CPU arm's 7 (not 8): the change moved a memory constant
-    only, and a suite on a machine with memory to spare must not get a wider run
-    than the CPU share allows.
+    better one, so the count has to fall with availability (4 at 4,848-5,313 MB,
+    3 here) instead of sitting flat across the band. The released constants gave
+    **2** here, so this row is a raise too, not a return to the old count. At the
+    other end, 8,498 MB and 24,000 MB must both resolve the CPU arm's 7 (not 8):
+    the change moved a memory constant only, and a suite on a machine with memory
+    to spare must not get a wider run than the CPU share allows.
     """
     assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=4522) == 3
     assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=8498) == 7
