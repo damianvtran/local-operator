@@ -16,7 +16,19 @@ vi.mock("./api", () => ({
 	getCommands: vi.fn(async () => ({ commands: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
-	markSessionSeen: vi.fn(async () => ({ ok: true })),
+	/* Settled by default: the answer the handshake is defined by. Tests that need
+	   the UNREAD answer (a superseded token, or an older daemon) stage their own. */
+	markSessionSeen: vi.fn(async () => ({
+		ok: true,
+		attention: {
+			conversation_id: "session/s1",
+			completion_token: "token-a",
+			anchor_id: "result-a",
+			kind: "complete",
+			unseen: false,
+			revision: [1, 1],
+		},
+	})),
 }));
 
 let slot: { projection: SessionProjection | null; connected: boolean } = {
@@ -100,6 +112,58 @@ describe("SessionScreen seen handshake", () => {
 		expect(markSessionSeen).toHaveBeenCalledWith("s1", "token-a");
 		await sample();
 		expect(markSessionSeen).toHaveBeenCalledTimes(1);
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
+	});
+
+	it("keeps polling while the answer does not say the conversation is read", async () => {
+		// The shipped daemon answered a SUPERSEDED token with a 200 whose body
+		// still said `unseen` (see the findings file). Latched on the resolved
+		// call, the "new" mark never cleared, because nothing ever acknowledged
+		// the completion the projection had moved on to. `unseen` is the verdict;
+		// anything else keeps the poll running.
+		const p = focusedResult();
+		const seen = vi.mocked(markSessionSeen);
+		seen.mockResolvedValue({
+			ok: true,
+			attention: { ...p.attention!, unseen: true },
+		});
+		render(<SessionScreen sessionId="s1" />);
+		await sample();
+		expect(seen).toHaveBeenCalledTimes(1);
+		await sample();
+		expect(seen).toHaveBeenCalledTimes(2);
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
+
+		// The answer catches up: the receipt belongs to this conversation and the
+		// daemon confirms it. Now -- and only now -- the attempt settles.
+		seen.mockResolvedValue({
+			ok: true,
+			attention: { ...p.attention!, unseen: false, revision: [1, 1] },
+		});
+		await sample();
+		const settledCalls = seen.mock.calls.length;
+		await sample();
+		expect(seen.mock.calls.length).toBe(settledCalls);
+		expect(seen).toHaveBeenLastCalledWith("s1", "token-a");
+	});
+
+	it("keeps polling when the daemon refuses the receipt", async () => {
+		// A refusal is not a read. An older daemon refuses nothing, but the
+		// current one answers a superseded token with 409, and the honest
+		// response to that is to wait for the token the projection names next --
+		// never to stop, and never to clear the mark optimistically.
+		focusedResult();
+		const seen = vi.mocked(markSessionSeen);
+		seen.mockRejectedValue(
+			Object.assign(new Error("completion token superseded by a newer completion"), {
+				status: 409,
+				code: "superseded_completion_token",
+			}),
+		);
+		render(<SessionScreen sessionId="s1" />);
+		await sample();
+		await sample();
+		expect(seen.mock.calls.length).toBeGreaterThan(1);
 		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 
