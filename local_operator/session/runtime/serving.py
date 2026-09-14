@@ -1156,9 +1156,12 @@ class ServingSessionHandle(SessionHandle):
         move, announce the handover, refuse new work, leave when nothing is in
         flight. Three things differ, and each is what a VIEWER makes different:
 
-        * the announcement is a frame to a client that is waiting on this very
-          connection, so it must land BEFORE the refusal (see
-          ``process._begin_drain`` for the ordering argument);
+        * the daemon announces into its RECORD and keeps serving while anything
+          is attached, latching only once its drain has emptied; this
+          announcement is a frame to a client that is waiting on this very
+          connection and is followed by the latch in the same step, because a
+          runtime that waited for its viewer would be the defect rather than the
+          fix (see ``process._begin_drain`` for the ordering argument);
         * the drain is BOUNDED by the caller (``process._BuildWatch``), because
           a session runtime can be busy for hours and the process that runs its
           next engage is waiting on this one leaving;

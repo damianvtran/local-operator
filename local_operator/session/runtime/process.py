@@ -803,14 +803,21 @@ async def _begin_drain(
     — keep serving, ask again on the next check — which is the status quo rather
     than a regression.
 
-    THE ANNOUNCEMENT PRECEDES THE LATCH, and that is the one place this departs
-    from the daemon's shape (``server/retire.py``: "latch the refusal, then
-    publish the reason into the record"). Both orders serve the same goal — a
-    reader must learn the process is leaving before it is refused — and the
-    mechanism decides which: a daemon's readers POLL its record, so a latched
-    refusal published a moment later is still read as a handover, while this
-    runtime's announcement is a frame on the very connection a prompt arrives
-    on, so a refusal that leaves first is read as an error. See
+    THE ANNOUNCEMENT PRECEDES THE LATCH. The daemon reaches the same order by a
+    different route, and the difference is worth reading off rather than
+    paraphrased: ``server/retire.py`` publishes ``retiring_from``/``retiring_to``
+    into the RECORD the moment a settled change is detected, keeps serving
+    while anything is attached, and latches its typed refusal only once the
+    drain has emptied — with a jittered ``BUILD_STAGGER_S`` slice between the
+    latch and the exit. Both serve the same goal, a reader must learn the
+    process is leaving before it is refused, and each mechanism decides how much
+    time that reader gets: a daemon's readers POLL its record, so announcing
+    early costs it nothing and it can keep working until they let go, while this
+    runtime's announcement is a FRAME on the very connection a prompt arrives
+    on — and waiting for that viewer is precisely the failure being fixed here,
+    because viewer presence is the term that kept five-hour-stale runtimes
+    resident. So the runtime announces and latches in the SAME synchronous step
+    and leaves when its own work is done, rather than waiting to be let go. See
     ``ServingSessionHandle.begin_drain`` for the runtime's half of the shape.
     """
     begin_drain = getattr(handle, "begin_drain", None)
