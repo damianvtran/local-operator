@@ -21,17 +21,21 @@ REFUSES to reuse rather than one that it reuses.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY, AsyncJob
 from local_operator.harness.subagent import TRAJECTORY_CAP, _make_relay
 from local_operator.harness.types import (
+    ModelSpec,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
@@ -421,6 +425,124 @@ def test_a_non_list_trajectory_is_frozen_rather_than_emptied(
     store.refresh_jobs(session)
     assert work.freezes == 2
     assert "child-0" not in store._retained_windows()._by_job
+
+
+async def _no_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+    """A stream double that never yields: these tests never run a real turn.
+
+    An async GENERATOR rather than a plain callable, because that is what
+    ``stream_fn``'s annotation requires -- a stub that only returns ``None`` would
+    raise the first time a turn ran, which is the kind of double that hides a
+    broken test.
+    """
+    return
+    yield  # pragma: no cover -- the ``yield`` is what makes this a generator
+
+
+def _real_session(directory: Path) -> Any:
+    """A real Session, for the one cell that must drive the real coalescer."""
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    return Session(
+        model=ModelSpec(provider="test", model_id="mock"),
+        stream_fn=_no_stream,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda *_args: [],
+    )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [{"_lo_seq": 0, "type": "x"}, "abc", b"abc", (1, 2), ("a", "b")],
+    ids=["mapping", "str", "bytes", "tuple-of-non-rows", "tuple-of-strs"],
+)
+def test_a_sequence_that_holds_no_rows_keeps_the_pre_change_answer(shape: Any) -> None:
+    """A non-list sequence the writer never produces must not raise out of the tick.
+
+    The fallback mirrors ``from_job``'s row predicate (``_retained_row``), so a
+    sequence whose items are not rows gets the answer the pre-change tree gave it:
+    no rows, and no exception. Freezing its ITEMS instead puts non-rows into
+    canonical state, where ``FrontendUpdate(job_trajectory_appends=...)`` rejects
+    them -- a ``ValidationError`` out of ``refresh_jobs`` and, on the roster path,
+    out of the pump's bare ``call_later`` callback (round 2, F6/Q5).
+    """
+    job = SimpleNamespace(id="child-0", type="task", status="running", trajectory=shape, prompt="p")
+    store = _store([])
+
+    store.refresh_jobs(_session([job]))
+
+    assert list(store.state.jobs[0].trajectory) == []
+    assert store.state.jobs[0].trajectory_length == 0
+    assert "child-0" not in store._retained_windows()._by_job
+
+
+def test_a_list_of_non_rows_is_unchanged_by_this_round() -> None:
+    """The one malformed shape this round deliberately leaves alone.
+
+    A ``list`` of non-rows takes the memo's fast path (identity and stamps are
+    readable for any list), so the frozen items reach canonical state and the
+    appends writer rejects them. That behaviour is PRE-EXISTING -- it arrives with
+    the memo itself (``0854ac6ac``, where the same cell raises), not with the
+    round-1 non-list fallback -- and narrowing it means changing the fast path's
+    contract, so this round records it rather than folding in a second change.
+    """
+    job = SimpleNamespace(
+        id="child-0", type="task", status="running", trajectory=["a", "b"], prompt="p"
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        _store([]).refresh_jobs(_session([job]))
+
+    assert "job_trajectory_appends" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_sequence_that_holds_no_rows_does_not_escape_the_roster_pump(
+    tmp_path: Path,
+) -> None:
+    """The loop-handler half: nothing reaches the exception handler on a real tick.
+
+    ``Session._schedule_frontend_jobs`` runs the refresh from a bare ``call_later``
+    callback, so anything ``refresh_jobs`` raises there is reported to the loop's
+    exception handler and lost. Measured before the predicate was shared: three
+    handler exceptions (mapping, str, tuple of strings) against zero on the
+    merge-base; this asserts the zero, with the pump and the roster intact.
+    """
+    loop = asyncio.get_running_loop()
+    seen: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(
+        lambda _loop, context: seen.append(str(context.get("exception") or context.get("message")))
+    )
+    try:
+        session = _real_session(tmp_path)
+        session.jobs.set_max_running(4)
+        gate = asyncio.Event()
+
+        async def run(job_id: str, signal: Any, progress: Any) -> None:
+            await gate.wait()
+
+        job_id = session.jobs.register("task", "child", run)
+        job = session.jobs.get(job_id)
+        job.trajectory = [{"type": "x", "_lo_seq": 0, "tool_call_id": "c", "tool_name": "bash"}]
+        store = session._frontend_state_store
+        store.subscribe(lambda _update: None)  # a live viewer: the pump runs
+
+        session._schedule_frontend_jobs()
+        await asyncio.sleep(0.25)
+        assert [row.id for row in store.state.jobs] == [job_id]
+
+        for shape in ({"_lo_seq": 0, "type": "x"}, "abc", ("a", "b")):
+            job.trajectory = shape
+            session._schedule_frontend_jobs()
+            await asyncio.sleep(0.25)
+            assert [row.id for row in store.state.jobs] == [job_id]
+
+        assert seen == [], f"a malformed trajectory reached the loop: {seen[:1]}"
+    finally:
+        loop.set_exception_handler(previous)
 
 
 def test_rebind_drops_the_previous_lineages_windows(monkeypatch: pytest.MonkeyPatch) -> None:
