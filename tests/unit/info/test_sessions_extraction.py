@@ -491,3 +491,129 @@ def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
     payload = _json.loads(capsys.readouterr().out)
     row = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
     assert "killer pid 40609" in row["completion_reason"]
+
+
+def _why_cell(line: str) -> str:
+    """The trailing WHY cell of a rendered row, at its own published width."""
+    from local_operator.cli import WHY_COLUMN_WIDTH
+
+    return line[len(line) - WHY_COLUMN_WIDTH :]
+
+
+def _rendered_why_cell(monkeypatch: Any, tmp_path: Any, capsys: Any) -> str:
+    """Render the table and return the live row's WHY cell."""
+    import argparse
+
+    from local_operator import cli
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    line = next(row for row in out.splitlines() if "Investigate" in row)
+    return _why_cell(line)
+
+
+def _before_rendered_why_cell(monkeypatch: Any, tmp_path: Any, capsys: Any, reason: str) -> str:
+    """The cell the PRE-CHANGE slice produced, recomputed from the old rule.
+
+    The old expression was ``reason[:WHY_COLUMN_WIDTH]`` — an identity at or
+    under the width — so comparing against it is what makes "byte-identical" a
+    measurement rather than an assertion about an unchanged file.
+    """
+    from local_operator.cli import WHY_COLUMN_WIDTH
+
+    assert reason[:WHY_COLUMN_WIDTH] == reason, "the fitting case must not be cut"
+    return _rendered_why_cell(monkeypatch, tmp_path, capsys)
+
+
+def test_a_reason_wider_than_the_column_is_marked_not_silently_sliced(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """Design round 2, D8 — now TRIGGERED by this branch's own longer sentence.
+
+    A slice at exactly the column width is invisible: it drops the tail and the
+    row still reads as a finished sentence. That was survivable only while
+    every reason happened to fit — the involuntary reason filled the 48-cell
+    column exactly, which is why design round 2 filed the missing marker as a
+    non-blocking follow-up instead of a finding. ``CUT_OFF_UNKNOWN`` is 58
+    cells, so it is the first reason this surface has that EXCEEDS the budget
+    and loses a word (``determined``) with nothing to say so.
+
+    The sentence itself is untouched — round 1 approved it for the transcript
+    and notice surfaces (D3/U3) and it is asserted below to reach ``--json`` in
+    full — so this is the column's own summary marker, not a copy change.
+    """
+    import argparse
+    import json as _json
+
+    from local_operator import cli
+    from local_operator.incidents import CUT_OFF_UNKNOWN
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    assert len(CUT_OFF_UNKNOWN) > cli.WHY_COLUMN_WIDTH, "this test needs a wider reason"
+
+    # A cause token this build does not know, which is the real shape that
+    # paints this sentence: a newer runtime's token reaching an older viewer.
+    _seed_outcome(
+        tmp_path, "a3f9c21b7e40", kind="error", reason=CUT_OFF_UNKNOWN, cause="future-cause"
+    )
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    line = next(row for row in out.splitlines() if "Investigate" in row)
+    cell = _why_cell(line)
+
+    assert len(cell) == cli.WHY_COLUMN_WIDTH, repr(cell)
+    assert cell.endswith("…"), cell
+    # The cut really happened, and the marker is the ONLY thing that says so.
+    assert "determined" not in line, line
+    assert cell == CUT_OFF_UNKNOWN[: cli.WHY_COLUMN_WIDTH - 1] + "…", cell
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    payload = _json.loads(capsys.readouterr().out)
+    full = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    assert full["completion_reason"] == CUT_OFF_UNKNOWN, full["completion_reason"]
+
+
+def test_a_reason_that_fits_the_column_is_untouched(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """The boundary: 48 cells must be byte-identical to the pre-change slice.
+
+    Pinned at the width rather than on a sample sentence because the property
+    is arithmetic: ``reason[:48]`` is the identity at 48, so a fitting cell may
+    not change. Otherwise the marker re-flows every row that was already fine.
+    """
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    fitting = "x" * cli.WHY_COLUMN_WIDTH
+    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=fitting, cause="future-cause")
+
+    assert _before_rendered_why_cell(monkeypatch, tmp_path, capsys, fitting) == fitting
+
+
+def test_a_reason_one_cell_too_wide_gains_the_marker(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """49 cells is the first width that pays: one cell for the ellipsis."""
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    overflowing = "y" * (cli.WHY_COLUMN_WIDTH + 1)
+    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=overflowing, cause="future-cause")
+
+    cell = _rendered_why_cell(monkeypatch, tmp_path, capsys)
+    assert cell == overflowing[: cli.WHY_COLUMN_WIDTH - 1] + "…", repr(cell)
+    assert len(cell) == cli.WHY_COLUMN_WIDTH, repr(cell)
