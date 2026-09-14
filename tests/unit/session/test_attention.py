@@ -1131,6 +1131,48 @@ def test_a_marker_that_predates_the_run_is_not_a_verdict_when_no_record_survives
     assert "killer pid 61123" in fresh[2], fresh[2]
 
 
+@pytest.mark.parametrize("offset", [-1.0, -0.5, -0.001, 0.0, 0.001])
+def test_stop_marker_event_order_has_no_process_identity_tolerance(
+    tmp_path: Path, offset: float
+) -> None:
+    """An earlier stop cannot explain a new turn, even a millisecond later.
+
+    These are distinct events with fractional writer timestamps, not rounded
+    copies of a process identity. Exercise the real import and persisted row:
+    checking only the comparison would miss stale attribution surviving in the
+    SQLite outcome after the classifier's return value changed.
+    """
+    from local_operator.incidents import CUT_OFF_UNKNOWN
+    from local_operator.session.attention import bootstrap_transcript
+
+    session_id = "markerboundary"
+    token = _seed_started(tmp_path, session_id)
+    transcript = Transcript(tmp_path / "sessions" / session_id)
+    started_at = transcript.entries()[-1].ts
+    _write_stop_marker(tmp_path, session_id, at=started_at + offset)
+    assert not (tmp_path / "run").exists(), "this case must have no surviving run record"
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(transcript, store)
+    assert result is not None
+    kind, cause, reason, returned = result
+    assert returned == token
+    expected = ("error", "") if offset < 0 else ("interrupted", "user-stop")
+    assert (kind, cause) == expected, result
+    if offset < 0:
+        assert reason == CUT_OFF_UNKNOWN
+        assert "killer pid 61123" not in reason
+        assert "control.stop_session" not in reason
+    else:
+        assert "killer pid 61123" in reason
+        assert "control.stop_session" in reason
+    with sqlite3.connect(store.path) as connection:
+        row = connection.execute(
+            "SELECT kind, cause, reason FROM completions WHERE conversation = ?",
+            (f"session/{session_id}",),
+        ).fetchone()
+    assert row == (kind, cause, reason)
+
+
 @pytest.mark.asyncio
 async def test_a_witnessed_deliberate_stop_is_written_as_an_interruption(
     tmp_path: Path,

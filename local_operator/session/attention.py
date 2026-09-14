@@ -445,7 +445,10 @@ def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) 
     """
     if run_started_at is None or not _is_stamp(marker.get("at")):
         return True
-    return float(marker["at"]) >= float(run_started_at) - _RUN_KEY_TOLERANCE_S
+    # These fractional writer stamps order DIFFERENT events, unlike the two
+    # rounded copies of one process key compared above. Any look-behind here
+    # attributes a rapid re-engagement's death to the preceding turn's stop.
+    return float(marker["at"]) >= float(run_started_at)
 
 
 def _record_detail(record: Any) -> str:
