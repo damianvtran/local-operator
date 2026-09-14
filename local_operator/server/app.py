@@ -187,6 +187,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # with.
         serve_publisher = serve_registry.publisher(serve_record, root=config_dir)
         app.state.serve_record = serve_record
+        # The publisher goes on state TOO, not just its heartbeat Task: the
+        # claim route has to refresh the record's ``desktop`` field when it
+        # accepts a claim, and re-deriving a publisher there would mean
+        # rebuilding the record — which re-mints ``claim_key`` and silently
+        # invalidates the app's proof of ownership. Publishing through the
+        # object that owns this record is the only cheap, non-destructive way
+        # to rewrite it (see ``accept_claim`` and its caller).
+        app.state.serve_publisher = serve_publisher
         # One task on the loop, cancelled below. The record is rewritten whole
         # by the shared `publish`, so its atomicity and 0600/0700 permissions
         # are the session registry's, not re-implemented here.
@@ -238,6 +246,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.gather(serve_heartbeat, return_exceptions=True)
             serve_publisher.close()
         app.state.serve_record = None
+        app.state.serve_publisher = None
         app.state.serve_heartbeat = None
 
 
@@ -462,7 +471,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def desktop_origin_cors(request: Request, call_next):
-    """Stop echoing arbitrary origins once a desktop allowlist is configured.
+    """Stop echoing arbitrary origins once the desktop plane is governed.
 
     ``CORSMiddleware`` is registered with ``allow_origins=["*"]`` and
     ``allow_credentials=True``, which makes Starlette ECHO the requesting
@@ -477,22 +486,31 @@ async def desktop_origin_cors(request: Request, call_next):
     above it sees no ``Access-Control-Allow-Origin`` at all (verified, not
     assumed) and would silently strip nothing.
 
-    Scoped to the managed desktop posture (``desktop_posture``: the app's env
-    token, or an accepted claim and the origin it brought with it). With no
-    allowlist configured, a standalone server keeps its historical wildcard
-    CORS, so CLI clients, scripts and existing embedders are untouched.
+    Scoped to the POSTURE, never to a non-empty allowlist. The first version
+    returned early on ``if not allowed``, which read an empty allowlist as
+    "no tightening in force" -- and an empty allowlist is exactly what a
+    native (Origin-less) claim installs, so the drive-by surface stayed open
+    on the very caller this plane's claim exists for, while ``require_desktop``
+    on the gated families refused every Origin-bearing request in that same
+    state. On a governed daemon an empty allowlist therefore means "no browser
+    origin is admitted"; only a plane nobody governs keeps the historical
+    wildcard CORS, so CLI clients, scripts and existing embedders are
+    untouched.
     """
     response = await call_next(request)
-    # The allowlist in force: the environment's, UNIONED with a claimed
-    # caller's own origin (see `desktop_posture`). So a claim both keeps this
-    # middleware from echoing arbitrary origins back to a page AND admits the
-    # app that claimed the plane — the two halves have to come from one value
-    # or the app would claim its way into a CORS wall of its own making.
-    allowed = desktop_posture().origins
-    if not allowed:
+    posture = desktop_posture()
+    if not posture.enabled:
         return response
+    # The allowlist in force: the environment's, UNIONED with the origins the
+    # accepted claim installed (see ``desktop_posture``). So a claim both keeps
+    # this middleware from echoing arbitrary origins back to a page AND admits
+    # the app that claimed the plane -- the two halves have to come from one
+    # value or the app would claim its way into a CORS wall of its own making.
+    # An app that declared a renderer origin in its claim body gets exactly
+    # that, and the packaged app that declares none gets no browser grant at
+    # all -- correct, since its renderer goes through main.
     origin = request.headers.get("origin")
-    if origin is not None and origin not in allowed:
+    if origin is not None and origin not in posture.origins:
         # Removed rather than set to a placeholder: absent means "no CORS grant",
         # which is what a browser must conclude. Credentials must go with it, or
         # the pair reads as a grant to the wildcard.
