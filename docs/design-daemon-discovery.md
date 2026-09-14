@@ -330,11 +330,73 @@ record (live pid, stale heartbeat) is degraded-and-named, never reaped.
   restarts a `lop serve` on a new build. Give it the same shape — a poll task
   using `process.py`'s `BUILD_CHECK_S`/`BUILD_SETTLE_S` semantics (reused, not
   reinvented) that **announces** by writing `retiring_from`/`retiring_to` into its
-  record and refusing new session spawns, then exits once nothing is in flight,
-  leaving the successor to whoever supervises it: the app (for a daemon it owns,
-  which re-discovers the new pid and port via §3) or launchd. An external,
-  unsupervised daemon is never restarted by the UI — it says so, names `lop
-  update`, and offers to run it if it is the global install.
+  record the moment a settled change is detected, **keeps serving** for as long as
+  anything is attached, and only once the drain is empty **latches** — refusing
+  new work with `503 daemon-retiring` — and exits, leaving the successor to
+  whoever supervises it: the app (for a daemon it owns, which re-discovers the new
+  pid and port via §3) or launchd. An external, unsupervised daemon is never
+  restarted by the UI — it says so, names `lop update`, and offers to run it if it
+  is the global install.
+  - **Announce early, latch late, and the announcement IS the release valve.**
+    The daemon holds no agent turn — turns run in the detached runtime children,
+    which retire on their own (`process.py`) — so what it holds is *attachment*,
+    and the standing terms are the desktop app's own: the replayable
+    `GET /v1/desktop/sessions/{id}/events` relay, held for as long as a
+    conversation is mounted, and the watch lease renewed every 15 s inside a 45 s
+    TTL (`WATCH_TTL`), which is renewed over that same subscription. Announcing
+    only after the drain emptied is therefore *circular* for the daemon the app is
+    attached to: the drain cannot empty until a client lets go, no client can know
+    to let go until the record says something, and the record says nothing until
+    the drain is empty (measured: 32 s of samples with the relay held, no
+    announcement, no log at the default level). Announcing the instant a settled
+    change is detected, while refusing nothing, is what makes the record a valve a
+    client can act on within its own timing; refusing work at that instant instead
+    would break the app for an unbounded period, and refusing nothing until the
+    client had already let go is the circularity above.
+  - **The refusal is the DOOR, not the routes, and it covers reads.**
+    `DesktopSessions.session()` is the one place a desktop route obtains a bridge
+    (and the one place a bridge is constructed), so the latch check lives there:
+    every present route, and every route added later, is covered by construction,
+    and the enumeration of admission paths survives only as the test that keeps
+    it honest. Once latched it refuses session-scoped READS as well as writes — a
+    request answered by the build the daemon has already told its readers to
+    leave can only keep a client on a dying process — while the record plane
+    (`GET /v1/desktop/sessions`, `/health`, the record file) keeps answering
+    until the clean exit removes it, which is what lets any reader observe the
+    handover.
+  - **The announcement is re-read, and can be withdrawn.** The daemon re-asks
+    whether the install still proves the move it announced on every check
+    interval. A `lop-update` that failed, was rolled back, or was superseded by
+    the running build clears the record fields and the daemon carries on serving
+    — it is the right build after all; an install that moved on again re-announces
+    onto the newer build; and a stamp that cannot be read as a build at all means
+    STAY, because leaving a process behind for a build it could not read is the
+    one direction this watch must never take. The *latch* remains one-way: only a
+    record field is withdrawn, and only before the refusal runs.
+  - **What the UI PR must implement, stated as a specification.** On observing
+    non-empty `retiring_from`/`retiring_to` in a discovered daemon's record, the
+    app must (1) **drop the session relay** for that daemon — the
+    `src/main/desktop-stream.ts` subscription to
+    `GET /v1/desktop/sessions/{id}/events` — and (2) **stop the watch-lease
+    heartbeat** that rides it (`sessions.watch`, every 15 s into a 45 s lease, so
+    the term clears within one lease of the drop), then (3) **re-bind to the
+    successor once it appears**, rediscovering it through the record exactly as §3
+    describes (the successor publishes its own record; the identity check stays
+    `/health`'s `instance_id`). No new channel is needed for either half: the
+    relay already reconnects from its retained receipt cursor, and a lease is a
+    view rather than work, so dropping both costs the client a rebind and nothing
+    else. **The drop needs no turn condition, and dropping mid-turn is expected
+    rather than tolerated:** a turn is owned by the detached
+    `session/runtime/process.py` runtime, which this daemon neither holds nor
+    cancels, so what the drop ends is the client's *view* of it — the turn keeps
+    running and its output stays in the transcript, and (3)'s rebind replays it
+    from the retained cursor. Gating the drop on a turn's stream ending would put
+    the rollout behind an unbounded wait for exactly the case the valve exists to
+    unblock, since a streaming turn is when a viewer is most likely to be
+    attached. Until this ships, an app-attached daemon announces and keeps
+    serving — strictly better than the silence it replaces (the record is
+    readable by any reader, and `lop stop` remains the manual release), but NOT
+    yet a completed update path for the app-attached case.
 - **Bundled venv**: keep the code path, demote its role. It exists so a fresh
   machine has *a* backend; once a global daemon is discoverable it must not be
   started, must not be updated, and must not be what the version banner describes.
@@ -421,7 +483,14 @@ documented at `types.py:255-315`.
    watch for a working `curl` script starting to 401, and for a renderer call site
    still hitting a gated path directly.
 2. **`--reload`** (dev only) publishes from uvicorn's child; verify the reloader's
-   own exit cannot orphan the record.
+   own exit cannot orphan the record. **Resolved for the retirement case, and the
+   first answer was wrong:** the child ran the build watch, so it announced,
+   removed its record and asked its own process to stop — leaving the reloader
+   parent still accepting on the port with no record to explain it, and
+   `/health` timing out (QA round 1, Q3, three runs). The child now runs no
+   build watch at all (`registry.is_reload_child`): a dev-mode supervisor is
+   not a production daemon, cannot hand a socket to a successor, and the
+   operator is watching its console.
 3. **The retirement latch.** `begin_retire` (`process.py:397-470`) is what stops a
    retirement aborting work it had just decided not to disturb; the daemon's
    version needs the same property or an update cuts a turn.
