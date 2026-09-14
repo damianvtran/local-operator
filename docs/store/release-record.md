@@ -52,6 +52,41 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.15 — on `main`, NOT submitted (as of 2026-09-14)
+
+The number moved so that the extension version pins exactly one tree again.
+**Three** trees landed on `main` under the never-submitted `0.1.14`: the
+version-skew tree (`d44560d3…`), the popup-collapse tree (`7b6a0c65…`, PR #1095)
+and the driver-move tree (`a1a53479…`, PR #1104) — the latter two changed
+`extension/` without a bump, which is the rule AGENTS.md states and the reason
+this number exists. `0.1.15` names the tree this bump lands: the version-skew
+tree with the range/guard work of #1038, #1095 and #1104 underneath it.
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.15 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; this is a revision of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | the bump commit on `chore/extension-version-0.1.15` (SHA in that PR's thread; the tree hash below is the field that pins the input) |
+| `extension/` tree hash | `41c61cc4198bab327eac49108aa1e7b60d295d6a` (`git rev-parse <bump commit>:extension`, rebased onto `main` so it is the tree this version actually lands with — a hash measured before the rebase would pin a tree nobody merges) |
+| Artifact SHA-256 | *not applicable — not uploaded* |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Not dispatched.** Running `chrome-web-store.yml` requires a clear queue; the live listing is still `v0.1.10` with `v0.1.12` in review (`PENDING_REVIEW`), and the store refuses uploads while an item is queued |
+| Promotion route | **Not dispatched** |
+| Store state | Not submitted. `v0.1.12` was still `PENDING_REVIEW` when this number was taken |
+| State last checked | 2026-09-14 |
+| Approval timestamp | *not applicable* |
+| Previously published | v0.1.10 (0.1.12 in review) |
+
+**Why the bump is in this commit rather than the one that changed behaviour.**
+The rule is that a behaviour change carries its version bump in the same PR
+(AGENTS.md). #1095 broke it, and this is the repair: the version now names the
+tree that is actually on `main`. The runtime's `EXPECTED_EXTENSION_VERSION`
+moves with it (`extension/manifest.json` and `extension/package.json` are the
+source of truth; a unit test pins the constant to them), so the update advisory
+keeps telling users a newer extension exists without ever implying the store can
+serve it yet.
+
 ## v0.1.13 and v0.1.14 — two trees landed on `main`, NEITHER submitted
 
 Two numbers, two trees, one story, recorded together so neither reads as an
@@ -93,6 +128,20 @@ force a submission. Whichever of the two trees is promoted next — the one the
 next submission window picks, after 0.1.12 clears — needs its own workflow run,
 API response and tree hash appended here before promotion; until then this
 section claims nothing is live.
+
+**Post-script (2026-09-14): 0.1.14 came to name THREE trees.** Two PRs landed
+under `extension/` with no version bump, so both manifests kept reading `0.1.14`
+while the tree moved twice underneath them: PR #1095
+(`fix(extension): stop the popup clamping its card to its own window`, merge
+`d383e6bfe`) took it to `7b6a0c65901ba5a94ae5ab1cfbaac3e501a766b5`, and PR #1104
+(`refactor(browser-driver): extract the host-free modules under src/driver/`,
+merge `3905e0d2a`, merged 13:33:21Z on 2026-09-14) took it to
+`a1a5347974003cf77e20837c5e7e7fd634ab5356`. That is the 0.1.9 ambiguity again,
+caught before either number was submitted; the version was therefore moved on to
+**0.1.15** (see the section above) rather than letting `0.1.14` stand for three
+trees. `d44560d3…` above remains the tree `0.1.14` named at the moment this
+section was written. **Any further change under `extension/` must carry its own
+bump in the same PR** — this section records what happens when it does not.
 
 **Nothing about either version is required for the version-skew fix to work.**
 That defect was fixed on the RUNTIME side (an older extension is driven, not
