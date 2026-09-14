@@ -290,7 +290,14 @@ def _spawn_runtime(
     identity travel over the authenticated loopback socket, never through
     ``ps``-readable state. Alongside identity and deferred-materialisation,
     the optional birth model is routing data: it seeds only a new owner,
-    never an already-running session or a saved selection on resume.
+    never an already-running session or a saved selection on resume. The birth
+    EFFORT rides the same channel and for the same reason (see
+    ``LOP_MOBILE_CHILD_EFFORT`` in ``process.amain``): the owner must be
+    CONSTRUCTED on the level the user chose, so its first frontend snapshot, its
+    first provider call and the selection row it journals at admission all
+    carry that level. Applying it afterwards over the model RPC would leave the
+    child briefly on the model's own default and would lose the level
+    altogether if the owner was already running.
     """
     env = dict(os.environ)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
@@ -300,12 +307,19 @@ def _spawn_runtime(
     for key in (
         "LOP_MOBILE_CHILD_PROVIDER",
         "LOP_MOBILE_CHILD_MODEL",
+        "LOP_MOBILE_CHILD_EFFORT",
         "LOP_MODEL_SELECTION_OVERRIDE",
     ):
         env.pop(key, None)
     if initial_model is not None:
         env["LOP_MOBILE_CHILD_PROVIDER"] = initial_model.provider
         env["LOP_MOBILE_CHILD_MODEL"] = initial_model.model_id
+        # ``getattr``, not an attribute read: this is a birth sample read off a
+        # duck-typed spec, and callers outside the desktop plane (the CLI's
+        # ``--model`` birth, tests) pass objects that carry no level.
+        effort = getattr(initial_model, "reasoning_effort", None)
+        if effort:
+            env["LOP_MOBILE_CHILD_EFFORT"] = str(effort)
     if model_selection_override:
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:

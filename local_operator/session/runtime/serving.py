@@ -2087,10 +2087,45 @@ class ServingSessionHandle(SessionHandle):
         return "cancelling at the next tool boundary"
 
     async def set_model(self, provider: str, model_id: str) -> str:
+        """Switch the owner onto ``provider``/``model_id`` at the model's own level.
+
+        The two-argument call every host and test double already makes; the
+        optional reasoning level travels through :meth:`set_model_effort`, which
+        the wire dispatch probes for (see ``server.py``'s ``set_model`` arm).
+        """
+        return await self.set_model_effort(provider, model_id, None)
+
+    async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
+        """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
+
+        ``effort`` is the other half of a BIRTH selection: a viewer that chose a
+        model AND a reasoning level sends both here, because ``build_model_spec``
+        seeds the model's own default level and a pair-only switch would
+        therefore silently replace the chosen one — ``Session.set_model``
+        assigns the new spec before its same-pair early return, so nothing else
+        would restore it. ``None`` is byte-for-byte the old behaviour.
+
+        CLAMPED with ``resolve_effort_in`` against THIS spec's ladder rather than
+        refused: the level comes from a durable record the catalogue can move
+        under, and the owner's job with a stale level is to land on the nearest
+        rung it can express. The refusal belongs to the moment the user chooses
+        (the create/preview routes answer 422); by the time a level reaches here
+        it is a stored decision, and failing a send over it would turn a stale
+        record into a dead turn.
+        """
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
+        from local_operator.model.effort import resolve_effort_in
 
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        if effort:
+            spec = spec.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
+                    )
+                }
+            )
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
@@ -4374,6 +4409,7 @@ async def spawn_owned_session(
     cwd: str,
     provider: str | None = None,
     model_id: str | None = None,
+    birth_effort: str | None = None,
     resume: str | None = None,
     model_selection_override: bool = True,
 ) -> ServingSessionHandle:
@@ -4383,6 +4419,13 @@ async def spawn_owned_session(
     ``args.resume`` exactly as the CLI's ``--resume`` does, so the factory
     reuses that transcript directory and the session replays its history —
     the phone's "open this past conversation" button.
+
+    ``birth_effort`` is the reasoning level the caller's viewer chose, used in
+    place of the configured default when this session is CONSTRUCTED. It rides
+    ``args.birth_effort`` rather than ``args.effort`` on purpose: the CLI's
+    ``--effort`` is applied by ``exec_session`` AFTER construction and RAISES on
+    a level the model cannot express, where a stored birth choice must clamp.
+    Two different contracts, so two different names.
     """
     # These imports MUST stay function-local, and ``create_session`` most of
     # all. Do not "tidy" them to the top of the file.
@@ -4440,6 +4483,7 @@ async def spawn_owned_session(
         yolo=False,
         train=False,
         resume=resume,
+        birth_effort=birth_effort,
         model_selection_override=model_selection_override,
     )
     session = await create_session(

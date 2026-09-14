@@ -62,13 +62,22 @@ _AMBIENT_VARS = (
     # directory the test owns rather than its real install, and could
     # retire (or refuse to) on a stranger's marker.
     "LOP_BUILD_PREFIX",
-    # A runtime child spawned by the mobile daemon carries its session id,
-    # provider, model and cwd here. A test suite run from inside such a
-    # session (agents do this) inherited LOP_MOBILE_CHILD_RESUME and created
-    # THAT id inside its store (QA round 1 of #645).
+    # A runtime child spawned by the mobile daemon (or by the desktop plane
+    # birthing a draft) carries its session id, provider, model, reasoning level
+    # and cwd here. A test suite run from inside such a session (agents do this)
+    # inherited LOP_MOBILE_CHILD_RESUME and created THAT id inside its store
+    # (QA round 1 of #645).
     "LOP_MOBILE_CHILD_RESUME",
     "LOP_MOBILE_CHILD_PROVIDER",
     "LOP_MOBILE_CHILD_MODEL",
+    # The level the desktop plane pins for a draft born on a chosen model. An
+    # inherited one makes every child the test process spawns construct its spec
+    # at a stranger's reasoning level, which changes what a provider-call or
+    # journal assertion measures while failing nothing by itself — the same
+    # silent shape as RESUME above. It is read by
+    # ``session/runtime/process.py``; the ambient-env test is what holds this
+    # entry to that (QA round 1 of #1110).
+    "LOP_MOBILE_CHILD_EFFORT",
     "LOP_MODEL_SELECTION_OVERRIDE",
     # The eval worker's scrub-channel transport (R1). The parent sets it per
     # spawn, but a worker that inherited a STALE value from the operator's own

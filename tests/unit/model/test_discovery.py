@@ -2415,3 +2415,48 @@ def test_a_router_listing_row_is_not_where_cache_support_comes_from() -> None:
     merged = merge_models(discovery._static_rows("radient"), live)
 
     assert merged[0].supports_prompt_cache is False
+
+
+def test_offered_model_ids_is_the_catalogues_answer_or_no_answer(tmp_path, monkeypatch) -> None:
+    """The set a caller may REFUSE a pair on, and the providers with no set at all.
+
+    ``None`` is the load-bearing half. Two provider shapes cannot be enumerated
+    without the network — an aggregator with no cached document, and a local
+    endpoint whose ids live behind a configured server — and a caller that read
+    "not in the set" as "does not exist" would refuse exactly the picks the
+    model picker had just offered it. So the contract is: a set when the
+    catalogue is knowable offline, ``None`` when it is not, and a caller accepts
+    the pair in the second case.
+
+    The scope sweep is pinned here too, on a document a real fetch WROTE rather
+    than on a hand-built one: an account-scoped catalogue is keyed per account,
+    so a set built only from the plain reader would refuse every id the
+    ChatGPT-login catalogue had just offered. The payload below is what the
+    transport really stores; only its KEY is relocated to the account-scoped
+    name ``invalidate_documents`` documents (``openai.oauth.<hash>.listing``),
+    and the unscoped document is dropped so nothing else can answer for it.
+    """
+    monkeypatch.setattr(discovery, "default_cache_dir", lambda: tmp_path)
+
+    # A fixed provider's catalogue IS the registry until a listing says more.
+    shipped = discovery.offered_model_ids("anthropic")
+    assert shipped is not None and "claude-opus-5" in shipped
+    assert "claude-opus-9" not in shipped
+
+    # Nothing to enumerate offline: an aggregator on a cold cache, a local
+    # endpoint, and an id the registry does not know at all.
+    assert discovery.offered_model_ids("openrouter") is None
+    assert discovery.offered_model_ids("ollama") is None
+    assert discovery.offered_model_ids("not-a-provider") is None
+
+    client = _StubClient([_Response(200, {"data": [{"id": "gpt-6-account-only"}]})])
+    available_models("openai", api_key="sk-api", client=client, cache_dir=tmp_path)
+    unscoped = tmp_path / "openai.listing.json"
+    assert unscoped.exists(), "the fixture depends on a real listing document being written"
+    (tmp_path / "openai.oauth.deadbeef.listing.json").write_text(unscoped.read_text())
+    unscoped.unlink()
+
+    served = discovery.offered_model_ids("openai")
+    assert served is not None
+    assert "gpt-6-account-only" in served, "an account-scoped document was not swept"
+    assert set(static_models("openai")) <= served, "static rows must survive a listing's answer"

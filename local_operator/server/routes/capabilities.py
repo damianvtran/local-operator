@@ -66,6 +66,17 @@ async def capabilities():
                 # missing. The draft strip is the only thing that may not render
                 # without it.
                 "draft_preview": 1,
+                # Whether a draft's model and effort chips can be made
+                # ACTIONABLE. Its own key rather than a bump of `draft_preview`,
+                # and it exists precisely because the two answer different
+                # questions: `draft_preview` says the backend can REPORT the
+                # readings a first turn will get, which a renderer shows inert;
+                # this says it also accepts a `model` on create and preview, so
+                # a client that does not see it must keep its chips inert rather
+                # than let them dispatch into a 422 (an older backend ignores the
+                # field, and a pick that silently did nothing would be worse than
+                # a chip that never offered itself).
+                "draft_selection": 1,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
                 # Named for this map's convention (`<subsystem>: <version>`); the

@@ -1892,10 +1892,18 @@ async def _prepare(
         # conversation resumed on a stored selection outranks this value by
         # design — ``model_effort`` must not fight the per-conversation journal
         # (design §0.1).
+        #
+        # ``birth_effort`` is the deliberate per-launch choice (the desktop
+        # draft's chip) and outranks the configured default for THIS
+        # construction only; it is a separate name from the CLI's ``effort``
+        # because that one is applied after construction by ``exec_session`` and
+        # raises where this one must clamp (see ``spawn_owned_session``). Only
+        # an explicit selection carries it, so every other caller — and every
+        # session that omits a model — reads the configured default unchanged.
         return (
             agent,
             (hosting, model_name, model_source),
-            configured_effort(config_manager),
+            getattr(args, "birth_effort", None) or configured_effort(config_manager),
         )
 
     agent, (hosting, model_name, model_source), effort_default = await asyncio.to_thread(
