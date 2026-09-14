@@ -1,190 +1,741 @@
 
-========== 1. an unsupervised daemon announces its handover, then exits ==========
-started daemon pid=83582 tag=unsupervised
-record at /tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/83582.json:
-{"pid": 83582, "host": "127.0.0.1", "port": 65022, "instance_id": "T0pubuag1VCcaldscy8qzBf2JSCbwVVzsNhxEmk3fcA", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "AJjPgYVQwwt5vXpaKNTAzH0Zm7OPb042pSIaqY-zkhA", "started_at": 1789361647.0889118, "heartbeat_at": 1789361647.08911, "retiring_from": "", "retiring_to": ""}
-daemon: pid=83582 port=65022 record=/tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/83582.json
+========== 1. an unsupervised daemon announces its handover while still serving ==========
+started daemon pid=59669 tag=unsupervised
+record at /tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/59669.json:
+{"pid": 59669, "host": "127.0.0.1", "port": 64044, "instance_id": "HjzkwRYS6d4c8GbC4uYdK_tislmyUpHZcmwBysrZnzI", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "unPdBYQg9nKW0MsYhEUQjPtMyPkS_fHxVf96ifZ36JA", "started_at": 1789372269.285215, "heartbeat_at": 1789372269.285395, "retiring_from": "", "retiring_to": ""}
+daemon: pid=59669 port=64044 record=/tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/59669.json
 boot record: version=0.54.39 source_ref=
 record retiring fields at boot: retiring_from='' retiring_to=''
 flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
 
---- t=14.462s: the record announces the handover ---
+--- t=14.834s: the record announces the handover ---
 {
-  "claim_key": "AJjPgYVQwwt5vXpaKNTAzH0Zm7OPb042pSIaqY-zkhA",
+  "claim_key": "unPdBYQg9nKW0MsYhEUQjPtMyPkS_fHxVf96ifZ36JA",
   "desktop": false,
-  "heartbeat_at": 1789361662.1287308,
+  "heartbeat_at": 1789372284.298094,
   "host": "127.0.0.1",
   "install_kind": "editable",
-  "instance_id": "T0pubuag1VCcaldscy8qzBf2JSCbwVVzsNhxEmk3fcA",
-  "pid": 83582,
-  "port": 65022,
+  "instance_id": "HjzkwRYS6d4c8GbC4uYdK_tislmyUpHZcmwBysrZnzI",
+  "pid": 59669,
+  "port": 64044,
   "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
   "retiring_from": "0.54.39@1111111",
   "retiring_to": "0.54.39@2222222",
   "source_ref": "",
-  "started_at": 1789361647.0889118,
+  "started_at": 1789372269.285215,
   "version": "0.54.39"
 }
+(the daemon is STILL SERVING: the announcement is a notice, not a refusal)
 
---- t=34.676s: the record is removed (clean exit) ---
+--- t=37.385s: the record is removed (clean exit) ---
 record present after exit: False
-process alive after exit: False (gone at t=34.697s, i.e. 0.021s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
-timings: announce at 14.462s, exit at 34.676s, notice window 20.214s
---- daemon log (tail) ---
-2026-09-14 00:54:22,129 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-2026-09-14 00:54:22,130 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+process alive after exit: False
+timings: flip -> announce 14.834s, latch at n/a, record gone at 37.385s
+--- daemon log: the announcement, the refusal and the restart line ---
+2026-09-14 03:51:09,286 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
+2026-09-14 03:51:24,298 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+2026-09-14 03:51:24,298 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+2026-09-14 03:51:29,306 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
 --- record after exit ---
 total 0
 
-========== 2. a claimed daemon refuses a new session while retiring ==========
-started daemon pid=86524 tag=governed
-record at /tmp/lo-serve-retire-evidence/cfg-governed/run/serve/86524.json:
-{"pid": 86524, "host": "127.0.0.1", "port": 49702, "instance_id": "nlsZxPDCzXQKgYC-BIRDbVPOq-CZ0iN8umDaOc1iB4c", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": true, "claim_key": "", "started_at": 1789361692.735004, "heartbeat_at": 1789361692.735211, "retiring_from": "", "retiring_to": ""}
-daemon: pid=86524 port=49702 record=/tmp/lo-serve-retire-evidence/cfg-governed/run/serve/86524.json
+========== 2. a claimed daemon: announced-but-admitting, then the refusal matrix ==========
+started daemon pid=63840 tag=governed
+record at /tmp/lo-serve-retire-evidence/cfg-governed/run/serve/63840.json:
+{"pid": 63840, "host": "127.0.0.1", "port": 65076, "instance_id": "2LpPYkSPAHyDtoixbYLdMii2ERcrW4YM4DkJMK1zIuo", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": true, "claim_key": "", "started_at": 1789372311.9340658, "heartbeat_at": 1789372311.93422, "retiring_from": "", "retiring_to": ""}
+daemon: pid=63840 port=65076 record=/tmp/lo-serve-retire-evidence/cfg-governed/run/serve/63840.json
 boot record: version=0.54.39 source_ref=
 record retiring fields at boot: retiring_from='' retiring_to=''
+session created BEFORE the flip: HTTP 200 {"status":200,"message":"Desktop session result.","result":{"binding":{"agent":null,"team":null},"session_id":"5e271f23783e","replayed":false}}
 flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
 
---- t=14.843s: the record announces the handover ---
+--- t=4.794s: the record announces the handover ---
 {
   "claim_key": "",
   "desktop": true,
-  "heartbeat_at": 1789361707.7540438,
+  "heartbeat_at": 1789372316.940921,
   "host": "127.0.0.1",
   "install_kind": "editable",
-  "instance_id": "nlsZxPDCzXQKgYC-BIRDbVPOq-CZ0iN8umDaOc1iB4c",
-  "pid": 86524,
-  "port": 49702,
+  "instance_id": "2LpPYkSPAHyDtoixbYLdMii2ERcrW4YM4DkJMK1zIuo",
+  "pid": 63840,
+  "port": 65076,
   "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
   "retiring_from": "0.54.39@1111111",
   "retiring_to": "0.54.39@2222222",
   "source_ref": "",
-  "started_at": 1789361692.735004,
+  "started_at": 1789372311.9340658,
   "version": "0.54.39"
 }
+(the daemon is STILL SERVING: the announcement is a notice, not a refusal)
+t= 4.817s still admitting: create -> HTTP 200 (announced, not refusing)
 
---- new-session request while retiring: HTTP 503 ---
-{"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new sessions. Reconnect to the new backend and retry."}}
+--- t=9.840s: the daemon LATCHES (refuses new work) ---
+create while latched: HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend and retry."}}
 
---- t=23.465s: the record is removed (clean exit) ---
-record present after exit: False
-process alive after exit: False (gone at t=23.465s, i.e. 0.000s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
-timings: announce at 14.843s, exit at 23.465s, notice window 8.622s
-create-while-retiring answered 503
---- daemon log (tail) ---
-2026-09-14 00:55:07,754 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-INFO:     127.0.0.1:50023 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
---- record after exit ---
+--- refusal matrix: every path that can admit or start work ---
+  POST /v1/desktop/sessions (create)             HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend
+  POST /v1/desktop/sessions/{id}/warm            HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend
+  POST /v1/desktop/sessions/{id}/messages        HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend
+  POST /v1/desktop/sessions/{id}/commands        HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend
+  POST /v1/desktop/sessions/{id}/answers         HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend
+  (run/mobile records: no run/mobile directory at all)
+
+--- this run STOPS here on purpose: the refusal window is overridden long so the whole matrix fits inside it; the harness' SIGTERM owns the exit ---
+--- SIGTERM inside the refusal window (the harness' own stop) ---
+--- record after the stop (a clean exit removes it) ---
 total 0
+--- runtime records under the isolated root (no spawn was started) ---
+(no run/mobile directory at all)
+--- sessions after the matrix (a refused create adds none) ---
+       2
+--- daemon log ---
+2026-09-14 03:51:51,934 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
+2026-09-14 03:51:56,942 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+2026-09-14 03:52:01,944 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
 
-========== 3. a daemon holding a live SSE stream does not retire, then does ==========
-started daemon pid=88789 tag=held
-record at /tmp/lo-serve-retire-evidence/cfg-held/run/serve/88789.json:
-{"pid": 88789, "host": "127.0.0.1", "port": 50208, "instance_id": "UgVj-e4ScZz-17vjF3kVeFfNcelrleWJ9UHM6Wle_E8", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "v-I_XJS1GlYSrqoysZm7evj8mtSUgxNystqUkDqC_o8", "started_at": 1789361721.86382, "heartbeat_at": 1789361721.867195, "retiring_from": "", "retiring_to": ""}
-daemon: pid=88789 port=50208 record=/tmp/lo-serve-retire-evidence/cfg-held/run/serve/88789.json
+========== 3. the app's own relay holds the announced daemon, then lets it finish ==========
+started daemon pid=65524 tag=held
+record at /tmp/lo-serve-retire-evidence/cfg-held/run/serve/65524.json:
+{"pid": 65524, "host": "127.0.0.1", "port": 65461, "instance_id": "xWDZ0CxVf_0-wEJ9rxRZNeOC8OaUZeiW7IVN4PN68ao", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": true, "claim_key": "", "started_at": 1789372327.5954401, "heartbeat_at": 1789372327.595594, "retiring_from": "", "retiring_to": ""}
+daemon: pid=65524 port=65461 record=/tmp/lo-serve-retire-evidence/cfg-held/run/serve/65524.json
 boot record: version=0.54.39 source_ref=
 record retiring fields at boot: retiring_from='' retiring_to=''
-held SSE stream: http://127.0.0.1:50208/v1/sse/jobs/00000000-0000-0000-0000-000000000001
-  first frames: [': connected']
+session created BEFORE the flip: HTTP 200 {"status":200,"message":"Desktop session result.","result":{"binding":{"agent":null,"team":null},"session_id":"f70df1204b0d","replayed":false}}
+held the app's own relay: http://127.0.0.1:65461/v1/desktop/sessions/f70df1204b0d/events
+  first frames: ['data: {"session_id":"f70df1204b0d","epoch":"c1424133ab244d78836da3293405212b","seq":0,"type":"open","payload":{"subscription_id":"401fb9193206496a9558c474cc220880","gap":true,"watch_ttl_seconds":45.0}}']
 flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
-t= 1.003s check 1: pid_alive=True retiring_from='' retiring_to=''
-t= 2.009s check 2: pid_alive=True retiring_from='' retiring_to=''
-t= 3.010s check 3: pid_alive=True retiring_from='' retiring_to=''
-t= 4.032s check 4: pid_alive=True retiring_from='' retiring_to=''
-t= 5.041s check 5: pid_alive=True retiring_from='' retiring_to=''
-t= 6.049s check 6: pid_alive=True retiring_from='' retiring_to=''
-t= 7.056s check 7: pid_alive=True retiring_from='' retiring_to=''
-t= 8.060s check 8: pid_alive=True retiring_from='' retiring_to=''
-t= 9.062s check 9: pid_alive=True retiring_from='' retiring_to=''
-t=10.066s check 10: pid_alive=True retiring_from='' retiring_to=''
-t=11.085s check 11: pid_alive=True retiring_from='' retiring_to=''
-t=12.095s check 12: pid_alive=True retiring_from='' retiring_to=''
-t=13.102s check 13: pid_alive=True retiring_from='' retiring_to=''
-t=14.117s check 14: pid_alive=True retiring_from='' retiring_to=''
-  verdict: 14 samples across a held stream, no retirement
-releasing the SSE stream at t=14.118s
 
---- t=18.787s: the record announces the handover ---
+--- t=14.526s: the record announces the handover ---
 {
-  "claim_key": "v-I_XJS1GlYSrqoysZm7evj8mtSUgxNystqUkDqC_o8",
-  "desktop": false,
-  "heartbeat_at": 1789361741.899029,
+  "claim_key": "",
+  "desktop": true,
+  "heartbeat_at": 1789372342.611812,
   "host": "127.0.0.1",
   "install_kind": "editable",
-  "instance_id": "UgVj-e4ScZz-17vjF3kVeFfNcelrleWJ9UHM6Wle_E8",
-  "pid": 88789,
-  "port": 50208,
+  "instance_id": "xWDZ0CxVf_0-wEJ9rxRZNeOC8OaUZeiW7IVN4PN68ao",
+  "pid": 65524,
+  "port": 65461,
   "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
   "retiring_from": "0.54.39@1111111",
   "retiring_to": "0.54.39@2222222",
   "source_ref": "",
-  "started_at": 1789361721.86382,
+  "started_at": 1789372327.5954401,
   "version": "0.54.39"
 }
+(the daemon is STILL SERVING: the announcement is a notice, not a refusal)
+t=15.570s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=16.581s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=17.595s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=18.607s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=19.658s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=20.676s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=21.685s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=22.693s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=23.714s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
+t=24.731s holding: pid_alive=True getting_health=200 retiring_to='0.54.39@2222222' relay_frames=6
 
---- t=30.589s: the record is removed (clean exit) ---
+--- t=24.733s: dropping the relay (the view closes) ---
+t=30.650s still admitting: create -> HTTP 200 (announced, not refusing)
+
+--- t=34.546s: the daemon LATCHES (refuses new work) ---
+create while latched: HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend and retry."}}
+
+--- t=47.350s: the record is removed (clean exit) ---
 record present after exit: False
-process alive after exit: False (gone at t=30.589s, i.e. 0.000s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
-timings: announce at 18.787s, exit at 30.589s, notice window 11.802s
---- daemon log (tail) ---
-2026-09-14 00:55:26,879 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but 1 SSE subscription(s) is in flight; retiring when it completes
-2026-09-14 00:55:41,899 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-2026-09-14 00:55:41,900 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+process alive after exit: False
+timings: flip -> announce 14.526s, latch at 34.546s, record gone at 47.350s
+relay frames received while held: 6
+--- daemon log: it names the term holding it ---
+2026-09-14 03:52:07,596 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
+2026-09-14 03:52:22,612 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+2026-09-14 03:52:27,615 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk and announced; 1 in-flight desktop request(s) on f70df1204b0d is still in flight, so it keeps serving until that completes
+2026-09-14 03:52:42,630 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
 --- record after exit ---
 total 0
 
-========== full daemon logs ==========
+========== 4. an unwritable record directory neither latches the daemon nor stops the poll ==========
+started daemon pid=69955 tag=readonly
+record at /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json:
+{"pid": 69955, "host": "127.0.0.1", "port": 50170, "instance_id": "48yhbe3YLV90GQc1vP8hgiUfuPsSOxIAF-2C4s2CiWA", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": true, "claim_key": "", "started_at": 1789372377.7501912, "heartbeat_at": 1789372377.750528, "retiring_from": "", "retiring_to": ""}
+daemon: pid=69955 port=50170 record=/tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json
+boot record: version=0.54.39 source_ref=
+record retiring fields at boot: retiring_from='' retiring_to=''
+session created BEFORE the flip: HTTP 200 {"status":200,"message":"Desktop session result.","result":{"binding":{"agent":null,"team":null},"session_id":"0361b72abb2e","replayed":false}}
+flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
+
+--- made /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve immutable (UF_IMMUTABLE): the announcement write must now fail ---
+t= 1.089s check 1: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 2.120s check 2: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 3.146s check 3: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 4.178s check 4: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 5.202s check 5: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 6.224s check 6: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 7.237s check 7: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 8.272s check 8: pid_alive=True create=200 retiring_from='' retiring_to=''
+t= 9.323s check 9: pid_alive=True create=200 retiring_from='' retiring_to=''
+t=10.482s check 10: pid_alive=True create=200 retiring_from='' retiring_to=''
+t=11.553s check 11: pid_alive=True create=200 retiring_from='' retiring_to=''
+t=12.572s check 12: pid_alive=True create=200 retiring_from='' retiring_to=''
+--- /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve writable again at t=12.572s ---
+
+--- t=14.763s: the record announces the handover ---
+{
+  "claim_key": "",
+  "desktop": true,
+  "heartbeat_at": 1789372392.752928,
+  "host": "127.0.0.1",
+  "install_kind": "editable",
+  "instance_id": "48yhbe3YLV90GQc1vP8hgiUfuPsSOxIAF-2C4s2CiWA",
+  "pid": 69955,
+  "port": 50170,
+  "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
+  "retiring_from": "0.54.39@1111111",
+  "retiring_to": "0.54.39@2222222",
+  "source_ref": "",
+  "started_at": 1789372377.7501912,
+  "version": "0.54.39"
+}
+(the daemon is STILL SERVING: the announcement is a notice, not a refusal)
+t=14.896s still admitting: create -> HTTP 200 (announced, not refusing)
+
+--- t=19.816s: the daemon LATCHES (refuses new work) ---
+create while latched: HTTP 503 {"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new work. Reconnect to the new backend and retry."}}
+
+--- t=24.738s: the record is removed (clean exit) ---
+record present after exit: False
+process alive after exit: False
+timings: flip -> announce 14.763s, latch at 19.816s, record gone at 24.738s
+--- daemon log: the failed write is loud, and the sequence then completes ---
+2026-09-14 03:53:02,756 [WARNING] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but the handover could not be written to /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json; keeping the old build in service and retrying on the next check
+2026-09-14 03:53:07,764 [WARNING] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but the handover could not be written to /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json; keeping the old build in service and retrying on the next check
+2026-09-14 03:53:12,778 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+2026-09-14 03:53:17,780 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
+--- record after exit ---
+total 0
+
+========== 5. a --reload child does not self-retire (nothing happens at all) ==========
+reload child record: /tmp/lo-serve-retire-evidence/cfg-reload/run/serve/72406.json
+{"pid": 72406, "host": "127.0.0.1", "port": 50882, "instance_id": "tgQrgOXwguxL8MgLVLiBGGAuR0oAktT-C6P1_JRZp90", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "4BEqapvb9Ru0dTD5WrJ-6J5vqNjmSyCcELjcZGiSQuQ", "started_at": 1789372406.2044811, "heartbeat_at": 1789372406.204694, "retiring_from": "", "retiring_to": ""}
+reloader parent pid=72332 (it owns the port; the child serves through it)
+daemon: pid=72406 port=50882 record=/tmp/lo-serve-retire-evidence/cfg-reload/run/serve/72406.json
+boot record: version=0.54.39 source_ref=
+record retiring fields at boot: retiring_from='' retiring_to=''
+flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
+t= 1.093s check 1: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 2.116s check 2: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 3.130s check 3: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 4.166s check 4: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 5.186s check 5: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 6.220s check 6: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 7.228s check 7: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 8.243s check 8: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t= 9.271s check 9: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=10.278s check 10: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=11.300s check 11: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=12.318s check 12: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=13.378s check 13: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=14.385s check 14: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=15.397s check 15: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=16.456s check 16: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=17.474s check 17: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=18.481s check 18: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=19.507s check 19: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=20.537s check 20: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=21.554s check 21: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=22.579s check 22: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=23.614s check 23: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+t=24.633s check 24: pid_alive=True getting_health=200 retiring_from='' retiring_to=''
+  verdict: 24 samples, no announcement, no exit, /health still 200
+--- reload log ---
+(no build watch line at all)
+--- stopping the reloader (it owns the child) ---
+records left under run/serve: 0
+listeners left on port 50882: 0
+
+========== 6. a probe the daemon cannot read means STAY (injected at the probe seam) ==========
+real desktop bridge held: session=bf7592968b24 users=1
+INFO local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
+INFO local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+t=0.214s record announced: retiring_from='0.54.39@1111111' retiring_to='0.54.39@2222222'
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+INFO local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk and announced; an in-flight probe that could not be read (the desktop plane) is still in flight, so it keeps serving until that completes
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+WARNING local_operator.server.retire: serve daemon: the desktop in-flight probe could not be read
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 246, in in_flight
+    reason: Any = desktop()
+                  ^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/docs/evidence/serve-build-retire/inject.py", line 84, in probe
+    raise OSError("the desktop probe could not be read")
+OSError: the desktop probe could not be read
+t=1.215s with the probe UNREADABLE: latched=False exits=0 poll_alive=True
+          verdict(probe broken): 'an in-flight probe that could not be read (the desktop plane)'
+          FAIL-CLOSED: announced, still serving, not latched, NOT exited
+INFO local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk and announced; 1 in-flight desktop request(s) on bf7592968b24 is still in flight, so it keeps serving until that completes
+t=2.216s with the probe readable again: reason='1 in-flight desktop request(s) on bf7592968b24' exits=0
+INFO local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
+t=2.232s after the viewer lets go: latched=True exits=1
+
+========== daemon logs ==========
 --- unsupervised.log ---
-Starting server at http://127.0.0.1:65022
-INFO:     Started server process [83582]
+Starting server at http://127.0.0.1:64044
+INFO:     Started server process [59669]
 INFO:     Waiting for application startup.
-2026-09-14 00:54:07,084 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:51:09,279 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:51:09,286 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
 INFO:     Application startup complete.
-2026-09-14 00:54:22,129 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-2026-09-14 00:54:22,130 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+2026-09-14 03:51:24,298 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+2026-09-14 03:51:24,298 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+2026-09-14 03:51:29,306 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
-2026-09-14 00:54:42,335 [INFO] apscheduler.scheduler: Scheduler has been shut down
+2026-09-14 03:51:46,621 [INFO] apscheduler.scheduler: Scheduler has been shut down
 INFO:     Application shutdown complete.
-INFO:     Finished server process [83582]
+INFO:     Finished server process [59669]
 --- governed.log ---
-Starting server at http://127.0.0.1:49702
-INFO:     Started server process [86524]
+Starting server at http://127.0.0.1:65076
+INFO:     Started server process [63840]
 INFO:     Waiting for application startup.
-2026-09-14 00:54:52,731 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:51:51,929 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:51:51,934 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
 INFO:     Application startup complete.
-2026-09-14 00:55:07,754 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-INFO:     127.0.0.1:50023 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65138 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:51:56,942 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+INFO:     127.0.0.1:65208 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65211 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65213 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65214 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65215 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65216 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65217 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65218 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65219 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65220 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65221 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65222 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65225 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65226 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65228 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65229 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65232 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65234 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65237 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65238 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65239 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65240 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65241 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65242 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65244 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65245 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65246 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65247 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65248 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65249 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65250 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65251 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65252 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65253 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65254 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65255 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65256 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65257 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65258 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65259 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65260 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65265 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65267 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65268 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65271 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65273 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65274 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65275 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65276 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65277 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65278 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65281 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65283 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65284 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65286 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65287 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65288 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65289 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65291 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65292 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65296 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65303 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65304 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65306 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65310 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65314 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65316 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65319 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65320 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65321 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65323 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65324 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65326 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65328 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65329 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65330 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65331 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65333 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65335 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65338 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65339 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65341 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65343 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65344 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65347 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65352 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65356 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65358 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65361 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65367 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65370 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65374 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65379 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65380 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65381 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65387 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65392 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65394 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65396 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65405 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65407 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65411 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65412 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65414 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65416 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65420 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65421 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65422 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65425 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:52:01,944 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
+INFO:     127.0.0.1:65427 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65429 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65430 - "POST /v1/desktop/sessions/5e271f23783e/warm HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65431 - "POST /v1/desktop/sessions/5e271f23783e/messages HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65432 - "POST /v1/desktop/sessions/5e271f23783e/commands HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:65433 - "POST /v1/desktop/sessions/5e271f23783e/answers HTTP/1.1" 503 Service Unavailable
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
-2026-09-14 00:55:16,377 [INFO] apscheduler.scheduler: Scheduler has been shut down
+2026-09-14 03:52:02,346 [INFO] apscheduler.scheduler: Scheduler has been shut down
 INFO:     Application shutdown complete.
-INFO:     Finished server process [86524]
+INFO:     Finished server process [63840]
 --- held.log ---
-Starting server at http://127.0.0.1:50208
-INFO:     Started server process [88789]
+Starting server at http://127.0.0.1:65461
+INFO:     Started server process [65524]
 INFO:     Waiting for application startup.
-2026-09-14 00:55:21,860 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:52:07,583 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:52:07,596 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
 INFO:     Application startup complete.
-INFO:     127.0.0.1:50284 - "GET /v1/sse/jobs/00000000-0000-0000-0000-000000000001 HTTP/1.1" 200 OK
-2026-09-14 00:55:26,879 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but 1 SSE subscription(s) is in flight; retiring when it completes
-2026-09-14 00:55:41,899 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
-2026-09-14 00:55:41,900 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+INFO:     127.0.0.1:49198 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49204 - "GET /v1/desktop/sessions/f70df1204b0d/events HTTP/1.1" 200 OK
+2026-09-14 03:52:22,612 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+INFO:     127.0.0.1:49502 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49520 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49539 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49556 - "GET /health HTTP/1.1" 200 OK
+2026-09-14 03:52:27,615 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk and announced; 1 in-flight desktop request(s) on f70df1204b0d is still in flight, so it keeps serving until that completes
+INFO:     127.0.0.1:49579 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49602 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49616 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49635 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49640 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49653 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49763 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49764 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49765 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49766 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49767 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49768 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49770 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49772 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49773 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49774 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49775 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49776 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49777 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49778 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49780 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49782 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49783 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49784 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49786 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49787 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49790 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49792 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49793 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49798 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49799 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49800 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49803 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49804 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49805 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49806 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49808 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49809 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49813 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49817 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49818 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49820 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49822 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49823 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49824 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49825 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49826 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49832 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49833 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49839 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49840 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49842 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49843 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49844 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49847 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49849 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49853 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49858 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49864 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49866 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49870 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49873 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49876 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49882 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49884 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49887 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49888 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49889 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49890 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49891 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49893 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49894 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49895 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49897 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49898 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49899 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49900 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49902 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49904 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49907 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49908 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49909 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:52:42,630 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
+INFO:     127.0.0.1:49916 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
-2026-09-14 00:55:53,698 [INFO] apscheduler.scheduler: Scheduler has been shut down
+2026-09-14 03:52:55,196 [INFO] apscheduler.scheduler: Scheduler has been shut down
 INFO:     Application shutdown complete.
-INFO:     Finished server process [88789]
+INFO:     Finished server process [65524]
+--- readonly.log ---
+Starting server at http://127.0.0.1:50170
+INFO:     Started server process [69955]
+INFO:     Waiting for application startup.
+2026-09-14 03:52:57,742 [INFO] apscheduler.scheduler: Scheduler started
+2026-09-14 03:52:57,751 [INFO] local_operator.server.retire: serve daemon: build watch baseline 0.54.39@1111111
+INFO:     Application startup complete.
+INFO:     127.0.0.1:50208 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50240 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50257 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50286 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50320 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:53:02,756 [WARNING] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but the handover could not be written to /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json; keeping the old build in service and retrying on the next check
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 438, in retirement_poll
+    announce(
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 287, in announce
+    publisher.heartbeat(retiring_from=retiring_from, retiring_to=retiring_to)
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 250, in heartbeat
+    publish(self.record, self._root, self._dirname)
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 82, in publish
+    directory = run_dir(root, dirname)
+                ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 59, in run_dir
+    os.chmod(path, 0o700)
+PermissionError: [Errno 1] Operation not permitted: '/tmp/lo-serve-retire-evidence/cfg-readonly/run/serve'
+INFO:     127.0.0.1:50344 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50360 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50375 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50398 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50416 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:53:07,764 [WARNING] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but the handover could not be written to /tmp/lo-serve-retire-evidence/cfg-readonly/run/serve/69955.json; keeping the old build in service and retrying on the next check
+Traceback (most recent call last):
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 438, in retirement_poll
+    announce(
+  File "/Users/damian/lo-wt-serve-retire/local_operator/server/retire.py", line 287, in announce
+    publisher.heartbeat(retiring_from=retiring_from, retiring_to=retiring_to)
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 250, in heartbeat
+    publish(self.record, self._root, self._dirname)
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 82, in publish
+    directory = run_dir(root, dirname)
+                ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/damian/lo-wt-serve-retire/local_operator/session/runtime/registry.py", line 59, in run_dir
+    os.chmod(path, 0o700)
+PermissionError: [Errno 1] Operation not permitted: '/tmp/lo-serve-retire-evidence/cfg-readonly/run/serve'
+INFO:     127.0.0.1:50444 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50469 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50485 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:53:12,778 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; announced in the record and still serving until nothing is in flight
+INFO:     127.0.0.1:50515 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50517 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50522 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50525 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50528 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50529 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50531 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50535 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50536 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50541 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50544 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50546 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50548 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50549 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50551 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50552 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50553 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50554 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50555 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50556 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50557 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50558 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50560 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50561 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50564 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50568 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50570 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50572 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50573 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50575 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50578 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50579 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50580 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50582 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50584 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50590 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50591 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50594 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50595 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50597 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50599 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50602 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50603 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50604 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50608 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50611 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50613 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50614 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50616 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50617 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50618 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50619 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50622 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50623 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50627 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50628 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50629 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50633 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50634 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50636 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50637 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50638 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50639 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50641 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50646 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50649 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50650 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50651 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50652 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50653 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50654 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50658 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50659 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50663 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50666 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50667 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50670 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50671 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50672 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50673 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50675 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50677 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50679 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50682 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50683 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50684 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50686 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50689 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50691 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50693 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50696 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50698 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50700 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50701 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50702 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50704 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50705 - "POST /v1/desktop/sessions HTTP/1.1" 200 OK
+2026-09-14 03:53:17,780 [INFO] local_operator.server.retire: serve daemon: nothing is in flight; refusing new work and leaving for 0.54.39@2222222
+INFO:     127.0.0.1:50707 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-09-14 03:53:22,522 [INFO] apscheduler.scheduler: Scheduler has been shut down
+INFO:     Application shutdown complete.
+INFO:     Finished server process [69955]
 
 ========== raw artifacts under /tmp/lo-serve-retire-evidence ==========
-total 48
-drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:54 cfg-governed
-drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:55 cfg-held
-drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:54 cfg-unsupervised
--rw-r--r--@ 1 damian  wheel   757 Sep 14 00:55 governed.log
--rw-r--r--@ 1 damian  wheel  1208 Sep 14 00:55 held.log
-drwxr-xr-x@ 3 damian  wheel    96 Sep 14 00:53 prefix
--rw-r--r--@ 1 damian  wheel  1188 Sep 14 00:54 run1.txt
--rw-r--r--@ 1 damian  wheel  1396 Sep 14 00:55 run2.txt
--rw-r--r--@ 1 damian  wheel  2323 Sep 14 00:55 run3.txt
--rw-r--r--@ 1 damian  wheel   933 Sep 14 00:54 unsupervised.log
+total 128
+drwxr-xr-x@ 7 damian  wheel    224 Sep 14 03:51 cfg-governed
+drwxr-xr-x@ 7 damian  wheel    224 Sep 14 03:52 cfg-held
+drwxr-xr-x@ 7 damian  wheel    224 Sep 14 03:53 cfg-readonly
+drwxr-xr-x@ 5 damian  wheel    160 Sep 14 03:53 cfg-reload
+drwxr-xr-x@ 5 damian  wheel    160 Sep 14 03:51 cfg-unsupervised
+-rw-r--r--@ 1 damian  wheel   9564 Sep 14 03:52 governed.log
+-rw-r--r--@ 1 damian  wheel   7490 Sep 14 03:52 held.log
+drwxr-xr-x@ 3 damian  wheel     96 Sep 14 03:51 prefix
+-rw-r--r--@ 1 damian  wheel  11350 Sep 14 03:53 readonly.log
+-rw-r--r--@ 1 damian  wheel   2288 Sep 14 03:53 reload.log
+-rw-r--r--@ 1 damian  wheel   1123 Sep 14 03:51 run1.txt
+-rw-r--r--@ 1 damian  wheel   2709 Sep 14 03:52 run2.txt
+-rw-r--r--@ 1 damian  wheel   2972 Sep 14 03:52 run3.txt
+-rw-r--r--@ 1 damian  wheel   2738 Sep 14 03:53 run4.txt
+-rw-r--r--@ 1 damian  wheel   2439 Sep 14 03:53 run5.txt
+-rw-r--r--@ 1 damian  wheel    548 Sep 14 03:53 run6.txt
+-rw-r--r--@ 1 damian  wheel   1220 Sep 14 03:51 unsupervised.log
+EXIT=0

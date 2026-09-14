@@ -640,7 +640,24 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     "/v1/desktop/sessions/{session_id}/messages", response_model=CRUDResponse[MessageAdmission]
 )
 async def prompt(session_id: str, body: Prompt, request: Request):
+    """Admit ONE user turn, or refuse because this process is leaving.
+
+    The refusal is the FIRST thing the handler does, before the receipt is
+    claimed, and it is deliberate that it is not only about the turn: this
+    callback reaches ``admit_prompt``, which binds a viewer through
+    ``_ensure_bound`` (``session/attached.py``) — the one path in the desktop
+    plane that can also START a session runtime. That is precisely what
+    ``warm``'s own gate exists to prevent, and review round 1 measured this
+    route answering 200 on a latched daemon while ``/warm`` answered 503 against
+    the same process (MAJOR-2). ``bridge.assert_admitting`` is the same question
+    ``warm`` asks, asked at the same seam.
+
+    NOT refused while the daemon is merely ANNOUNCED, which is why the gate is
+    on the latch and not on the record: an announced daemon is still the only
+    place its client can work (``server/retire.py``).
+    """
     async with errors(), host(request).session(session_id) as bridge:
+        bridge.assert_admitting()
 
         async def admit():
             assert bridge.remote is not None
@@ -674,6 +691,15 @@ async def prompt(session_id: str, body: Prompt, request: Request):
     "/v1/desktop/sessions/{session_id}/commands", response_model=CRUDResponse[CommandReceipt]
 )
 async def command(session_id: str, body: Command, request: Request):
+    """Run ONE slash command, or refuse because this process is leaving.
+
+    Refused for the same reason as ``prompt`` and at the same seam, and here it
+    matters twice: ``bridge.remote.bind_runtime()`` below is an explicit
+    ``_ensure_bound``, so a latched daemon would start a runtime for a command
+    alone. The gate is before the receipt is claimed, so a refused command
+    leaves no receipt row for the client's retry against the successor to
+    trip over.
+    """
     spec = slash_command_for("/" + body.command.removeprefix("/"))
     if spec is None or not spec.desktop_destination:
         raise HTTPException(422, "Unknown command")
@@ -700,6 +726,7 @@ async def command(session_id: str, body: Command, request: Request):
         if get_provider_definition(body.args.strip()) is None:
             raise HTTPException(422, "Choose a provider in the authentication panel")
     async with errors(), host(request).session(session_id) as bridge:
+        bridge.assert_admitting()
 
         async def execute():
             if (
@@ -775,8 +802,24 @@ async def decode_images(images: list[Image]):
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
 async def answer(session_id: str, body: Answer, request: Request):
+    """Answer the pending gate, or refuse because this process is leaving.
+
+    Gated on the latch like the two routes above, and the reason is NOT that
+    this path can start a runtime — it cannot: ``answer_gate`` needs a connected
+    client and raises otherwise, so a cold daemon cannot be warmed into a spawn
+    from here. The reason is that a latched daemon is a process whose socket is
+    about to close, and an answer delivered through it is a delivery nobody can
+    confirm; the client's correct move is the same one every other refusal asks
+    for (rediscover the successor through the record) rather than the 409 its
+    own "no longer pending" check would produce, which reads like the question
+    expired.
+
+    BEFORE the epoch comparison, deliberately: a stale-epoch answer on a latched
+    daemon must not get a refusal that suggests retrying against this process.
+    """
     async with errors(), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
+        bridge.assert_admitting()
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
         try:
@@ -870,7 +913,7 @@ async def warm(session_id: str, body: Warm, request: Request):
     report, and the send that follows reports it properly through its own
     ladder. The non-2xx answers that remain are the ones that mean the call
     itself was not admissible at all: an unknown session (404), a full
-    bridge table (409), and a daemon that has announced its retirement (503,
+    bridge table (409), and a daemon that has LATCHED against new work (503,
     ``daemon-retiring``) — the last is the one refusal that says "this process is
     leaving", not "this call is wrong", so a client reconnects to the successor
     rather than retrying here, both from ``errors()``.

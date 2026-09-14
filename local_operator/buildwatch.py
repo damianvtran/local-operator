@@ -154,7 +154,19 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
         return None
     if on_disk == boot:
         return None
-    age = update_mod.build_marker_age_s(prefix)
+    try:
+        age = update_mod.build_marker_age_s(prefix)
+    except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
+        # The SETTLE read is guarded for the same reason the stamp read above it
+        # is, and the reason is the consequence rather than the likelihood: this
+        # function is called from a background watcher on BOTH sides (the daemon's
+        # retirement poll and the runtime's refresh check), and an exception here
+        # used to leave that task dead — for the daemon, a process that never
+        # retires, silently (review round 1, MINOR-3).
+        logger.debug(
+            "build marker age unreadable; treating the install as unsettled", exc_info=True
+        )
+        return None
     if age is None or age < build_settle_seconds():
         # Younger than the settle, or unknowable: the install may still be
         # mid-write. Try again next check; the marker only gets older.

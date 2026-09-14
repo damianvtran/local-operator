@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from starlette.routing import compile_path
 
+from local_operator import buildwatch
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
@@ -184,6 +185,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     retire_task: asyncio.Task[None] | None = None
     retire_stop: asyncio.Event | None = None
     if announced is not None:
+        # THE BUILD WATCH'S BASELINE IS SAMPLED HERE, BEFORE THE RECORD EXISTS —
+        # and the ordering is load-bearing rather than incidental. The baseline
+        # is "the build this process loaded", and the only reader that acts on
+        # the announcement finds the daemon by waiting for the record to appear:
+        # a baseline read AFTER the publish would adopt a marker that landed in
+        # between as the build we loaded, so that update would be invisible to
+        # this process for the rest of its life, with no log line at all. QA
+        # round 1 reproduced exactly that (Q2: 3 of 7 flips issued immediately
+        # after the record appeared were swallowed) using this repo's own
+        # evidence driver. `LOP_BUILD_PREFIX` is the e2e-only override the
+        # reader honours; production reads `sys.prefix`.
+        boot_build = buildwatch.boot_build()
         serve_record = serve_registry.build_record(
             instance_id=app.state.instance_id, announced=announced
         )
@@ -208,21 +221,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.serve_heartbeat = serve_heartbeat
 
         # And the build watch: poll the install on disk and, when the build has
-        # moved under this process and nothing is in flight, announce the
-        # handover in the record and leave (`server/retire.py`). Started HERE,
-        # beside the publisher, because the announcement it writes IS this
-        # record — and only when a record was published, for the same reason:
-        # no record, no way to say where the daemon went.
+        # moved under this process, ANNOUNCE the handover in the record and keep
+        # serving; then, once nothing is in flight, latch against new work and
+        # leave (`server/retire.py`). Started HERE, beside the publisher,
+        # because the announcement it writes IS this record — and only when a
+        # record was published, for the same reason: no record, no way to say
+        # where the daemon went.
         #
-        # It samples the boot stamp itself, in its first statement: a stamp read
-        # after the install moved would compare equal to the moved install, and
-        # the handover could never be seen.
-        retire_stop = asyncio.Event()
-        retire_task = asyncio.create_task(
-            serve_retire.retirement_poll(app, serve_publisher, stop=retire_stop)
-        )
-        app.state.serve_retire = retire_task
-        app.state.serve_retire_stop = retire_stop
+        # NOT ON A `--reload` CHILD (`serve_registry.is_reload_child`): that
+        # child's port belongs to uvicorn's supervisor, so a child that retired
+        # would remove its record and leave the parent accepting on a socket
+        # with nothing behind it — a daemon a reader cannot see and cannot
+        # explain (QA round 1, Q3). A dev-mode supervisor is not a production
+        # daemon and has no successor to hand the socket to.
+        if not serve_registry.is_reload_child(app):
+            retire_stop = asyncio.Event()
+            retire_task = asyncio.create_task(
+                serve_retire.retirement_poll(
+                    app, serve_publisher, stop=retire_stop, boot=boot_build
+                )
+            )
+            # Observed, not merely held: the task is cancelled at teardown and
+            # nothing else ever awaits it, so a task that DIED would be silent —
+            # a daemon that never retires, with no line saying why, which is the
+            # silent no-rollout this change removes arrived at from the other
+            # side (review round 1, MINOR-3).
+            retire_task.add_done_callback(serve_retire.observe_poll)
+            app.state.serve_retire = retire_task
+            app.state.serve_retire_stop = retire_stop
 
     yield
     try:

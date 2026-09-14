@@ -141,6 +141,27 @@ class TestTheWatch:
         monkeypatch.setattr(update_mod, "installed_build", _boom)
         assert buildwatch.boot_build() is None
 
+    def test_an_unreadable_settle_is_no_change_rather_than_a_dead_watcher(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The marker-age read must not take the caller's task down with it.
+
+        Both callers of this function are background watchers — the daemon's
+        retirement poll and the runtime's refresh check — and a raise here used
+        to leave that task dead with nothing logged. For the runtime that meant
+        silently keeping an old build; for the daemon, with the latch on the
+        other side of it, a process that never rolled forward at all (review
+        round 1, MINOR-3). "Not settled" is the safe direction: this process
+        stays, and the next check asks again.
+        """
+
+        def _boom(*_a: object, **_k: object) -> float:
+            raise OSError("the marker is unreadable")
+
+        monkeypatch.setattr(update_mod, "build_marker_age_s", _boom)
+        self.state["build"] = NEW
+        assert buildwatch.build_changed(OLD) is None
+
     def test_the_pair_names_both_builds(self) -> None:
         assert buildwatch.build_pair(OLD, NEW) == f" ({OLD.label()} → {NEW.label()})"
         assert buildwatch.build_pair(None, NEW) == ""

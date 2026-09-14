@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
-# Evidence for the ``serve`` daemon's build watch: announce, refuse, leave.
+# Evidence for the ``serve`` daemon's build watch: announce early, keep serving,
+# refuse once the drain is empty, then leave.
 #
-# Three runs against REAL daemons on ephemeral ports, each with its own isolated
+# Six runs against REAL daemons on ephemeral ports, each with its own isolated
 # config root and a FAKE install root (LOP_BUILD_PREFIX) whose ``.lop-source``
 # marker is flipped under the running process — exactly the file ``lop-update``
 # writes last, and the whole signal this feature reads.
 #
 #   1. unsupervised  - an unclaimed daemon: the handover is announced in the
-#                      record, the restart line is logged, the record is removed.
-#   2. governed      - a claimed daemon: the same sequence, plus the new-session
-#                      request refused with 503 daemon-retiring while retiring.
-#   3. held stream   - an SSE job stream held open across the update: NO
-#                      retirement across several check intervals, and the
-#                      retirement once the stream is released.
+#                      record WHILE the daemon keeps answering, the restart line
+#                      is logged, the refusal follows, the record is removed.
+#   2. refusal matrix - a claimed daemon: the announcement is readable while a
+#                      create still answers 200, then the refusal is live and
+#                      EVERY path that can admit or start work answers the typed
+#                      503 (and no runtime record appears).
+#   3. held relay    - THE app-attached case: the desktop app's own
+#                      ``/v1/desktop/sessions/{id}/events`` relay is held across
+#                      the update. The announcement must be READABLE within one
+#                      check while the daemon keeps serving, across several check
+#                      intervals, with NO latch and NO exit; dropping the relay is
+#                      what then lets it finish. (A job SSE stream would not test
+#                      this: it is per-turn, and it is the one term the desktop
+#                      app does not use.)
+#   4. write failure - the retirement poll's announcement cannot be written (the
+#                      record directory is made read-only): the daemon keeps
+#                      serving, does NOT latch, and says so loudly; when the
+#                      directory is writable again the sequence completes.
+#   5. --reload      - a dev-mode child must not self-retire: nothing at all
+#                      happens, and /health keeps answering.
+#   6. probe failure - a probe the daemon cannot READ must mean "stay" rather
+#                      than "nothing in flight" (``inject.py``; a raising probe
+#                      cannot be provoked in an unprivileged real daemon).
 #
 # Nothing here touches a live daemon: every config root is under $WORK, every port
 # is ephemeral (--port 0), and the operator's exported desktop token is scrubbed
-# so run 1 and 3 exercise the ungoverned posture they claim to.
+# so the ungoverned run exercises the ungoverned posture it claims to.
 #
 # Run from anywhere; the repo root is located from this script's own path:
 #     bash docs/evidence/serve-build-retire/run.sh
@@ -37,15 +55,32 @@ printf '%s %s\n' "$OLD_SHA" "old-build" > "$PREFIX/.lop-source"
 
 banner() { printf '\n========== %s ==========\n' "$*"; }
 
+# Every daemon this script starts, so a failure mid-run cannot leave listeners
+# (or, worse, a half-retired daemon) behind on the operator's machine.
+DAEMON_PIDS=()
+cleanup() {
+  for pid in "${DAEMON_PIDS[@]:-}"; do
+    [ -n "${pid:-}" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
 start_daemon() {  # <tag> [extra env assignments...]
   local tag="$1"; shift
   CFG="$WORK/cfg-$tag"
   mkdir -p "$CFG"
+  # The operator's own desktop token and every CMUX_* variable are scrubbed per
+  # daemon: an inherited token would make an "ungoverned" run governed, and an
+  # inherited workspace id is how a headless run has renamed real workspaces here.
   env -u LOCAL_OPERATOR_DESKTOP_TOKEN -u LOCAL_OPERATOR_DESKTOP_ORIGINS \
+      -u CMUX_SOCKET_PATH -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID \
       LOCAL_OPERATOR_CONFIG_DIR="$CFG" \
       LOP_BUILD_PREFIX="$PREFIX" "$@" \
       "$LOP" serve --host 127.0.0.1 --port 0 >"$WORK/$tag.log" 2>&1 &
   DAEMON_PID=$!
+  DAEMON_PIDS+=("$DAEMON_PID")
   RECORD="$CFG/run/serve/$DAEMON_PID.json"
   for _ in $(seq 1 600); do [ -f "$RECORD" ] && break; sleep 0.05; done
   if [ ! -f "$RECORD" ]; then
@@ -63,41 +98,111 @@ stop_daemon() {  # never leave a stray listener behind
   wait "$DAEMON_PID" 2>/dev/null || true
 }
 
-banner "1. an unsupervised daemon announces its handover, then exits"
+reset_marker() { printf '%s %s\n' "$OLD_SHA" "old-build" > "$PREFIX/.lop-source"; }
+
+banner "1. an unsupervised daemon announces its handover while still serving"
 start_daemon unsupervised LOG_LEVEL=INFO
 python3 "$HERE/drive.py" "$RECORD" "$PREFIX" "$NEW_SHA" --cwd "$WORK" | tee "$WORK/run1.txt"
-echo "--- daemon log (tail) ---"
-grep -E "retire|lop serve" "$WORK/unsupervised.log" || tail -6 "$WORK/unsupervised.log"
+echo "--- daemon log: the announcement, the refusal and the restart line ---"
+grep -E "build watch baseline|announced in the record|refusing new work|lop serve" \
+  "$WORK/unsupervised.log" || tail -8 "$WORK/unsupervised.log"
 echo "--- record after exit ---"
 ls -l "$CFG/run/serve/" || true
 stop_daemon
 
-# Recreate the fake install for the next run: run 1 flipped the marker.
-printf '%s %s\n' "$OLD_SHA" "old-build" > "$PREFIX/.lop-source"
-
-banner "2. a claimed daemon refuses a new session while retiring"
-start_daemon governed LOG_LEVEL=INFO LOCAL_OPERATOR_DESKTOP_TOKEN="$TOKEN" LOP_BUILD_STAGGER_S=10
+banner "2. a claimed daemon: announced-but-admitting, then the refusal matrix"
+reset_marker
+# A LONG refusal window (test-only override) so the whole matrix runs inside it,
+# and a short settle so the run does not wait 10 s for the marker to age.
+start_daemon governed LOG_LEVEL=INFO LOCAL_OPERATOR_DESKTOP_TOKEN="$TOKEN" \
+  LOP_BUILD_SETTLE_S=1 LOP_BUILD_STAGGER_S=300
 python3 "$HERE/drive.py" "$RECORD" "$PREFIX" "$NEW_SHA" \
-  --token "$TOKEN" --cwd "$WORK" | tee "$WORK/run2.txt"
-echo "--- daemon log (tail) ---"
-grep -E "retire|lop serve|503" "$WORK/governed.log" || tail -6 "$WORK/governed.log"
-echo "--- record after exit ---"
-ls -l "$CFG/run/serve/" || true
+  --token "$TOKEN" --refuse-matrix --leave-latched --cwd "$WORK" | tee "$WORK/run2.txt"
+echo "--- SIGTERM inside the refusal window (the harness' own stop) ---"
 stop_daemon
+echo "--- record after the stop (a clean exit removes it) ---"
+ls -l "$CFG/run/serve/" || true
+echo "--- runtime records under the isolated root (no spawn was started) ---"
+ls -A "$CFG/run/mobile" 2>/dev/null || echo "(no run/mobile directory at all)"
+echo "--- sessions after the matrix (a refused create adds none) ---"
+ls -1 "$CFG/sessions" 2>/dev/null | wc -l
+echo "--- daemon log ---"
+grep -E "build watch baseline|announced in the record|refusing new work" "$WORK/governed.log" \
+  || tail -8 "$WORK/governed.log"
 
-banner "3. a daemon holding a live SSE stream does not retire, then does"
-printf '%s %s\n' "$OLD_SHA" "old-build" > "$PREFIX/.lop-source"
-start_daemon held LOG_LEVEL=INFO LOP_BUILD_SETTLE_S=1
+banner "3. the app's own relay holds the announced daemon, then lets it finish"
+reset_marker
+# Production constants on purpose: this run is the one whose timings the design
+# quotes (settle 10 s, check 5 s, notice a jittered slice of 20 s).
+start_daemon held LOG_LEVEL=INFO LOCAL_OPERATOR_DESKTOP_TOKEN="$TOKEN"
 python3 "$HERE/drive.py" "$RECORD" "$PREFIX" "$NEW_SHA" \
-  --hold-sse 14 --cwd "$WORK" | tee "$WORK/run3.txt"
-echo "--- daemon log (tail) ---"
-grep -E "retire|lop serve|in flight|SSE" "$WORK/held.log" || tail -8 "$WORK/held.log"
+  --token "$TOKEN" --hold-desktop 24 --cwd "$WORK" | tee "$WORK/run3.txt"
+echo "--- daemon log: it names the term holding it ---"
+grep -E "build watch baseline|announced in the record|in flight|refusing new work" \
+  "$WORK/held.log" || tail -10 "$WORK/held.log"
 echo "--- record after exit ---"
 ls -l "$CFG/run/serve/" || true
 stop_daemon
 
-banner "full daemon logs"
-for tag in unsupervised governed held; do
+banner "4. an unwritable record directory neither latches the daemon nor stops the poll"
+reset_marker
+start_daemon readonly LOG_LEVEL=INFO LOCAL_OPERATOR_DESKTOP_TOKEN="$TOKEN" \
+  LOP_BUILD_SETTLE_S=1 LOP_BUILD_STAGGER_S=10
+python3 "$HERE/drive.py" "$RECORD" "$PREFIX" "$NEW_SHA" \
+  --token "$TOKEN" --readonly-record-dir 12 --cwd "$WORK" | tee "$WORK/run4.txt"
+echo "--- daemon log: the failed write is loud, and the sequence then completes ---"
+grep -E "could not be written|announced in the record|refusing new work" "$WORK/readonly.log" \
+  | head -6 || tail -8 "$WORK/readonly.log"
+echo "--- record after exit ---"
+ls -l "$CFG/run/serve/" || true
+stop_daemon
+
+banner "5. a --reload child does not self-retire (nothing happens at all)"
+reset_marker
+CFG="$WORK/cfg-reload"
+mkdir -p "$CFG"
+env -u LOCAL_OPERATOR_DESKTOP_TOKEN -u LOCAL_OPERATOR_DESKTOP_ORIGINS \
+    -u CMUX_SOCKET_PATH -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID \
+    LOCAL_OPERATOR_CONFIG_DIR="$CFG" LOP_BUILD_PREFIX="$PREFIX" LOG_LEVEL=INFO \
+    "$LOP" serve --reload --host 127.0.0.1 --port 0 >"$WORK/reload.log" 2>&1 &
+RELOAD_PID=$!
+DAEMON_PIDS+=("$RELOAD_PID")
+RECORD=""
+# ``|| true`` on the pipeline: the child takes a few seconds to boot, so the
+# first iterations find no record at all and ``set -e -o pipefail`` would end
+# the run there rather than waiting for it (which is exactly what happened the
+# first time this run existed).
+for _ in $(seq 1 600); do
+  RECORD="$(ls "$CFG"/run/serve/*.json 2>/dev/null | head -1 || true)"
+  [ -n "$RECORD" ] && break
+  sleep 0.1
+done
+if [ -z "$RECORD" ]; then
+  echo "FAIL: the --reload child published no record; log follows:"
+  cat "$WORK/reload.log"
+  exit 1
+fi
+echo "reload child record: $RECORD"; cat "$RECORD"; echo
+PORT="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['port'])" "$RECORD")"
+echo "reloader parent pid=$RELOAD_PID (it owns the port; the child serves through it)"
+python3 "$HERE/drive.py" "$RECORD" "$PREFIX" "$NEW_SHA" \
+  --expect-no-retire --window 24 --cwd "$WORK" | tee "$WORK/run5.txt"
+echo "--- reload log ---"
+grep -E "build watch baseline" "$WORK/reload.log" || echo "(no build watch line at all)"
+echo "--- stopping the reloader (it owns the child) ---"
+kill "$RELOAD_PID" 2>/dev/null || true
+wait "$RELOAD_PID" 2>/dev/null || true
+sleep 2
+echo "records left under run/serve: $(ls -A "$CFG"/run/serve 2>/dev/null | wc -l | tr -d ' ')"
+echo "listeners left on port $PORT: $(lsof -nP -iTCP:"$PORT" 2>/dev/null | wc -l | tr -d ' ')"
+
+banner "6. a probe the daemon cannot read means STAY (injected at the probe seam)"
+# the worktree's own interpreter: inject.py drives the REAL poll, so it has to
+# import ``local_operator`` (drive.py deliberately does not, and runs anywhere).
+"$REPO/.venv/bin/python" "$HERE/inject.py" | tee "$WORK/run6.txt"
+
+banner "daemon logs"
+for tag in unsupervised governed held readonly; do
   echo "--- $tag.log ---"
   cat "$WORK/$tag.log"
 done
