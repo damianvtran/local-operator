@@ -30,7 +30,6 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from pydantic import ValidationError
 
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY, AsyncJob
 from local_operator.harness.subagent import TRAJECTORY_CAP, _make_relay
@@ -67,6 +66,13 @@ def _row(seq: int, *, stamped: bool = True, text: str = "x" * 64) -> dict[str, A
 
 def _rows(count: int, *, text: str = "x" * 64) -> list[dict[str, Any]]:
     return [_row(seq, text=text) for seq in range(count)]
+
+
+#: A trajectory already in canonical-state containers -- exactly what
+#: ``JobState.trajectory`` holds. ``_FrozenMapping`` is deliberately NOT a ``dict``
+#: subclass, so a frozen row is not a raw job row: ``from_job`` says so on every
+#: tree, and the memo has to agree with it in both directions (round 3, F7).
+_FROZEN_ROWS = module._FrozenSequence(module._freeze_value(row) for row in _rows(2))
 
 
 def _job(job_id: str, rows: list[dict[str, Any]] | None = None) -> AsyncJob:
@@ -478,26 +484,6 @@ def test_a_sequence_that_holds_no_rows_keeps_the_pre_change_answer(shape: Any) -
     assert "child-0" not in store._retained_windows()._by_job
 
 
-def test_a_list_of_non_rows_is_unchanged_by_this_round() -> None:
-    """The one malformed shape this round deliberately leaves alone.
-
-    A ``list`` of non-rows takes the memo's fast path (identity and stamps are
-    readable for any list), so the frozen items reach canonical state and the
-    appends writer rejects them. That behaviour is PRE-EXISTING -- it arrives with
-    the memo itself (``0854ac6ac``, where the same cell raises), not with the
-    round-1 non-list fallback -- and narrowing it means changing the fast path's
-    contract, so this round records it rather than folding in a second change.
-    """
-    job = SimpleNamespace(
-        id="child-0", type="task", status="running", trajectory=["a", "b"], prompt="p"
-    )
-
-    with pytest.raises(ValidationError) as raised:
-        _store([]).refresh_jobs(_session([job]))
-
-    assert "job_trajectory_appends" in str(raised.value)
-
-
 @pytest.mark.asyncio
 async def test_a_sequence_that_holds_no_rows_does_not_escape_the_roster_pump(
     tmp_path: Path,
@@ -534,7 +520,20 @@ async def test_a_sequence_that_holds_no_rows_does_not_escape_the_roster_pump(
         await asyncio.sleep(0.25)
         assert [row.id for row in store.state.jobs] == [job_id]
 
-        for shape in ({"_lo_seq": 0, "type": "x"}, "abc", ("a", "b")):
+        # Every shape from the round-3 matrix, including the `list` cells the
+        # writer's declared type allows with wrong items: each one must reach the
+        # coalescer, leave the roster intact and raise nothing into the loop.
+        for shape in (
+            {"_lo_seq": 0, "type": "x"},
+            "abc",
+            b"abc",
+            ("a", "b"),
+            (1, 2),
+            ["a", "b"],
+            [_row(0), "x", _row(1)],
+            [_row(0), _row(1), "x"],
+            _FROZEN_ROWS,
+        ):
             job.trajectory = shape
             session._schedule_frontend_jobs()
             await asyncio.sleep(0.25)
@@ -593,6 +592,140 @@ class _JobThatFailsLate:
         if not self.healthy:
             raise RuntimeError("a malformed extension row")
         return {"progress": "thinking"}
+
+
+def _seen_rows(shape: Any) -> tuple[list[Any], list[Any], list[Any]]:
+    """(rows on the first tick, on the second tick, and what a plain rebuild holds).
+
+    The second tick is the one that can consult a memo, so the pair is THE
+    transparency check: a window may neither keep a row the rebuild path drops nor
+    drop a row it keeps. Generators are excluded by callers -- a generator is
+    single-shot, so a read after the tick that materialised it is empty on every
+    tree including the merge-base, which is a property of the shape and not of the
+    memo.
+    """
+    job = SimpleNamespace(id="child-0", type="task", status="running", trajectory=shape, prompt="p")
+    session = _session([job])
+    store = _store([])
+    store.refresh_jobs(session)
+    first_tick = list(store.state.jobs[0].trajectory)
+    store.refresh_jobs(session)
+    second_tick = list(store.state.jobs[0].trajectory)
+    return first_tick, second_tick, list(JobState.from_job(job).trajectory)
+
+
+@pytest.mark.parametrize(
+    ("shape", "merge_base_rows"),
+    [
+        (["a", "b"], 0),
+        ([_row(0), "x", _row(1)], 2),
+        ([_row(0), _row(1), "x"], 2),
+    ],
+    ids=["list-of-strs", "list-with-a-str-in-the-middle", "list-with-a-trailing-str"],
+)
+def test_a_list_holding_non_rows_answers_what_the_merge_base_answered(
+    shape: Any, merge_base_rows: int
+) -> None:
+    """A ``list`` whose ITEMS are wrong answers 0 rows quietly, as it did before the memo.
+
+    This is the shape the declared type allows and the writer's own type does not
+    guarantee: ``list[dict]`` with an item that is not a dict. Before the memo the
+    only reader materialised the rows it recognised and shipped the rest as absent;
+    from ``0854ac6ac`` on, the fast path froze every item, so the non-row reached
+    canonical state and ``FrontendUpdate(job_trajectory_appends=...)`` raised -- once
+    per tick, out of the roster pump's bare ``call_later`` callback, and with the two
+    readers disagreeing for the same job. The fingerprint cannot see an item in the
+    middle, so such a list is simply not memoised (see :func:`_row_items`).
+    """
+    first_tick, second_tick, rebuild = _seen_rows(shape)
+
+    assert second_tick == first_tick == rebuild
+    assert len(second_tick) == merge_base_rows
+
+
+def test_a_list_holding_only_rows_is_still_memoised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard above must not cost the common path its memo.
+
+    ``_row_items`` returns an all-rows list BY IDENTITY, so the tick after the first
+    still answers from the entry instead of freezing the window again -- the whole
+    point of this file. Pinned structurally: a second unchanged tick freezes nothing.
+    """
+    jobs = [_job("child-0")]
+    session = _session(jobs)
+    store = _store(jobs)
+    work = _warm(store, session, monkeypatch)
+
+    work.reset()
+    store.refresh_jobs(session)
+
+    assert work.freezes == 0, "a clean list stopped being memoised"
+    assert "child-0" in store._retained_windows()._by_job
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        _rows(2),
+        (_row(0), _row(1)),
+        [_row(0), "x", _row(1)],
+        ["a", "b"],
+        {"_lo_seq": 0, "type": "x"},
+        "abc",
+        b"abc",
+        ("a", "b"),
+        (1, 2),
+        _FROZEN_ROWS,
+    ],
+    ids=[
+        "list-of-dicts",
+        "tuple-of-dicts",
+        "list-with-a-str-in-the-middle",
+        "list-of-strs",
+        "mapping",
+        "str",
+        "bytes",
+        "tuple-of-strs",
+        "tuple-of-non-rows",
+        "frozen-sequence",
+    ],
+)
+def test_the_memo_serves_exactly_what_a_plain_rebuild_would(shape: Any) -> None:
+    """Transparency for every shape, in both directions.
+
+    THE invariant the memo's soundness rests on: what a warm read (second tick, memo
+    in play) serves equals what a cold read serves, which equals what the one-off
+    reader builds. Stated as an equality rather than as a literal count, so the
+    adjudicated ``_FrozenSequence`` answer (0 rows: canonical-state containers are
+    not raw job rows, and ``from_job`` says so on every tree) is locked to its reason
+    instead of to the number -- and so the next agent cannot flip either direction
+    while the malformed cells stay green.
+    """
+    first_tick, second_tick, rebuild = _seen_rows(shape)
+
+    assert second_tick == first_tick == rebuild
+
+
+def test_the_shared_predicate_refuses_a_canonical_container() -> None:
+    """The REASON the ``frozen-sequence`` cell ships 0 rows, pinned where the rule lives.
+
+    A ``_FrozenMapping`` is what canonical state already holds -- deliberately not a
+    ``dict`` subclass -- so accepting it would be a second, drifting notion of what a
+    raw job row is, and ``JobState.from_job`` has refused it since the merge-base.
+    Locking this here means the transparency cell above cannot be flipped to the
+    other direction without a test saying so.
+    """
+    assert module._is_retained_row(_FROZEN_ROWS[0]) is False
+    assert module._is_retained_row(_row(0)) is True
+    assert (
+        module._is_retained_row(
+            ToolExecutionEndEvent(
+                tool_call_id="c0",
+                tool_name="bash",
+                result=ToolResult(tool_call_id="c0", tool_name="bash", content=[]),
+            )
+        )
+        is True
+    )
 
 
 def test_a_row_that_fails_to_build_does_not_keep_its_memo(monkeypatch: pytest.MonkeyPatch) -> None:
