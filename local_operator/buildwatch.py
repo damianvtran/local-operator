@@ -64,10 +64,9 @@ BUILD_SETTLE_S = 10.0
 #: Spread over 20 s the eager re-engages average ≤1 spawn/s. Same env
 #: override rule as the settle: test-only.
 #:
-#: The daemon reuses it as its handover NOTICE as well as its spread: it
-#: announces the retirement first, then waits this slice before leaving, which
-#: is the window in which a record reader can actually see it (see
-#: ``server/retire.py``).
+#: The daemon's internal injected-callback tests reuse this refusal window.
+#: Production daemon polling announces only and never staggers toward an exit
+#: (see ``server/retire.py``); runtime retirement above is unchanged.
 BUILD_STAGGER_S = 20.0
 
 
