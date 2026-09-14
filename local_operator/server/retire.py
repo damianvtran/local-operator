@@ -1,81 +1,22 @@
-"""How the ``serve`` daemon leaves when a new build lands, without cutting work.
+"""Announce a changed ``serve`` build without interrupting daemon-owned work.
 
-Every other participant on this host already rolls forward on its own: an idle
-session runtime notices that the install on disk moved (``buildwatch``), waits
-out the settle window, announces ``retiring`` to its viewers and exits, so the
-viewer's next engage runs the new build (``session/runtime/process.py``). The
-daemon had none of that — it kept serving the old build until a person killed
-it, which is why "update the daemon" used to mean downtime.
+Production lifespan supplies no ``exit_process`` callback: marker drift only
+updates ``retiring_from``/``retiring_to`` and the daemon keeps serving. These
+legacy field names are new-build announcements, NOT instructions for a UI to
+release SSE or watch leases. Re-read the marker on every check so a rollback or
+unreadable build withdraws the announcement and a newer build retargets it.
 
-This module gives it the same shape, with three deliberate differences, each
-argued where it is implemented:
+The daemon DOES own legacy scheduled/async work. In particular,
+``SchedulerService._run_tasks`` runs in this process and lifespan shutdown
+cancels it. Detached desktop runtimes are not the only execution path, and
+``in_flight`` is not a complete work-safety predicate. A marker also supplies no
+guarantee that a successor is ready. Neither an idle-looking daemon nor a
+claimed desktop daemon may therefore latch, refuse, or exit on build drift.
 
-* it ANNOUNCES in its rendezvous record (``retiring_from``/``retiring_to``)
-  instead of over a socket, because a daemon's readers are record readers;
-* it REFUSES new work only once the drain has emptied (:class:`DaemonRetiring`)
-  — the announcement comes first and the latch comes last, see below;
-* it NEVER restarts itself — it says which build it left for and which command
-  brings it back, and leaves supervision to whoever supervises it.
-
-**THE ANNOUNCEMENT COMES FIRST, AND THE LATCH COMES LAST.** They are two
-separate events, and the order between them is the design:
-
-1. a settled build change is DETECTED: ``retiring_from``/``retiring_to`` go into
-   the record IMMEDIATELY and the daemon keeps serving normally. Nothing is
-   latched and no request is refused, because while it is merely announced this
-   process is still the only place its clients can work;
-2. it keeps polling, and stays up for as long as anything holds it — see
-   :func:`in_flight`, which is fail-closed as it always was;
-3. only once the drain is empty does it LATCH: refuse new work with the typed
-   ``503 daemon-retiring``, then exit cleanly and remove the record.
-
-AND THE ANNOUNCEMENT IS RE-READ EVERY TICK, because it is a claim about the
-install rather than a fact about this process: the poll re-asks
-``buildwatch.handover_build`` while it is announced, WITHDRAWS the handover from
-the record when the install turns out to be back on ``boot`` (a ``lop-update``
-rolled back or superseded) or unreadable, and re-announces onto a newer build if
-the install moved on again (review round 2, MINOR-2). Announcing once and acting
-on it forever meant a daemon that latched, exited and removed its record leaving
-its readers a ``retiring_to`` that named a build no longer on disk. The LATCH is
-still one-way, and its place in the sequence is unchanged: withdrawal is a
-record change, not an un-latch, and it can only happen before ``latch`` runs.
-
-WHY NOT "DRAIN, THEN ANNOUNCE", the obvious order and this module's first shape:
-because the terms that hold a daemon include a STANDING ATTACHMENT — the desktop
-app's replayable ``/v1/desktop/sessions/{id}/events`` relay and the watch lease
-renewed beside it are held open for as long as a conversation is on screen (see
-:func:`in_flight`). Announcing only after the drain empties is CIRCULAR for the
-daemon the app is attached to: the drain cannot empty until a client lets go, no
-client can know to let go until the record says something, and the record says
-nothing until the drain is empty. Two reviewers reproduced that on round 1
-independently, by execution: 32 s of samples (six check intervals, the settle
-long past) with the app's relay held showed no announcement, no record change
-and no log line at a default log level.
-
-THE DAEMON HOLDS NO AGENT TURN. Turns run in the detached
-``session/runtime/process.py`` children this daemon spawns and then merely
-observes; they retire on their own schedule. What this process holds is
-ATTACHMENT — a replayable stream and a view lease. The announcement is what
-tells an attached client to let go, so it must be written before the client has
-let go; and refusing work before that has happened would break the app for an
-unbounded period. Hence announce early, latch late.
-
-WHAT A CLIENT MUST DO WITH THE ANNOUNCEMENT is a specification rather than a
-hope, and it lives in ``docs/design-daemon-discovery.md`` §7: on seeing
-``retiring_from``/``retiring_to`` in the record, the desktop app drops the
-``/v1/desktop/sessions/{id}/events`` relay and stops the ``watch`` heartbeat,
-then re-binds to the successor once it appears. Until the UI implements that
-valve, an app-attached daemon announces and keeps serving — strictly better than
-the silence this replaces, but NOT yet a completed update path for the
-app-attached case (stated in the PR body too).
-
-**What "in flight" means here is not what it means for a runtime**, and that is
-the one thing a reader must not assume: a runtime OWNS its turn, so exiting it
-cancels the operator's work, while a turn on this daemon runs in a detached
-child process (``session/runtime/launch.py::_spawn_runtime`` spawns
-``-m local_operator.session.runtime.process``). See :func:`in_flight` for the
-terms this process can actually observe, for which of them is a STANDING
-attachment rather than a turn, and for why a probe it cannot read means stay.
+An explicitly injected callback retains the internal drain/latch TEST seam.
+There is no production opt-in or environment switch. A future handoff protocol
+must prove successor readiness and protect daemon-owned work before enabling
+any exit; the callback alone does not establish that safety contract.
 """
 
 from __future__ import annotations
@@ -113,10 +54,8 @@ RETIRING_MESSAGE = (
 #: be missed by a pool built after the latch, and the refusal it carries is the
 #: whole point of latching.
 #:
-#: NOT set while merely announced, and that is the round-2 correction: the
-#: announcement's job is to tell an attached client to let go, and a daemon that
-#: refused work at that instant would be unusable for as long as the client took
-#: to react.
+#: Production announcements never set this latch. Only the internal injected
+#: callback path exercises it; announcements are not client release instructions.
 RETIRING_STATE_ATTR = "serve_retiring"
 
 
@@ -126,12 +65,12 @@ class DaemonRetiring(RuntimeError):
     Deliberately a subclass of ``RuntimeError`` so an unmapped caller still gets
     the routes' existing 503 ladder rather than a 500 with a traceback, and
     deliberately a TYPE rather than a string the routes match on: the client's
-    correct response is not "retry" but "rediscover the successor through the
-    record" (design §7), and that is a decision only a distinguishable refusal
-    can support.
+    refusal can be distinguished from unrelated server errors. The future
+    successor protocol is not implemented; design §7 specifies announcement-only
+    production behavior rather than a client handoff.
 
-    Raised only after the LATCH, so it always means "this process is leaving",
-    never "this daemon is thinking about it" — see the module docstring.
+    Raised only after the internal test LATCH. Production build announcements
+    never raise this refusal; no production successor handoff exists yet.
     """
 
     #: The machine-readable code the desktop routes put on the wire beside the
@@ -181,7 +120,10 @@ def _unreadable(probe: str) -> str:
 
 
 def in_flight(app: "FastAPI") -> str | None:
-    """The first reason this daemon must not leave yet, or ``None``.
+    """An attachment reason for the internal drain tests, or ``None``.
+
+    This is NOT a complete work-safety predicate: scheduler-owned tasks are not
+    counted. Production announcement polling must never use it to authorize exit.
 
     WHAT IS ACTUALLY IN FLIGHT FOR THIS PROCESS, verified against the code:
 
@@ -274,20 +216,18 @@ def announce(
 ) -> None:
     """Publish the handover into the record. THE WRITE IS THE ANNOUNCEMENT.
 
-    NOTHING IS LATCHED HERE, and that is the round-2 correction: a daemon that
-    has only announced is still the place its client works, so refusing at this
-    point would break the app for as long as it takes the client to react (see
-    the module docstring). The latch belongs to :func:`latch`, which the caller
-    runs only once the drain has emptied.
+    NOTHING IS LATCHED HERE. Production continues serving indefinitely: the
+    announcement instructs no client action. Only the internal callback test
+    seam subsequently consults the attachment drain and exercises the latch.
 
     THE WRITE IS ALLOWED TO FAIL, and the caller must let it: ``heartbeat`` can
     raise on a read-only or full config directory (the failure class the sibling
     ``heartbeat_loop`` swallows as self-healing, ``server/registry.py``), and a
     daemon that latched on a failed write would refuse every request forever
     without ever leaving. So the caller retries the announcement on its next
-    check and does not latch in the meantime — at worst the daemon keeps serving
-    the old build and says so loudly, which is the behaviour this whole change
-    replaces rather than a new failure mode.
+    check and does not latch in the meantime. Production keeps serving even
+    after a successful write; the failed-write gate also protects the explicit
+    callback test seam.
 
     The record write is ``publisher.heartbeat(**updates)``, the existing
     rewrite-whole-record path, so the staged write, the ``0600`` file and the
@@ -306,9 +246,8 @@ def withdraw(publisher: "session_registry.RecordPublisher") -> None:
     ``lop-update`` that failed and was rolled back, or was superseded by the
     running build — review round 2, MINOR-2), or the stamp cannot be read as a
     build at all (:func:`buildwatch.proves_a_move`). In both cases the daemon is
-    NOT leaving: it is serving the right build, or a build nobody can identify,
-    and a record that still told its readers to let go would be telling them to
-    hand over to nothing.
+    serving the loaded build, or observing an unreadable install. Clear the
+    stale new-build announcement; it never instructs readers to let go.
 
     NOT AN UN-LATCH, and it cannot become one: this is a record field, the latch
     is :func:`latch`'s ``app.state`` flag, and the poll only reaches here before
@@ -332,9 +271,9 @@ def latch(app: "FastAPI") -> None:
     (``server/desktop.py``) and for the same reason: un-announcing would make
     every reader that acted on the announcement wrong.
 
-    Called ONLY after the announcement is readable AND the drain is empty, so
-    the refusal can never arrive before the record has told a client to let go
-    (see the module docstring for why that order is the design). "Readable" is
+    Internal callback tests call this after announcement and attachment drain.
+    Production never reaches this latch: an empty drain proves neither safe
+    scheduler shutdown nor a ready successor. "Readable" is
     re-read on every tick rather than remembered: the poll withdraws the
     announcement if the install on disk stops proving the move it announced, and
     the latch is reachable only on a tick where the announcement still stands.
@@ -365,30 +304,19 @@ def _request_shutdown() -> None:
 
 
 def observe_poll(task: "asyncio.Task[None]") -> None:
-    """Log a build watch that DIED, instead of a daemon that never retires.
+    """Report a failed watcher: the daemon serves but announcements are stale.
 
-    The poll is created bare in the lifespan and awaited only at teardown, so
-    without this a task that raised would be silent: the daemon would keep
-    serving the old build with no record change and no line explaining why —
-    the same silent no-retirement this change exists to remove, arrived at from
-    the other side. Attached with ``add_done_callback``, so it also covers a
-    failure the poll's own ``try`` did not name.
-
-    Deliberately does not clear the latch either: a latched daemon that failed on
-    its way out has already told its readers to leave, and re-admitting work
-    would make every one of them wrong. So this logs an ERROR, the announcement
-    and the refusal both stand, and what can still make the promise good is
-    whoever supervises the process — the next `lop serve` on the new build (or
-    the app, for a daemon it owns). Silence would leave the reader with neither
-    the handover nor a reason.
+    The lifespan otherwise awaits this task only during teardown, so an early
+    failure would leave record readers unaware that build detection has stopped.
+    An injected test latch is not cleared by this observer.
     """
     if task.cancelled():
         return
     error = task.exception()
     if error is not None:
         logger.error(
-            "serve daemon: the build watch died and this daemon will not retire on its "
-            "own; restart it to pick up the new install",
+            "serve daemon: the build watch died; new-build announcements will not "
+            "refresh while this daemon continues serving",
             exc_info=error,
         )
 
@@ -427,32 +355,14 @@ async def retirement_poll(
     exit_process: Callable[[], None] | None = None,
     boot: "BuildStamp | None" = None,
 ) -> None:
-    """Poll the install on disk; announce the move, then latch and leave.
+    """Poll and reconcile new-build announcements while continuing to serve.
 
-    Started by ``server/app.py``'s lifespan beside the record publisher, and
-    stopped (cancelled, with ``stop`` set) in its shutdown half. The two phases
-    are the module docstring's sequence, and the loop is deliberately shaped by
-    them: while ``announced`` is None this task is looking for a move and will
-    not consult the drain, and once it has announced it never looks at the
-    record again except to keep the drain waiting.
-
-    ``boot`` is the build stamp this process LOADED, sampled by the caller
-    BEFORE it published the record (``app.py``) — and defaulted here so a direct
-    caller (a test, a driver) can sample it itself. It has to precede the record
-    for a reason worth stating: a reader's first act is to wait for the record
-    to appear and then act, and a baseline read AFTER the record was published
-    would adopt a marker flipped in that gap as the build this process loaded —
-    the change would then be invisible for the rest of the process's life, with
-    no log line at all (QA round 1, Q2: 3 of 7 immediate flips were swallowed
-    that way). The baseline is logged for the same reason: a watcher that can
-    never fire should be diagnosable from its own output.
-
-    ``buildwatch.build_changed`` is the shared rule — same stamp, an unsettled
-    marker or an unreadable one is "no action", and ``LOP_BUILD_PREFIX`` (the
-    e2e-only override) points the whole check at a fake install root. This loop
-    adds only what is this process's own: the announcement, the re-read of it
-    (``buildwatch.handover_build``, which is why an announcement can be WITHDRAWN
-    again), the in-flight gate and the refusal.
+    ``boot`` is sampled before record publication so a flip immediately after
+    discovery cannot be mistaken for the loaded build. The shared buildwatch
+    readers enforce marker settling and withdraw/retarget stale announcements.
+    Only an explicitly injected internal test callback reaches the legacy drain
+    and latch below; production has neither a successor-ready protocol nor a
+    complete daemon-owned-work drain and must not exit on marker drift.
     """
     if boot is None:
         boot = buildwatch.boot_build()
@@ -464,7 +374,6 @@ async def retirement_poll(
         return
 
     logger.info("serve daemon: build watch baseline %s", boot.label())
-    exit_process = exit_process or _request_shutdown
     announced: "BuildStamp | None" = None
     last_reason: str | None = None
     while not stop.is_set():
@@ -499,7 +408,7 @@ async def retirement_poll(
             announced = newer
             logger.info(
                 "serve daemon: the install on disk is %s but this process loaded %s; "
-                "announced in the record and still serving until nothing is in flight",
+                "announced in the record; continuing to serve",
                 newer.label(),
                 boot.label(),
             )
@@ -590,6 +499,13 @@ async def retirement_poll(
             announced = standing
             continue
 
+        # A marker proves only that another build is on disk, not that a
+        # successor is ready or that scheduler-owned work can survive shutdown.
+        # Production never supplies this internal test callback. Keep verifying
+        # announcements above, but do not consult the incomplete drain or latch.
+        if exit_process is None:
+            continue
+
         reason = in_flight(app)
         if reason is not None:
             if reason != last_reason:
@@ -606,9 +522,8 @@ async def retirement_poll(
                 last_reason = reason
             continue
 
-        # THE DRAIN IS EMPTY: nothing is attached, nothing is being started, so
-        # the latch can no longer cut anything. This is the only place the
-        # refusal is raised, and it is one-way from here.
+        # Internal injected-callback path only. The attachment probe being
+        # empty is NOT proof that daemon-owned scheduled work is safe to stop.
         latch(app)
         logger.info(
             "serve daemon: nothing is in flight; refusing new work and leaving for %s",
