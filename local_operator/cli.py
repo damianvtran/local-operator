@@ -3291,6 +3291,18 @@ def _clamp_reason_cell(summary: str) -> str:
     the last cell is unused, not missing, and inventing a space to fill it would
     report width the text does not have. A reason whose glyph mix reaches an odd
     boundary does land on 48.
+
+    The unit being fitted is the GRAPHEME — not the code point, and not the
+    character count the old rule used. A ZWJ family cluster is one 2-cell glyph,
+    so a reason built from them fills the column instead of a third of it, and a
+    VS16 sequence is 2 cells rather than the 1 its characters add up to (review
+    round 2, M1/M2; see :func:`_cut_to_cells`).
+
+    A summary that FITS is returned untouched, and that includes a joiner of its
+    own at the end: the back-off in :func:`_cut_to_cells` is a property of a CUT,
+    and a value nothing had to cut is not edited at all (review round 2, N2 —
+    recorded as the rule, not changed, because trimming it would be a second,
+    invisible edit on a cell that is already correct).
     """
     if _cell_len(summary) <= WHY_COLUMN_WIDTH:
         return summary
@@ -3305,18 +3317,31 @@ def _cut_to_cells(text: str, budget: int) -> str:
 
     A cell bound cannot be a slice: one East-Asian character is two cells, so
     ``text[:n]`` overshoots by however many wide glyphs it happens to contain.
-    The loop stops BEFORE the character that would overflow, which is what keeps
-    a COMBINING MARK attached to its base rather than orphaned by a
-    character-count cut.
+    Neither can it be a walk over CHARACTERS, which is the defect this function
+    was written with: rich measures a STRING, and two of its rules only fire on a
+    whole sequence — a VS16 (``U+FE0F``) upgrades the glyph before it to two
+    cells, and a ZWJ (``U+200D``) collapses the emoji it joins into one two-cell
+    glyph. Summing ``cell_len(char)`` per character therefore MIS-measures both
+    classes in opposite directions: ``❤️`` is 1 cell per character but 2 as a
+    unit, so twenty of them (40 cells) came back UNCUT against a 24-cell budget
+    — worse than the character rule this replaced, which clipped them at 24 —
+    while a family cluster was charged about three times its width and left most
+    of the column empty (review round 2, M1 and M2).
 
-    A ZERO-WIDTH JOINER is the one case that rule does not cover, so it is
-    handled here. ``U+200D`` means "join with the glyph AFTER me", so a cut that
-    ends on one emits a joiner with nothing to join — a stray control character
-    sitting immediately before the marker, which a terminal renders as a
-    replacement box (review round 1, Q1). Backing off it costs no cells, so the
-    budget is unaffected and no other column moves. Only a TRAILING joiner is
-    dropped: inside a cluster it is doing its job, and a variation selector at the
-    end is legitimate presentation.
+    So the unit measured is the GRAPHEME, via rich's own
+    :func:`rich.cells.split_graphemes` — the splitter the measurement rules come
+    from, so the unit measured is the unit emitted, and a combining mark or a
+    joined emoji cannot be separated from what it belongs to.
+
+    The returned prefix never ends on a ZERO-WIDTH JOINER. ``U+200D`` means "join
+    with the glyph AFTER me", so a prefix ending on one emits a joiner with
+    nothing to join — a stray control character immediately before the marker,
+    which a terminal renders as a replacement box (review round 1, Q1). The
+    back-off costs no cells, so the budget is unaffected and no other column
+    moves; it is a no-op for well-formed text, because a grapheme absorbs an
+    interior joiner together with the glyph it joins, and it fires only when the
+    input's OWN trailing grapheme ends on one. A value that fits is not touched
+    at all, trailing joiner included — see :func:`_clamp_reason_cell`.
 
     The prefix is the longest that FITS, not one that FILLS. With all-wide text
     the final cell can go unused (a two-cell glyph cannot occupy cell 47 of a
@@ -3324,18 +3349,17 @@ def _cut_to_cells(text: str, budget: int) -> str:
     occupying every cell is not a goal, and padding to reach it would report width
     the text does not have.
 
-    ``cell_len`` is bound ONCE for the loop rather than per glyph: it is imported
-    at the point of use (see :func:`_cell_len` for why third-party stays out of
-    the module-level imports), and re-running that import statement for every
-    character of a long reason is a cost this one-line loop does not need.
+    ``split_graphemes`` is imported at the point of use, like every other
+    third-party name here: this module's contract is that ``import
+    local_operator.cli`` stays cheap (see the module docstring).
     """
-    from rich.cells import cell_len
+    from rich.cells import split_graphemes
 
+    spans, _total_cells = split_graphemes(text)
     used = 0
-    for index, char in enumerate(text):
-        width = cell_len(char)
+    for start, _end, width in spans:
         if used + width > budget:
-            cut = text[:index]
+            cut = text[:start]
             while cut.endswith("\u200d"):
                 cut = cut[:-1]
             return cut
@@ -3382,9 +3406,10 @@ def _cell_len(text: str) -> int:
     local_operator.cli`` stays cheap (see the module docstring); ``rich`` is
     already a hard dependency and ``rich.cells`` is its width primitive.
 
-    :func:`_cut_to_cells` binds that same function once for its loop, for the
-    same reason and without weakening the contract: the import stays inside the
-    function, it just stops running once per character.
+    This measures a WHOLE string, which is the only way rich applies its
+    sequence rules (VS16 upgrade, ZWJ collapse) — measuring per character is what
+    :func:`_cut_to_cells` did and why it mis-counted both classes. The cut fits
+    the same units this does, one grapheme at a time.
     """
     from rich.cells import cell_len
 
