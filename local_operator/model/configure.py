@@ -614,8 +614,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     The strip is ONE leading ``<hosting>/`` and only when that prefix names THIS
     hosting (see :func:`~local_operator.model.registry
     ._hosting_qualified_bare_id`), so an aggregator's genuine vendor namespace is
-    never rewritten; local runtimes are excluded outright, since their ids are
-    the server's own names.
+    never rewritten; aggregator and local hostings are excluded outright there,
+    because both serve ids that legitimately begin with their own name
+    (``openrouter/auto``; ``ollama/hf.co/...``).
     """
     bare_name = _hosting_qualified_bare_id(hosting, model_name)
     if bare_name is not None:

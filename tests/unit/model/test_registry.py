@@ -761,9 +761,73 @@ def test_a_local_models_own_name_is_never_stripped(provider: str) -> None:
     """
     from local_operator.model.configure import build_model_spec
 
-    spec = build_model_spec(provider, f"{provider}/hf.co/owner/model:Q4")
+    for model_id in (f"{provider}/hf.co/owner/model:Q4", "hf.co/owner/model:Q4"):
+        assert build_model_spec(provider, model_id).model_id == model_id
 
-    assert spec.model_id == f"{provider}/hf.co/owner/model:Q4"
+
+#: OpenRouter's own namespaced ids — real rows in its public catalogue, none of
+#: which has a bare counterpart (there is no `auto`/`free`/`fusion` model).
+#: F1: the spec-boundary strip treated the aggregator's own name as a PROVIDER
+#: prefix, rewrote each of these to its tail, and put a name no provider serves
+#: into the request body — a working model failing its first turn.
+_OPENROUTER_NAMESPACED_IDS = (
+    "openrouter/auto",
+    "openrouter/auto-beta",
+    "openrouter/fusion",
+    "openrouter/pareto-code",
+    "openrouter/free",
+    "openrouter/bodybuilder",
+)
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "radient"])
+@pytest.mark.parametrize("model_id", _OPENROUTER_NAMESPACED_IDS)
+def test_an_aggregators_own_namespace_survives_the_spec_boundary(
+    provider: str, model_id: str
+) -> None:
+    """An aggregator's ids travel WHOLE, asserted on the RENDERED body.
+
+    ``spec.model_id`` is not a label — ``providers/clients.py::_build_body`` sets
+    ``"model": request.model.model_id`` — so an id-equality assertion alone is
+    the reason F1 had no test that could fail. This renders the body through the
+    real client, for each of the six published ids on both aggregator hostings.
+
+    ``radient-key`` is deliberately not a case: it sits in
+    ``AGGREGATOR_PROVIDERS`` but is not a hosting ``configure_model`` accepts at
+    all (it raises ``Unsupported hosting provider``), so its membership only
+    matters to the exclusion set, not to a spec build.
+    """
+    from local_operator.harness.types import ChatRequest, Message, TextContent
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import OpenAICompatClient
+
+    info = get_model_info(provider, model_id)
+    spec = build_model_spec(provider, model_id, info)
+    body = OpenAICompatClient("https://example.invalid")._build_body(
+        ChatRequest(model=spec, messages=[Message(role="user", content=[TextContent(text="hi")])])
+    )
+
+    assert spec.model_id == model_id
+    assert body["model"] == model_id
+
+
+def test_the_aggregator_exclusion_does_not_loosen_the_vendor_trap() -> None:
+    """The exclusion is by HOSTING, so the vendor-namespace rule still holds.
+
+    An id whose prefix names another provider under an aggregator hosting is
+    still never rewritten, and a direct hosting whose model name carries its own
+    prefix is still canonicalised (the deepseek case this PR exists for).
+    """
+    from local_operator.model.configure import build_model_spec
+
+    assert (
+        build_model_spec(
+            "openrouter", "deepseek/deepseek-v4.1-flash", get_model_info("openrouter", "x")
+        ).model_id
+        == "deepseek/deepseek-v4.1-flash"
+    )
+    assert build_model_spec("deepseek", "deepseek/deepseek-flash").model_id == "deepseek-flash"
+    assert build_model_spec("deepseek", "deepseek-flash").model_id == "deepseek-flash"
 
 
 def test_the_anthropic_family_resolver_and_template_still_answer() -> None:
