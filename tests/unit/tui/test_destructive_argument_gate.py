@@ -22,14 +22,18 @@ that called the gate directly would have agreed with the bug.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
+from textual.message import Message
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import MessageWaiter
 
 #: ``/mcp remove`` rows, shaped exactly as the app builds them: compound names
 #: (the matcher compares against the WHOLE argument) carrying ``alert=True``
@@ -61,11 +65,6 @@ LOGIN_ROWS = [
 ]
 
 
-async def _settle(pilot: Any, times: int = 8) -> None:
-    for _ in range(times):
-        await pilot.pause()
-
-
 async def _fuzzy_enter(rows: list[ArgumentChoice], typed: str, key: str = "enter") -> Any:
     """Type ``typed`` into ``/mcp `` against ``rows``, then press ``key``.
 
@@ -77,28 +76,34 @@ async def _fuzzy_enter(rows: list[ArgumentChoice], typed: str, key: str = "enter
     query one message-loop tick behind the keystroke, and this harness has no
     app-side handler to refill them.
     """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 24)) as pilot:
-        await _settle(pilot, 6)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    messages = MessageWaiter()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        await messages.wait_for(
+            lambda: app._session is session, description="boot worker adopted the session"
+        )
         editor = app.query_one(Editor)
         editor.focus()
         editor.text = "/mcp "
         editor.move_cursor(editor._end_of_buffer())
         editor._sync_picker()
-        await _settle(pilot, 8)
+        await pilot.pause()
         editor.picker.set_choices(list(rows))
-        await _settle(pilot, 6)
+        await pilot.pause()
+        # press() already waits for the screen's message queues. These are
+        # parser/gate assertions, not animation geometry: five more idle
+        # frames per character prove nothing beyond that same barrier.
         for char in typed:
             await pilot.press("space" if char == " " else char)
-            await _settle(pilot, 5)
         editor.picker.set_choices(list(rows))
-        await _settle(pilot, 6)
+        await pilot.pause()
 
         matched = [name for name, _ in editor.picker.suggestions()]
         destructive = editor._argument_is_destructive()
         before = editor.text
         await pilot.press(key)
-        await _settle(pilot, 10)
+        # The real Enter/Tab handler and its screen barrier ran in press().
         return before, editor.text, destructive, matched
 
 
@@ -182,21 +187,25 @@ async def test_the_command_word_floor_survives_a_row_without_flags() -> None:
     protection. Rows here deliberately carry ``alert=False`` to prove the floor
     holds without them.
     """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 24)) as pilot:
-        await _settle(pilot, 6)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    messages = MessageWaiter()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        await messages.wait_for(
+            lambda: app._session is session, description="boot worker adopted the session"
+        )
         editor = app.query_one(Editor)
         editor.focus()
         editor.text = "/logout "
         editor.move_cursor(editor._end_of_buffer())
         editor._sync_picker()
-        await _settle(pilot, 8)
+        await pilot.pause()
         unflagged = [
             ArgumentChoice("openrouter", "Forget the key"),
             ArgumentChoice("deepseek", ""),
         ]
         editor.picker.set_choices(unflagged)
-        await _settle(pilot, 6)
+        await pilot.pause()
 
         assert (
             editor._argument_is_destructive() is True
@@ -256,21 +265,135 @@ async def test_the_gate_is_armed_on_the_typed_path(verb: str, alert: bool, expec
     alert flag ship in the concurrent PR; the gate reads the flag off the row,
     so rows of the right shape exercise it faithfully.
     """
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 24)) as pilot:
-        await _settle(pilot, 6)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    messages = MessageWaiter()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        await messages.wait_for(
+            lambda: app._session is session, description="boot worker adopted the session"
+        )
         editor = app.query_one(Editor)
         editor.focus()
+        # Keep every real key event; press() includes its message barrier.
         for char in f"/mcp {verb} ":
             await pilot.press("space" if char == " " else char)
-            await _settle(pilot, 6)
         editor.picker.set_choices(
             [
                 ArgumentChoice(f"{verb} linear", "", alert=alert),
                 ArgumentChoice(f"{verb} notion", "", alert=alert),
             ]
         )
-        await _settle(pilot, 8)
+        await pilot.pause()
 
         assert editor.picker.is_open(), f"/mcp {verb} left the picker closed by typing"
         assert editor._argument_is_destructive() is expected
+
+
+@pytest.mark.asyncio
+async def test_message_waiter_handles_early_and_reentrant_publication() -> None:
+    messages = MessageWaiter()
+    messages.on_message(Message())
+    await messages.wait_for(lambda: True, description="already ready")
+    assert not messages._pending
+    checks = 0
+
+    def predicate() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            # A clear-after-check implementation loses this synchronous edge.
+            messages.on_message(Message())
+            return False
+        return True
+
+    await messages.wait_for(predicate, description="reentrant edge")
+    assert checks == 2
+    assert not messages._pending
+
+
+@pytest.mark.asyncio
+async def test_message_waiter_cancellation_does_not_steal_another_consumers_edge() -> None:
+    messages = MessageWaiter()
+    entered = asyncio.Event()
+    ready = False
+
+    def predicate() -> bool:
+        entered.set()
+        return ready
+
+    first = asyncio.create_task(messages.wait_for(predicate, description="cancelled consumer"))
+    await entered.wait()
+    entered.clear()
+    second = asyncio.create_task(messages.wait_for(predicate, description="surviving consumer"))
+    await entered.wait()
+    assert len(messages._pending) == 2
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert len(messages._pending) == 1
+    ready = True
+    messages.on_message(Message())
+    await second
+    assert not messages._pending
+
+
+@pytest.mark.asyncio
+async def test_message_waiter_cleans_up_timeout_and_predicate_failure() -> None:
+    messages = MessageWaiter()
+    # A zero guard tests readiness vs a missing edge without another time bet.
+    await messages.wait_for(lambda: True, description="ready", timeout=0)
+    with pytest.raises(AssertionError, match="never became ready: absent edge"):
+        await messages.wait_for(lambda: False, description="absent edge", timeout=0)
+    assert not messages._pending
+
+    def broken() -> bool:
+        raise ValueError("predicate failed")
+
+    with pytest.raises(ValueError, match="predicate failed"):
+        await messages.wait_for(broken, description="broken predicate")
+    assert not messages._pending
+
+    def timed_out() -> bool:
+        raise TimeoutError("predicate timeout")
+
+    with pytest.raises(TimeoutError, match="predicate timeout"):
+        await messages.wait_for(timed_out, description="predicate, not guard, timed out")
+    assert not messages._pending
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.asyncio
+async def test_message_waiter_observes_real_delayed_boot_and_failure(fail: bool) -> None:
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    session = FakeSession()
+
+    async def factory() -> Any:
+        entered.set()
+        await release.wait()
+        if fail:
+            raise RuntimeError("deliberate boot failure")
+        return session
+
+    messages = MessageWaiter()
+    app = OperatorApp(factory)
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        await entered.wait()
+        assert app._session is None, "premise: real boot is still loading"
+        release.set()
+        if fail:
+            await messages.wait_for(
+                lambda: any(
+                    "deliberate boot failure" in row.text() for row in app.query(NoticeBlock)
+                ),
+                description="boot failure notice mounted",
+            )
+            assert app._session is None
+            assert app._boot_failed
+        else:
+            await messages.wait_for(
+                lambda: app._session is session, description="delayed session adoption"
+            )
+            assert app.query_one(Editor).is_mounted
+        await pilot.pause()
+        assert not messages._pending

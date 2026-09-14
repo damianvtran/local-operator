@@ -49,6 +49,8 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor, StopRequested
 
 from .test_app_pilot import FakeSession, _factory
+from .test_word_caret import _watch_stops
+from .waiting import MessageWaiter
 
 #: A prompt in history, so any chord that wrongly reaches history navigation
 #: visibly destroys the buffer rather than silently doing nothing.
@@ -122,12 +124,8 @@ STATES: dict[str, dict[str, Any]] = {
 }
 
 
-async def _boot(pilot: Any, app: OperatorApp) -> Editor:
-    for _ in range(200):
-        if app._session is not None:
-            break
-        await pilot.pause()
-        await asyncio.sleep(0.01)
+async def _boot(pilot: Any, app: OperatorApp, messages: MessageWaiter) -> Editor:
+    await messages.wait_for(lambda: app._session is not None, description="matrix session adopted")
     assert app._session is not None, "the session never booted"
     editor = app.query_one(Editor)
     editor.focus()
@@ -135,9 +133,21 @@ async def _boot(pilot: Any, app: OperatorApp) -> Editor:
     return editor
 
 
-async def _settle(pilot: Any, cycles: int = 6) -> None:
-    for _ in range(cycles):
-        await pilot.pause()
+async def _settle(pilot: Any, editor: Editor, messages: MessageWaiter) -> None:
+    """Observe the deferred Escape, not six guesses at an idle frame.
+
+    The first queue barrier delivers the raw driver events, which can arm an
+    Escape callback. Its observable retirement is a separate condition: queue
+    emptiness alone is not evidence that deferred work ran. The second barrier
+    delivers the resulting StopRequested/picker messages before observing them.
+    These assertions inspect editor state, not settled animation geometry; zero
+    delay keeps the real queue barriers without CPU-idle detection per frame.
+    """
+    await pilot.pause(0)
+    await messages.wait_for(
+        lambda: editor._pending_escape is None, description="deferred Escape retired"
+    )
+    await pilot.pause(0)
 
 
 async def _arrange(pilot: Any, editor: Editor, state: str, history: bool) -> None:
@@ -195,8 +205,9 @@ async def _run(
     real gap does not save you from the bug.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 24)) as pilot:
-        editor = await _boot(pilot, app)
+    messages = MessageWaiter()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        editor = await _boot(pilot, app, messages)
         await _arrange(pilot, editor, state, history)
 
         stops: list[Any] = []
@@ -221,7 +232,7 @@ async def _run(
                     event.set_sender(app)
                     driver.send_message(event)
         await act(pilot, app)
-        await _settle(pilot)
+        await _settle(pilot, editor, messages)
         return _observe(editor, stops)
 
 
@@ -428,3 +439,73 @@ async def test_a_vertical_chord_never_destroys_a_typed_slash_command(
 
     assert text == typed, f"{encoding} ⌥{chord} destroyed the typed command: {text!r}"
     assert text not in HISTORY, "the buffer was overwritten from history"
+
+
+@pytest.mark.asyncio
+async def test_settle_waits_for_deferred_escape_before_observing_its_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued key is not completion: hold its real deferred callback open.
+
+    A fixed queue barrier alone returns while this worker is parked. The
+    observable-condition wait must stay pending, then deliver the StopRequested
+    the real callback posts, without depending on a parser or wall-clock delay.
+
+    The composer's resting state is enough: a lone Escape there defers the real
+    ``post_message(StopRequested())``, which is the behaviour this pins.
+    """
+    messages = MessageWaiter()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    release = asyncio.Event()
+    armed = asyncio.Event()
+    waiting = asyncio.Event()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        editor = await _boot(pilot, app, messages)
+        stops = _watch_stops(app)
+        original_call_later = editor.call_later
+
+        def delayed(callback: Any, *args: Any, **kwargs: Any) -> bool:
+            if callback == editor._flush_escape:
+
+                async def deliver() -> None:
+                    armed.set()
+                    await release.wait()
+                    original_call_later(callback, *args, **kwargs)
+
+                app.run_worker(deliver())
+                return True
+            return original_call_later(callback, *args, **kwargs)
+
+        original_wait = messages.wait_for
+
+        async def observed(predicate: Any, *, description: str, timeout: float = 30.0) -> None:
+            if description == "deferred Escape retired" and not predicate():
+                waiting.set()
+            await original_wait(predicate, description=description, timeout=timeout)
+
+        monkeypatch.setattr(editor, "call_later", delayed)
+        monkeypatch.setattr(messages, "wait_for", observed)
+        await pilot.press("escape")
+        await armed.wait()
+        task = asyncio.create_task(_settle(pilot, editor, messages))
+        # WHICH of these two settles first is the whole discrimination: a wait on
+        # the deferred callback (correct), or the settle task returning without
+        # one (the queue-barrier-only regression). The bound is a diagnostic
+        # backstop for the broken arm, so its expiry can never read as a pass.
+        try:
+            waited = asyncio.create_task(waiting.wait())
+            try:
+                await asyncio.wait(
+                    {task, waited}, timeout=10.0, return_when=asyncio.FIRST_COMPLETED
+                )
+                assert waiting.is_set(), "settle returned without waiting on the deferred callback"
+                assert not task.done(), "settle returned before the deferred callback"
+                assert stops == []
+                assert editor._pending_escape is not None
+            finally:
+                waited.cancel()
+        finally:
+            release.set()
+            await task
+        assert editor._pending_escape is None
+        assert len(stops) == 1, "the completion barrier lost the downstream stop"
