@@ -225,6 +225,23 @@ async def test_a_lost_kernel_race_reads_as_absent_rather_than_empty_memory(deskt
 
 
 @pytest.mark.asyncio
+async def test_an_unrecognised_read_refusal_is_terminal_not_a_permanent_reading(desktop) -> None:
+    """Each cause gets its own state: ``busy`` is a retry, not a catch-all.
+
+    Folding every refusal into ``busy`` would leave the panel on its "reading…"
+    affordance forever, because nothing later in the interaction completes it.
+    A cause this build cannot report as a reading therefore takes the terminal
+    state, where the panel says so and stops asking.
+    """
+    client, remote = desktop
+    remote.answers["list"] = {"ok": False, "code": "invalid_value", "message": "not a reading"}
+
+    data = (await client.get(_variables_url())).json()["result"]["data"]
+
+    assert data == {"state": "unsupported"}
+
+
+@pytest.mark.asyncio
 async def test_a_namespace_that_moved_under_the_read_is_retryable_not_empty(desktop) -> None:
     client, remote = desktop
     remote.answers["list"] = {

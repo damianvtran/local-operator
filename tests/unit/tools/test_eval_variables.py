@@ -22,6 +22,7 @@ explicitly because losing any of them is silent:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -359,3 +360,133 @@ async def test_a_value_the_cell_retrieved_from_the_secret_ledger_is_redacted(con
     # The ECHO on a write is the same road out of the process.
     echo = await _verb(SESSION, "set", "again", "tok-abcdef-123456", "str")
     assert "tok-abcdef-123456" not in echo["variable"]["value"]
+
+
+# ---------------------------------------------------------------------------
+# the response budget, the lease, and the truncation flag
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_large_namespace_is_truncated_before_the_control_line_cap(context) -> None:
+    """The budget must bound the FRAME, not just the value characters in it.
+
+    Regression: charging ``len(rendered)`` per entry let a 20,000-entry
+    namespace report a third of the budget used while serializing to ~1.8 MB, so
+    the runtime's 1 MiB control line refused the answer and the viewer got a 503
+    — and a panel that cannot READ a namespace cannot delete out of one, so
+    there was no way back from the UI.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+    from local_operator.session.variable_ops import TOTAL_BUDGET_CHARS
+
+    await _cell(
+        context,
+        "for i in range(20000):\n    globals()[f'v{i:06d}'] = i",
+    )
+
+    answer = await _verb(SESSION, "list")
+
+    assert answer["truncated"] is True
+    assert 0 < len(answer["variables"]) < 20000
+    # The frame that will actually travel, envelope included.
+    frame = json.dumps(answer).encode()
+    assert len(frame) < _MAX_LINE_BYTES, f"frame {len(frame)} bytes is over the line cap"
+    # And it is bounded by the budget it claims to honour, not by luck.
+    assert len(frame) <= TOTAL_BUDGET_CHARS + 4096, len(frame)
+    # Keys stay sorted, so what is listed is deterministic.
+    keys = _keys(answer)
+    assert keys == sorted(keys)
+    # The panel can act on what it was given: a listed entry is deletable.
+    assert await _verb(SESSION, "delete", keys[0]) == {"ok": True, "state": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_a_read_neither_reorders_nor_evicts_other_sessions_kernels(context, tmp_path):
+    """A read is not work: it must not decide who is shed next.
+
+    Regression: the read released ownership through ``_remember``, whose
+    ``move_to_end`` promoted the entry and whose capacity pass then evicted
+    another session's interpreter at the four-kernel cap — so opening one chat's
+    panel killed a different chat's namespace.
+    """
+    sessions = ["evict-a", "evict-b", "evict-c", "evict-d"]
+    for name in sessions:
+        session_context = ToolContext(cwd=str(tmp_path), session_id=name)
+        await _cell(session_context, "seed = 0")
+    before = list(eval_tool._KERNELS)
+    assert before == sessions, before
+
+    assert (await _verb(sessions[0], "list"))["state"] == "observed"
+
+    assert list(eval_tool._KERNELS) == before, "a read reordered the kernel registry"
+    assert dict(eval_tool._LOST_KERNELS) == {}, "a read evicted another session's kernel"
+    # A WRITE still promotes (it is work), which is the other half of the rule.
+    await _verb(sessions[0], "set", "written", "1", "int")
+    assert list(eval_tool._KERNELS)[-1] == sessions[0]
+
+
+@pytest.mark.asyncio
+async def test_a_value_the_renderer_shortened_is_reported_truncated(context) -> None:
+    """``truncated`` must mean "the render lost something", not "over the hard cap".
+
+    ``reprlib`` shortens a string at ``maxstring`` (the same 4096) and a
+    container at 100 items, i.e. at or before the explicit cap, so a value the
+    write path ACCEPTED read back cut with the flag clear and the panel could not
+    tell a whole value from a shortened one.
+    """
+    await _cell(context, "seed = 0")
+    for key, length in (("short", 10), ("long", 4096)):
+        await _verb(SESSION, "set", key, "x" * length, "str")
+    await _verb(SESSION, "set", "items", json.dumps(list(range(200))), "list")
+
+    answer = await _verb(SESSION, "list")
+
+    assert _entry(answer, "short")["truncated"] is False
+    assert _entry(answer, "long")["truncated"] is True
+    assert _entry(answer, "items")["truncated"] is True
+
+
+def test_the_truncation_detector_follows_reprlibs_own_caps() -> None:
+    """The detector is derived from ``_REPR``, and one notch looser is enough.
+
+    Cheap and deterministic: the cases are ``reprlib``'s boundary, not a value
+    cap this repo chose, so a future cap cannot silently make the flag blind.
+    """
+    from local_operator.tools import eval_worker as worker
+
+    cap = worker._REPR.maxstring
+    # The boundary is ``reprlib``'s, and the hard cap's, and they interact: a
+    # string of ``cap - 2`` renders to exactly the hard cap whole, ``cap - 1``
+    # is where reprlib starts shortening, and ``cap`` is shortened by the hard
+    # cap because the render carries two quote characters.
+    for limit, expected in ((10, False), (cap - 2, False), (cap - 1, True), (cap, True)):
+        _, truncated = worker._render_value("x" * limit)
+        assert truncated is expected, (limit, truncated)
+    # A list AT the item cap is whole; one over it is flagged.
+    _, at_cap = worker._render_value(list(range(worker._REPR.maxlist)))
+    _, over_cap = worker._render_value(list(range(worker._REPR.maxlist + 1)))
+    assert at_cap is False and over_cap is True
+    # A value that merely CONTAINS the fill value is not a shortened one.
+    assert worker._render_value("a...b")[1] is False
+
+
+@pytest.mark.asyncio
+async def test_a_name_a_url_cannot_address_is_not_advertised_or_created(context) -> None:
+    """A row no route can edit must not offer Edit, and the routes must not make one.
+
+    Percent-encoded ``/`` is decoded into extra path segments before the router
+    matches, so ``PATCH``/``DELETE`` can never reach such a key (measured). A
+    cell can still create one, and hiding the user's own binding would be the
+    "Nothing stored yet" lie — so it is LISTED, marked non-editable.
+    """
+    await _cell(context, "seed = 0\nglobals()['a/b'] = 1")
+
+    listed = await _verb(SESSION, "list")
+
+    assert _entry(listed, "a/b")["editable"] is False
+    assert _entry(listed, "seed")["editable"] is True
+    refused = await _verb(SESSION, "set", "c/d", "1", "int")
+    assert refused["ok"] is False and refused["code"] == "invalid_value"
+    assert "path segment" in refused["message"]
+    assert (await _verb(SESSION, "delete", "a/b"))["code"] == "invalid_value"
