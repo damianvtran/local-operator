@@ -661,6 +661,24 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 for word in FORBIDDEN:
                     assert word not in text, f"{word!r} reached the ledger:\n{text}"
                 successor_pid = int(new_record.pid)
+                # QUIT THE APP FROM INSIDE ITS OWN FRAME — the idiom the other
+                # stages of this suite use (``test_viewer_attach_e2e``,
+                # ``test_fork_checkpoint_e2e``). Falling out of the block
+                # instead runs ``App.run_test``'s teardown from the TEST's
+                # frame (``run_test`` awaits ``App._shutdown`` after awaiting
+                # the app's own message loop), and Textual stops a widget's
+                # timers while it awaits that widget's pump: a timer that comes
+                # due in that window calls ``Timer._tick``, which reads the
+                # ``active_app`` contextvar the app has already released, so the
+                # teardown dies with ``LookupError: active_app`` rather than
+                # stopping the timer. That is how this stage passed on
+                # macos-latest and failed on ubuntu-latest (run 34824475709) —
+                # a slow runner is simply more likely to have a timer due at
+                # that instant. Exiting here lets the app finish its own
+                # shutdown with its context still live, and the pump above it
+                # lets the last messages land first.
+                await pilot.pause()
+                app.exit()
     finally:
         if viewer is not None:
             try:
