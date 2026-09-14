@@ -302,15 +302,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 2. If retained, ordered frames after the supplied receipt cursor are replayed.
    This includes semantic `event` frames already covered by newer paint state.
 3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold}`. Its
-   history page is the transcript's durable tail, read once for this frame — the
-   same read `/history` serves — so it carries every row committed before the
-   read, including rows written since the last frontend refresh or checkpoint.
-   `frontend.snapshot.history_cursor` / `live_cursor` are the DEDUPE watermark
-   for the paired state, never a visibility boundary for the page: truncating the
-   page at them silently dropped durable rows whenever a turn was mid-flight (the
-   steer-drain case) or the viewer's state predated the rows, with no
-   `cursor_missing` to signal it. An empty page (a state with no cursor at all)
-   still means "reconcile through `/history`".
+   history page is the transcript's durable tail — the newest ≤100 entries,
+   `limit` unchanged — read once for this frame, which is the same unbounded read
+   `/history` serves. `has_more` means *older rows exist below the page*, not that
+   the page is partial or lossy: `before_id` paging reaches them, and this is also
+   the flag that can now flip to `true` on a reopen where it previously read
+   `false` with the older rows silently absent. `frontend.snapshot.history_cursor`
+   / `live_cursor` are the DEDUPE watermark for the paired state, NEVER a
+   visibility boundary for the page: truncating the page at them silently dropped
+   durable rows whenever a turn was mid-flight (the steer-drain case) or the
+   viewer's state predated the rows, with no `cursor_missing` to signal it.
+   Because nothing is cut, the snapshot can no longer report
+   `cursor_missing: true` — an evicted or replaced cursor is not a state this
+   frame can be in. An EMPTY page still means "reconcile through `/history`":
+   that is now exactly the case where the paired state carries no `history_cursor`
+   at all (no frontend refresh or checkpoint yet), and readers depend on that
+   signal, so it is preserved deliberately rather than inferred.
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.

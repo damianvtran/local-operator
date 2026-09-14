@@ -588,6 +588,13 @@ class DesktopSessionBridge:
         seq, epoch = self.sequence, self.epoch
         cursor = state["snapshot"].get("history_cursor")
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
+        # The gate is about the STATE, not about bounding the page, and the empty
+        # page it produces is a signal a reader ACTS on: "no history cursor, so
+        # reconcile through /history". That promise lives in the other repository
+        # (``local-operator-ui`` reconciles on an empty page or ``cursor_missing``),
+        # which is why it is stated here and in ``docs/DESKTOP_API.md`` rather than
+        # left to be inferred -- and why this branch is the one place where the
+        # snapshot still serves something not derived from the journal.
         if cursor:
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
@@ -610,13 +617,16 @@ class DesktopSessionBridge:
             # its owner (`_can_go_cold`) or a state restored from a checkpoint
             # that predates the rows reaches the same short page with no error.
             #
-            # The cursor keeps its real job -- the ``live_cursor`` dedupe
-            # watermark on the wire, and the pairing field for the very same
-            # unbounded read the ``/history`` route already serves -- so nothing
-            # is dropped from the contract by not truncating at it. Reads are
-            # bounded by their OWN source's cut: see ``read_transcript_page``
-            # for the inclusive-boundary rule it still applies when a caller
-            # asks for one.
+            # The cursor keeps its real job, and one job only: it is the
+            # ``live_cursor`` DEDUPE watermark on the wire, telling a reader which
+            # rows the paired frontend state has already accounted for. It is not
+            # a pairing field for this read and never was one that needed the
+            # truncation -- ``/history`` serves this very same unbounded tail, so
+            # the page and the state were already paired on rows, not on the
+            # bound. Nothing is dropped from the contract by not cutting at it,
+            # and reads stay bounded by their OWN source's cut: see
+            # ``read_transcript_page`` for the inclusive-boundary rule it still
+            # applies when a caller asks for one.
             history = await self.history()
         return {
             "session_id": self.session_id,
@@ -633,6 +643,19 @@ class DesktopSessionBridge:
     async def history(
         self, *, before_id: str | None = None, through_id: str | None = None, limit: int = 100
     ) -> dict[str, Any]:
+        """One page of the durable journal.
+
+        ``through_id`` is the transcript-level inclusive cut and stays part of
+        this method's contract, but NO DESKTOP CALLER PASSES IT ANY MORE: the
+        snapshot used to bind the page to the paired frontend ``history_cursor``
+        and that bound was the defect (a state watermark is not a visibility
+        boundary over the journal -- see :meth:`snapshot`). Do not restore it
+        here without that argument; a page that stops short of the journal loses
+        rows silently, because the bound row is still on disk so
+        ``read_transcript_page`` cannot report them missing. ``before_id``
+        backward paging and this cut's direct use by
+        ``read_transcript_page``'s own tests are what keep the parameter alive.
+        """
         try:
             page = await asyncio.to_thread(
                 read_transcript_page,
