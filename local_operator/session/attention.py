@@ -496,7 +496,8 @@ def _classify_orphaned_run(
         and marker.get("deliberate")
         and _stop_marker_covers_run(marker, directory, dead)
     ):
-        killer = marker.get("killer") if isinstance(marker.get("killer"), dict) else {}
+        raw_killer = marker.get("killer")
+        killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
         return (
             "interrupted",
             DELIBERATE_CUT_OFF_CAUSE,
