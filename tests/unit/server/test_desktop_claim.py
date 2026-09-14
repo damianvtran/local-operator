@@ -700,9 +700,9 @@ async def test_an_app_managed_daemon_without_a_list_keeps_the_echo_its_renderer_
 
     # The control half is untouched by this narrowing: on a gated family this
     # same state already refused an Origin-bearing request. That 403 is what
-    # the renderer's own DIRECT calls to `/v1/chat` and `/v1/credentials` meet
-    # — which is why the UI PR moves those probes to the main process instead
-    # of trying to re-open the gate here.
+    # the renderer's own DIRECT calls to the gated families meet — which is why
+    # the UI PR moves those probes to the main process instead of trying to
+    # re-open the gate here.
     assert (
         await client.get(
             "/v1/settings",
