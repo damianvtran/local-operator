@@ -6162,8 +6162,15 @@ class AttachedSession:
         client = self._client
         if client is None or not client.connected or self._recovering:
             raise ConnectionError("session is reconnecting")
-        await client.acknowledge_attention(token)
-        return dict(self.frontend_state.attention)
+        # The OWNER's answer for this op, not this follower's projection: the
+        # projection arrives on the event queue (a different writer from the ack)
+        # and would read stale by construction, which is how an honest receipt
+        # comes to look lost (agent review round 1, R4). An owner older than the
+        # field sends none, so fall back to the projection -- where the caller
+        # must stay inconclusive rather than report a verdict it cannot support.
+        return await client.acknowledge_attention_state(token) or dict(
+            self.frontend_state.attention
+        )
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """The owner serializes the copy; a viewer never raw-copies a live store."""

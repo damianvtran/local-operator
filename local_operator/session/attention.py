@@ -36,10 +36,18 @@ ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
 
 #: The machine token a surface reads to tell "your token is stale, re-arm from
-#: the state I just returned" apart from a failure worth backing off on. Part of
-#: the wire contract because the clients must act DIFFERENTLY on the two, and
-#: message text is not a contract (the desktop error object carries it as
-#: `code`, the mobile body as `code`).
+#: your own state" apart from a failure worth backing off on. Part of the wire
+#: contract because the clients must act DIFFERENTLY on the two, and message
+#: text is not a contract (the desktop error object carries it as `code`, the
+#: mobile body as `code`, and `docs/DESKTOP_API.md` documents the row).
+#:
+#: THIS constant is the string's source of truth. A renderer cannot import
+#: Python, so `SUPERSEDED_COMPLETION_TOKEN_CODE` in local-operator-ui's
+#: `src/shared/desktop-session-contract.ts` is a copy of it, and neither repo's
+#: tests can see the other's: each side therefore pins the literal it ships
+#: (here `tests/unit/server/test_desktop_attention.py`; there
+#: `scripts/completion-view-ack.test.mjs`). Changing the string is a cross-repo
+#: change, not a local one.
 SUPERSEDED_TOKEN_CODE = "superseded_completion_token"
 
 
@@ -1015,8 +1023,15 @@ class AttentionStore:
         (the operator's defect: the desktop app sent a superseded token, got a
         200, latched, and its checkmark never cleared). The honest answer is that
         the caller is looking at a result the conversation has moved past: refuse
-        it, hand back the state, and let the caller re-read the token that is
-        current. A DELAYED OR DUPLICATE RECEIPT STILL CONVERGES -- that is the
+        it, and let the caller re-read the token that is current. THE REFUSAL
+        CARRIES NO STATE, deliberately: the wire body is a machine ``code`` plus
+        one operator-facing sentence (see :data:`SUPERSEDED_TOKEN_CODE`), because
+        the state that settles this is the CALLER's own projection -- the thing it
+        is already subscribed to and must refresh to learn which token is current
+        now. A state computed here would be a second, already-stale opinion about
+        a conversation the caller is watching, and a caller that trusted it
+        instead of refreshing would be exactly as stuck as before. A DELAYED OR
+        DUPLICATE RECEIPT STILL CONVERGES -- that is the
         case where the conversation is already read, and there this method answers
         with the read state exactly as before, which is what out-of-order
         delivery of a buffered receipt needs.

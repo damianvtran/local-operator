@@ -167,6 +167,32 @@ describe("SessionScreen seen handshake", () => {
 		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 
+	it("bounds a refusal storm instead of retrying it forever", async () => {
+		// The other half of "keep polling": a refusal that cannot resolve on its
+		// own (a projection stuck on a superseded token) must not be re-attempted
+		// at the flat cadence for as long as the tab is open, in silence. Three
+		// consecutive refusals back the cadence off and one line explains why; a
+		// fresh token re-runs the effect with the counter at zero.
+		focusedResult();
+		const seen = vi.mocked(markSessionSeen);
+		seen.mockRejectedValue(
+			Object.assign(new Error("completion token superseded by a newer completion"), {
+				status: 409,
+				code: "superseded_completion_token",
+			}),
+		);
+		const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		render(<SessionScreen sessionId="s1" />);
+		await sample();
+		await sample();
+		await sample();
+		expect(warned).toHaveBeenCalledTimes(1);
+		const attempts = seen.mock.calls.length;
+		await sample();
+		expect(seen.mock.calls.length).toBe(attempts);
+		expect(clearSessionUnseen).not.toHaveBeenCalled();
+	});
+
 	it.each(["hidden", "blurred", "covered", "scrollback", "streaming", "disconnected", "truncated", "unknown completeness"])("does not acknowledge %s results", async (reason) => {
 		const p = focusedResult();
 		if (reason === "hidden") vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
