@@ -38,7 +38,13 @@ export function installPopupPerformance({ state = "healthy", delay = 0, large = 
     runtime: { id: FIXTURE_ID, getManifest: () => ({ version: "fixture" }), openOptionsPage() {}, reload() { throw new Error("Fixture cannot reload an extension"); }, async sendMessage(message) { metrics.messages.push(message); return { applied: false }; } },
     tabs: { query: async () => [] },
   };
-  const health = { paired: true, extension_connected: true, protocol_version: 1, authorized_extension_ids: [FIXTURE_ID], driver_extension_id: FIXTURE_ID, surface_url: "https://example.com/fixture", surface_title: "Synthetic fixture" };
+  // The keys the daemon's /health actually emits (daemon.py: `current_url`,
+  // `current_title`) and the ones the popup reads. This fixture used to carry
+  // `surface_url`/`surface_title`, which no consumer reads, so every captured
+  // healthy frame rendered the EMPTY-trough variant of the Connected card
+  // ("No page open yet.") and the URL-populated card — the taller one PR #996's
+  // D3-1 deferral describes — was in evidence on neither side of this branch.
+  const health = { paired: true, extension_connected: true, protocol_version: 1, authorized_extension_ids: [FIXTURE_ID], driver_extension_id: FIXTURE_ID, current_url: "https://example.com/fixture", current_title: "Synthetic fixture" };
   if (state === "standby") Object.assign(health, { driver_extension_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", driver_label: "Synthetic second browser", standby_extension_ids: [FIXTURE_ID] });
   globalThis.fetch = async (...args) => {
     const call = { start: performance.now() - start }; metrics.health.push(call);

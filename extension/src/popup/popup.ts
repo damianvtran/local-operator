@@ -450,6 +450,20 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // and its copy tells the user to reload and open it again, so the next open is
 // precisely the one most likely to be a DIFFERENT card.
 //
+// `disconnected` is NOT pinned, for that same reason and by the same test, and
+// it is written down here because this branch's new catch makes arriving at it
+// from a pinned card (148px `connected`, 219px `pairing`) reachable from one
+// more failure mode. Its whole copy is "try again", so the next open is the one
+// most likely to be a different card — the daemon answered, or the read that
+// failed recovered — and a pin would charge that open the mis-size. This is a
+// DECLINED pin, not an oversight, and it differs from `unresponsive`'s case in
+// one way worth recording: no round has measured an arrival cost for this card
+// to weigh against the bet (this branch's stalled frames are 261.77px settling
+// down from a 344px stranded #pending, pinned on neither side), while the
+// conditional wedge pin above was tried on exactly that idea and measured
+// negative. If it is ever revisited, pin it from a measurement of the arrival,
+// not from symmetry with `standby`.
+//
 // THIS IS A TRADE, AND THESE ARE ITS NUMBERS. Measured from the seed a real
 // browser carried when this block was written (`86px`; it reads `148px` now
 // that the update advisory reserves a slot in the Connected card — see above),
@@ -584,6 +598,29 @@ function show(state: State): void {
   pairingShown = state === "pairing";
 }
 
+/** Paint the unreachable card with the copy the failure behind it can support.
+ *
+ * `#disconnected` is reached by two different failures and only one of them
+ * measured anything (popup.html carries both sentences, and why): a /health
+ * probe that answered nothing is a diagnosis, while renderOnce()'s own catch —
+ * a saved-state read that threw or stalled past CHROME_API_DEADLINE_MS —
+ * established nothing about the daemon, and can even have discarded a HEALTHY
+ * probe result (the third member of the Promise.all a render awaits IS the
+ * probe, and Promise.all rejects on the first rejection). Swapping two authored
+ * pairs rather than rewriting one paragraph's text keeps the shipped sentences
+ * in the markup and keeps the `lop browser status` chip on both paths. The
+ * Retry button is the same element either way: a failed state read needs it
+ * exactly as much as a dead daemon does. */
+function showDisconnected(measured: boolean): void {
+  for (const id of ["disconnected-title-measured", "disconnected-sub-measured"]) {
+    document.getElementById(id)?.classList.toggle("hidden", !measured);
+  }
+  for (const id of ["disconnected-title-unchecked", "disconnected-sub-unchecked"]) {
+    document.getElementById(id)?.classList.toggle("hidden", measured);
+  }
+  show("disconnected");
+}
+
 async function daemonHealth(port: number): Promise<Health | null> {
   try {
     // BOUNDED, because renders are serialised. An unbounded probe against a
@@ -675,8 +712,11 @@ async function renderOnce(): Promise<void> {
   } catch (error) {
     // A stalled/rejected read must release the render latch and leave a Retry,
     // not strand #pending or keep a previously connected card authoritative.
+    // NOT the measured diagnosis: this path never established that the daemon
+    // is unreachable, and its own /health answer may be one of the results
+    // Promise.all just discarded.
     console.warn("popup state read failed", error);
-    show("disconnected");
+    showDisconnected(false);
     return;
   }
   const [session, { allowAllSites }, health] = snapshot;
@@ -854,7 +894,11 @@ async function renderOnce(): Promise<void> {
   // install was UNPAIRED rather than never paired (UX round 3, U5).
   const { connState, revoked } = session;
   if (!health) {
-    show(connState === "incompatible" ? "incompatible" : "disconnected");
+    // The probe DID answer for nothing here (a refusal, a non-ok response, or
+    // its own timeout), so this card may carry the diagnosis — the copy the
+    // catch above must not use.
+    if (connState === "incompatible") show("incompatible");
+    else showDisconnected(true);
     return;
   }
   if (connState === "incompatible") {
