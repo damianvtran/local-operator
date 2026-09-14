@@ -722,6 +722,12 @@ def test_a_wide_glyph_reason_is_clamped_by_cells_not_characters(
     cell = _why_cell(row)
 
     assert cell_len(cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(cell), repr(cell))
+    # Q4 / D3, recorded rather than "fixed": an all-wide reason cannot use the
+    # 47th cell, because a two-cell glyph cannot occupy an odd cell. The cell
+    # therefore measures 47 and its last cell stays UNUSED — raggedness in one
+    # cell of trailing space, not a correctness gap, and deliberately not padded
+    # to 48: filling it would report width the text does not have.
+    assert cell_len(cell) == cli.WHY_COLUMN_WIDTH - 1, cell_len(cell)
     assert cell == _widest_prefix_of_cells(reason, cli.WHY_COLUMN_WIDTH - 1) + "…", repr(cell)
     # The reflow, measured: a row that widened past the header is the bug, so the
     # table's own width is the assertion, not the string's length.
@@ -803,3 +809,215 @@ def test_a_wide_glyph_reason_lands_on_the_full_budget_when_its_glyphs_allow_it(
     # The reflow itself: a 48-cell cell pads by ZERO, so the row is the header's
     # own width even though the cell has fewer characters than cells.
     assert cell_len(row) == cell_len(header), (cell_len(row), cell_len(header), row)
+
+
+def _cells_span(line: str, start: int, width: int) -> str:
+    """The characters covering cells ``start .. start+width`` of ``line``.
+
+    Written the way the terminal addresses the table rather than by slicing the
+    string: a fixed-width column is a span of CELLS, so character offsets cannot
+    name it once any cell is wide. This is what lets an assertion say "this column
+    holds these 24 cells" for a CJK row, which is the only way to check that a
+    clamped cell did not shift its neighbours.
+    """
+    from rich.cells import cell_len
+
+    used = 0
+    kept = ""
+    for char in line:
+        size = cell_len(char)
+        if used >= start + width:
+            break
+        if used + size > start:
+            kept += char
+        used += size
+    return kept
+
+
+def test_ascii_rows_still_render_by_the_character_rule(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """The equivalence witness for clamping the three text columns (D2 / Q2).
+
+    ``cell_len`` equals ``len`` for ASCII, so the new bound must be
+    indistinguishable from the old one — ``value[:24]`` and the ``:<24`` padding
+    it fed. Re-derived here from the row dicts as an expression of the OLD rule
+    rather than asserted against a stored table, so this is a check and not a
+    restatement of the implementation: if the clamp or its cell padding moved one
+    ASCII character, it fails.
+
+    The fixture is a real witness rather than a trivial one: "Investigate request
+    latency" and "anthropic/claude-sonnet-4-6" are 28 characters against a
+    24-character column, and NEEDS holds exactly its 8.
+    """
+    import argparse
+
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    rows = session_rows(tmp_path)
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    header, *lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == len(rows), (len(lines), len(rows))
+
+    # An ASCII header puts every label at the same character and cell offset, so
+    # the columns below it can be addressed by the header's own offsets.
+    needs_at = header.index("NEEDS")
+    conversation_at = header.index("CONVERSATION")
+    model_at = header.index("MODEL")
+
+    for row, line in zip(rows, lines):
+        assert cell_len(line) == cell_len(header), line
+        old_needs = f"{(row.get('pending') or '')[:8]:<8}"
+        old_name = f"{(row['conversation_name'] or row['session_id'] or '')[:24]:<24}"
+        old_model = f"{(row['model_label'] or '')[:24]:<24}"
+        assert line[needs_at : needs_at + 8] == old_needs, line
+        assert line[conversation_at : conversation_at + 24] == old_name, line
+        assert line[model_at : model_at + 24] == old_model, line
+
+
+def test_a_wide_title_model_and_needs_are_clamped_by_cells(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """Design round 1, D2 / QA round 1, Q2 — the same defect, one column over.
+
+    CONVERSATION, MODEL and NEEDS were cut by characters, so a 14-glyph CJK title
+    (28 cells) went into a 24-cell column and pushed its neighbours along: design
+    measured 181 cells against a 167-cell header. These values come from OUTSIDE
+    this process — the title is whatever named the conversation, the label is the
+    provider catalogue's own display name — so they are the same class of input
+    the WHY cell had to stop trusting.
+
+    No marker is added, and that is the point of the ASCII witness above: these
+    columns have never carried one, and a marker would move every existing ASCII
+    listing that overflows.
+    """
+    import argparse
+    from dataclasses import replace
+
+    from rich.cells import cell_len
+
+    from local_operator import cli
+    from local_operator.session.runtime import registry
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    title = "模" * 14  # 28 cells into a 24-cell column
+    model = "模型" * 13 + "/模"  # wider still, and mixed
+    needs = "模" * 6  # 12 cells into an 8-cell column
+    wide = [
+        (
+            replace(
+                record,
+                conversation_name=title,
+                model_label=model,
+                # `_OldRecord` predates the field, exactly as a running runtime
+                # of that vintage does; the title and label still apply to it.
+                **({"pending": needs} if hasattr(record, "pending") else {}),
+            ),
+            state,
+        )
+        for record, state in FIXTURE
+    ]
+    monkeypatch.setattr(registry, "scan", lambda root=None: wide)
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    header, *lines = capsys.readouterr().out.splitlines()
+    assert lines, "the fixture must render rows"
+    rows = session_rows(tmp_path)
+    assert len(lines) == len(rows), (len(lines), len(rows))
+
+    conversation_at = header.index("CONVERSATION")
+    model_at = header.index("MODEL")
+    needs_at = header.index("NEEDS")
+
+    for row, line in zip(rows, lines):
+        # The defect's shape: the row was wider than its own header.
+        assert cell_len(line) == cell_len(header), (cell_len(line), cell_len(header), line)
+        assert "…" not in line, line
+        # `_OldRecord` predates NEEDS, so that row's cell is blank — kept in the
+        # set on purpose, because a row with nothing to clamp must still come out
+        # header-width.
+        expected_needs = "模" * 4 if row.get("pending") else " " * cli.NEEDS_COLUMN_WIDTH
+        assert _cells_span(line, needs_at, cli.NEEDS_COLUMN_WIDTH) == expected_needs, line
+        assert _cells_span(line, conversation_at, cli.CONVERSATION_COLUMN_WIDTH) == "模" * 12, line
+        assert _cells_span(line, model_at, cli.MODEL_COLUMN_WIDTH) == "模型" * 6, line
+
+
+def test_the_clamp_never_ends_a_reason_on_a_dangling_joiner() -> None:
+    """Review round 1, Q1 — bounded cells, but a stray control character.
+
+    ``U+200D`` means "join with the glyph AFTER me", so a cut landing right after
+    one emitted a joiner with nothing to join, sitting immediately before the
+    marker: a replacement box on some terminals, inside a cell that is otherwise
+    the right width. Exercised through the clamp's own entry point because the
+    case needs a glyph mix no fixture row carries.
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    cluster = "\U0001f469\u200d\U0001f469"  # woman ZWJ woman, one 2-cell cluster
+
+    def old_cut(text: str, budget: int) -> str:
+        """The pre-fix loop, so the witness below cannot rot into a tautology.
+
+        It is the same walk minus the joiner back-off, which is the only thing
+        this test exists to establish.
+        """
+        used = 0
+        for index, char in enumerate(text):
+            width = cell_len(char)
+            if used + width > budget:
+                return text[:index]
+            used += width
+        return text
+
+    # Straddles the cut: 49 cluster-aware cells, and the OLD loop stopped right
+    # after the first cluster's joiner.
+    straddling = "x" * 45 + cluster * 2
+    assert cell_len(straddling) == 49, cell_len(straddling)
+    pre_fix = old_cut(straddling, cli.WHY_COLUMN_WIDTH - 1)
+    assert pre_fix.endswith("\u200d"), "the straddle this test needs is gone"
+    cell = cli._clamp_reason_cell(straddling)
+    assert cell.endswith("…"), repr(cell)
+    assert not cell[:-1].endswith("\u200d"), repr(cell)
+    assert cell_len(cell) <= cli.WHY_COLUMN_WIDTH, cell_len(cell)
+
+    # A joiner INSIDE the kept prefix is doing its job and must survive: the
+    # back-off is for a trailing joiner only.
+    interior = "x" * 43 + cluster * 3
+    assert cell_len(interior) > cli.WHY_COLUMN_WIDTH, cell_len(interior)
+    kept = cli._clamp_reason_cell(interior)
+    assert "\u200d" in kept, repr(kept)
+    assert not kept[:-1].endswith("\u200d"), repr(kept)
+
+
+def test_fit_and_pad_are_the_character_rule_for_ascii() -> None:
+    """The smallest form of the D2 / Q2 proof, on the two primitives.
+
+    ``_fit_cell`` is ``value[:width]`` and ``_pad_cell`` is ``f"{value:<{width}}"``
+    whenever the text is ASCII, which is the whole of the byte-identity guarantee:
+    the change is a bound, not a rendering. The long value is included because the
+    fixture's own title overflows its column.
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    for value in ("", "x", "Investigate request latency", "x" * 24, "x" * 25, "x" * 100):
+        assert cell_len(value) == len(value)
+        for width in (cli.NEEDS_COLUMN_WIDTH, cli.CONVERSATION_COLUMN_WIDTH):
+            fitted = cli._fit_cell(value, width)
+            assert fitted == value[:width], (value, width, fitted)
+            assert cli._pad_cell(fitted, width) == f"{fitted:<{width}}", (value, width)
