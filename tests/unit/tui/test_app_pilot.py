@@ -8825,6 +8825,11 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     # breaks by construction.
     for key, tail in (
         ("ctrl+v", "system clipboard"),
+        # The panel's keyboard mode is entered by `f9` and by nothing else since
+        # design round D1 (a pointer press no longer takes it), so this row is
+        # the durable half of that discovery — and it carries the same 74-cell
+        # ceiling as its neighbours.
+        ("f9", "esc returns"),
         ("cmd+v", "not Terminal.app"),
         ("!", "shell command"),
         ("option+left/right", "by word"),
