@@ -481,7 +481,7 @@ async def test_another_tui_is_ended_beneath_a_surviving_process(kill_spy) -> Non
         # Drive the shared ladder as a peer would, concurrently with the app
         # loop — the app must keep running to service the op.
         task = app.run_worker(
-            control.stop_session(own, timeout_s=5.0, _root=control.registry.run_dir()),
+            control.stop_session(own, timeout_s=5.0, _root=control.config_dir()),
             thread=False,
         )
         for _ in range(120):

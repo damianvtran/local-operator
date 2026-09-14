@@ -394,6 +394,48 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     return f"{sentence}{detail}"
 
 
+#: How one rung of the stop ladder reads inside a deliberate stop's detail.
+#:
+#: Named, not passed through raw, because the record's token is the WRITER's
+#: spelling (``socket`` is the graceful control op, not a socket anyone
+#: signalled) while the sentence is the operator's — and what they need from it
+#: is how hard the stop had to push: the same word "stopped" covers a runtime
+#: that exited on request and one carrying orphaned state because SIGKILL was
+#: the only answer left.
+STOP_RUNG_LABELS: dict[str, str] = {
+    "socket": "the control socket",
+    "sigterm": "SIGTERM",
+    "sigkill": "SIGKILL",
+}
+
+
+def render_stop_attribution(*, rung: str = "", command: str = "", killer_pid: object = None) -> str:
+    """The parenthetical a DELIBERATE stop's reason carries.
+
+    SCALARS RATHER THAN THE MARKER DICT, deliberately: the marker's schema
+    belongs to its one writer (``control._stop_marker_payload``) and this module
+    only renders text, so a field renamed on one side cannot silently empty the
+    sentence on the other. The rung answers "how hard", the command and pid
+    answer "who" — and "who" is not trivia here: the 2026-09-13 investigation
+    could reproduce every consequence of the kill wave and still not name a
+    single process that sent a signal, because nothing recorded it.
+
+    Returns ``""`` rather than a bare ``" ()"`` when there is nothing to name,
+    so an older or partial marker degrades to exactly the shared sentence.
+    """
+    label = STOP_RUNG_LABELS.get(rung, rung) if rung else ""
+    who = command or ""
+    if killer_pid is not None and str(killer_pid).strip():
+        who = f"{who}, pid {killer_pid}".lstrip(", ")
+    if label and who:
+        return f" ({label} by {who})"
+    if label:
+        return f" ({label})"
+    if who:
+        return f" (by {who})"
+    return ""
+
+
 def cause_from_reason(reason: str) -> str:
     """The cause token a rendered reason came from, or ``""`` when unknown.
 
