@@ -145,9 +145,35 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 # never written and nothing said so (QA round 1, Q2: base wrote 110,703 chars,
 # the truncated branch produced ``tool_executions: []``). The remedy is the
 # model's to take, so the result has to name it.
+#
+# HOW it is named decides whether the model takes it. The first wording
+# ("cut off at the output limit ... re-emit this call with a smaller payload")
+# demanded the size reduction without the authority to make it: under an
+# instruction to emit the whole content and not abbreviate, the model read
+# "smaller payload" as a requirement the user had forbidden it to satisfy and
+# answered in prose instead of re-issuing the call -- measured on deepseek-flash
+# at `high` with the same 3,000-line write cell, 1/6 runs wrote any file against
+# 6/6 for the bare ``ABORTED_RESULT_TEXT``, and the single-variable
+# counterfactual on that tree flipped it to base's shape 2/2 (QA #1077, Q10;
+# full sample on the PR). So this string carries three facts, in this order:
+#   1. the call did not run and no file was written -- without it the tool reads
+#      as having silently succeeded (the Q2 measurement above);
+#   2. the limit is a SIZE BOUND on one call, not a licence to shorten the
+#      ANSWER -- this is what dissolves the conflict that stalled the re-ask;
+#   3. a shorter payload is the expected outcome here, plus the standing
+#      instruction to answer with the call rather than with prose about it.
+#
+# It says the arguments exceeded a limit rather than that something cut the
+# call, so it does not re-name what was cut -- the mis-description D3 removed
+# from the user-facing receipt (``harness/rows.py``: a failed-call card says
+# nothing about an answer, and no row claims a call where none was made).
 TRUNCATED_RESULT_TEXT = (
-    "cut off at the output limit before the arguments finished; nothing ran -- "
-    "re-emit this call with a smaller payload"
+    "this call did not run and no file was written: its arguments were larger "
+    "than the output limit allows. Re-issue the call now with a payload that "
+    "fits within it — a shorter file than asked for is the expected outcome here "
+    "and not the abbreviation the user prohibited, while the identical oversize "
+    "arguments will be cut again. Reply with the call itself, not with an "
+    "explanation of why it cannot be sent."
 )
 
 #: Cap on the reason carried by a never-run call's terminal compose frame.

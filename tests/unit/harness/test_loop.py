@@ -484,7 +484,7 @@ async def test_length_with_prose_and_a_call_takes_the_answer_arm():
 
     The call half is not lost by that. It is still not executed (the
     placeholder below keeps Q2's fix), and the model still learns why from
-    ``TRUNCATED_RESULT_TEXT`` -- which says "nothing ran" on the call's own row,
+    ``TRUNCATED_RESULT_TEXT`` -- which says the call did not run on its own row,
     where a reader looks for that fact rather than in a notice about the answer.
     """
     executed: list[str] = []
