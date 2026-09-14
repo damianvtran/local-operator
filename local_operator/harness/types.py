@@ -2028,12 +2028,30 @@ class ModelSpec(BaseModel):
     # either. So the fix is compliance at the wire layer rather than better
     # capture.
     #
-    # Derived in ``build_model_spec`` like every other capability here, so no
-    # wire client has to recognise a model name: it is set for the
-    # DeepSeek-hosted thinking-mode family -- which is a property of the
-    # WEIGHTS, so it is set on every route that can serve them, the aggregator
-    # routes included -- and it stays off for the legacy ``deepseek-chat`` /
-    # ``deepseek-reasoner`` rows.
+    # Derived from the model id at ``ModelSpec`` construction (see
+    # ``_derive_deepseek_thinking_contract``) and, on the builder's path, in
+    # ``build_model_spec`` — whichever runs, the SAME rule in
+    # ``model.configure.reasoning_echo_required`` answers, so no wire client has
+    # to recognise a model name. It is set for the DeepSeek-hosted thinking-mode
+    # family -- which is a property of the WEIGHTS, so it is set on every route
+    # that can serve them, the aggregator routes included -- and it stays off for
+    # the legacy ``deepseek-chat`` / ``deepseek-reasoner`` rows.
+    #
+    # **``None`` is "no caller stated a value", not a third state on the wire.**
+    # The default is tri-state for one measured reason: a STATED ``False`` has to
+    # survive a round trip, and a plain ``bool`` default cannot distinguish "this
+    # spec says no echo" from "nobody filled the field" the moment a persister
+    # dumps with ``exclude_defaults=True`` -- the ``False`` IS the default, so it
+    # is dropped, and re-validating what is left derives the echo back on for a
+    # route whose caller deliberately said otherwise. With ``None`` as the
+    # default, ``False`` is no longer equal to it and survives the dump (pinned by
+    # ``test_a_defaults_excluding_dump_survives_a_stated_false``).
+    #
+    # No VALIDATED spec carries ``None``: the construction hook resolves it to the
+    # rule's answer, so every reader may treat this as a bool. Only a value that
+    # bypassed the hook (``model_construct``, a ``model_copy`` that writes
+    # ``None`` itself) can read as ``None``, which is the same falsy answer an
+    # unstated spec would get.
     #
     # It is NOT route-keyed, and an earlier revision's decision to key it on
     # the direct ``deepseek`` hosting was wrong on its own evidence. That
@@ -2052,7 +2070,7 @@ class ModelSpec(BaseModel):
     # the safe way: the echo is one short sentence per assistant turn, measured
     # accepted on that route as well, where being wrong the other way kills a
     # turn hundreds of messages deep.
-    requires_reasoning_echo: bool = False
+    requires_reasoning_echo: bool | None = None
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     # ``None`` means OMIT: send no key at all and let the vendor's own default
     # apply. That is now the common case rather than an exotic one — most
@@ -2172,6 +2190,92 @@ class ModelSpec(BaseModel):
     # different from "no name exists" and is why the readers fall back rather
     # than treat this as authoritative.
     display_name: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_deepseek_thinking_contract(cls, data: Any) -> Any:
+        """Derive the DeepSeek thinking-mode ECHO from the model id itself.
+
+        ``build_model_spec`` derived ``requires_reasoning_echo`` as a local, so a
+        ``ModelSpec`` built any other way took the field default -- echo off, which
+        is the HTTP 400 this capability exists to prevent ("The
+        `reasoning_content` in the thinking mode must be passed back to the
+        API"). Measured in the field: 76 sessions carry that refusal wording, and
+        the incidents continue past the release that shipped the derivation. A
+        spec built by any path OTHER than the builder is what this hook removes.
+
+        Deriving it here rather than asking every construction site to remember is
+        the point: a capability that has to be REMEMBERED at each site is one that
+        will be dropped at the next one, and the failure is silent until a user's
+        turn dies hundreds of messages deep. The rule itself is IMPORTED from
+        ``model.configure.reasoning_echo_required`` and never restated -- two
+        copies of a family regex drift, and then the builder and a directly-built
+        spec disagree about the same model, which is the defect this method
+        removes rather than moves.
+
+        **Only the echo.** The effort LADDER is deliberately NOT derived here,
+        and that was a review finding rather than a preference: the ladder is not
+        only a wire input, it is what decides whether the status band paints an
+        effort segment at all (``tui/widgets/status_line.py``), and the cold
+        viewer and the desktop draft preview render specs built by this path -- so
+        filling it here moved a rendered surface (a new ``auto`` segment) for a
+        backend resilience fix. It also left the ladder with two owners, since
+        ``build_model_spec`` resolves it from the provider's own LISTING first and
+        no construction hook can see a listing. The ladder therefore keeps its one
+        owner, ``build_model_spec``, and no behaviour here depends on it: the
+        harness-side recovery in ``harness/loop.py`` re-sends with the echo filled
+        and needs no rung -- verified live on the worst case, capability off AND
+        ladder empty.
+
+        **Runs only for a spec being BUILT from a model id**, which is what makes
+        it "cannot be dropped by omission" rather than "cannot be stated at all":
+
+        * a mapping (``ModelSpec(provider=..., model_id=...)``,
+          ``model_validate({...})``, the wire) is filled in only when it does not
+          carry a value, so a caller that never heard of the capability -- or a
+          spec rebuilt from a record written before it existed -- still lands on
+          the right answer;
+        * a value the caller DID state is left alone, because that is a statement
+          rather than an omission. ``None`` means "unstated" (see the field's own
+          docstring for why the default is tri-state), so both an absent key and
+          an explicit ``None`` get the rule's answer;
+        * an existing spec INSTANCE is not rewritten at all. Pydantic re-runs an
+          ``after``-mode validator against a nested instance in place, which is
+          why this is a ``before``-mode one: the instrument that reproduces the
+          pre-fix body (``scripts/deepseek_reasoning_echo_probe.py``) and the
+          loop's own regression tests state "this spec does not carry the echo",
+          and a construction hook that overwrote them would delete the
+          measurement rather than fix the bug. A spec only ever becomes an
+          instance by passing through this hook first, so nothing is lost by
+          trusting it.
+
+        Scoped so nothing else moves. ``reasoning_echo_required`` is False for
+        every family but the DeepSeek thinking one (the legacy ``deepseek-chat`` /
+        ``deepseek-reasoner`` rows and a local user-operated server included), and
+        it answers only for a spec that stated nothing -- so no route, and no
+        caller with an opinion, can have behaviour changed here.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        if data.get("requires_reasoning_echo") is not None:
+            return data
+        provider = data.get("provider")
+        model_id = data.get("model_id")
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            # An incomplete or non-string pair is the caller's problem to
+            # report, and duplicating pydantic's error here would only make the
+            # message worse.
+            return data
+        # Function-local: ``model.configure`` imports this module at module
+        # scope, so a top-level import here would be a cycle.
+        from local_operator.model.configure import reasoning_echo_required
+
+        # Resolve the tri-state unconditionally, so no validated spec carries
+        # ``None`` and every reader may treat the field as a bool.
+        return {
+            **data,
+            "requires_reasoning_echo": reasoning_echo_required(provider, model_id),
+        }
 
 
 #: The most tokens ONE model call may generate, reasoning included.

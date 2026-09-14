@@ -756,9 +756,13 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
     """A spec WITHOUT the capability keeps the old body, byte for byte.
 
     This is the regression guard. The FIELD decides, and it only ever arrives by
-    derivation: a hand-built spec (every test double and embedder), a local
-    server, and a model from another family must all get exactly the body they
-    got before the capability existed, on the same history DeepSeek fills in.
+    derivation: a spec whose route has no capability -- a local server, a model
+    from another family, an embedder's hand-built spec for one of those -- and a
+    DeepSeek-family spec whose caller STATED the field off must all get exactly
+    the body they got before the capability existed, on the same history
+    DeepSeek fills in. (For the DeepSeek thinking pair itself a hand-built spec
+    now DERIVES the field, which is the change the derivation exists for; that is
+    why the copy below spells ``False`` instead of leaving it to the default.)
     """
     client = OpenAICompatClient(f"https://{provider}.invalid/v1")
     scope = credential_scope("fixture")
@@ -769,7 +773,20 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
         native_turn(text="done"),
     ]
     req = ChatRequest(
-        model=spec().model_copy(update={"provider": provider, "model_id": "some/model"}),
+        # ``requires_reasoning_echo=False`` is SPELLED rather than left implied.
+        # A hand-built spec for the DeepSeek thinking route now derives the
+        # capability at construction (``ModelSpec``'s hook), so the relabelled
+        # copy below would otherwise carry it across from a spec that no longer
+        # means "off" -- the capability is derived for the pair the spec was
+        # BUILT with, and this test's subject is the body builder's field gating
+        # on a route that has none.
+        model=spec().model_copy(
+            update={
+                "provider": provider,
+                "model_id": "some/model",
+                "requires_reasoning_echo": False,
+            }
+        ),
         messages=history,
         system_blocks=["Stable"],
     )

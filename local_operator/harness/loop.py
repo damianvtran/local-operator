@@ -375,9 +375,17 @@ def is_connectivity_continuation_instruction(text: str) -> bool:
 # name and the legacy rows' "unsupported field" 400 were both reported to the
 # user as our own recovery having failed.
 
-#: Turns this RUN has retried after such a refusal. One, not more: the retry
-#: changes the request's thinking mode, and a second attempt at the same body
-#: would only spend a call to be told the same thing.
+#: Turns this RUN has re-sent with the reasoning echo FILLED after such a
+#: refusal. One, not more: the fill is a property of the request shape, so a
+#: second identical attempt would spend a call to be told the same thing.
+MAX_REASONING_ECHO_FILL_RETRIES = 1
+
+#: Turns this RUN has retried after such a refusal with thinking turned OFF.
+#: One, not more, and SEPARATE from the fill budget above: a route can need the
+#: echo and still refuse (or refuse for a second reason), and the retreat is
+#: what recovers the ones where the echo alone was not the whole story. The
+#: separate counters are what keep "one of each" true without letting either
+#: alone loop.
 MAX_REASONING_ECHO_RETRIES = 1
 
 
@@ -830,10 +838,22 @@ class AgentLoop:
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
         # Turns this run has retried with thinking turned OFF after DeepSeek
-        # refused a request for a missing reasoning echo. Run-scoped and topped
-        # up by nothing: the refusal is a property of what this run is sending,
-        # so a fresh allowance per turn would re-buy the same diagnosis.
+        # refused a request for a missing reasoning echo -- and, separately,
+        # turns it has re-sent with the echo FILLED. Run-scoped and topped up
+        # by nothing: the refusal is a property of what this run is sending, so
+        # a fresh allowance per turn would re-buy the same diagnosis.
         reasoning_echo_retries = 0
+        reasoning_echo_fill_retries = 0
+        # The provider/model pair a reasoning-echo FILL is in force for, set
+        # when the loop has evidence that this route's requests were reaching
+        # the provider without their echo. Applied to the spec of each later
+        # request in this run, because the host's ``get_model`` resolver hands
+        # back its OWN spec (the same reason ``effort_ceiling`` above exists) --
+        # without it the fill would reach one request and be undone on the
+        # next, which is a slower version of the bug. Scoped to the pair rather
+        # than a bare flag so a mid-run model switch re-derives its own
+        # answer instead of inheriting a decision made about another model.
+        echo_fill_route: tuple[str, str] | None = None
         # Turns this run has continued after the network cut them short. Run-
         # scoped, not per-turn: a laptop carried between networks can interrupt
         # the same run more than once, and the budget bounds the RUN's total
@@ -895,11 +915,16 @@ class AgentLoop:
 
                     assistant, stop_reason, stream_error = None, "stop", None
                     turn_connectivity_loss = False
+                    # The spec this call was BUILT with, which is not
+                    # ``config.model`` whenever the host resolves per call. The
+                    # echo fill below is gated on what was actually sent.
+                    turn_model: "ModelSpec | None" = None
                     async for event in self._model_turn(
                         context,
                         config,
                         signal,
                         effort_ceiling=effort_ceiling,
+                        echo_fill_route=echo_fill_route,
                         context_tokens_hint=(
                             run_context_tokens
                             if run_context_tokens is not None
@@ -912,6 +937,7 @@ class AgentLoop:
                                 event.stop_reason,
                                 event.error,
                             )
+                            turn_model = event.model
                             turn_connectivity_loss = event.connectivity_loss
                         else:
                             yield event
@@ -1183,9 +1209,92 @@ class AgentLoop:
                     new_messages.append(assistant)
 
                     if stop_reason in ("error", "aborted", "refusal"):
-                        # DeepSeek's thinking mode can refuse a request for a
-                        # missing reasoning echo even though the body echoes one
-                        # on every turn it has anything for (see
+                        # FIRST recovery for a refused reasoning echo: re-send the
+                        # SAME request with the echo filled.
+                        #
+                        # This is the BENIGN half of the pair and it is tried
+                        # first, before anything gives up a capability. Filling
+                        # the echo adds a short placeholder sentence per blank
+                        # assistant turn and changes nothing else -- same route,
+                        # same effort, same thinking mode, same tools -- while
+                        # the alternative below disables the model's reasoning
+                        # for the rest of the run. The asymmetry is why they are
+                        # ordered this way and why they are gated differently:
+                        # a refusal whose OWN WORDS say the echo is missing is
+                        # evidence the fill is what this request needs, so this
+                        # branch needs no capability bit at all.
+                        #
+                        # Capability-INDEPENDENT on purpose, and that is not a
+                        # hypothetical: the bit is a prediction about which
+                        # routes run this validator, derived from the model's
+                        # family (``model.configure.reasoning_echo_required``).
+                        # A family rule cannot know about a model it has never
+                        # seen -- the next generation id, the same weights behind
+                        # a rebranded or relayed host -- and a spec that never
+                        # went through the derivation can state the bit off
+                        # outright. The provider's own wording is direct evidence
+                        # about THIS request, so when the wording says the echo is
+                        # missing and the spec we SENT was not carrying one, the
+                        # fill is the measured answer (live: unfilled body 400,
+                        # filled body 200 on the same window).
+                        #
+                        # That gate is on ``turn_model`` rather than on
+                        # ``config.model`` because the two differ whenever a host
+                        # resolves per call: what matters is whether the request
+                        # the provider just refused carried an echo, and only the
+                        # resolved spec can answer that.
+                        #
+                        # Bounded like every other recovery in this loop, and
+                        # gated on nothing having been SHOWN: a 400 arrives
+                        # before the first byte, and a turn the user has already
+                        # read may not be replayed.
+                        #
+                        # ``not assistant.tool_calls`` is that gate, and it means
+                        # a refusal that arrives AFTER streamed tool-call deltas
+                        # gets no recovery at all -- inherited from the retreat
+                        # below, not introduced here, and recorded on the PR as
+                        # not addressed. A turn whose call is already on screen
+                        # (or executing) is no more replayable than one with text,
+                        # so lifting it is a design question about partial calls
+                        # rather than a line to change.
+                        if (
+                            stop_reason == "error"
+                            and reasoning_echo_fill_retries < MAX_REASONING_ECHO_FILL_RETRIES
+                            and not assistant.text.strip()
+                            and not assistant.tool_calls
+                            and turn_model is not None
+                            and not turn_model.requires_reasoning_echo
+                            and _is_reasoning_echo_rejection(stream_error)
+                        ):
+                            reasoning_echo_fill_retries += 1
+                            # The refused turn must not reach the retry's
+                            # history: it carries nothing the user saw, and the
+                            # next request has to re-send the same conversation
+                            # that was just refused.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            config.model = config.model.model_copy(
+                                update={"requires_reasoning_echo": True}
+                            )
+                            echo_fill_route = (turn_model.provider, turn_model.model_id)
+                            yield NoticeEvent(
+                                text=(
+                                    "the provider refused this request for a "
+                                    "missing reasoning echo — retrying with the "
+                                    "echo filled in at the same effort"
+                                ),
+                                kind="warning",
+                            )
+                            has_more_tool_calls = True
+                            continue
+                        # SECOND recovery, and the one that needs a gate: a
+                        # route that never sends the echo must not have a rung
+                        # of its own ladder disabled by a message that merely
+                        # resembles this one. DeepSeek's thinking mode can refuse
+                        # a request for a missing reasoning echo even though the
+                        # body echoes one on every turn it has anything for (see
                         # ``ModelSpec.requires_reasoning_echo``). That refusal is
                         # recoverable rather than fatal: the same request with
                         # thinking disabled answers 200 (measured live), so spend
@@ -1218,6 +1327,12 @@ class AgentLoop:
                         # aggregator, and the test that pins it must derive its
                         # spec rather than hand one a rung production never
                         # builds.
+                        #
+                        # Deliberately still reads the RUN's model for the
+                        # ladder, exactly as it shipped: the retreat is a
+                        # statement about the model this run is on, while the
+                        # fill above is a statement about the request that was
+                        # sent -- and only ``turn_model`` can answer the second.
                         if (
                             stop_reason == "error"
                             and reasoning_echo_retries < MAX_REASONING_ECHO_RETRIES
@@ -1659,6 +1774,7 @@ class AgentLoop:
         signal: AbortSignal | None,
         effort_ceiling: str | None = None,
         context_tokens_hint: int | None = None,
+        echo_fill_route: tuple[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events.
@@ -1668,6 +1784,13 @@ class AgentLoop:
         request by THIS loop, which owns the conversation the call belongs
         to — never remembered on the shared stream fn, where a subagent's
         registration would overwrite the parent's (review F8).
+
+        ``echo_fill_route`` is the run's standing decision that this route's
+        requests must carry the reasoning echo, taken after a provider REFUSED
+        one for missing it. It is applied to the RESOLVED spec for the same
+        reason ``effort_ceiling`` is: the host's resolver returns its own
+        model, so a capability set only on the run's snapshot would reach one
+        request and be undone on the next.
         """
         assistant = Message(role="assistant")
         text_parts: list[str] = []
@@ -1679,6 +1802,14 @@ class AgentLoop:
         # Set only by the except arm below, from the exception's own flag: the
         # harness cannot import ``providers`` to classify this itself.
         connectivity_loss = False
+        # The spec the request below is BUILT with, captured before the stream
+        # starts. Declared here rather than read after the ``try`` for two
+        # reasons: the resolved ``model`` is assigned inside it, so a reader
+        # after the block cannot be sure it exists; and a failover that serves
+        # the call reports ITSELF through ``StreamModelEvent``, which is not the
+        # spec we built the request from. The run loop's echo fill acts on what
+        # we SENT.
+        request_model: "ModelSpec | None" = None
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -1726,6 +1857,13 @@ class AgentLoop:
                     and ladder.index(current) > ladder.index(effort_ceiling)
                 ):
                     model = model.model_copy(update={"reasoning_effort": effort_ceiling})
+            if echo_fill_route is not None and (model.provider, model.model_id) == echo_fill_route:
+                # The same resolved-spec problem, for the other half of the
+                # refusal. Nothing else is touched: same route, same effort,
+                # same tools — the ONLY delta is that every blank assistant
+                # turn now carries its reasoning echo, which is the field the
+                # provider said was missing.
+                model = model.model_copy(update={"requires_reasoning_echo": True})
             # ``max_tokens`` is deliberately NOT set here. The generation bound
             # is part of the request contract (``harness/types.py``,
             # ``DEFAULT_TURN_OUTPUT_TOKENS``) and every request is filled from
@@ -1736,6 +1874,7 @@ class AgentLoop:
             # aggregate model is 943,718 and is what let a single decision run to
             # 97,189 output tokens (95,098 of them reasoning). A host that wants a
             # different bound names ``max_tokens`` explicitly.
+            request_model = model
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
@@ -2145,6 +2284,7 @@ class AgentLoop:
             stop_reason=stop_reason,
             error=error,
             connectivity_loss=connectivity_loss,
+            model=request_model,
         )
 
     @staticmethod
@@ -3657,6 +3797,12 @@ class _ModelTurnResult:
     message: Message
     stop_reason: str
     error: str | None = None
+    #: The spec the provider call was actually built with, resolved per call.
+    #: Carried out so the run loop can act on what it SENT rather than on the
+    #: run's snapshot -- the two differ whenever a host resolver is in play, and
+    #: a recovery gated on the wrong one of them is a recovery that does not
+    #: fire (see the reasoning-echo fill in ``run``).
+    model: "ModelSpec | None" = None
     #: The stream died because the MACHINE was offline, not because the provider
     #: answered badly. Carried out to the run loop, which continues such a turn
     #: instead of ending the run on it — see ``MAX_CONNECTIVITY_CONTINUATIONS``.
