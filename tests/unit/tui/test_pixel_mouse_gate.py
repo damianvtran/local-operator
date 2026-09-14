@@ -95,11 +95,12 @@ IN_BAND_REPORT = "\x1b[48;44;133;704;1064t"
 COLLAPSED_SECOND_POSITION = (7, 1)
 
 #: The re-clean's wire bytes, as literal text: ``?2048l`` (the mode the report
-#: reveals) then ``?1016l`` (the pixel-mouse mode a co-tenant sets with it), one
+#: reveals), ``?1016l`` (the pixel-mouse mode a co-tenant sets with it) and
+#: ``?1006h`` (SGR, the encoding we parse, re-asserted after that reset), as one
 #: write. Literal rather than imported so the assertion is about the wire and so
-#: this file still imports against a build that predates the 1016 half — which
-#: is how the pre-fix failure is demonstrated.
-RESET_PAIR = "\x1b[?2048l\x1b[?1016l"
+#: this file still imports against a build that predates any one of the three —
+#: which is how the pre-fix failure is demonstrated.
+MODE_RESET_WRITE = "\x1b[?2048l\x1b[?1016l\x1b[?1006h"
 
 #: Where the pointer actually is.
 TRUE_FIRST_POSITION = (40, 44)
@@ -295,7 +296,7 @@ def test_the_reclaimer_writes_the_reset_through_its_sink() -> None:
     reclaimer = InBandResizeReclaimer(writes.append)
 
     assert reclaimer.reclaim() is True
-    assert writes == [RESET_PAIR] == ["\x1b[?2048l\x1b[?1016l"]
+    assert writes == [MODE_RESET_WRITE] == ["\x1b[?2048l\x1b[?1016l\x1b[?1006h"]
 
 
 def test_the_reclaimer_honours_the_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -312,7 +313,7 @@ def test_the_reclaimer_honours_the_kill_switch(monkeypatch: pytest.MonkeyPatch) 
     assert reclaimer.reclaim() is True
     monkeypatch.setenv("LOCAL_OPERATOR_NO_MODE_RESET", "1")
     assert reclaimer.reclaim() is False
-    assert writes == [RESET_PAIR]
+    assert writes == [MODE_RESET_WRITE]
 
 
 def test_a_dead_writer_cannot_turn_a_resize_into_an_exception() -> None:
@@ -369,11 +370,11 @@ async def test_the_app_re_closes_the_mode_on_resize_and_on_focus(
 
         app.post_message(events.Resize(app.size, app.size))
         await pilot.pause()
-        assert writes.count(RESET_PAIR) == 1
+        assert writes.count(MODE_RESET_WRITE) == 1
 
         app.post_message(events.AppFocus())
         await pilot.pause()
-        assert writes.count(RESET_PAIR) == 2
+        assert writes.count(MODE_RESET_WRITE) == 2
 
 
 @pytest.mark.asyncio
@@ -451,7 +452,7 @@ async def test_the_mid_session_reset_honours_the_kill_switch(
 
         app.post_message(events.Resize(app.size, app.size))
         await pilot.pause()
-        assert writes.count(RESET_PAIR) == 0
+        assert writes.count(MODE_RESET_WRITE) == 0
 
 
 # -- the pty end-to-end: the real driver, a real app, a real pointer ----------
@@ -551,12 +552,14 @@ from local_operator.tui.terminal_modes import InBandResizeReclaimer
 from textual.app import App
 
 OUT = os.environ["ARML_LOG"]
-# The pair the re-clean hands the writer, pinned as literal bytes rather than
+# The write the re-clean hands the writer, pinned as literal bytes rather than
 # imported: this is the wire contract, and the test above compares what the
 # child counted here against what the pty received. Both modes, because a
 # co-tenant sets 1016 with 2048 (linux_driver.py:480-482) and it is 1016 that
-# decides whether the numbers the terminal sends are cells.
-RESET = "\\x1b[?2048l\\x1b[?1016l"
+# decides whether the numbers the terminal sends are cells, plus the SGR
+# re-assert that stops those numbers coming back as legacy X10 bytes once 1016
+# is off (input_decode.py, the 0.54.35-0.54.37 crash).
+RESET = "\\x1b[?2048l\\x1b[?1016l\\x1b[?1006h"
 
 
 class Probe(App):
@@ -849,7 +852,7 @@ def test_a_compliant_vt_reports_cells_once_we_clear_1016(tmp_path: Path) -> None
 
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_a_resize_re_closes_the_mode_through_the_real_driver(tmp_path: Path) -> None:
-    """One 16-byte write per delivered Resize, and it reaches the wire.
+    """One 24-byte write per delivered Resize, and it reaches the wire.
 
     This is the `B` half's real-path evidence and the measurement behind the
     "does not coalesce" decision in ``terminal_modes``: every SIGWINCH-derived
@@ -895,6 +898,6 @@ def test_a_resize_re_closes_the_mode_through_the_real_driver(tmp_path: Path) -> 
         ), "more than one re-close per delivered Resize: " + repr(delivered)
         # The pair, contiguously: this is what proves the ?1016l half reached the
         # wire on the same write as ?2048l rather than being counted and dropped.
-        assert child.output().count(RESET_PAIR.encode()) >= counts[-1]
+        assert child.output().count(MODE_RESET_WRITE.encode()) >= counts[-1]
     finally:
         child.close()
