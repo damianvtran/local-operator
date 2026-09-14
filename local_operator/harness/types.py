@@ -2173,6 +2173,89 @@ class ModelSpec(BaseModel):
     # than treat this as authoritative.
     display_name: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_deepseek_thinking_contract(cls, data: Any) -> Any:
+        """Derive the DeepSeek thinking-mode contract from the model id itself.
+
+        ``build_model_spec`` derived ``requires_reasoning_echo`` and the native
+        effort ladder as locals, so a ``ModelSpec`` built any other way got the
+        field defaults -- echo off, no ladder -- and the same model behaved
+        differently depending on who built it. That is not a cosmetic
+        divergence: echo off is the HTTP 400 this capability exists to prevent
+        ("The `reasoning_content` in the thinking mode must be passed back to
+        the API"), and an empty ladder is what stops the harness retreating to
+        thinking-off, so the ONE recovery for that refusal cannot fire on
+        exactly the spec that needs it. Measured in the field: 76 sessions carry
+        that refusal wording, and the incidents continue past the release that
+        shipped the derivation.
+
+        Deriving it here rather than asking every construction site to remember
+        is the point: a capability that has to be REMEMBERED at each site is one
+        that will be dropped at the next one, and the failure is silent until a
+        user's turn dies hundreds of messages deep. The rules themselves are
+        IMPORTED from ``model.configure`` and never restated -- two copies of a
+        family regex or an effort ladder drift, and then the builder and a
+        directly-built spec disagree about the same model, which is the defect
+        this method removes rather than moves.
+
+        **Runs only for a spec being BUILT from a model id**, which is what
+        makes it "cannot be dropped by omission" rather than "cannot be stated
+        at all":
+
+        * a mapping (``ModelSpec(provider=..., model_id=...)``,
+          ``model_validate({...})``, the wire) is filled in for every key it
+          did NOT carry, so a caller that never heard of the capability -- or a
+          spec rebuilt from a record written before it existed -- still lands on
+          the right answer;
+        * a key the caller DID state is left alone, because that is a
+          statement rather than an omission; and
+        * an existing spec INSTANCE is not rewritten at all. Pydantic re-runs an
+          ``after``-mode validator against a nested instance in place, which is
+          why this is a ``before``-mode one: the instrument that reproduces the
+          pre-fix body (``scripts/deepseek_reasoning_echo_probe.py``) and the
+          loop's own regression tests state "this spec does not carry the
+          echo", and a construction hook that overwrote them would delete the
+          measurement rather than fix the bug. A spec only ever becomes an
+          instance by passing through this hook first, so nothing is lost by
+          trusting it.
+
+        Scoped so nothing else moves. ``reasoning_echo_required`` is False for
+        every family but the DeepSeek thinking one (the legacy ``deepseek-chat``
+        / ``deepseek-reasoner`` rows and a local user-operated server
+        included), and the ladder is filled only for the four ids the native
+        endpoint documents it for -- so no non-DeepSeek route, and no local
+        route to anything, can change behaviour here. Both halves fill only what
+        the caller left out, so a provider listing's own answer (which
+        ``build_model_spec`` resolves before constructing) still wins.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        provider = data.get("provider")
+        model_id = data.get("model_id")
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            # An incomplete or non-string pair is the caller's problem to
+            # report, and duplicating pydantic's error here would only make the
+            # message worse.
+            return data
+        if "requires_reasoning_echo" in data and "reasoning_efforts" in data:
+            return data
+        # Function-local: ``model.configure`` imports this module at module
+        # scope, so a top-level import here would be a cycle.
+        from local_operator.model.configure import (
+            deepseek_effort_ladder,
+            reasoning_echo_required,
+        )
+
+        filled = dict(data)
+        if "requires_reasoning_echo" not in filled and reasoning_echo_required(provider, model_id):
+            filled["requires_reasoning_echo"] = True
+        if "reasoning_efforts" not in filled:
+            ladder = deepseek_effort_ladder(provider, model_id)
+            if ladder:
+                filled["reasoning_efforts"] = ladder
+        return filled
+
 
 #: The most tokens ONE model call may generate, reasoning included.
 #:

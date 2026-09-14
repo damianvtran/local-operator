@@ -4939,9 +4939,117 @@ def test_a_local_server_serving_the_weights_is_left_alone(provider):
     assert build_model_spec(provider, "deepseek-v4-flash").requires_reasoning_echo is False
 
 
-def test_reasoning_echo_defaults_off_for_a_hand_built_spec():
-    """Every embedder and test double that builds a ModelSpec by hand keeps
-    today's body: the capability only ever arrives by derivation."""
-    assert (
-        ModelSpec(provider="deepseek", model_id="deepseek-flash").requires_reasoning_echo is False
+def test_the_direct_route_contract_cannot_be_dropped_by_omission():
+    """A spec built OUTSIDE ``build_model_spec`` behaves identically to one built by it.
+
+    The capability and the ladder used to be locals in ``build_model_spec``, so
+    the same ``(provider, model_id)`` behaved differently depending on who built
+    the spec: echo off is the HTTP 400 the capability exists to prevent, and an
+    empty ladder is what stops the thinking-off retreat, so a dropped-flag spec
+    lost BOTH halves of the recovery at once. The field shows what that costs --
+    76 sessions carry the refusal wording -- so the derivation now runs at
+    ``ModelSpec`` construction and this pins it against the builder rather than
+    against a literal.
+    """
+    for provider, model_id in (
+        ("deepseek", "deepseek-flash"),
+        # The ``<hosting>/``-qualified spelling of the same name, which is what
+        # a session's own saved selection and a user-typed ``/model`` carry.
+        ("deepseek", "deepseek/deepseek-flash"),
+    ):
+        derived = build_model_spec(provider, model_id)
+        built = ModelSpec(provider=provider, model_id=model_id)
+        assert built.requires_reasoning_echo is True
+        assert built.requires_reasoning_echo is derived.requires_reasoning_echo
+        assert built.reasoning_efforts == derived.reasoning_efforts
+        assert built.reasoning_efforts == ("none", "low", "high", "max")
+
+
+def test_the_construction_time_derivation_leaves_every_other_route_alone():
+    """Only the DeepSeek thinking contract is derived, and only for the ids it applies to.
+
+    Two halves, because both failure directions are silent. A rule that filled
+    the echo everywhere would put a sentence into every unrelated provider's
+    request; one that filled the ladder everywhere would offer ``/effort`` rungs
+    a route rejects. And the legacy rows must keep NOTHING, for the reason the
+    table above gives: ``deepseek-reasoner`` rejects an input
+    ``reasoning_content`` outright, so deriving the echo there would be the very
+    400 the capability exists to prevent.
+    """
+    for provider, model_id in (
+        ("anthropic", "claude-opus-5"),
+        ("openai", "gpt-5.2"),
+        ("deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek-reasoner"),
+        # A LOCAL server serving these very weights, which is NOT hypothetical:
+        # ``build_model_spec`` returns ``local_model_spec`` for these providers
+        # before any rule runs, so a family rule applied at construction would
+        # have made a locally-served model carry a sentence per assistant turn
+        # that the builder never sent. Caught by
+        # ``test_a_local_server_serving_the_weights_is_left_alone``.
+        ("ollama", "deepseek-v4-flash"),
+        ("llamacpp", "deepseek-v4-flash"),
+        ("", ""),
+    ):
+        built = ModelSpec(provider=provider, model_id=model_id)
+        assert built.requires_reasoning_echo is False, (provider, model_id)
+        assert built.reasoning_efforts == (), (provider, model_id)
+    # ...while a route whose spec carries its OWN ladder keeps it: the listing
+    # that spoke is authoritative, and the fill only answers an ABSENT one.
+    kept = ModelSpec(
+        provider="openrouter", model_id="deepseek/deepseek-v4.1-flash", reasoning_efforts=("low",)
     )
+    assert kept.reasoning_efforts == ("low",)
+
+
+def test_a_wire_model_spec_round_trip_keeps_the_derived_contract():
+    """The viewer/attached facades carry specs as JSON; the contract survives it.
+
+    ``FrontendModelSpec`` is what a cold viewer, the desktop draft preview and
+    the runtime's own state snapshots exchange, and a deserialised spec that
+    lost the capability would put the viewer's spec and the runtime's out of
+    step -- which is the divergence this whole derivation exists to remove.
+    """
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    wire = FrontendModelSpec(
+        provider="deepseek", model_id="deepseek-flash", reasoning_effort="high"
+    )
+    assert wire.requires_reasoning_echo is True
+    assert wire.reasoning_efforts == ("none", "low", "high", "max")
+    restored = FrontendModelSpec.model_validate(wire.model_dump(mode="json"))
+    assert restored.requires_reasoning_echo is True
+    assert restored.reasoning_efforts == wire.reasoning_efforts
+
+
+def test_the_legacy_escape_hatch_for_a_hand_built_spec_still_works():
+    """A spec that STATES it does not carry the echo keeps saying so.
+
+    The construction hook fills only what a caller left out, so a spec kept
+    from the pre-fix shape can still be built -- which is not a convenience but
+    the only way to measure anything here:
+    ``scripts/deepseek_reasoning_echo_probe.py`` reproduces the refusal by
+    building the OFF body from ``model_copy(update={"requires_reasoning_echo":
+    False})``, and a hook that overwrote it would delete the measurement rather
+    than fix the bug. Pinned through BOTH routes a spec instance travels -- a
+    nested field of ``ChatRequest``/``LoopConfig``, and a dump/re-validate
+    round trip -- because pydantic re-runs validators on nested instances and a
+    later move to ``mode="after"`` would silently restore the fill here.
+    """
+    from local_operator.harness.types import ChatRequest, LoopConfig, Message
+
+    derived = ModelSpec(provider="deepseek", model_id="deepseek-flash")
+    assert derived.requires_reasoning_echo is True
+    without = derived.model_copy(update={"requires_reasoning_echo": False})
+    assert without.requires_reasoning_echo is False
+    assert ChatRequest(model=without).model.requires_reasoning_echo is False
+    config = LoopConfig(
+        model=without,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=lambda *args, **kwargs: None,
+    )
+    assert config.model.requires_reasoning_echo is False
+    revalidated = ModelSpec.model_validate(without.model_dump(mode="python"))
+    assert revalidated.requires_reasoning_echo is False
+    # ...while omitting it is still filled, which is the half that matters.
+    assert ModelSpec(provider="deepseek", model_id="deepseek-flash").requires_reasoning_echo is True
