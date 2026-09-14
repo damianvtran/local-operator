@@ -38,6 +38,21 @@ USAGE
 =====
     .venv/bin/python scripts/bench_cold_send_http.py --runs 3
     .venv/bin/python scripts/bench_cold_send_http.py --runs 3 --json out.json
+    .venv/bin/python scripts/bench_cold_send_http.py --runs 3 --mcp-variant mcpx \\
+        --measured-tree 2bf8cb890 --label "pre-fix arm"
+
+MEASURED TREE. ``--measured-tree`` names the commit whose ``local_operator/`` this
+run measures and is VERIFIED against the subtree on disk (``bench_tree``), because
+the before arm of a before/after pair is measured with the subtree checked out of
+another commit while the worktree HEAD stays put. The run is refused when they
+disagree, so the artefact's ``rev`` always names a tree this run actually measured
+(review round 2, R2-1).
+
+DECLARATION, READ BACK. ``--mcp-variant mcpx`` is supposed to declare one MCP
+server and ``none`` is supposed to declare nothing, and the session reports what
+it actually sees back — recorded per row as ``mcp_declared_servers`` and graded in
+the summary. A run whose declaration does not match its own arm name exits 3
+rather than reporting a treatment arm that measured the control (QA round 1, Q1).
 """
 
 from __future__ import annotations
@@ -58,6 +73,8 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import bench_tree  # noqa: E402
 
 _STRIPPED_PREFIXES = ("LOP_", "CMUX_")
 
@@ -83,7 +100,7 @@ def _seed_config(root: Path) -> Path:
     return config_dir
 
 
-def _write_mcp_config(root: Path, variant: str) -> None:
+def _write_mcp_config(cwd: Path, variant: str) -> None:
     """Declare one MCP server, the way a real machine does.
 
     `none` declares nothing (the control); `mcpx` points at a closed port, so
@@ -92,11 +109,17 @@ def _write_mcp_config(root: Path, variant: str) -> None:
     This is the operator's own condition (gitlab, google-workspace) reduced to
     its cheapest form, because the whole point of the measurement is the
     difference between a machine with a server declared and one without.
+
+    WRITTEN INTO THE SESSION'S CWD, and the parameter is the cwd rather than the
+    run root because that is where discovery looks: resolution reads
+    ``<cwd>/.mcp.json`` (plus the config dir, ``~/.claude.json``, ...), never
+    ``<HOME>/.mcp.json``. Writing it to ``HOME`` made the `mcpx` arm declare
+    nothing, i.e. measured the control arm twice (QA round 1, Q1).
     """
     if variant == "none":
         return
     entry: dict[str, Any] = {"type": "http", "url": "http://127.0.0.1:1/mcp"}
-    (root / ".mcp.json").write_text(
+    (cwd / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"bench-slow": entry}}), encoding="utf-8"
     )
 
@@ -157,8 +180,29 @@ def _kill_runtime(config_dir: Path, session_id: str) -> None:
         pass
 
 
+def _declared_servers(client: Any, session_id: str) -> list[str]:
+    """The MCP servers the RUNNING session sees declared, asked of the session.
+
+    A benchmark whose "declared" arm declares nothing is measuring its own
+    control, and on this host that produced plausible-looking numbers for a whole
+    campaign (QA round 1, Q1: the config was written to ``HOME`` while discovery
+    reads ``<cwd>/.mcp.json``). So the declaration is READ BACK from the running
+    session and recorded in the row, and ``_summarize`` grades it: the arm's own
+    output now carries the proof that it measured what it claims.
+
+    Never raises: a run whose declaration cannot be read is a recorded unknown
+    rather than a dead campaign.
+    """
+    try:
+        listed = client.post(f"/v1/desktop/sessions/{session_id}/mcp", json={"action": "list"})
+        data = listed.json().get("result", {}).get("data", {}) or {}
+        return sorted(str(server.get("name")) for server in data.get("servers", []))
+    except Exception:  # noqa: BLE001 — a record we could not read is not a result
+        return []
+
+
 def _one_run(
-    client: Any, base: str, workspace: Path, config_dir: Path, index: int
+    client: Any, base: str, workspace: Path, config_dir: Path, index: int, variant: str
 ) -> dict[str, Any]:
     """One new conversation, one first send, both response bodies kept.
 
@@ -181,11 +225,17 @@ def _one_run(
     )
     first_send_ms = round((time.perf_counter() - started) * 1000.0, 1)
 
+    # AFTER the timed window, so the extra round trip cannot land in the number.
+    declared = _declared_servers(client, session_id)
+
     result = {
         "run": index,
         "session_id": session_id,
         "first_send_ms": first_send_ms,
         "loadavg": round(loadavg, 1),
+        "variant": variant,
+        "mcp_declared_servers": declared,
+        "mcp_declaration_correct": bool(declared) == (variant != "none"),
         "create_status": created.status_code,
         "create_body": created_body,
         "send_status": sent.status_code,
@@ -199,35 +249,24 @@ def _one_run(
     return result
 
 
-def _git_rev() -> str:
-    """The exact commit under test, recorded next to the numbers (R5).
-
-    A first-send figure is only comparable to another campaign's when the tree
-    that produced it is in the artefact; best-effort, so a missing ``git``
-    reports ``unknown`` rather than failing a measurement.
-    """
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(Path(__file__).resolve().parents[1]),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    return completed.stdout.strip() or "unknown"
-
-
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     values = [row["first_send_ms"] for row in rows]
     if not values:
         return {}
+    declared = sorted({name for row in rows for name in row.get("mcp_declared_servers", [])})
+    correct = [row.get("mcp_declaration_correct") for row in rows]
     return {
         "median": round(statistics.median(values), 1),
         "min": round(min(values), 1),
         "max": round(max(values), 1),
         "n": len(values),
+        #: What the running sessions ACTUALLY had declared, and whether that
+        #: matches the arm's own name for itself. A `mcpx` arm that declares
+        #: nothing is the control arm wearing the treatment's label, which is the
+        #: failure Q1 found; this is the field that makes it visible instead of
+        #: plausible.
+        "mcp_servers_seen": declared,
+        "declaration_correct": all(correct) if correct else None,
     }
 
 
@@ -248,15 +287,34 @@ def main() -> int:
         default="",
         help="free-form note recorded WITH the numbers (see bench_cold_engage.py)",
     )
+    parser.add_argument(
+        "--measured-tree",
+        type=str,
+        default="",
+        help=(
+            "commit whose local_operator/ this run measures (default: the "
+            "worktree HEAD). VERIFIED against the subtree on disk — the run is "
+            "refused when they disagree (review round 2, R2-1)"
+        ),
+    )
     args = parser.parse_args()
+    # Refuse BEFORE measuring (and the fields are re-derived at the end, so a
+    # subtree that moved under the run is caught too): a campaign that records a
+    # commit it did not measure is worse than one that never ran.
+    try:
+        bench_tree.describe(args.measured_tree)
+    except bench_tree.MeasuredTreeError as exc:
+        print(f"REFUSING TO MEASURE: {exc}", flush=True)
+        return 2
 
     import httpx
 
     root = Path(tempfile.mkdtemp(prefix="lop-cold-send-"))
     config_dir = _seed_config(root)
-    _write_mcp_config(root, args.mcp_variant)
     workspace = root / "workspace"
     workspace.mkdir()
+    # The workspace IS the session cwd, so the declaration goes here (Q1).
+    _write_mcp_config(workspace, args.mcp_variant)
     token = secrets.token_hex(32)
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
@@ -294,12 +352,13 @@ def main() -> int:
                 _wait_for_health(client, base, proc)
                 print(f"  server up on {base} (pid {proc.pid})", flush=True)
                 for index in range(args.runs):
-                    row = _one_run(client, base, workspace, config_dir, index)
+                    row = _one_run(client, base, workspace, config_dir, index, args.mcp_variant)
                     rows.append(row)
                     print(
                         f"  run {index + 1}/{args.runs}: first send = "
                         f"{row['first_send_ms']} ms  (create {row['create_status']}, "
-                        f"send {row['send_status']}, load {row['loadavg']})",
+                        f"send {row['send_status']}, load {row['loadavg']}, "
+                        f"mcp declared: {row['mcp_declared_servers'] or 'none'})",
                         flush=True,
                     )
     finally:
@@ -316,12 +375,16 @@ def main() -> int:
                 os.environ[key] = value
 
     stats = _summarize(rows)
-    rev = _git_rev()
-    stats["rev"] = rev
+    # Re-verified at the END as well as before the first run: a subtree that moved
+    # under a long campaign is exactly the case the field exists to catch.
+    tree = bench_tree.describe(args.measured_tree)
+    stats["rev"] = tree["rev"]
+    stats["worktree_head"] = tree["worktree_head"]
+    stats["measured_tree_verified"] = tree["verified"]
     stats["label"] = args.label
     print("\n--- first POST /messages wall time (ms) ---")
     print(f"  mcp variant: {args.mcp_variant}")
-    print(f"  measured tree: {rev[:9]}")
+    print(bench_tree.format_banner(tree))
     if args.label:
         print(f"  label: {args.label}")
     for key, value in stats.items():
@@ -339,6 +402,22 @@ def main() -> int:
     if server_log.exists():
         print(f"\n(server log: {server_log} — removed with {root})")
     shutil.rmtree(root, ignore_errors=True)
+
+    if stats.get("declaration_correct") is False:
+        # Non-zero, because a driver that only reads the exit status must not
+        # treat an arm that measured its own control as a treatment reading
+        # (QA round 1, Q1). The numbers are still written above and in --json,
+        # so nothing is hidden — this only says they are not what the arm's name
+        # claims.
+        print(
+            "\n  DECLARATION NOT VERIFIED: --mcp-variant "
+            f"{args.mcp_variant!r} asked for one declaration and the running "
+            f"sessions reported {stats.get('mcp_servers_seen') or 'none'}. The arm "
+            "measured the wrong thing; see _write_mcp_config for where the "
+            "declaration has to live (the session's cwd).",
+            flush=True,
+        )
+        return 3
     return 0
 
 

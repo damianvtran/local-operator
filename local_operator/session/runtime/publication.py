@@ -70,6 +70,14 @@ class PublicationGate:
         the process is going away and the task with it, so the open is dropped
         rather than raised: this is called from a ``finally`` on the way out of
         a failing boot, and a raise there would replace the real failure.
+
+        BOTH ORDERINGS OF A CLOSE ARE DROPPED, which is why the schedule is
+        guarded as well as the pre-check: a loop that closes between
+        ``is_closed()`` and ``call_soon_threadsafe`` makes the schedule raise
+        ``RuntimeError("Event loop is closed")``. Unreachable in this tree — the
+        only closer is ``_run``'s own ``loop.close()``, on a thread that is
+        inside ``_serve`` while this returns (review round 2, R2-5) — but the
+        promise is worth the two lines it costs to keep it.
         """
         try:
             running = asyncio.get_running_loop()
@@ -80,4 +88,7 @@ class PublicationGate:
             return
         if self._loop.is_closed():
             return
-        self._loop.call_soon_threadsafe(self._event.set)
+        try:
+            self._loop.call_soon_threadsafe(self._event.set)
+        except RuntimeError:  # pragma: no cover — the loop closed inside the window
+            return

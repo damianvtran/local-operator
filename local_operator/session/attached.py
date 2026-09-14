@@ -1594,8 +1594,13 @@ class AttachedSession:
             and "cumulative_parent_cost" not in changes
             and identity is not None
         ):
+            # The neutral pricing module, not the TUI package: this runs in
+            # whichever process prices a turn — the runtime child and a daemonless
+            # viewer both do — and the TUI package must not be in their import
+            # graph (review round 2, Q7; the functions are re-exported from
+            # ``tui.costs`` for the panels that legitimately live there).
+            from local_operator.model.costs import turn_cost
             from local_operator.session.frontend_state import CostKnowledge
-            from local_operator.tui.costs import turn_cost
 
             # Priced on the receipt's OWN serving identity, not on the model
             # that will run next: a reading taken on another model was billed at
@@ -1656,12 +1661,14 @@ class AttachedSession:
         the frontend checkpoint and may be the ONLY durable state. Read it once
         for both rows and money; summing visible rows loses swept/prior work.
         """
+        from local_operator.model.costs import (
+            cost_summary,  # neutral, not the TUI package (Q7)
+        )
         from local_operator.session.frontend_state import CostKnowledge
         from local_operator.session.session import (
             SUBAGENT_ROSTER_SIDECAR,
             _read_roster_sidecar,
         )
-        from local_operator.tui.costs import cost_summary
 
         payload = (
             _read_roster_sidecar(
@@ -1735,8 +1742,10 @@ class AttachedSession:
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
                 if job.usage is not None:
+                    from local_operator.model.costs import (
+                        cost_summary,  # neutral module (Q7)
+                    )
                     from local_operator.session.frontend_state import _cost_knowledge
-                    from local_operator.tui.costs import cost_summary
 
                     # The strict AsyncJob sidecar cannot grow frontend-only
                     # fields without breaking older owners. Reconstruct only
