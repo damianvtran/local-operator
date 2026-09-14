@@ -494,6 +494,28 @@ def _remember(key: str, kernel: _Kernel) -> None:
         _record_reset(_key, "kernel evicted to make room for other active sessions")
 
 
+def _restore(key: str, kernel: _Kernel, position: int) -> None:
+    """Put a READ's kernel back exactly where it was: no promotion, no eviction.
+
+    ``_remember`` is the WRITE path's helper, and for a read it is wrong twice
+    over: it moves the entry to the MRU end (so reading chat A's panel decides
+    that chat B is shed next under ``MAX_KERNELS``) and it runs the capacity pass
+    with it. Measured before this existed, with four resident kernels and one of
+    them out on loan: reading the LRU entry evicted a THIRD session and recorded
+    its ``_LOST_KERNELS`` receipt, so the next cell in that chat started on a
+    fresh interpreter because somebody looked at another chat's panel.
+
+    ``position`` is the index the entry held before the verb popped it. The
+    registry holds at most ``MAX_KERNELS`` idle kernels, so rebuilding the order
+    is a handful of entries — and it is the only way to restore an index, since
+    an ``OrderedDict`` assignment always appends.
+    """
+    items = list(_KERNELS.items())
+    items.insert(min(position, len(items)), (key, kernel))
+    _KERNELS.clear()
+    _KERNELS.update(items)
+
+
 async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
@@ -1329,9 +1351,10 @@ async def complete_session_variables(
       turn's ``ToolContext``, and reviving a namespace ``_LOST_KERNELS`` has
       already reported lost would answer with a fresh empty interpreter that the
       panel would render as this chat's memory;
-    * ``last_used`` moves only for a write — a READ must not extend the
-      interpreter's lease, or looking at the panel would keep an idle kernel
-      alive indefinitely;
+    * ``last_used`` moves only for a write, and so does the registry
+      POSITION — a READ must not extend the interpreter's lease or promote it,
+      or looking at the panel would keep an idle kernel alive indefinitely and
+      would decide which OTHER session's interpreter is shed next;
     * a timeout answers BUSY and LEAVES THE KERNEL RESIDENT. Retiring it here
       would silently destroy user state to satisfy a five-second deadline, and
       ``_exchange`` skips responses whose id does not match, so a late answer is
@@ -1349,6 +1372,10 @@ async def complete_session_variables(
     writing = action != "list"
     if session_id in _ACTIVE_KERNELS:
         return _variables_refusal("kernel_busy") if writing else {"ok": True, "state": "busy"}
+    # Captured BEFORE the pop, because popping and re-inserting is what would
+    # otherwise move the entry to the MRU end (see ``_restore``).
+    order = list(_KERNELS)
+    position = order.index(session_id) if session_id in order else len(order)
     kernel = _KERNELS.pop(session_id, None)
     if kernel is None:
         if writing:
@@ -1404,9 +1431,15 @@ async def complete_session_variables(
         _ACTIVE_KERNELS.discard(session_id)
         if crash is not None or dispose_requested:
             _retire(kernel)
-        else:
-            # A timeout keeps the kernel too: it is only a verb that was slow.
+        elif writing:
+            # A write extends the lease and is the only verb that may promote
+            # the entry: it is work, and ``_remember`` also runs the capacity
+            # pass that a genuinely used interpreter has earned.
             _remember(session_id, kernel)
+        else:
+            # A read is not work: it keeps its position and evicts nothing, and
+            # a timeout keeps the kernel too (it is only a verb that was slow).
+            _restore(session_id, kernel, position)
     if crash is not None:
         # The interpreter is gone with its namespace, which is what "absent"
         # means to the panel; a write has nothing to write into.

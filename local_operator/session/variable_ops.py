@@ -76,10 +76,14 @@ RESERVED_NAMES = frozenset({"secrets", "display", "tool"})
 MAX_KEY_CHARS = 128
 MAX_VALUE_CHARS = 4096
 
-#: Total response budget for one enumeration. NOT cosmetic: the control socket
-#: reads at a 1 MiB line limit, so an unbounded namespace would sever the
-#: connection instead of answering. The worker stops at this budget and reports
-#: ``truncated``.
+#: Total response budget for one enumeration, charged in the ENCODED bytes the
+#: control socket will carry. NOT cosmetic: that socket reads at a 1 MiB line
+#: limit, so an unbounded namespace would sever the connection instead of
+#: answering — and a panel that cannot READ a namespace cannot DELETE out of it
+#: either, so the failure is not merely cosmetic on the client side. Charging
+#: characters of the rendered value (the first accounting) under-counted the
+#: frame by ~1.7x, because JSON escaping, the key, the type name and the
+#: envelope all ride the same line; see the worker's ``_variables_list``.
 TOTAL_BUDGET_CHARS = 256 * 1024
 
 #: Refusal codes the desktop routes lift into ``detail.code`` (see §1 of the
@@ -112,21 +116,71 @@ def is_reserved_name(name: str) -> bool:
     return name in RESERVED_NAMES or (name.startswith("__") and name.endswith("__"))
 
 
+def name_is_addressable(name: str) -> bool:
+    """Whether a URL path segment can address ``name`` at all.
+
+    The routes address a variable as ``.../variables/{key}``, and a ``/``
+    decodes into extra path segments BEFORE the router matches — percent-encoding
+    it does not help (``%2F`` is decoded by the server, measured), so no PATCH or
+    DELETE can ever reach such a key. A cell can still create one, and hiding a
+    binding the user's own code made would be the "Nothing stored yet" lie the
+    ``state`` discriminator exists to prevent, so the row stays LISTED — but it
+    must not advertise as editable, and the write paths refuse to create one.
+    """
+    return "/" not in name
+
+
+#: The sentence for each way a NAME can be unusable. One copy, used by the verb
+#: table AND by the worker: the worker's own wording was previously unreachable
+#: (both session shapes pre-validate through the table), which is how two
+#: sentences for one rule came to exist.
+_NAME_REFUSAL_MESSAGES: dict[str, str] = {
+    "unnamed": "Enter a variable name.",
+    "too_long": f"A variable name is limited to {MAX_KEY_CHARS} characters.",
+    "control": "A variable name cannot contain control characters.",
+    "unaddressable": (
+        "A variable name cannot contain '/': a variable is addressed as a URL "
+        "path segment, so such a name cannot be edited or deleted."
+    ),
+    "reserved": "That name belongs to the interpreter and cannot be used.",
+}
+
+
+def name_refusal(key: str) -> dict[str, Any] | None:
+    """The complete refusal for an unusable ``key``, or ``None`` when it is fine.
+
+    Returns the envelope rather than a code so the caller cannot pair the right
+    code with the wrong sentence (the worker used to answer the "1-128
+    characters" bound for every ``invalid_value`` name, including a reserved
+    one).
+    """
+    if not key:
+        return refusal("invalid_value", _NAME_REFUSAL_MESSAGES["unnamed"])
+    if len(key) > MAX_KEY_CHARS:
+        return refusal("invalid_value", _NAME_REFUSAL_MESSAGES["too_long"])
+    if any(character < " " or character == "\x7f" for character in key):
+        return refusal("invalid_value", _NAME_REFUSAL_MESSAGES["control"])
+    if not name_is_addressable(key):
+        return refusal("invalid_value", _NAME_REFUSAL_MESSAGES["unaddressable"])
+    if is_reserved_name(key):
+        return refusal("reserved_name", _NAME_REFUSAL_MESSAGES["reserved"])
+    return None
+
+
 def key_refusal(key: str) -> str | None:
-    """The refusal code for ``key``, or ``None`` when it is usable.
+    """The refusal CODE for ``key``, or ``None`` when it is usable.
+
+    The code half of :func:`name_refusal`, kept for callers that only need to
+    ask "is this name usable?" (the worker's existence check runs after it).
 
     Deliberately a DENYLIST, not an identifier check: the write path is
     ``namespace[key] = value``, so ``globals()["a b"]`` is addressable and must
-    keep working. What is refused is what the protocol cannot carry safely (an
-    empty name, a control character) or what the kernel owns (a reserved name).
+    keep working. What is refused is what the protocol cannot carry (an empty
+    name, a control character, a ``/``), what the runtime cannot address (the
+    same ``/``), or what the kernel owns (a reserved name).
     """
-    if not key or len(key) > MAX_KEY_CHARS:
-        return "invalid_value"
-    if any(character < " " or character == "\x7f" for character in key):
-        return "invalid_value"
-    if is_reserved_name(key):
-        return "reserved_name"
-    return None
+    rejected = name_refusal(key)
+    return None if rejected is None else str(rejected["code"])
 
 
 def coerce_variable_value(value: str, value_type: str) -> Any:
@@ -234,9 +288,9 @@ async def run_variable_verb(
         raise ValueError(f"unknown code-memory action: {action!r}")
 
     if action != "list":
-        code = key_refusal(key)
-        if code is not None:
-            return refusal_for(code)
+        rejected = name_refusal(key)
+        if rejected is not None:
+            return rejected
         if action in ("set", "update") and len(value) > MAX_VALUE_CHARS:
             return refusal_for("too_large")
 

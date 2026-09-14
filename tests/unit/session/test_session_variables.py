@@ -62,6 +62,10 @@ async def test_a_refused_name_never_reaches_the_kernel() -> None:
         ("", "invalid_value"),
         ("x" * 129, "invalid_value"),
         ("bad\x01name", "invalid_value"),
+        # A ``/`` decodes into extra path segments before the router matches, so
+        # no route can ever address the key: refused where the name policy is,
+        # with a sentence that names the rule rather than the value.
+        ("a/b", "invalid_value"),
         ("secrets", "reserved_name"),
         ("display", "reserved_name"),
         ("tool", "reserved_name"),
@@ -71,9 +75,26 @@ async def test_a_refused_name_never_reaches_the_kernel() -> None:
         answer = await run_variable_verb("s1", "set", key, "1", "int", complete=recorder)
         assert answer["ok"] is False
         assert answer["code"] == code, (key, answer)
+        assert answer["message"], (key, answer)
     assert (
         recorder.calls == []
     ), "a refusal decided from the shared table must not cost a kernel round trip"
+
+
+@pytest.mark.asyncio
+async def test_the_unaddressable_name_sentence_names_the_rule() -> None:
+    """One wording, in the shared table, for parent and worker alike.
+
+    The worker used to answer its own "1-128 characters" bound for every
+    ``invalid_value`` name, and the parent's pre-validation made it unreachable
+    — two sentences for one rule, only one of them ever shown.
+    """
+    recorder = _Recorder()
+    answer = await run_variable_verb("s1", "set", "a/b", "1", "int", complete=recorder)
+
+    assert "path segment" in answer["message"]
+    assert "a/b" not in answer["message"]
+    assert recorder.calls == []
 
 
 @pytest.mark.asyncio

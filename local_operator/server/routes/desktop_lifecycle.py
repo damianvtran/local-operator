@@ -148,17 +148,24 @@ def read_variables(answer: dict[str, Any]) -> dict[str, Any]:
     ``busy`` and ``unsupported`` carry NO ``variables`` key, and that is the
     point of the model: a consumer cannot render "Nothing stored yet" over a
     namespace nobody read. ``variables: []`` means observed and empty, never
-    unknown — so any other refusal (``changed_under_read``, or ``no_kernel``
-    losing a race with a disposing kernel) is reported as the retryable state the
-    panel already has, not as emptiness.
+    unknown — so the refusals are mapped one cause at a time rather than folded
+    into one state: ``no_kernel`` losing a race with a disposing kernel is an
+    observed/absent reading, ``changed_under_read`` is the retryable state the
+    panel already has (a half-old list never gets answered as a snapshot), and
+    anything else is a cause this build cannot report as a READING at all —
+    painted ``busy`` it would sit on the "reading…" affordance forever, so it
+    takes the terminal state instead.
     """
     state = answer.get("state")
     if state in ("busy", "unsupported"):
         return {"state": state}
     if not answer.get("ok"):
-        if answer.get("code") == "no_kernel":
+        code = str(answer.get("code") or "")
+        if code == "no_kernel":
             return {**_COLD_VARIABLES, "runtime": "running"}
-        return {"state": "busy"}
+        if code == "changed_under_read":
+            return {"state": "busy"}
+        return {"state": "unsupported"}
     return {
         "state": "observed",
         "runtime": "running",

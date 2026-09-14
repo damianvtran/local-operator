@@ -74,7 +74,8 @@ from local_operator.session.variable_ops import (
     VARIABLE_TYPES,
     coerce_variable_value,
     is_reserved_name,
-    key_refusal,
+    name_is_addressable,
+    name_refusal,
     refusal_for,
 )
 
@@ -435,6 +436,28 @@ _REPR.maxtuple = 100
 _REPR.maxdict = 100
 
 
+def _looser_repr(base: reprlib.Repr) -> reprlib.Repr:
+    """``base`` with every numeric cap one notch looser, for detecting a cut.
+
+    Derived by walking ``base``'s own attributes rather than from a list of
+    caps somebody has to remember: a cap that arrived with a newer ``reprlib``
+    (``maxdeque``, ``maxarray``, …) would otherwise leave the truncation flag
+    blind to exactly the value shape it was added for. Every cap stays A CAP,
+    so one detector render is bounded by cap+1 characters/items/levels and can
+    never expand a huge value.
+    """
+    looser = reprlib.Repr()
+    for attribute in dir(base):
+        limit = getattr(base, attribute, None)
+        if attribute.startswith("max") and isinstance(limit, int) and not isinstance(limit, bool):
+            setattr(looser, attribute, limit + 1)
+    return looser
+
+
+#: The truncation detector for the code-memory walk (see ``_render_value``).
+_REPR_DETECTOR = _looser_repr(_REPR)
+
+
 class _CappedTextIO(io.TextIOBase):
     """Text sink retaining at most ``limit`` chars while reporting all writes
     successful, so user code cannot distinguish it from StringIO."""
@@ -562,7 +585,7 @@ def _scrub_secrets(text: str) -> str:
     )
 
 
-def _safe_repr(value: Any) -> str:
+def _safe_repr(value: Any, *, renderer: reprlib.Repr | None = None) -> str:
     """``repr(value)`` that cannot raise, with retrieved secrets scrubbed.
 
     A user-defined ``__repr__`` is arbitrary code; one that raises would turn
@@ -575,9 +598,14 @@ SecretValue`'s own ``__repr__`` cannot: a secret nested inside a container,
     ``list.__repr__``, which calls ``repr`` on the element — that one is
     covered — but ``"".join`` or an f-string inside a user ``__repr__`` is
     not). Scrubbing the finished string catches every route at one point.
+
+    ``renderer`` exists for the code-memory walk's truncation detector, which
+    renders the SAME value a second time with looser caps and compares: it has
+    to go through this function (rather than calling ``repr`` itself) or the
+    scrub would make an unscrubbed detector render look like a shortening.
     """
     try:
-        rendered = _REPR.repr(value)
+        rendered = (renderer or _REPR).repr(value)
     except BaseException as exc:  # noqa: BLE001 — user code, any failure is data
         rendered = f"<unrepresentable result: {type(exc).__name__}: {exc}>"
     return _scrub_secrets(rendered)
@@ -797,7 +825,13 @@ def _variable_entry(name: str, item: Any, rendered: str, truncated: bool) -> dic
         "key": name,
         "type": type_name,
         "value": rendered,
-        "editable": type_name in VARIABLE_TYPES,
+        # Editable means the panel can offer Edit/Delete AND the write path will
+        # accept the result, so it needs BOTH halves: a type the coercion table
+        # knows, and a name a URL path segment can carry. A cell can create a
+        # key containing ``/`` (``globals()['a/b'] = 1``); it is listed because
+        # hiding the user's own binding would be a lie, but the row must not
+        # offer a control that can only 404.
+        "editable": type_name in VARIABLE_TYPES and name_is_addressable(name),
         "truncated": truncated,
     }
 
@@ -811,10 +845,23 @@ def _render_value(item: Any) -> tuple[str, bool]:
     ``secrets["NAME"]`` is already scrubbed by the time it returns. The extra
     4096-char cap here is the wire contract the parent validates against — a
     longer value is reported as truncated rather than silently shortened.
+
+    ``truncated`` means THE RENDER LOST SOMETHING, which is not the same as
+    "longer than the hard cap": ``reprlib``'s own caps fire at or before it
+    (``maxstring`` is the same 4096, ``maxlist``/``maxdict`` are 100 items), so
+    a 4096-character string the write path ACCEPTED used to read back cut, with
+    an embedded ``...`` and the flag clear — the panel could not tell a whole
+    value from a shortened one, which is the one thing this flag is for. The
+    detector render runs only when the fill value is present at all (ints, most
+    strings and every uncut container never pay for it) and is capped one notch
+    looser, so the comparison is exact rather than a guess about which shapes
+    ``reprlib`` shortens.
     """
     rendered = _safe_repr(item)
     if len(rendered) > MAX_VALUE_CHARS:
         return rendered[:MAX_VALUE_CHARS], True
+    if _REPR.fillvalue in rendered and rendered != _safe_repr(item, renderer=_REPR_DETECTOR):
+        return rendered, True
     return rendered, False
 
 
@@ -900,14 +947,24 @@ def _variables_list(request_id: Any, namespace: dict[str, Any]) -> dict[str, Any
     try:
         for name, item in candidates:
             rendered, entry_truncated = _render_value(item)
-            # The budget is enforced HERE, deterministically, because the control
-            # socket reads at a 1 MiB line limit: an unbounded namespace would
-            # sever the connection instead of answering it.
-            if used + len(rendered) > TOTAL_BUDGET_CHARS:
+            entry = _variable_entry(name, item, rendered, entry_truncated)
+            # Charged in the SERIALIZED form, because that is what the binding
+            # limit measures. The control socket refuses a line over 1 MiB
+            # (``runtime/server.py::_MAX_LINE_BYTES``), and the VALUE's rendered
+            # characters are only part of that line: JSON escaping expands a
+            # value several-fold, and every entry also carries its key, its type
+            # name and the envelope. Charging rendered characters alone left a
+            # 20,000-entry namespace reporting 88,890 of 262,144 used while the
+            # frame serialized to 1,808,952 bytes — the socket refused it, the
+            # viewer saw a 503, and a panel that cannot READ a namespace cannot
+            # delete out of one either, so it had no way back. This budget is a
+            # quarter of the line cap, so the frame cannot approach it.
+            cost = len(json.dumps(entry)) + 1
+            if used + cost > TOTAL_BUDGET_CHARS:
                 truncated = True
                 break
-            used += len(rendered)
-            variables.append(_variable_entry(name, item, rendered, entry_truncated))
+            used += cost
+            variables.append(entry)
     except RuntimeError:
         return _refuse(request_id, "changed_under_read", changed)
     if _namespace_changed(namespace, snapshot):
@@ -923,17 +980,13 @@ def _variables_store(
     request: dict[str, Any],
 ) -> dict[str, Any]:
     """Create or replace one variable, refusing what the route must report."""
-    code = key_refusal(key)
-    if code is not None:
-        # The reserved-name sentence comes from the shared table; only the
-        # unusable-name case (empty, over 128 chars, a control character) gets the
-        # bound spelled out, because the table's generic sentence says nothing
-        # actionable about a name that is simply not usable.
-        return _refuse(
-            request_id,
-            code,
-            "A variable name must be 1-128 characters." if code == "invalid_value" else "",
-        )
+    rejected = name_refusal(key)
+    if rejected is not None:
+        # The sentence comes from the shared table, which is where the parent's
+        # pre-validation reads it too — the worker's own hand-written wording
+        # here was unreachable through both session shapes, and a second copy
+        # that cannot be reached is a second copy nobody corrects.
+        return {"id": request_id, **rejected}
     value = request.get("value", "")
     if not isinstance(value, str):
         return _refuse(request_id, "invalid_value", "A variable value must be text.")
@@ -967,13 +1020,9 @@ def _variables_store(
 
 def _variables_delete(request_id: Any, namespace: dict[str, Any], key: str) -> dict[str, Any]:
     """Remove one variable; a missing key is ``not_found``, never a silent success."""
-    code = key_refusal(key)
-    if code is not None:
-        return _refuse(
-            request_id,
-            code,
-            "A variable name must be 1-128 characters." if code == "invalid_value" else "",
-        )
+    rejected = name_refusal(key)
+    if rejected is not None:
+        return {"id": request_id, **rejected}
     if key not in namespace:
         return _refuse(request_id, "not_found")
     del namespace[key]
