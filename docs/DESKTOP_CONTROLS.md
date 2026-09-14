@@ -145,6 +145,32 @@ rather than automatically spending more tokens.
 - GET `/v1/desktop/analytics?since_ms=...&until_ms=...&session_id=...&days=...`:
   AnalyticsStore aggregate and daily series. The daily series explicitly reports
   all_sessions scope; it is not mislabelled as the optional aggregate session filter.
+  The response also carries `session_names` (id -> human name) and `session_parents`
+  (child id -> parent id), the store's two side attributes that a dataclass dump
+  drops; a client uses them to label a per-session row and to indent a child under
+  its root. They are `{}` when the ledger carries no parent column, and the
+  per-session figures stay OWN-scope — the payload hands over the edges so a client
+  can re-partition, and never rolls a child's spend into its parent's column.
+- GET `/v1/desktop/info`: the `/info` host read — `collect_snapshot(LiveState())`
+  from `local_operator/info/`, run on a worker thread because the session probe
+  blocks (~880 ms on macOS). It takes no parameters: there is one answer per host,
+  which is why the command takes no argument at all. The snapshot is taken with **no
+  session attached**, so its live half (subagent tree, job counts, MCP probes,
+  approval mode) is empty by construction — those are facts about a SESSION and a
+  client renders them from its own canonical frontend snapshot. This payload
+  describes the MACHINE, which is why the panel labels it as the machine the app is
+  connected to. `env.credential_keys` carries credential key NAMES only: never a
+  value, length, prefix or environment value. Gated on `features.diagnostics >= 1`.
+- GET `.../sessions/{id}/report?recent_limit=...`: one exact session's ledger report
+  (`AnalyticsStore.session_report`) read in a single explicit transaction, so every
+  figure comes from one WAL snapshot while the recorder may be committing behind it.
+  `recent_limit` defaults to 12 and the store clamps it to 0..50. The three
+  group-bys — `by_model`, `by_purpose` and `by_purpose_outcome` — are all
+  **arrays** of objects, never maps: two of them are keyed by tuples JSON cannot
+  carry, and the third is converted so one payload does not ship two shapes for
+  one idea. `descendants_aggregate: null` and `tool_calls: null` mean the walk
+  could not run and nothing was measured, which is not the same fact as zero.
+  Gated on `features.diagnostics >= 1`.
 - GET `.../sessions/{id}/failovers`: selected and effective runtime models plus the
   configured **default** chains. Defaults are labelled, not represented as a live
   provider's private cooldown/account routing state.
