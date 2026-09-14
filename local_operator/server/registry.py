@@ -243,14 +243,19 @@ class ServeRecord:
     #: ``update.install_kind()``: ``uv-tool`` / ``pipx`` / ``pip`` / ``editable``
     #: / ``unknown``. Tells the updater both how to update and whether it may.
     install_kind: str
-    #: Is the desktop plane already governed when this record was written, i.e.
-    #: did the desktop app start this daemon and hand it
-    #: ``LOCAL_OPERATOR_DESKTOP_TOKEN``. A daemon started by the app is not the
-    #: same animal as one a person started from a shell, and the difference is
-    #: not otherwise visible from outside the process. It is evaluated once, at
-    #: publish time, from ``server/desktop.py``'s posture — so a daemon that
-    #: LATER accepts a claim keeps reporting the posture it booted with, and a
-    #: reader that needs the live answer asks the daemon, not this file.
+    #: Is the desktop plane governed RIGHT NOW, i.e. did the desktop app start
+    #: this daemon (``LOCAL_OPERATOR_DESKTOP_TOKEN`` in its environment) or has
+    #: an app claimed it since. A daemon started by the app is not the same
+    #: animal as one a person started from a shell, and the difference is not
+    #: otherwise visible from outside the process.
+    #:
+    #: Refreshed by the claim when it is accepted (``routes/desktop_claim.py``
+    #: republishes through the record's own publisher), so it is not a
+    #: boot-time snapshot: a reader that saw ``false`` and finds ``true`` here
+    #: is looking at a daemon whose plane was claimed in between, which is
+    #: also why its ``claim_key`` is spent. Regenerating the record to refresh
+    #: it would RE-MINT that key and destroy the app's proof of ownership, so
+    #: nothing may refresh this field by rebuilding the record.
     desktop: bool
     #: Reserved for the claim handshake: minted by :func:`build_record` at
     #: startup and published in this record, ``""`` when the desktop app itself
@@ -288,7 +293,7 @@ class ServeRecord:
 
 
 def build_record(
-    *, instance_id: str, announced: tuple[str, int], desktop_token_set: bool | None = None
+    *, instance_id: str, announced: tuple[str, int], desktop_governed: bool | None = None
 ) -> ServeRecord:
     """Assemble the record for THIS process, reading identity fresh.
 
@@ -303,10 +308,16 @@ def build_record(
     other importer of this module (a reader, a test of the record shape) should
     not pay for ``importlib.metadata`` and ``urllib``.
 
-    ``desktop_token_set`` is a test seam — the desktop plane's own predicate is
+    ``desktop_governed`` is a test seam for the record's ``desktop`` field. The
+    desktop plane's own predicate is
     :func:`~local_operator.server.desktop.desktop_posture`, which a test cannot
     pin without mutating the process's environment for every other test in the
-    worker.
+    worker. The seam is named for the POSTURE rather than for the variable that
+    usually produces it, because the field it pins is true of two different
+    daemons: one the app started, and one an app claimed. Passing ``False`` for
+    a governed plane therefore publishes a record whose ``desktop`` and
+    ``claim_key`` contradict each other — a state a test may construct, never
+    one production can be in.
 
     **The claim key is minted HERE, and only when the plane is nobody else's**
     (``desktop_posture().enabled`` false). Two reasons for the placement: the
@@ -330,7 +341,7 @@ def build_record(
 
     host, port = announced
     build = installed_build()
-    governed = desktop_posture().enabled if desktop_token_set is None else desktop_token_set
+    governed = desktop_posture().enabled if desktop_governed is None else desktop_governed
     return ServeRecord(
         pid=os.getpid(),
         host=_dialable_host(host),

@@ -41,12 +41,31 @@ by any page the user visited. Accepting a claim puts this process into the same
 managed posture the app imposes when it starts the backend itself, so
 ``/v1/agents``, ``/v1/jobs``, ``/v1/schedules``, ``/v1/config``,
 ``/v1/credentials`` and ``/v1/models`` become bearer-gated for every other
-local caller, and the wildcard CORS echo is dropped for foreign origins once
-the claim has installed an allowlist (a claim that presented no Origin — a
-native main-process caller — leaves the historical wildcard-echo behaviour on
-NON-control paths, which the gated families above no longer include). The
-accepted cost is named in the design (rollout risk 1): a local ``curl`` script
-against a claimed daemon starts seeing 401.
+local caller, and the CORS echo is scoped to the POSTURE rather than to a
+configured allowlist: on a governed daemon a browser origin that is not
+admitted gets no grant at all, and an EMPTY allowlist means "no browser origin
+is admitted" rather than "tightening is off". The two are not the same
+statement, and reading the empty allowlist as the latter left the drive-by
+surface open on precisely the native (Origin-less) claim this route exists
+for. The accepted cost is named in the design (rollout risk 1): a local
+``curl`` script against a claimed daemon starts seeing 401.
+
+**Who may claim — the key, and never from a page.** The key is the whole
+credential, and a claim carrying ``Sec-Fetch-Site`` is refused EVEN WITH the
+correct key. That header is attached by the browser's fetch/XHR stack and sits
+on the forbidden-header list, so page script can neither forge nor remove it:
+its presence proves a browser origin. Defence in depth rather than a capability
+boundary — the key is already 256 bits and unreadable from a page — but a
+leaked key must not be spendable by page script, since the request that installs
+an Origin puts the spender on the allowlist. The intended caller is the app's
+main process, which sends none.
+
+A native caller may still send an ``Origin`` (that is the origin it asks to
+admit), and may additionally DECLARE the origins its renderer needs via the
+claim route's optional ``origins`` body field (:func:`parse_claim_origins`).
+That field exists because the renderer of a packaged app loads from ``file://``,
+whose origin is the literal ``"null"`` this module refuses, so a claim would
+otherwise have no way to admit the dev-server origin the UI is written against.
 """
 
 from __future__ import annotations
@@ -54,7 +73,8 @@ from __future__ import annotations
 import os
 import secrets
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 
@@ -74,7 +94,12 @@ class DesktopPosture(NamedTuple):
     ``token`` is the bearer that opens the plane (the env capability when the
     app started this daemon, the accepted claim key otherwise) and ``""`` when
     the plane is closed. ``origins`` is the Origin allowlist in force, which is
-    the environment's list UNIONED with a claimed caller's own origin.
+    the environment's list UNIONED with the origins the accepted claim
+    installed (its own ``Origin`` header and whatever it declared).
+
+    An allowlist of ``frozenset()`` on a plane whose ``enabled`` is true means
+    "no browser origin is admitted", never "no allowlist is in force" — the
+    distinction the CORS suppressor is scoped on.
 
     A pair rather than two functions so that a caller cannot read the bearer
     and the allowlist from two different moments — the boundary middleware and
@@ -92,7 +117,7 @@ class DesktopPosture(NamedTuple):
 
 @dataclass(frozen=True)
 class _Claim:
-    """The one accepted claim: the key it was proved with, and its Origin."""
+    """The one accepted claim: the key it was proved with, and its origins."""
 
     key: str
     origins: frozenset[str]
@@ -209,18 +234,21 @@ def _claim_origin(request: Request) -> str | None:
 
     What is still refused, and each for its own reason:
 
+    * a request carrying ``Sec-Fetch-Site`` — a page cannot claim at all, with
+      or without an Origin and with or without the key (see the module
+      docstring). Checked FIRST and unconditionally: it is the one signal page
+      script cannot forge, so it must not be reachable only down the
+      "Origin absent" branch, which is how a page-shaped claim was admitted;
     * ``"null"`` — an opaque origin names EVERY ``srcdoc`` document and ``data:``
       URL rather than one application, so installing it would admit strictly
       more than the app that asked;
-    * a browser-originated request with no origin at all — ``Sec-Fetch-Site``
-      proves a page and there is nothing to install;
     * an origin the operator's own environment list excludes — that list is a
       deliberate narrowing by whoever started the daemon.
     """
+    if not _is_non_browser_caller(request):
+        raise HTTPException(403, "This origin cannot access desktop controls.")
     origin = request.headers.get("origin")
     if origin is None:
-        if not _is_non_browser_caller(request):
-            raise HTTPException(403, "This origin cannot access desktop controls.")
         return None
     allowed = desktop_posture().origins
     if origin == "null" or (allowed and origin not in allowed):
@@ -228,7 +256,64 @@ def _claim_origin(request: Request) -> str | None:
     return origin
 
 
-def accept_claim(request: Request, *, published_key: str) -> None:
+def parse_claim_origins(declared: Sequence[object]) -> frozenset[str]:
+    """The origins a claim declares for its renderer, or the refusal that stops it.
+
+    The claim body's optional ``origins`` list is how an app admits the origin
+    its renderer is served from — the packaged app's ``file://`` origin is the
+    literal ``"null"`` this module refuses, so without this the only way in
+    would be the caller's own ``Origin`` header, which a native caller does not
+    send. The caller holds the 256-bit record key, so it is already trusted to
+    manage this plane; the list is validated as INPUT, not authorised as a
+    principal.
+
+    Each entry must be a plain origin: an ``http``/``https`` scheme, a host,
+    and nothing else. Refused, each with its own sentence, because the caller
+    here is the one legitimate caller — a vague "invalid origin" would only
+    cost it a debugging round-trip while telling an unauthenticated prober
+    nothing it could not already guess:
+
+    * a non-string entry;
+    * ``"null"`` — the opaque origin, refused for the reason above;
+    * ``"*"`` — a wildcard would reopen the whole drive-by-page surface this
+      claim exists to close, since it makes every origin admitted;
+    * anything ``urlsplit`` cannot read as an absolute ``http(s)`` origin
+      (including a bare hostname, ``file://``, or an empty string);
+    * anything carrying a path, query or fragment — an Origin header never has
+      one, and accepting it would install a value no browser will ever send,
+      so the app would appear to be allowlisted while matching nothing;
+    * an origin the operator's ``ORIGINS_ENV`` list excludes, refused with the
+      same ``403`` its header-borne twin gets: that list is the operator's own
+      narrowing, and a body field must not be a way around it.
+    """
+    allowed = desktop_posture().origins
+    parsed: set[str] = set()
+    for item in declared:
+        if not isinstance(item, str):
+            raise HTTPException(400, "Claim origins must be strings.")
+        if item == "null":
+            raise HTTPException(400, "An opaque ('null') origin cannot be claimed.")
+        if item == "*":
+            raise HTTPException(400, "A wildcard origin cannot be claimed.")
+        parts = urlsplit(item)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise HTTPException(400, "Claim origins must be absolute http(s) origins.")
+        if parts.path not in {"", "/"} or parts.query or parts.fragment:
+            raise HTTPException(
+                400, "Claim origins must be plain origins, without a path, query or fragment."
+            )
+        if allowed and item not in allowed:
+            raise HTTPException(
+                403,
+                "A claim cannot install an origin outside the configured desktop origins.",
+            )
+        parsed.add(item)
+    return frozenset(parsed)
+
+
+def accept_claim(
+    request: Request, *, published_key: str, declared_origins: Sequence[object] = ()
+) -> None:
     """Accept THE single claim on this process's desktop plane, or raise.
 
     Called only by ``POST /v1/desktop/claim``, which is deliberately NOT behind
@@ -236,18 +321,28 @@ def accept_claim(request: Request, *, published_key: str) -> None:
     and a claim route gated on an unclaimed plane is a deadlock the design
     calls out by name. The Origin rule it applies is therefore its own
     (:func:`_claim_origin`), stricter about what may be INSTALLED than
-    :func:`require_desktop` is about what may be reached, and identical about
-    the unforgeable ``Sec-Fetch-Site`` signal.
+    :func:`require_desktop` is about what may be reached. It is stricter about
+    the unforgeable ``Sec-Fetch-Site`` signal too: ``require_desktop`` refuses a
+    browser-shaped request that withholds its Origin, while a claim refuses any
+    browser-shaped request at all, since the intended caller is main.
 
     The key is compared with :func:`secrets.compare_digest` against the value
     published in this daemon's record, exactly as a session's ``control_key``
     is checked. What the caller may see on refusal is a status and nothing
     else: no partial match, no length, no echo of the submitted value.
 
+    ``declared_origins`` is the claim body's optional list of extra origins to
+    admit (see :func:`parse_claim_origins`); it is validated here rather than in
+    the route so that the one function deciding what may be INSTALLED decides it
+    for every source of an origin.
+
     Refusals, in the order they are decided:
 
     * ``403`` — an origin that cannot be installed at all (see
-      :func:`_claim_origin`).
+      :func:`_claim_origin`), including one the operator's configured list
+      excludes.
+    * ``400`` — a malformed declaration in the claim body (see
+      :func:`parse_claim_origins`).
     * ``409`` — the plane is ALREADY governed: by the environment (the app
       started this daemon, so there is nothing to claim) or by an accepted
       claim (the latch is one-way; see the module docstring). Deliberately not
@@ -261,6 +356,7 @@ def accept_claim(request: Request, *, published_key: str) -> None:
     """
     global _CLAIMED
     origin = _claim_origin(request)
+    declared = parse_claim_origins(declared_origins)
     if desktop_posture().enabled:
         raise HTTPException(409, "This desktop plane is already controlled.")
     if not published_key:
@@ -270,11 +366,9 @@ def accept_claim(request: Request, *, published_key: str) -> None:
     if not secrets.compare_digest(supplied.encode("utf-8"), expected):
         raise HTTPException(401, "Desktop claim authorization is required.")
     # The caller's own Origin joins the allowlist — the literal "null" and an
-    # origin off a configured list never get this far. A native caller
-    # (Electron main) sends none; it is then allowlisted by the
-    # ``Sec-Fetch-Site`` rule above, not by an Origin it does not have, and
-    # every later request it makes is admitted by the bearer.
-    _CLAIMED = _Claim(
-        key=published_key,
-        origins=frozenset() if origin is None else frozenset({origin}),
-    )
+    # origin off a configured list never get this far — as do whatever origins
+    # the body declared for its renderer. A native caller (Electron main) sends
+    # no Origin; the ``Sec-Fetch-Site`` rule above admits it, and every later
+    # request it makes is admitted by the bearer.
+    installed = frozenset() if origin is None else frozenset({origin})
+    _CLAIMED = _Claim(key=published_key, origins=installed | declared)

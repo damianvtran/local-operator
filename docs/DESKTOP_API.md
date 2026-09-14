@@ -23,20 +23,86 @@ variables, renderer storage, or URLs. Main's typed IPC adapter supplies
 main-frame sender and rejects redirects. Browser development uses a server-side
 proxy with the isolated token; client JavaScript must not receive it.
 
-New routes return 503 if the backend was not started with a token, 401 for a
-missing/wrong bearer, and 403 for an unapproved Origin. No-Origin requests still
-need the token. Origins are rejected unless they exactly match the comma-separated
-`LOCAL_OPERATOR_DESKTOP_ORIGINS` environment setting. `null` is never allowed.
+The bearer has **two sources**, and they exist for two different daemons:
 
-In explicit desktop-token mode the legacy `/v1/config`,
+1. **The environment token** above, for a backend main started itself.
+2. **The claim handshake**, for a daemon main did *not* start — the one the
+   user's TUI, a terminal or launchd started, which has no capability in its
+   environment. Such a daemon mints `claim_key = secrets.token_urlsafe(32)` at
+   startup and publishes it in its **discovery record** at
+   `<config>/run/serve/<pid>.json`, `0600` inside a `0700` directory — the same
+   boundary that already protects a session's `control_key`. Main reads the
+   record, finds the daemon, confirms `instance_id`, and presents the key once
+   to `POST /v1/desktop/claim` as `Authorization: Bearer <claim_key>`. The key
+   is never returned by a route, never logged, and never written anywhere but
+   the record. A daemon the app started publishes no key at all (the
+   environment already governs it, and its claim is refused with `409`).
+
+`POST /v1/desktop/claim` is the **only** desktop route not behind the bearer,
+because it is the door that bearer stands in front of — gating it would mean no
+app could ever attach to a discovered daemon. It answers `200` with
+`{"claimed": true, "instance_id": …}` once; `409` if the plane is already
+governed (the latch is one-way — one app owns a daemon for its lifetime); `503`
+if the daemon published no record and therefore no key; `401` for a missing or
+wrong key.
+
+Its body is optional and carries at most `origins`: a list of the origins the
+caller's **renderer** is served from, which the claim adds to the allowlist.
+Each entry must be a plain `http(s)` origin with no path, query or fragment;
+`null`, `*`, a non-string, an unparseable value, or an origin the operator's own
+`LOCAL_OPERATOR_DESKTOP_ORIGINS` list excludes is refused, each with its own
+error detail. The field exists because a packaged renderer loads from `file://`,
+whose origin is the literal `null`, which is never admittable — so without a
+declaration the app could not admit the dev-server origin it is developed
+against. A native caller may also simply send an `Origin` header.
+
+**A browser can never claim**, even holding the key: a claim request carrying
+`Sec-Fetch-Site` is refused. That header is attached by the browser's own fetch
+stack and is on the forbidden-header list, so page script cannot forge or remove
+it, while the intended caller (main) sends none. Defence in depth rather than a
+capability boundary — the request that installs an Origin puts the *spender* on
+the allowlist, so a leaked key must not be spendable by page script.
+
+New routes return 503 if the backend was not started with a token **and no claim
+has been accepted**, 401 for a missing/wrong bearer, and 403 for an unapproved
+Origin. No-Origin requests still need the token. Origins are rejected unless
+they exactly match the allowlist in force: the comma-separated
+`LOCAL_OPERATOR_DESKTOP_ORIGINS` environment setting, plus whatever the accepted
+claim installed. `null` is never allowed.
+
+**A daemon is `503` or governed; there is no third state.** Accepting a claim
+puts the daemon into the same posture the app imposes when it starts the backend
+itself — `/v1/capabilities` flips `desktop_available` to `true`, the legacy
+control surface (`/v1/config`, `/v1/credentials`, `/v1/agents`, `/v1/jobs`,
+`/v1/schedules`, `/v1/models`) becomes bearer-gated for every other local
+caller, and an `Origin` that is not on the allowlist loses its CORS grant
+altogether. That last part is scoped to the *posture*, not to a configured list:
+a governed daemon with an empty allowlist admits **no** browser origin, exactly
+as the bearer check already refuses every Origin-bearing request in that state.
+Only a plane nobody governs keeps the historical wildcard CORS, which is what
+keeps CLI clients and existing embedders working. The cost is deliberate and
+named: an operator's own `curl` script against a claimed daemon starts seeing
+`401`, and the daemon logs an audit line naming the instance and the origin the
+claim installed so that is diagnosable.
+
+In managed mode — a `LOCAL_OPERATOR_DESKTOP_TOKEN` in the environment **or** an
+accepted claim, which are one posture — the legacy `/v1/config`,
 `/v1/config/system-prompt`, and `/v1/credentials` reads/writes also require that
 bearer. Otherwise they would bypass the new central-control boundary. Unmanaged
 legacy servers retain their old behavior; this is not a redesign of every legacy
 route's security. Central Radient credential consumers (`/v1/models`, speech,
 transcription and agent ZIP upload) also require this boundary in managed mode;
 see DESKTOP_CONTROLS.md for their compatibility resolver and media-relay obligations.
-Legacy chat and SSE remain unchanged. Sensitive responses are
-`Cache-Control: no-store`; rejected input is not echoed by validation responses.
+Sensitive responses are `Cache-Control: no-store`; rejected input is not echoed
+by validation responses.
+
+Two surfaces are deliberately **outside both gate families**, so no bearer and no
+claim gates them: `/v1/chat`, `/v1/sse`, `/v1/ws`, `/v1/static`, and the
+`/v1/models/...` sub-paths (the gate matches the exact `/v1/models` template).
+This predates the claim handshake and is unchanged by it; a claim still removes
+their CORS grant, so a page can no longer *read* them cross-origin, but an
+unauthenticated local caller still can. Widening the gate to cover them is a
+separate, larger decision and is recorded rather than made here.
 
 ## Providers and accounts
 
