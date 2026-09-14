@@ -626,6 +626,11 @@ class DesktopSessionBridge:
         ):
             return
         try:
+            # The payload builder calls the PUBLIC composer
+            # (`notifications.compose`), which is the seam T-B13 patches, so a
+            # composer that raises is caught here and costs the BANNER — never
+            # the attention frame published above, which is the sync this bridge
+            # exists for.
             from local_operator.notifications import notification_payload
 
             # The LIVE name wins over the sidecar: a rename reaches frontend
