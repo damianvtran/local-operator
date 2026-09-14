@@ -878,6 +878,116 @@ def test_an_unprovable_rotation_keeps_the_replacement() -> None:
         assert list(list(prior) + list(tail))[-TRAJECTORY_CAP:] == candidate, name
 
 
+def test_a_long_running_child_costs_one_row_per_frame_for_thousands_of_events() -> None:
+    """The horizon this exists for: a child past the cap, for a long time.
+
+    A cap rotation is not a transient — a working child sits at the cap for the
+    whole of its run, so the per-frame cost has to stay the appended row rather
+    than the window, for every frame and not just the first few.
+    """
+    wire = _CappedWire(children=3)
+    follower = _follower(wire)
+    follower.apply_update(wire.rotate())
+    emitted = 0
+    for _ in range(20):
+        update = wire.rotate(50)
+        assert update.job_trajectory_replacements == []
+        assert sum(len(rows) for rows in update.job_trajectory_appends.values()) == 150
+        emitted += sum(len(rows) for rows in update.job_trajectory_appends.values())
+        follower.apply_update(update)
+        assert follower.state == wire.owner.state
+
+    assert emitted == 3 * 1000, emitted
+    assert follower._state.jobs[0].trajectory == wire.owner.state.jobs[0].trajectory
+
+
+def test_rows_of_equal_value_still_prove_an_overlap_by_position() -> None:
+    """Equal ROW VALUES must not let the classifier pick a different offset.
+
+    A child can emit the same event twice, so rows can agree field for field. When
+    they do, a comparison alone cannot choose between offsets — every candidate
+    compares equal — so the stamp is what pins the offset and the reconstruction is
+    then exact. The property this pins is that the returned tail starts at the
+    offset the stamps name: a classifier free to slide to a larger, equally-equal
+    offset would still "pass" a value comparison and hand the receiver a window
+    that is right by luck rather than by proof.
+    """
+    old = [_stamped_row(index, index, text="identical") for index in range(TRAJECTORY_CAP)]
+    # A normal one-row rotation in which every value is interchangeable.
+    new = [_stamped_row(index, index, text="identical") for index in range(1, TRAJECTORY_CAP + 1)]
+
+    tail = _capped_tail(old, new)
+
+    assert tail is not None
+    assert len(tail) == 1, "the classifier slid to a larger, equally-equal overlap"
+    assert tail == new[TRAJECTORY_CAP - 1 :]
+    assert list(list(old) + list(tail))[-TRAJECTORY_CAP:] == new
+
+
+def test_a_job_that_leaves_the_roster_takes_its_window_with_it() -> None:
+    """A returning job must not be handed a window the memo kept for it.
+
+    The memo is keyed by job id, and a job id can come back — a re-added child,
+    a re-used slot. `retain` drops entries for jobs no longer on the roster, so a
+    returning job pays a fresh freeze instead of inheriting rows from a window
+    that was never its own.
+    """
+    wire = _CappedWire(children=2)
+    follower = _follower(wire)
+    for _ in range(3):
+        follower.apply_update(wire.rotate())
+    before = follower._state.jobs[0].trajectory
+
+    # The job leaves the roster, then a different job arrives with the same id.
+    wire.jobs = [wire.jobs[1]]
+    follower.apply_update(wire._publish(list(wire.jobs)))
+    assert "child-0" not in {job.id for job in follower._state.jobs}
+
+    returned = [_stamped_row(40_000 + index, 5_000 + index) for index in range(TRAJECTORY_CAP)]
+    wire.jobs = [
+        JobState(
+            id="child-0",
+            type="task",
+            label="child-0",
+            status="running",
+            trajectory=returned,
+            trajectory_length=len(returned),
+        ),
+        *wire.jobs,
+    ]
+    follower.apply_update(wire._publish(list(wire.jobs)))
+
+    assert follower._state.jobs[0].trajectory == wire.owner.state.jobs[0].trajectory
+    assert (
+        follower._state.jobs[0].trajectory != before
+    ), "a returning job was handed the window of the job that used to hold its id"
+
+
+def test_a_window_cleared_to_empty_is_a_replacement_not_a_rotation() -> None:
+    """An emptied window has no suffix, and the receiver must be told so."""
+    wire = _CappedWire(children=1)
+    follower = _follower(wire)
+    follower.apply_update(wire.rotate())
+
+    wire.jobs = [wire.jobs[0].model_copy(update={"trajectory": [], "trajectory_length": 0})]
+    update = wire._publish(list(wire.jobs))
+    follower.apply_update(update)
+
+    assert update.job_trajectory_replacements == ["child-0"]
+    assert follower._state.jobs[0].trajectory == ()
+    assert follower._state.jobs[0].trajectory_length == 0
+
+
+def test_a_window_shortened_to_the_cap_minus_one_is_not_rebuilt_by_append() -> None:
+    """Below-cap shortening must not be sold as a rotation, even as a suffix."""
+    old = [_stamped_row(index, index) for index in range(TRAJECTORY_CAP)]
+    shortened = old[1:]
+    assert len(shortened) == TRAJECTORY_CAP - 1
+
+    assert _capped_tail(old, shortened) is None
+    assert _capped_tail(old, [*shortened, _stamped_row(30_000, TRAJECTORY_CAP)]) is not None
+
+
 def test_a_full_window_never_loses_a_row_to_the_classifier() -> None:
     """A replacement and a proven tail must land on the same canonical state.
 
