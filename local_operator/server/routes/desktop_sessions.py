@@ -655,7 +655,14 @@ async def preview_session(body: DraftPreview, request: Request):
 
     The account-metadata step is SKIPPED, unlike a cold session: a draft has no
     context reading to divide, and a synthetic stickiness key must not move a
-    real account's stickiness (the window is then an inert spec default).
+    real account's stickiness. So the window this pane publishes is the MODEL's
+    own (``build_model_spec``'s), carried with
+    ``context_metadata_resolved: False`` — it is NOT a placeholder, and it is NOT
+    a promise about the first turn: a cold open may apply plan-scoped account
+    metadata and a window that metadata scopes, which is exactly the read this op
+    must not perform. The LADDER and the LEVEL do agree with the first turn by
+    construction (see ``session.cold_model.resolve_birth_effort``); the effective
+    window cannot, and nothing here claims it does.
 
     ``target`` is validated exactly as ``create`` validates it, so an
     unresolvable profile fails here rather than becoming a session that cannot
@@ -697,13 +704,17 @@ async def preview_session(body: DraftPreview, request: Request):
             cwd=body.cwd,
             # The chosen selection, when there is one, is synthesised exactly as
             # the first cold frame of the session it describes will be — same
-            # resolver, same metadata — so the pane's identity AND its spec
-            # (context window, effort ladder, and the level the first turn runs at)
-            # are the ones the first turn gets rather than the configured
-            # default's. With NO selection the same synthesis answers the
-            # CONFIGURED pair, and ``session.cold_model`` resolves that through the
-            # model's own metadata too, so the ladder and the level are there for
-            # an unpicked draft as well (review round 2's effort-reading defect).
+            # resolver, same metadata — so the pane's identity, its effort LADDER
+            # and the LEVEL the first turn runs at are the ones the first turn
+            # gets rather than the configured default's. The WINDOW is the one
+            # reading that cannot agree and is not claimed to: the account-metadata
+            # step above is skipped, so this pane publishes the MODEL's window with
+            # ``context_metadata_resolved: False``, while a cold open may apply a
+            # plan-scoped account window a draft must not read. With NO selection
+            # the same synthesis answers the CONFIGURED pair, and
+            # ``session.cold_model`` resolves that through the model's own metadata
+            # too, so the ladder and the level are there for an unpicked draft as
+            # well (review round 2's effort-reading defect).
             # Still session-less and side-effect free: this is an INPUT, and the
             # state below writes nothing (see the docstring above).
             birth_model=birth_model,
