@@ -11961,7 +11961,26 @@ class Session:
         the index is rebuilt on the next open regardless, and a supervisor
         that failed to install costs nothing that was not already lost (the
         live session still fires its own wakes).
+
+        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` queues the
+        one-shot that replaces a schedule its fire retired, and the caller that
+        queues it IS the scheduler's deliver hook — so the persist the pump
+        runs immediately after that delivery is this method, and merging the
+        queue here is what makes the occurrence durable in the same breath as
+        the fire (review round 2, MINOR 1). Queuing it for the exit left it in
+        memory for as long as the drain's wait, which is deliberately unbounded
+        — the work it is waiting for is this change's own premise — so a socket
+        ``stop``, a SIGTERM, a dispose or a crash in that window lost the
+        occurrence with no schedule left to retry it (the pump had already
+        persisted the retire). The exit write stays as the retry: an id already
+        in the queue is dropped from the list being written, so merging is
+        idempotent, and until the queue is cleared nothing that comes through
+        here can drop it.
         """
+        pending = list(getattr(self, "_wake_rearms", []) or [])
+        if pending:
+            superseded = {schedule.id for schedule in pending}
+            schedules = [*[s for s in schedules if s.id not in superseded], *pending]
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},

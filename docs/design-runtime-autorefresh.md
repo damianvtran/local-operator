@@ -544,10 +544,14 @@ Two bounds on the refusal, plus a latch that does not wait for idle:
   and the supervisor starts a runtime for it. A fire that left a NEXT occurrence
   needs none of that — that schedule is still in the index, so the supervisor
   engages on its own when the occurrence comes due, and the spooled row runs
-  then. The re-arm is written by `Session.hand_wakes_to_successor` at the EXIT
-  rather than by the drain's deliver hook, because that hook runs inside
-  `WakeScheduler.pump`'s write lock: the write would deadlock against it, and
-  the persist that follows would overwrite what it wrote.
+  then. The re-arm is queued by that hook and written by the persist the scheduler
+  runs immediately AFTER the fire — the queue is merged into every list
+  `_persist_wake_schedules` writes, so the occurrence is durable at the fire
+  rather than at an exit that may never come (a socket `stop`, a SIGTERM, a
+  dispose, a crash: the drain's wait is unbounded by design). The hook itself
+  cannot write: it runs inside `WakeScheduler.pump`'s write lock, where a
+  schedule write would deadlock and the persist that follows would overwrite
+  it, and `Session.hand_wakes_to_successor` at the exit stays as the retry.
 - **A files-gone probe** on the same 5 s cadence: the package root and a sample
   of the loaded module paths, keyed on EXISTENCE and the install stamp and
   NEVER on mtime — an editable worktree legitimately looks stale by mtime, and
@@ -559,7 +563,15 @@ Two bounds on the refusal, plus a latch that does not wait for idle:
 
 Invariants held by construction: no new work after the commit; nothing in
 flight aborted by this path; a message arriving mid-drain deferred rather than
-dropped; the announcement preceding the refusal. Exercised against a real
+dropped; the announcement preceding the refusal. The predicate's warm-window
+term lives in `buildwatch.py` with the build-watch timings, and not in the
+runtime module that used to define it, because a runtime executes that module as
+`__main__`: an import of it is answered from DISK, which is exactly the moment
+the tree can be gone and the drain needs the predicate most (QA round 1, Q-1 —
+the drain latched and could never complete). Where the probe is ARMED has its
+own end-to-end stage in `tests/e2e/test_runtime_refresh_e2e.py`, which builds a
+non-editable install of the tree and removes it under a running turn; without it
+that arm had no coverage at all, which is how Q-1 shipped. Exercised against a real
 `process.py` in `tests/e2e/test_runtime_refresh_e2e.py` (drain, refused prompt,
 spooled peer message, successor on the new build), with the negative control —
 an editable install with a loaded module file DELETED — keeping the runtime

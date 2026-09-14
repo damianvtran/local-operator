@@ -17,6 +17,7 @@ covers the boot).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -90,6 +91,88 @@ def _host(tmp_path: Path, *, busy: bool = True) -> tuple[DrainHost, FakeSession]
     session = FakeSession(tmp_path / "sessions" / "s1")
     session.transcript.directory.mkdir(parents=True, exist_ok=True)
     return DrainHost(session, busy=busy), session
+
+
+# -- the residency predicate's warm-window term (QA round 1, Q-1) ----------------
+#
+# Only these tests use the REAL ``may_refresh``. Everything else in this file
+# stubs the predicate wholesale, because there the LATCH is what is under test;
+# Q-1 lives inside the predicate, where the wedge was.
+
+
+class PredicateHost:
+    """The production ``may_refresh`` over stubbed terms."""
+
+    may_refresh = ServingSessionHandle.may_refresh
+
+    def __init__(self, *, busy: bool = False, wake_due_ms: int | None = None) -> None:
+        self._busy = busy
+        self._wake_due_ms = wake_due_ms
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def next_wake_due_at(self) -> int | None:
+        return self._wake_due_ms
+
+
+def test_may_refresh_names_a_wake_inside_the_warm_window() -> None:
+    """The term, through the shared home, on a handle whose accessor answers."""
+    now_ms = int(time.time() * 1000)
+    assert (
+        PredicateHost(wake_due_ms=now_ms + 1_000).may_refresh() == "wake due within the warm window"
+    )
+    assert PredicateHost(wake_due_ms=now_ms + 3_600_000).may_refresh() == ""
+    assert PredicateHost(busy=True, wake_due_ms=now_ms).may_refresh() == "busy", "busy wins"
+
+
+def test_may_refresh_fails_open_when_the_warm_window_probe_breaks(monkeypatch) -> None:
+    """Q-1: a predicate that cannot be evaluated must NEVER pin the runtime.
+
+    The blocker QA found was this exact shape: the term was reached through a
+    function-local import of ``...runtime.process``, which a runtime executing
+    that module as ``__main__`` answers from DISK — so at the one moment the
+    predicate mattered most (the loaded tree had been replaced) it raised
+    ``ImportError``. ``process._idle_for_refresh`` reads a failing predicate as
+    "not idle" by design, so the drain never saw an idle instant, never reached
+    ``begin_retire``/``_clean_exit``, and the session was refused forever while
+    holding the lease — no successor could boot. The helper now lives in the
+    stdlib-only module both sides import, and the consult is guarded besides:
+    a raising probe reads as "no wake", the same answer the helper gives its
+    own broken accessor.
+    """
+    from local_operator.session.runtime import serving as serving_mod
+
+    def explode(_handle: Any, **_kwargs: Any) -> bool:
+        raise ImportError("cannot import name 'process' from 'local_operator.session.runtime'")
+
+    monkeypatch.setattr(serving_mod, "_wake_within_window", explode)
+    assert PredicateHost().may_refresh() == "", "a broken probe must not pin the runtime"
+
+
+def test_the_warm_window_term_is_not_reached_through_the_runtime_module() -> None:
+    """Q-1's pin on the construct, not just the behaviour.
+
+    The behavioural pin is the ARMED e2e stage (``test_runtime_refresh_e2e``),
+    which is the only place the loaded tree can actually be gone — the repo's
+    own interpreter is an editable venv, where the probe is disarmed, which is
+    why the wedge shipped. This one is cheap insurance that the exact construct
+    that caused it cannot come back: an import of the runtime module from
+    inside the predicate. Read off the SOURCE, because a call cannot tell the
+    two homes apart while the tree is intact — both return the same bool.
+    """
+    import inspect
+
+    from local_operator import buildwatch
+    from local_operator.session.runtime import process, serving
+
+    assert serving._wake_within_window is buildwatch.wake_within_window
+    assert process._wake_within_window is buildwatch.wake_within_window
+    source = inspect.getsource(ServingSessionHandle.may_refresh)
+    assert "session.runtime.process import" not in source, "the wedge's construct is back"
+    assert "runtime.process" not in inspect.getsource(buildwatch.wake_within_window).replace(
+        "runtime", ""
+    ), "the shared home must not reach back into the runtime"
 
 
 # -- the latch ------------------------------------------------------------------
@@ -290,6 +373,91 @@ async def test_a_wake_that_cannot_be_re_armed_is_still_spooled(tmp_path: Path) -
     rows = peek_inbox(tmp_path)
     assert len(rows) == 1 and rows[0].wake is True
     assert host._wake_rearms == [], "nothing to hand over, and nothing claimed"
+
+
+class PersistHost:
+    """The real ``Session._persist_wake_schedules`` over a recording transcript.
+
+    The one piece of the session that review round 2's MINOR 1 turns on: the
+    queue a fire leaves behind has to reach disk through the persist the
+    scheduler runs right after that fire, not through an exit that may never
+    come.
+    """
+
+    _persist_wake_schedules = Session._persist_wake_schedules
+    retire_wakes_to_inbox = Session.retire_wakes_to_inbox
+    _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _queue_wake_rearm = Session._queue_wake_rearm
+
+    def __init__(self) -> None:
+        self._wake_rearms: list[Any] = []
+        self._wake_fired_since_persist = True  # the delivery that just happened
+        self._session_id = "s1"
+        self._cwd = "/tmp"
+        self.appended: list[list[Any]] = []
+        self.indexed: list[list[Any]] = []
+        self.supervisors = 0
+        self._transcript = SimpleNamespace(append_custom=self._record_append)
+
+    async def _record_append(self, _kind: str, payload: dict[str, Any]) -> None:
+        self.appended.append(payload["schedules"])
+
+    def _write_wake_index_entry(self, schedules: list[Any], **_kwargs: Any) -> None:
+        self.indexed.append(list(schedules))
+
+    def _ensure_wake_supervisor(self) -> None:
+        self.supervisors += 1
+
+    def _missed_delivery_note(self, _due: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_final_fires_re_arm_is_durable_without_the_exit() -> None:
+    """MINOR 1 (review round 2): durable at FIRE time, not at the exit.
+
+    The queue used to be written only by ``hand_wakes_to_successor``, so from
+    the fire to an exit that is deliberately unbounded the occurrence existed
+    only in memory: the socket ``stop`` op, a SIGTERM, a dispose or a crash in
+    that window lost it, and the pump had already persisted the retire, so
+    nothing retried it. The scheduler persists immediately after the delivery
+    and that persist IS this method, so the queue joins whatever list it is
+    handed. The exit write stays as the retry.
+    """
+    host = PersistHost()
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_final_due())
+    assert host._wake_rearms, "the fire queued a re-arm"
+
+    # The pump's own persist, right after that delivery: the list it hands over
+    # is the post-retire one, WITHOUT the re-arm in it.
+    await host._persist_wake_schedules([])
+
+    assert len(host.appended) == 1
+    # The transcript payload is the DUMPED form — that is what becomes durable.
+    written = host.appended[0]
+    assert [row["id"] for row in written] == ["w1"], "the re-arm rode the fire's persist"
+    assert written[0]["every_ms"] is None and written[0]["limit"] is None, "and as the one-shot"
+    assert [schedule.id for schedule in host.indexed[0]] == [
+        "w1"
+    ], "the index too, so the supervisor can engage"
+    assert host.supervisors == 1, "which is the install-on-demand hook the index write feeds"
+
+
+@pytest.mark.asyncio
+async def test_the_durable_re_arm_supersedes_a_live_copy_of_the_same_id(tmp_path: Path) -> None:
+    """One row per id on disk: the re-armed one-shot replaces the live schedule."""
+    host = PersistHost()
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_final_due())
+    live = WakeSchedule(id="w1", message="check the deploy", next_due_at=9, every_ms=3_600_000)
+    other = WakeSchedule(id="w2", message="hourly", next_due_at=9, every_ms=3_600_000)
+
+    await host._persist_wake_schedules([live, other])
+
+    written = host.appended[0]
+    assert [row["id"] for row in written] == ["w2", "w1"]
+    assert written[1]["every_ms"] is None, "the surviving w1 is the re-arm, not the live copy"
 
 
 @pytest.mark.asyncio

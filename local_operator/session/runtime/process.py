@@ -70,17 +70,6 @@ REAP_CHECK_S = 0.25
 #: quiescent. This is a drain for newly arriving work, not a reconnect grace.
 DEFAULT_GRACE_S = 3.0
 
-#: A runtime whose own scheduler will fire a wake within this window stays
-#: resident instead of exiting and paying a ~1.2 s cold start (plus the
-#: supervisor's tick latency) to come back for it. Chosen to exceed
-#: ``MIN_WAKE_INTERVAL_MS`` (60 s, harness.wake) by a margin: a session with
-#: the tightest allowed recurrence then never thrashes exit → spawn → exit
-#: once a minute, because the next fire is always inside the window. Anything
-#: due further out is cheaper to leave to a cold spawn than to hold ~283 MB
-#: for. Not env-tunable on purpose — it pairs with a constant in the wake
-#: layer, and a knob would let the two drift apart.
-WARM_WINDOW_S = 90.0
-
 # The build-watch timings, the env readers that shorten them for the e2e stage,
 # and the changed-and-settled comparison `_build_changed` live in ONE module that
 # the ``serve`` daemon (`server/retire.py`) imports too — a second copy of a
@@ -96,6 +85,14 @@ WARM_WINDOW_S = 90.0
 BUILD_CHECK_S = _buildwatch.BUILD_CHECK_S
 BUILD_SETTLE_S = _buildwatch.BUILD_SETTLE_S
 BUILD_STAGGER_S = _buildwatch.BUILD_STAGGER_S
+# The warm-window term of the residency predicate moved there too, and for a
+# sharper reason than tidiness: this module is RUN as ``__main__``, so an import
+# of it is answered from DISK rather than from ``sys.modules`` — which is the
+# one moment the file may already be gone. ``may_refresh`` reached the helper
+# that way and raised ``ImportError`` exactly when the drain needed it, so the
+# exit was unreachable (QA round 1, Q-1). See that module's docstring.
+WARM_WINDOW_S = _buildwatch.WARM_WINDOW_S
+_wake_within_window = _buildwatch.wake_within_window
 _build_changed = _buildwatch.build_changed
 _build_pair = _buildwatch.build_pair
 _build_prefix = _buildwatch.build_prefix
@@ -329,6 +326,27 @@ class _BuildWatch:
         ``lop-update``) and restarts the count, while ``_stale_since`` — the
         belt — keeps the age of the FIRST decline this process ever recorded
         and is never cleared (see :meth:`poll`).
+
+        TWO SHAPES THIS MUST NOT BE READ AS COVERING, both measured by QA
+        round 1 rather than argued:
+
+        * a stamp stream with no settle gap at all. ``build_changed`` answers
+          ``None`` while ``.lop-source`` is younger than ``BUILD_SETTLE_S``, so
+          installs closer together than that leave ``newer is None`` on every
+          check, and neither bound can arm (Q-2: 40 polls, ``declines=0``,
+          ``_stale_since=None``, ``hard_stale=False``). It is left that way on
+          purpose: the settle is what makes an unreadable stamp mean "do not
+          act", and acting on a persistently torn tree is the torn-tree race
+          the settle exists to prevent — a successor booted out of a
+          half-written site-packages. The precondition is installs faster than
+          ``BUILD_SETTLE_S`` apart indefinitely, which ``lop-update`` does not
+          do; the PR body states the bound rather than overstating it.
+        * a marker that is GONE or blank (Q-3). ``installed_build`` then
+          answers a stamp whose ``source_ref`` is empty, which differs from the
+          boot stamp, so the count moves and a busy runtime retires ~15 s later
+          announcing an empty ref. Self-healing — the successor boots the same
+          build — and intended: an install whose identity cannot be read is not
+          a build this runtime gets to keep declining to notice.
         """
         if self._declined != newer:
             self._declined = newer
@@ -471,26 +489,6 @@ def _drain_detail(poll: _BuildPoll, boot: "BuildStamp | None") -> str:
         reasons.append("hard-stale")
     pair = _build_pair(boot, poll.newer) if poll.newer is not None else ""
     return f"{', '.join(reasons)}{pair}"
-
-
-def _wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
-    """Term 2 of the predicate: does the runtime's OWN scheduler have a wake
-    due within ``WARM_WINDOW_S``? Read through the handle (an optional
-    capability, probed) so reduced test handles and older handle
-    implementations that never grew the accessor behave as "no wakes" rather
-    than crash the reaper."""
-    accessor = getattr(handle, "next_wake_due_at", None)
-    if not callable(accessor):
-        return False
-    try:
-        due_at = accessor()
-    except Exception:  # noqa: BLE001 — a broken accessor must not pin the runtime
-        logger.debug("next_wake_due_at failed; treating as no wake", exc_info=True)
-        return False
-    if not isinstance(due_at, int) or isinstance(due_at, bool):
-        return False  # None, or a shape this reaper does not understand
-    now = int(time.time() * 1000) if now_ms is None else now_ms
-    return due_at - now <= WARM_WINDOW_S * 1000
 
 
 def _viewer_attached(runtime: object) -> bool:
@@ -950,7 +948,9 @@ async def _drain_inbox_into(handle: object) -> int:
     socket listens — see the call site for why that ordering is the delivery
     guarantee rather than an implementation detail.
 
-    Delivery honours the row's ``wake`` (``mode="mailbox"`` either way): a row
+    Delivery honours the row's ``wake`` and NEVER its ``mode`` (``mailbox``
+    either way — see ``serving._spool_for_successor`` for why a boot cannot
+    honour a steer, and why the row keeps it anyway): a row
     spooled by a runtime that was leaving a replaced build carries what its
     sender asked for, and a wake — a fired alarm, or a peer ``send --wake`` —
     asked for a TURN. Delivering it as a quiet note would keep the message and

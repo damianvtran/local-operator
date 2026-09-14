@@ -26,6 +26,18 @@ would be paid by processes that may never watch a build at all. It is also why
 this is NOT a section of :mod:`local_operator.update`: that module is the heavy
 one, and neither of these callers may pay for it.
 
+It also carries the WARM-WINDOW term of the residency predicate — the "a wake is
+about to fire" reason a runtime stays resident, :data:`WARM_WINDOW_S` and
+:func:`wake_within_window` — and that one is here for a sharper version of the
+same reason. The handle that asks it (``ServingSessionHandle.may_refresh``)
+cannot import the runtime module to reach the helper: an import of a module with
+no ``sys.modules`` entry is answered from DISK, and the state that matters is
+exactly the one where the runtime's own files have been replaced — so the
+function-local import raised ``ImportError``, the reaper read a failing
+predicate as "not idle", and a draining runtime could never reach its exit
+(QA round 1, Q-1). A stdlib-only module that BOTH sides already import is the
+only home that is still importable at that moment.
+
 The constants are re-exported by ``session/runtime/process.py`` under the names
 that module has always published (``BUILD_CHECK_S``, ``_build_changed``, …) so
 nothing outside this module had to change when the definition moved here.
@@ -35,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -97,6 +110,43 @@ def build_settle_seconds() -> float:
 def build_stagger_seconds() -> float:
     """``LOP_BUILD_STAGGER_S`` (test-only) or :data:`BUILD_STAGGER_S`."""
     return positive_seconds(os.environ.get("LOP_BUILD_STAGGER_S", ""), BUILD_STAGGER_S)
+
+
+#: A runtime whose own scheduler will fire a wake within this window stays
+#: resident instead of exiting and paying a ~1.2 s cold start (plus the
+#: supervisor's tick latency) to come back for it. Chosen to exceed
+#: ``MIN_WAKE_INTERVAL_MS`` (60 s, harness.wake) by a margin: a session with
+#: the tightest allowed recurrence then never thrashes exit → spawn → exit
+#: once a minute, because the next fire is always inside the window. Anything
+#: due further out is cheaper to leave to a cold spawn than to hold ~283 MB
+#: for. Not env-tunable on purpose — it pairs with a constant in the wake
+#: layer, and a knob would let the two drift apart.
+WARM_WINDOW_S = 90.0
+
+
+def wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
+    """Term 2 of the residency predicate: does this runtime's OWN scheduler
+    have a wake due within ``WARM_WINDOW_S``? Read through the handle (an
+    optional capability, probed) so reduced test handles and older handle
+    implementations that never grew the accessor behave as "no wakes" rather
+    than crash the reaper.
+
+    Failing open is the policy on purpose: a broken accessor must not pin the
+    runtime it was asked about. See this module's docstring for why the
+    function lives here rather than in the module that used to define it.
+    """
+    accessor = getattr(handle, "next_wake_due_at", None)
+    if not callable(accessor):
+        return False
+    try:
+        due_at = accessor()
+    except Exception:  # noqa: BLE001 — a broken accessor must not pin the runtime
+        logger.debug("next_wake_due_at failed; treating as no wake", exc_info=True)
+        return False
+    if not isinstance(due_at, int) or isinstance(due_at, bool):
+        return False  # None, or a shape this reaper does not understand
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    return due_at - now <= WARM_WINDOW_S * 1000
 
 
 def build_prefix() -> str | None:
