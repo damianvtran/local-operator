@@ -1141,6 +1141,13 @@ test("a fresh prompt opens at the top of its card, not scrolled past its banner 
   const bundle = await loadPopup();
   try {
     areas.local.set("token", "t");
+    // THE SEED, and it is the whole falsifiability of this test: the user has the
+    // popup open and scrolled, and a request arrives. Without it the modelled
+    // scroller never moves (`preventScroll` is honoured, so the focus model
+    // writes nothing), and the assertion below then passes whether the render
+    // resets the document, still resets the now-inert `.body`, or resets
+    // nothing at all — measured: deleting the reset left 44/44 green.
+    globalThis.document.scrollingElement.scrollTop = 88;
     areas.session.set("accessQueue", [pendingEntry()]);
     areas.session.set("accessQueueVersion", 1);
     await bundle.import();
@@ -1157,7 +1164,10 @@ test("a fresh prompt opens at the top of its card, not scrolled past its banner 
     // THE DEFECT: focusing below the fold scrolled the card's container to its
     // maximum, putting the title and the whole danger banner above the fold at
     // >=125% zoom — a zoomed user saw an ordinary consent prompt with live
-    // Allow/Deny and no sign their answer could not land.
+    // Allow/Deny and no sign their answer could not land. The seeded scroll is
+    // ALSO what a forgotten retarget looks like: the reset now targets
+    // `document.scrollingElement` (popup.ts), because `.body` stopped being the
+    // scroll container when the card stopped being viewport-bounded.
     assert.equal(
       scroller.scrollTop,
       0,

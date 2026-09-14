@@ -79,12 +79,16 @@ body {
  * `100vh` actually is.
  *
  * The property D2 wanted is carried by `position: sticky` on the header and
- * footer instead (see .head/.foot). Chrome caps a popup at 600 DEVICE px and
- * scrolls the DOCUMENT past that, and a sticky header stays on screen through
- * that scroll: measured on the wedged consent card, header y=0 at scrollTop=88
- * where it left the viewport at y=-75 without it. Sticky is also the only form
- * of this that survives zoom, where the cap is 600 device px and the CSS
- * viewport is therefore 600/zoom — a length the stylesheet cannot know.
+ * footer instead (see .head/.foot). Chrome clamps a popup to its own max size
+ * (600 CSS px, or the display's work area, whichever is smaller) and scrolls the
+ * DOCUMENT past that, and a sticky header stays on screen through that scroll:
+ * measured on the wedged consent card, header top y=0 at scrollTop=88 where it
+ * left the viewport at y=-75 without it. Sticky is also the only form of this
+ * that survives page zoom, which shrinks the CSS viewport the stylesheet would
+ * have to read — a length it cannot know. (The clamp is a DIP/CSS-px quantity,
+ * not a device-px one: at 100% zoom it is ~600 CSS px on any display scale, and
+ * it is zoom, not the display, that eats into it. Earlier revisions of this
+ * comment said "device px"; the conclusion is the same either way.)
  *
  * `overflow: clip`, not `hidden`: both clip children to the 10px radius, but
  * `hidden` makes the card a scroll container, and a sticky child of a scroll
@@ -99,31 +103,34 @@ body {
   overflow: clip;
   margin: 10px;
 }
-/* The one spend of colour: a 2px status rule along the card's top edge, read as
- * a status light, not a banner. --tone is set per state by the popup script and
- * is spent ONLY on real semantics (success = connected/paired, danger = error/
- * incompatible, neutral hairline = disconnected/pairing). Never the identity. */
-.card::before {
-  content: "";
-  display: block;
-  height: 2px;
-  background: var(--tone, var(--hairline-strong));
-}
-
 /* Header band on --sunken with a bottom hairline — the callback page's .head.
- * Sticky so it survives the document scroll of a capped popup (see .card).
- * `top: -1px` cancels the card's own 1px border, so the band ends up flush with
- * the viewport's top edge instead of leaving a hairline of card above it. The
- * background is opaque, so scrolled content cannot show through the band. */
+ *
+ * Sticky so it survives the document scroll of a capped popup (see .card), and
+ * the .card::before status rule travels ON the band as its border-top rather
+ * than as a static child: a child left the viewport with the card, so a scrolled
+ * consent card lost its --danger accent and read as neutral while the band above
+ * it stayed put (design D1 — the asymmetry with the footer, whose own top
+ * hairline pins fine, is what made it visible). `top: 0`, not `-1px`: the old
+ * -1px cancelled the card's 1px border, which now would clip 1px off the rule,
+ * and the border above the band is the rule itself. Rest-state geometry is
+ * unchanged — border 10..11, rule 11..13, band content from 13, exactly the rows
+ * `.card::before` occupied.
+ *
+ * The one spend of colour is therefore here: --tone is set per state on #card by
+ * the popup script and is inherited, and it is spent ONLY on real semantics
+ * (success = connected/paired, danger = error/incompatible, neutral hairline =
+ * disconnected/pairing). Never the identity. The band's background is opaque, so
+ * scrolled content cannot show through it. */
 .head {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
+  border-top: 2px solid var(--tone, var(--hairline-strong));
   border-bottom: 1px solid var(--hairline);
   background: var(--sunken);
   position: sticky;
-  top: -1px;
+  top: 0;
   z-index: 1;
 }
 /* The shared vector mark, stroked in currentColor pinned to --ink. Never
