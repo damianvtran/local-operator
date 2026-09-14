@@ -33,6 +33,14 @@ and model dollars are spelled the same way (``$—`` unknown, ``+`` lower bound)
 without a second formatter or a ledger import in the panels.
 
 Nothing here raises. A price is never worth a broken frame.
+
+The three pure pricing functions this module was built around — ``turn_cost``,
+``cost_summary`` and ``job_cost`` — now live in ``local_operator.model.costs``,
+next to the arithmetic they adapt, because the SESSION layer prices turns and
+jobs too and must not have to import the TUI package to do it (see that
+module's docstring). They are re-exported below, so every caller here is
+unchanged. The formatter ladder (``format_usd`` and friends) stays here: it is
+the TUI's own vocabulary.
 """
 
 from __future__ import annotations
@@ -40,6 +48,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+# The three pure pricing functions now live in `local_operator.model.costs`,
+# next to the arithmetic they adapt — see that module's docstring for why the
+# session layer must not have to import the TUI package to price a turn. They
+# are re-exported here so this module's surface (and every caller's import)
+# is unchanged.
+from local_operator.model.costs import cost_summary, job_cost, turn_cost
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, see ``SearchSpendSnapshot.of``
     from local_operator.web_search.cost import SearchSpendTotals
@@ -146,139 +161,6 @@ def format_usd_exact(micro: int) -> str:
     if len(fraction) < 2:
         fraction = (fraction + "00")[:2]
     return f"${whole}.{fraction}"
-
-
-def _resolve_for_paint(provider: str, model_id: str):
-    """The paint-safe resolver, with a background refresh fired on a cold miss.
-
-    One seam so ``turn_cost`` and the per-component loop share the exact
-    policy: resolve from the warm memo or registry ONLY (never discovery,
-    which is synchronous HTTP), and when the memo has no entry for this
-    model, hand the full resolution to a background thread so the NEXT tick
-    paints the real number. The refresh is what keeps a memo rollover from
-    silently switching the band to the (possibly stale) registry row; the
-    paint-only resolution is what keeps the keyboard live while it happens.
-    """
-    from local_operator.model.configure import (
-        refresh_model_info_background,
-        resolve_model_info_paint,
-    )
-
-    info, memo_hit = resolve_model_info_paint(provider, model_id)
-    if not memo_hit:
-        # Missed the paint memo: either a model this process never resolved
-        # (the registry row may carry no price — exactly the population the
-        # discovery legs exist for) or the TTL bucket rolled over mid-session
-        # (the registry row carries a price that may be staler than the
-        # discovery answer the band showed until that moment). Both want the
-        # same thing: the real answer, fetched OFF the loop, landing next
-        # tick. The band still shows this tick's honest answer — None when
-        # unpriceable, the registry price otherwise — rather than blocking.
-        refresh_model_info_background(provider, model_id)
-    return info
-
-
-def turn_cost(model_label: str, usage: Any) -> float | None:
-    """What ``usage`` cost on the model named by ``model_label``, or ``None``.
-
-    ``model_label`` is the ``provider/model_id`` spelling that
-    :attr:`Session.model_label` produces.
-
-    ``None`` means the price is genuinely unknown — no registry row, no provider
-    listing and no aggregator entry could put a number on this model. It is NOT
-    the same as ``0.0``, and a caller must not collapse the two: a confident
-    ``$0.0000`` on a turn that billed tokens reads as "that was free", which is
-    the more expensive lie of the two.
-
-    Resolution for the PAINT path is memo-or-registry only
-    (:func:`~local_operator.model.configure.resolve_model_info_paint`): the
-    full resolver's discovery legs are synchronous HTTP (measured 418 ms
-    warm-disk, 10 s + 3 s worst case for an unlisted model), and this
-    function runs on the Textual loop at ``message_end" and on the 1 Hz
-    subagent harvest — a blocking miss there is the frozen-keyboard
-    regression, not a slow number. A cold miss fires one background refresh
-    per model so the following tick prices from the warm memo; ``None" for
-    one tick is the same honest degradation the band already renders.
-    """
-    if usage is None or not model_label:
-        return None
-    try:
-        # A provider-reported dollar amount is authoritative without a table:
-        # OpenRouter (and any aggregator that precomputes billing) returns the
-        # exact charge it printed, per-routed-provider pricing and reasoning
-        # splits included. It must win even when the model has no published price
-        # row, because the provider's bill is the fact the table is an estimate of.
-        #
-        # Coerced and floored through the SAME helper the pricing path uses on
-        # the wire values rather than a bare ``float()`` here: a negative or
-        # non-numeric amount is malformed provider data and must fall back to the
-        # estimate, not render an upside-down credit or degrade the whole turn to
-        # unpriceable while a table price exists. (The wire client already drops
-        # these to ``None``, but ``turn_cost`` also serves rehydrated mappings.)
-        from local_operator.model.configure import cost_for_usage
-
-        provider, _, model_id = model_label.partition("/")
-        components = getattr(usage, "cost_components", None)
-        if components:
-            # A mixed aggregate cannot put a partial receipt in ``usd_cost``:
-            # that would make the pricing helper skip estimates for every other
-            # call. Price each original call on its serving identity instead.
-            total = 0.0
-            for component in components:
-                component_provider = getattr(component, "provider", None) or provider
-                component_model = getattr(component, "model_id", None) or model_id
-                reported = _recorded_cost(component)
-                if reported is not None:
-                    total += reported
-                    continue
-                info = _resolve_for_paint(component_provider, component_model)
-                if not (info.input_price or info.output_price):
-                    return None
-                total += cost_for_usage(component_provider, info, component)
-            return total
-
-        reported = _recorded_cost(usage)
-        if reported is not None:
-            return reported
-
-        info = _resolve_for_paint(provider, model_id)
-        if not (info.input_price or info.output_price):
-            return None
-        return cost_for_usage(provider, info, usage)
-    except Exception:  # noqa: BLE001 — an unpriceable model is not a render error
-        return None
-
-
-def _recorded_cost(usage: Any) -> float | None:
-    from local_operator.model.configure import _usage_cost
-
-    receipt = _usage_cost(usage)
-    if receipt is not None:
-        return receipt
-    return _usage_cost({"usd_cost": getattr(usage, "estimated_usd_cost", None)})
-
-
-def cost_summary(
-    components: Any, *, model_label: str = "", recorded_only: bool = False
-) -> tuple[float | None, bool]:
-    """Known spend and whether any component is unknown; never lose a lower bound.
-
-    Components, not aggregate tokens, own price provenance. A failed or offline
-    lookup must not erase already-priced siblings, and an empty ledger must not
-    masquerade as a provider-reported zero.
-    """
-    total: float | None = None
-    unknown = False
-    for component in components:
-        provider = getattr(component, "provider", None)
-        model_id = getattr(component, "model_id", None)
-        label = f"{provider}/{model_id}" if provider and model_id else model_label
-        cost = _recorded_cost(component) if recorded_only else turn_cost(label, component)
-        if cost is None:
-            unknown = True
-        else:
-            total = (total or 0.0) + cost
-    return total, unknown
 
 
 @dataclass(frozen=True)
@@ -608,45 +490,3 @@ def cost_note_rungs(spend: SpendSummary, *, search_component: str = "") -> tuple
     if search_component:
         return (f"≈ list price × tokens · {search_component}", search_component)
     return ("≈ list price × tokens",)
-
-
-def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
-    """What one subagent job has spent so far, or ``None`` when unpriceable.
-
-    ``job`` is duck-typed: anything carrying ``usage`` and ``model_label``, which
-    in production is an :class:`~local_operator.harness.jobs.AsyncJob`. A job with
-    no recorded usage — a ``bash`` job, or a child that has not reported a turn
-    yet — returns ``None`` rather than ``0.0``, because "spent nothing" and "has
-    not told us yet" are different facts and only one of them is worth a number
-    on screen.
-
-    ``default_model_label`` is the PARENT's model, used when the job did not
-    record one of its own. That is the common case rather than a fallback: every
-    child inherits the parent's spec unless ``run_subagent`` was given a
-    ``model_spec`` override, and a child that WAS overridden records its own
-    label — so the two together price a mixed-model fan-out correctly.
-
-    MUST NOT BLOCK, and every path it takes is now a warm-memo hit, pure
-    arithmetic, or a fire-and-forget background refresh. It is called from
-    the Textual event loop (`app.py`'s `_harvest_subagent_costs`, on the 1 Hz
-    poll), so anything added here that can wait on I/O freezes the keyboard.
-    The paint-safe resolver (:func:`turn_cost`'s seam) is what keeps that
-    true on a cold memo: a miss returns the registry row immediately and
-    resolves the real price in a thread, so a child on a model this process
-    has never priced costs one tick of "unpriceable", not a stalled frame.
-    A new caller on the event loop should assume the memo is cold.
-
-    Duck-typed means the two field reads are guarded, not just the pricing. The
-    TUI runs against embedder hosts and replayed ledgers whose job objects are
-    not ``AsyncJob`` at all, so ``job.usage`` can be a property with real work
-    behind it; an exception escaping here takes down the whole band repaint, so
-    one unreadable ledger row would cost every other row its number too.
-    """
-    try:
-        usage = getattr(job, "usage", None)
-        if usage is None:
-            return None
-        label = getattr(job, "model_label", None)
-    except Exception:  # noqa: BLE001 — an unreadable job is not a render error
-        return None
-    return turn_cost(label or default_model_label or "", usage)

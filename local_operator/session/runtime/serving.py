@@ -229,6 +229,16 @@ class ServingSessionHandle(SessionHandle):
     entry point that wiring uses.
     """
 
+    #: The latch ``RuntimeServer._serve`` opens once this runtime's record is
+    #: published, or ``None`` when nothing publishes one. Declared at CLASS
+    #: level as well as assigned per instance, unlike the handle's other state,
+    #: because the server reaches for it with a ``getattr`` capability probe and
+    #: the capability-surface guard reads ``hasattr(ServingSessionHandle, name)``
+    #: — an attribute that existed only on the instance would read as a
+    #: capability the handle cannot answer, which is the defect class that guard
+    #: exists to catch. See ``create_session`` for what waits on it.
+    mcp_publication_gate: asyncio.Event | None = None
+
     def __init__(
         self,
         session: Any,
@@ -239,6 +249,7 @@ class ServingSessionHandle(SessionHandle):
         approval_pinned: bool = False,
         install_gates: bool = True,
         config_dir: Path | None = None,
+        mcp_publication_gate: asyncio.Event | None = None,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -353,6 +364,16 @@ class ServingSessionHandle(SessionHandle):
         #: session was built from because the runtime is spawned with it in the
         #: environment.
         self._config_dir = config_dir
+        #: The latch the runtime opens when its record is published, or
+        #: ``None``. PUBLIC because it is deliberately read by ANOTHER object —
+        #: ``RuntimeServer._serve`` — the same way ``on_stop_requested`` is:
+        #: the runtime's contract with its handle is an attribute read, not a
+        #: method call, so a fake handle in a test simply does not have it and
+        #: the runtime's ``getattr`` default keeps that inert. Set only by
+        #: ``spawn_owned_session`` — the one spawn site whose runtime publishes
+        #: a record, and therefore the only one whose deferred MCP wiring must
+        #: wait for it (see ``create_session``'s ``mcp_publication_gate``).
+        self.mcp_publication_gate = mcp_publication_gate
         # Conversation naming is a TUI-only errand today (OperatorApp owns the
         # naming worker), so a phone-started session used to stay "mobile
         # session" forever — the session list and the header both read the
@@ -4374,6 +4395,14 @@ async def spawn_owned_session(
     credential_manager = CredentialManager(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
+    # The publication latch the deferred MCP wiring parks on. Created HERE, on
+    # the loop that will also set it (this process's one asyncio loop), so both
+    # ends of the latch are the same loop and no cross-thread wake-up is
+    # implied. It travels two ways: into ``create_session`` (where the wiring
+    # task waits on it) and onto the handle (where ``RuntimeServer._serve``
+    # finds it via ``_open_mcp_wiring_gate``).
+    mcp_publication_gate = asyncio.Event()
+
     # The owner's saved tool-approval default. The TUI reads the SAME key at
     # boot (OperatorApp._load_approvals_default) and adopts ``auto`` as
     # "approve every tier"; a phone-started session must honour it too, or a
@@ -4427,20 +4456,31 @@ async def spawn_owned_session(
         # the only caller left not opting in — which made the deferred branch
         # dead code in production.
         #
+        # AND THE DEFERRAL ALONE WAS NOT ENOUGH (measured): dispatching the
+        # wiring as a task moved it to the first await the loop reached, which
+        # in ``process.amain`` is the inbox drain BEFORE this record exists —
+        # so a declared server's SDK import still ran to completion inside the
+        # pre-publication window (+2.3 s with one server on a closed port, in
+        # 14 of 14 runs). ``mcp_publication_gate`` is that same record, as a
+        # latch: the task parks on it and ``RuntimeServer._serve`` sets it the
+        # moment the publisher exists. The runtime is the only caller that
+        # passes one, because it is the only caller that publishes.
+        #
         # Two properties this deliberately keeps. (1) The failure REPORT still
         # reaches the screen: the deferred path fires ``_fire_mcp_sink`` at the
         # gate snapshot and keeps the ``has_ui=False`` stderr prints, so the
-        # capture is unchanged — but the record now exists by then, so the
-        # frontend-state push that carries ``mcp_startup`` has a viewer to
-        # receive it. Before this, a failed mount left the child recording MCP
-        # failures that no transport could deliver. (2) The first seconds of a
-        # session carry the non-MCP surface plus the deferred-cache catalogue;
-        # a late merge arrives through ``manager.on_tools_changed`` ->
+        # capture is unchanged — and the record exists by the time the wiring
+        # runs, so the frontend-state push that carries ``mcp_startup`` has a
+        # viewer to receive it. Before this, a failed mount left the child
+        # recording MCP failures that no transport could deliver. (2) The first
+        # seconds of a session carry the non-MCP surface plus the deferred-cache
+        # catalogue; a late merge arrives through ``manager.on_tools_changed`` ->
         # ``refresh_frontend_state`` exactly as a late ``list_changed`` does
         # today, and a turn started before wiring settles reaches MCP tools
         # through the same deferred-cache path (cached schemas advertised, the
         # deferred execute awaiting the connect future).
         defer_mcp_wiring=True,
+        mcp_publication_gate=mcp_publication_gate,
     )
     # NOT pinned: this value came from config, so it must keep following
     # config. ``create_session`` has already started the process watcher for
@@ -4457,6 +4497,11 @@ async def spawn_owned_session(
         # registration itself share the config root this session was built
         # from (MINOR-3).
         config_dir=config_directory,
+        # The other end of the latch above. Only a runtime that publishes a
+        # record may be handed one, which is why this is passed at the spawn
+        # site rather than defaulted: a handle without it leaves the deferred
+        # wiring ungated (see ``create_session``).
+        mcp_publication_gate=mcp_publication_gate,
     )
     attach_gate_config_watch(handle, config_directory)
     return handle

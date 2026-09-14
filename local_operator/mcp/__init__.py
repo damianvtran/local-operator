@@ -9,14 +9,14 @@ outbound argument hygiene. See ``docs/REWRITE.md`` section E.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from local_operator.harness.types import AgentTool
-from local_operator.mcp.manager import McpLoadResult, McpManager
 from local_operator.mcp.tool_cache import McpToolCache
 
 if TYPE_CHECKING:
     from local_operator.mcp.auth import ManagedAuthStore
+    from local_operator.mcp.manager import McpLoadResult, McpManager
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,37 @@ __all__ = [
     "McpToolCache",
     "discover_and_load_mcp_tools",
 ]
+
+#: The names this package re-exports from ``local_operator.mcp.manager``, and
+#: the reason they are re-exported LAZILY rather than imported above.
+#:
+#: ``manager`` is a heavy module — it pulls ``local_operator.mcp.auth`` and
+#: behind it the MCP SDK — and an eager import here made the whole manager
+#: subtree the price of ANY ``local_operator.mcp.*`` import, including a pure
+#: config read. ``session.frontend_state`` imports ``mcp.grants`` for one string
+#: tuple, and ``session_factory._seed_mcp_routing`` imports ``mcp.config`` for
+#: one JSON parse; both are on the runtime child's PRE-PUBLICATION path, where
+#: every millisecond is in front of the user waiting for a bound session. The
+#: manager itself is not wanted there at all — it is wanted when a turn actually
+#: connects a server.
+#:
+#: PEP 562 module ``__getattr__`` keeps the names importable exactly as before
+#: (``from local_operator.mcp import McpManager``, ``mcp.McpManager``) while
+#: deferring the cost to the first attribute access. Do not "tidy" this back
+#: into a module-scope import.
+_MANAGER_EXPORTS = frozenset({"McpManager", "McpLoadResult"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _MANAGER_EXPORTS:
+        from local_operator.mcp.manager import McpLoadResult, McpManager
+
+        # Cache into the module dict so the LOOKUP happens once per process
+        # rather than once per access; ``__getattr__`` is only consulted for a
+        # name the module does not already have.
+        globals().update(McpLoadResult=McpLoadResult, McpManager=McpManager)
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def discover_and_load_mcp_tools(
@@ -52,8 +83,19 @@ async def discover_and_load_mcp_tools(
     live ``tools/list`` after connect overwrites the row. Passing ``None``
     used to mean "no cache", which made every runtime pay the handshake even
     when a sibling had just listed the same server.
+
+    The manager import is FUNCTION-LOCAL and goes through the PACKAGE attribute
+    on purpose. Function-local because a module-scope name would be resolved
+    from this module's globals, and a global lookup inside a function does not
+    consult the package's PEP 562 ``__getattr__`` — only attribute access on the
+    module object does. Through the package attribute so that
+    ``local_operator.mcp.McpManager`` stays the single seam a caller (or a test)
+    can substitute: reading the class straight off ``local_operator.mcp.manager``
+    would quietly stop honouring a patch of the documented export.
     """
-    manager = McpManager(cwd, tool_cache or McpToolCache(), auth_store=auth_store)
+    from local_operator import mcp as mcp_package
+
+    manager = mcp_package.McpManager(cwd, tool_cache or McpToolCache(), auth_store=auth_store)
     try:
         result = await manager.discover_and_connect()
     except Exception as exc:

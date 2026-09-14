@@ -36,7 +36,7 @@ def test_invalid_estimates_cannot_enter_durable_usage(bad):
 
 def test_recorded_estimate_is_not_a_receipt_and_does_not_reprice(monkeypatch):
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("repriced")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("repriced")
     )
     usage = Usage(provider="test", model_id="dynamic", estimated_usd_cost=0.125)
     assert usage.usd_cost is None
@@ -49,7 +49,7 @@ def test_relay_prices_leaf_calls_before_aggregation(monkeypatch):
     from local_operator.model.registry import ModelInfo
 
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint",
+        "local_operator.model.costs._resolve_for_paint",
         lambda *_: ModelInfo(id="dynamic", name="Dynamic", description="test", input_price=2),
     )
     job = AsyncJob(
@@ -66,7 +66,7 @@ def test_relay_prices_leaf_calls_before_aggregation(monkeypatch):
 
 def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint",
+        "local_operator.model.costs._resolve_for_paint",
         lambda *_: SimpleNamespace(input_price=0, output_price=0),
     )
     components = [
@@ -117,7 +117,8 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
 @pytest.mark.asyncio
 async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
     monkeypatch.setattr(
-        "local_operator.tui.costs.job_cost", lambda *_args, **_kwargs: pytest.fail("viewer priced")
+        "local_operator.model.costs.job_cost",
+        lambda *_args, **_kwargs: pytest.fail("viewer priced"),
     )
     row = JobState(
         id="child",
@@ -256,7 +257,7 @@ async def test_cold_facade_restores_sidecar_ledger_without_parent_checkpoint(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
     )
     directory = tmp_path / "sessions" / "coldledger01"
     directory.mkdir(parents=True)
@@ -359,7 +360,7 @@ def test_both_table_priced_models_preserve_cache_semantics_offline(
         cache_reads_price=0.2,
         cache_writes_price=2.5,
     )
-    monkeypatch.setattr("local_operator.tui.costs._resolve_for_paint", lambda *_: info)
+    monkeypatch.setattr("local_operator.model.costs._resolve_for_paint", lambda *_: info)
     usage = Usage(provider=provider, model_id=model_id, **counts)
     expected = cost_for_usage(provider, info, usage)
     plain_input = (
@@ -384,7 +385,7 @@ def test_both_table_priced_models_preserve_cache_semantics_offline(
     persisted = Usage.model_validate_json(job.usage.model_dump_json())
     assert persisted.cost_components[0].usd_cost is None
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("offline discovery")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("offline discovery")
     )
     assert cost_summary(persisted.cost_components, recorded_only=True) == (expected, False)
     _accumulate_usage(job, Usage(provider=provider, model_id=model_id, usd_cost=0.125))
