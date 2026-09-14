@@ -46,13 +46,14 @@ remote server's headers, which the allowlisted stdio child environment
   imported foreign config whose child expands ``${HOME}`` itself. **The escape
   is ``$${``**: ``$${HOME}`` passes the literal text ``${HOME}`` through, which
   is what a value meaning a reference literally should be written as.
-* A fragment whose inner text — before shell/compose decorations (see
-  :func:`_candidate_keys`) — IS a key the store holds: REFUSED, never handed
-  over. The store accepts any key (``CredentialManager.set_credential`` checks
-  only control characters), so ``${hubspot-token}`` and ``${TOKEN:-}` can name
-  real credentials while sitting outside the reference's name class; a fragment
-  naming a stored key cannot be a legitimate literal, and passing it through is
-  the silent-unauthenticated-server failure this module exists to remove.
+* A fragment whose inner text contains a name the store holds — whatever
+decorates it (see :func:`_candidate_keys`) — is REFUSED, never handed over. The
+store accepts any key (``CredentialManager.set_credential`` checks only control
+characters), and a shell or compose file wraps one in anything at all —
+``${hubspot-token}``, ``${TOKEN:-}``, ``${TOKEN#suffix}``, ``${!TOKEN}``,
+``${env:TOKEN}`` — so a fragment naming a stored key cannot be a legitimate
+literal, and passing it through is the silent-unauthenticated-server failure
+this module exists to remove.
 * ``"${NAME}"`` as the whole value: the value is the secret. This is the only
   shape the desktop writer accepts.
 * ``"Bearer ${NAME}"``: one or more well-formed references with literal text
@@ -70,30 +71,27 @@ warning. A bare ``$NAME`` without braces is not a reference and is untouched.
 **Not resolved, deliberately:** server ``args`` (a secret in argv is
 world-readable through ``ps``, which is why the writer's reference requirement
 covers exactly ``env`` and ``headers``) and the OAuth block's ``client_secret``
-(``auth.auth``/``oauth.client_secret``), which reaches the token endpoint
-verbatim.
+(``auth.client_secret``/``oauth.client_secret``), which reaches the token
+endpoint verbatim.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Mapping, TypeVar
+from typing import Mapping, TypeVar
+
+from pydantic import SecretStr
 
 from local_operator.mcp.config import MCPServerConfig
 from local_operator.paths import config_dir
 
-if TYPE_CHECKING:
-    from pydantic import SecretStr
-
 #: The name form both sides accept — the writer's own character class.
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-#: Decorations a fragment may wrap a key name in. ``env:NAME`` is the compose
-#: "from the environment" form; a shell parameter operator (``${NAME:-default}``,
-#: ``${NAME-default}``, ``${NAME:?err}``, …) puts the key first and the operator
-#: and its operand after it. Both are stripped to find the key the author meant.
-_DECORATION_PREFIXES = ("env:", "dotenv:")
-_OPERATOR_RE = re.compile(r":-|:=|:\?|:\+|-|\?|\+|:")
+#: Every run of name characters inside a ``${…}`` fragment is a candidate key —
+#: see :func:`_candidate_keys`. ``.`` and ``-`` are in the class because the
+#: store is free-form: ``hubspot-token`` and ``my.key`` are keys a user can hold.
+_NAME_RUN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
 
 #: The concrete config subtype, preserved through resolution so a caller that
 #: knows it holds a stdio config keeps the ``env`` attribute in view.
@@ -155,27 +153,46 @@ def _unusable(server: str, field: str, entry: str, key: str) -> McpSecretRefErro
     )
 
 
-def _candidate_keys(inner: str) -> list[str]:
-    """The key names ``inner`` may have meant, most specific first.
+def _unreadable(server: str, field: str, entry: str, key: str) -> McpSecretRefError:
+    """The refusal for a store entry this build cannot read as a value.
 
-    Only used to decide whether a fragment is intent-to-reference at all, so a
-    merely plausible candidate is enough to refuse: a value that names a stored
-    credential cannot have meant it as literal text, and the escape is always
-    available for a value that genuinely did.
+    Distinct from :func:`_missing` on purpose: the key IS in the store, so
+    "add it in Settings > API credentials" would send the user to an entry they
+    already have. A value of an unexpected type used to report exactly that,
+    because "not a ``SecretStr``" and "absent" were the same branch.
     """
-    candidates = [inner]
-    body = inner
-    for prefix in _DECORATION_PREFIXES:
-        if body.startswith(prefix):
-            body = body[len(prefix) :]
-            candidates.append(body)
-    head = _OPERATOR_RE.split(body, maxsplit=1)[0]
-    if head != body:
-        candidates.append(head)
-    stripped = body.strip()
-    if stripped != body:
-        candidates.append(stripped)
-    return [candidate for candidate in candidates if candidate]
+    return McpSecretRefError(
+        f"MCP server {server!r} cannot read {key} from the credential store for {field} "
+        f"{entry} — the stored value is not a string; re-save it in Settings > "
+        f"API credentials"
+    )
+
+
+def _candidate_keys(inner: str) -> list[str]:
+    """The key names ``inner`` may have meant: every name-like run it contains.
+
+    Deliberately NOT a list of decorations. Compose wraps a key in ``env:``, a
+    shell puts an operator after it (``:-``, ``:?``, ``#``, ``%``, ``/``,
+    ``^``, ``@``, ``#NAME``, ``!NAME``), and such a list is always one operator
+    short — each miss hands the server the reference as its credential, which is
+    the silent failure this module exists to remove. A name run standing inside
+    a ``${…}`` fragment is a candidate whatever surrounds it, and the store is
+    the oracle: only a name the store actually holds refuses, so a fragment
+    naming nothing stored keeps its pass-through and the escape stays available
+    for a value that genuinely means the text.
+
+    TWO run shapes, because each closes a hole the other has: the maximal run
+    (``.``/``-`` included) matches a store key that CONTAINS punctuation —
+    ``hubspot-token``, ``my.key``, which are the keys a user actually holds —
+    while the plain-name segments catch a key the shell glued an operator or a
+    suffix onto, as in ``${TOKEN-SUB}`` or ``${TOKEN#x}``, where the maximal run
+    would be ``TOKEN-SUB`` and would match nothing.
+    """
+    keys: list[str] = []
+    for key in (*_NAME_RUN_RE.findall(inner), *_NAME_RE.findall(inner)):
+        if key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _store_values() -> dict[str, SecretStr]:
@@ -243,8 +260,14 @@ def _resolve_value(
         close = value.find("}", index + 2)
         inner = None if close == -1 else value[index + 2 : close]
         if inner is not None and _NAME_RE.fullmatch(inner):
-            secret = _substitute_value(store, inner)
+            if inner not in store:
+                raise _missing(server, field, entry, inner)
+            secret = _substitute_value(
+                store[inner], server=server, field=field, entry_name=entry, key=inner
+            )
             if secret is None:
+                # Present but empty. The credentials surface lists non-empty keys
+                # only, so "needs it" is the same instruction here.
                 raise _missing(server, field, entry, inner)
             pieces.append(value[cursor:index])
             pieces.append(secret)
@@ -270,19 +293,28 @@ def _resolve_value(
     return "".join(pieces)
 
 
-def _substitute_value(store: Mapping[str, SecretStr], name: str) -> str | None:
-    """``name``'s value, unwrapped, or ``None`` when it is absent or empty.
+def _substitute_value(
+    entry: object, *, server: str, field: str, entry_name: str, key: str
+) -> str | None:
+    """``entry``'s plaintext, or ``None`` when the stored value is empty.
 
     An empty value counts as missing, the way the credentials surface lists only
     non-empty keys: substituting ``""`` would send an empty credential and
     re-create the failure this module removes.
-    """
-    from pydantic import SecretStr
 
-    entry = store.get(name)
-    if not isinstance(entry, SecretStr):
-        return None
-    return entry.get_secret_value() or None
+    A value of any OTHER type raises rather than returning ``None``: the key is
+    present, so folding it into the missing-key path would send the user to
+    Settings to add something the store already holds — which is exactly what
+    the round-1 ``isinstance(entry, SecretStr)`` check did.
+    """
+    if isinstance(entry, SecretStr):
+        return entry.get_secret_value() or None
+    if isinstance(entry, str):
+        # Not what ``CredentialManager`` returns, but a plain mapping is a shape
+        # a test or a future store may hand us; accepting it keeps that from
+        # masquerading as an unreadable value.
+        return entry or None
+    raise _unreadable(server, field, entry_name, key)
 
 
 def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:

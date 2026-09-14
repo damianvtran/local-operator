@@ -265,12 +265,30 @@ class TestDecoratedFragments:
         ("store_key", "fragment"),
         [
             ("hubspot-token", "${hubspot-token}"),  # the key itself, out of class
+            ("my.key", "${my.key}"),  # a dotted key
             ("TOKEN", "${TOKEN:-}"),  # compose/shell default form, no default
             ("TOKEN", "${TOKEN:-fallback}"),  # …with a default
             ("TOKEN", "${TOKEN-SUB}"),  # shell "use SUB if unset"
             ("TOKEN", "${TOKEN:?must be set}"),  # shell error form
+            ("TOKEN", "${TOKEN:1}"),  # shell substring form
             ("TOKEN", "${env:TOKEN}"),  # compose "from the environment"
             ("TOKEN", "${ TOKEN }"),  # stray whitespace
+            # Bash's string operators, the class round 2 found still open: each of
+            # these named a stored key and was handed to the child verbatim.
+            ("TOKEN", "${!TOKEN}"),  # indirection
+            ("TOKEN", "${#TOKEN}"),  # length, operator in PREFIX position
+            ("TOKEN", "${TOKEN#x}"),  # strip shortest prefix
+            ("TOKEN", "${TOKEN##x}"),  # strip longest prefix
+            ("TOKEN", "${TOKEN%suffix}"),  # strip suffix
+            ("TOKEN", "${TOKEN/x/y}"),  # replace
+            ("TOKEN", "${TOKEN^}"),  # upper-case
+            ("TOKEN", "${TOKEN,}"),  # lower-case
+            ("TOKEN", "${TOKEN^^}"),
+            ("TOKEN", "${TOKEN@Q}"),  # quote
+            ("TOKEN", "${TOKEN#x:-}"),  # decorated AND operator-bearing
+            ("TOKEN", "${env:TOKEN#x}"),
+            ("TOKEN", "${ TOKEN#x }"),
+            ("TOKEN", "${ENV:TOKEN}"),  # a decoration nobody enumerated
         ],
     )
     def test_a_fragment_naming_a_stored_key_is_refused(
@@ -297,9 +315,36 @@ class TestDecoratedFragments:
     ):
         _store(_isolate(monkeypatch, tmp_path), {"OTHER": SENTINEL})
 
-        for fragment in ("${1BAD}", "${MISSING:-x}", "${}", "${unterminated", "${{x}}"):
+        for fragment in (
+            "${1BAD}",
+            "${MISSING:-x}",
+            "${}",
+            "${unterminated",
+            "${{x}}",
+            "${a b}",
+            "a$$b",
+            "cost $$5",
+        ):
             resolved = resolve_config_secrets("handwritten", _stdio({"VALUE": fragment}))
             assert resolved.env == {"VALUE": fragment}
+
+    def test_a_stored_value_of_an_unexpected_type_is_not_reported_as_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The key IS there, so "add it in Settings" would send the user to an
+        # entry they already have — the two failures stay apart (review nit 2).
+        from local_operator.mcp import secret_refs
+
+        _iso = _isolate(monkeypatch, tmp_path)
+        _store(_iso, {"OTHER": SENTINEL})
+        monkeypatch.setattr(secret_refs, "_store_values", lambda: {"T": 12345})
+
+        with pytest.raises(McpSecretRefError) as caught:
+            resolve_config_secrets("hubspot", _stdio({"T": "${T}"}))
+
+        message = str(caught.value)
+        assert "cannot read" in message
+        assert "add it in Settings" not in message
 
     def test_an_escaped_decorated_fragment_is_literal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -528,6 +573,23 @@ class TestManagerSeam:
         assert conn_sent[0] is not cfg
         assert conn.config is cfg  # the connection keeps the reference form
         assert SENTINEL not in repr(conn)
+
+    def test_a_connection_built_with_a_resolved_config_does_not_print_it(self):
+        """The repr guard itself (review nit 4).
+
+        The seam test above cannot pin this: the pristine install keeps the value
+        out of the repr on its own, so its `SENTINEL not in repr(conn)` passes even
+        with `field(repr=False)` removed. This builds the connection the way the
+        transport helper does — config carrying the RESOLVED value — which is the
+        state the hardening exists for.
+        """
+        from local_operator.mcp.manager import ServerConnection
+
+        resolved = MCPStdioServerConfig(command="probe-cmd", env={"T": SENTINEL})
+        conn = ServerConnection(name="hubspot", config=resolved, session=cast(Any, object()))
+
+        assert SENTINEL not in repr(conn)
+        assert "config=" not in repr(conn)
 
     @pytest.mark.asyncio
     async def test_the_value_never_reaches_a_message_or_a_log_line(
