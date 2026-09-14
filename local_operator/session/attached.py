@@ -6738,6 +6738,41 @@ class AttachedSession:
             return {"ok": False, "reason": "disconnected"}
         return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb on the OWNER's eval kernel.
+
+        The namespace this reads is the eval kernel's, and the kernel runs beside
+        the owner's turn loop — so a viewer that answered from anything local
+        would report a namespace no cell in this conversation ever mutates. The
+        verbs themselves are the owner's (``ServingSessionHandle.variables_op``
+        → the shared table), so both session shapes execute one implementation.
+
+        A disconnected viewer RAISES. Deliberately not the
+        ``{"ok": False, "reason": "disconnected"}`` shape ``credential_op``
+        answers: a lost owner is transient and retryable, and the route's
+        ``errors()`` ladder already words it for every neighbouring route, while
+        the one state this surface has for "cannot read" (
+        ``unsupported``) is a claim about the owner's BUILD — a user told that
+        would go and update a backend that is not the problem.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError("the session runtime is not attached")
+        try:
+            answer = await client.variables(action, key, value, value_type)
+        except RuntimeError as error:
+            # An owner too old to know the op answers ``unknown op``: that IS a
+            # fact about its build, and the panel's sentence for it is exactly
+            # "update the backend".
+            if "unknown op" in str(error):
+                return {"state": "unsupported"}
+            raise
+        if not isinstance(answer, dict):
+            return {"state": "unsupported"}
+        return answer
+
     async def register_secret_redaction(self, value: str) -> None:
         """Hand one §6 value to the owner so IT registers it for redaction.
 
