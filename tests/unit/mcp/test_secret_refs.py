@@ -18,11 +18,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.mcp.config import (
-    MCPHttpServerConfig,
-    MCPServerConfig,
-    MCPStdioServerConfig,
-)
+from local_operator.mcp.config import MCPHttpServerConfig, MCPStdioServerConfig
 from local_operator.mcp.manager import McpManager
 from local_operator.mcp.secret_refs import McpSecretRefError, resolve_config_secrets
 
