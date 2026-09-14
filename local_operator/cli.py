@@ -3518,7 +3518,16 @@ def _wake_rows() -> "list[dict[str, Any]]":
             due = raw.get("next_due_at")
             if isinstance(due, bool) or not isinstance(due, int):
                 continue
-            delivery = record if record is not None and record.get("occurrence_ms") == due else None
+            # A GHOST'S RECORD IS FROZEN, NOT WORK IN PROGRESS — the same
+            # decision `_delivery_rows` makes for `status` (QA round 1, Q1).
+            # Nothing can engage a session with no transcript, so this row must
+            # not carry an owed age in its tail or its legend, or the listing
+            # contradicts the process that has already gone home over it.
+            delivery = (
+                record
+                if record is not None and not ghost and record.get("occurrence_ms") == due
+                else None
+            )
             rows.append(
                 {
                     "session_id": session_id,
