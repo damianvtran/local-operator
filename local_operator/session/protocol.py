@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 115 public members and a POSITIVE
+    than stylistic. This protocol carries 116 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -598,8 +598,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     112 once the lease-warm retry needed ``recovering``, 113 once
     ``restored_spend`` joined the shared surface a viewer inherits, 114 once
     session code memory joined the session contract with ``variables_op``, 115
-    once ``mcp_credentials_op`` joined ``ViewerSessionProtocol``), so
-    recompute it rather than adjusting it by the size of your own change.
+    once the retention predicate's clone-free ``has_running_job`` joined the
+    per-frame reads, 116 once ``mcp_credentials_op`` joined
+    ``ViewerSessionProtocol``), so recompute it rather than adjusting it by the
+    size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -1349,6 +1351,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def epoch(self) -> str:
         """The runtime epoch, read without the whole-state clone."""
+        ...
+
+    @property
+    def has_running_job(self) -> bool:
+        """Whether any child is still running, read without the whole-state clone.
+
+        The retention predicate (``SessionInteraction.retained_for_auto_work``)
+        asks this as a boolean on every canonical delta of every leased source,
+        and it used to answer through ``frontend_state`` — a full deep copy of
+        canonical state for one boolean — which is why it belongs beside
+        ``pending_gate`` and ``epoch`` in this section rather than with the
+        roster-returning members.
+        """
         ...
 
     def subscribe_frontend(self, handler: Callable[[Any], Any]) -> Any:
