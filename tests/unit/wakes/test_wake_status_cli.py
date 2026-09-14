@@ -1096,6 +1096,18 @@ def test_a_ghost_with_an_owed_record_is_not_reported_as_retried(
     # reported as an attempt in progress.
     assert deliveries.read_delivery(tmp_path, "ghostowed001") is not None
 
+    # AND THE LISTING AGREES WITH IT. The `status` bucket was the reported half;
+    # the table's DUE word said `ghost` while its tail said `owed 1m` and the
+    # `retrying` legend printed under it — the same contradiction one surface
+    # over.
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    listed = capsys.readouterr().out
+    row = next(line for line in listed.splitlines() if "ghostowed001" in line)
+    assert "ghost" in row, row
+    # `, owed ` and not the bare word: the synthetic id itself contains "owed".
+    assert ", owed " not in row, row
+    assert "one failed attempt so far" not in listed, listed
+
 
 def test_the_owed_legends_come_first_and_share_one_tail(
     tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
