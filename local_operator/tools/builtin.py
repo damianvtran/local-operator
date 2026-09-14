@@ -7659,9 +7659,9 @@ class BrowserParams(BaseModel):
     tab: str = Field(
         default="",
         description=(
-            "'open' only: ADOPT a browser tab the USER handed to this session, "
-            "named by the handle 'tabs' reported for it (handed_to_you). Omit it "
-            "to create a new tab; another session's handle is refused here."
+            "'open' only: ADOPT a tab the USER handed to this session, "
+            "named by the FULL handle 'tabs' reported for it. Omit it to create a "
+            "new tab; a redacted handle is not yours to drive."
         ),
     )
     path: str = Field(default="", description="Destination file for 'screenshot'.")
