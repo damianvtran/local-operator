@@ -474,6 +474,21 @@ def _openrouter_upstream_error(error: Mapping[str, Any]) -> Mapping[str, Any] | 
 #: not part of the signal.
 _OPAQUE_AGGREGATOR_MESSAGE = "provider returned error"
 
+#: The part of the relay envelope's sentence that ATTRIBUTION cannot change.
+#:
+#: :func:`_attributed_relay_message` swaps the gateway's generic subject for the
+#: upstream host's name whenever the envelope carries a ``provider_name``
+#: ("Together returned error"), so matching the full sentence would miss half
+#: the envelopes on the wire. This is the fixed predicate of that sentence.
+#:
+#: Exported because the provider layer has to recognise the same envelope from
+#: the COMPOSED error message: ``failover.is_aggregator_upstream_stream_failure``
+#: treats a relay envelope on a 5xx as the gateway reporting that an upstream
+#: host died — which is the class a re-issue repairs — independently of what
+#: the upstream host's (possibly opaque) body said. A second copy of the wording
+#: in that module is exactly the drift this constant exists to prevent.
+RELAY_ENVELOPE_MARKER = "returned error"
+
 #: Statuses on which a relayed upstream failure is treated as WEATHER.
 #:
 #: Deliberately just 404, and the exclusion of 400 is the load-bearing part.

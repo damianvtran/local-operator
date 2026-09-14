@@ -162,14 +162,31 @@ class RenderedStreamError(Exception):
     not import the provider layer — the dependency only runs the other way.
     """
 
-    #: The MACHINE was offline (DNS/route/socket failed before any HTTP), as
-    #: opposed to a provider that answered badly. Declared here, on the base
-    #: class, precisely BECAUSE the harness must not import ``providers``: the
-    #: loop has to tell "the laptop moved between wifi networks" apart from "the
-    #: provider 500ed" to decide whether an interrupted turn may be continued,
-    #: and this attribute is the only channel that does not invert the layering.
-    #: ``providers.failover.ProviderError`` sets it from ``is_connectivity_loss``
-    #: (the single classifier — this is a carrier, never a second definition);
+    #: The provider call was cut off MID-STREAM in a way that re-issuing the
+    #: REMAINDER repairs, as opposed to a provider that answered about the
+    #: request it was given. Declared here, on the base class, precisely BECAUSE
+    #: the harness must not import ``providers``: the loop has to tell "the
+    #: laptop moved between wifi networks" — or "the gateway's upstream host
+    #: died mid-body" — apart from "the provider 500ed" to decide whether an
+    #: interrupted turn may be continued, and this attribute is the only channel
+    #: that does not invert the layering.
+    #:
+    #: The flag has TWO halves and they are stamped in different places, so a
+    #: reader looking for both at construction will not find them:
+    #:
+    #: * The connectivity half is stamped by ``ProviderError.__init__`` itself
+    #:   (``self.connectivity_loss = transport and is_connectivity_loss(self)``)
+    #:   — available at construction, and only when OUR client observed the
+    #:   transport die (see :func:`~local_operator.providers.failover.is_connectivity_loss`).
+    #: * The aggregator half is stamped LATER, by the failover driver's
+    #:   ``_mark_mid_stream_connectivity`` upgrade, which consults
+    #:   ``is_aggregator_upstream_stream_failure`` — and only on the raise site
+    #:   where bytes had already been forwarded, because "the caller has read
+    #:   part of the answer" is the fact that inference turns on. A PRE-delta
+    #:   aggregator 5xx is therefore marked nowhere, here or there, and stays the
+    #:   terminal failure it has always been.
+    #:
+    #: Both classifiers carry one decision rather than defining a second one;
     #: every other stream error keeps the ``False`` default, so a client that
     #: knows nothing about it behaves exactly as before.
     connectivity_loss: bool = False

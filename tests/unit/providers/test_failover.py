@@ -47,6 +47,7 @@ from local_operator.providers.failover import (
     connectivity_backoff_delay_ms,
     expand_fallback_candidates,
     expand_fallback_targets,
+    is_aggregator_upstream_stream_failure,
     is_auth_error,
     is_connectivity_loss,
     is_direct_credential_rotation_error,
@@ -5035,13 +5036,18 @@ class _CutAfterDeltas:
 
 
 async def _drive_until_error(
-    exc_factory: Any, *, deltas: int
+    exc_factory: Any, *, deltas: int, request: ChatRequest | None = None
 ) -> tuple[list[Any], ProviderError | None]:
     """Run the REAL ``stream_with_failover`` against a client that cuts out.
 
     Deliberately goes through the driver rather than calling the classifier: the
     property under test is the WIRING, so anything that hands the marking to the
     test instead of making the driver perform it would defeat the purpose.
+
+    ``request`` selects the target, which matters for the AGGREGATOR cases: the
+    provider identity is a fact the driver parses out of the selector and is
+    half of the "is this resumable" decision, so a test that could not choose
+    the provider could not exercise it.
     """
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -5057,10 +5063,11 @@ async def _drive_until_error(
             "fallbackChains": {},
         }
     }
+    request = request if request is not None else _request()
     forwarded: list[Any] = []
     try:
         async for event in stream_with_failover(
-            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+            request, FakeAuth({request.model.provider: ["k"]}), settings, client_for
         ):
             forwarded.append(event)
     except ProviderError as error:
@@ -5132,6 +5139,231 @@ async def test_the_driver_does_NOT_mark_a_cut_that_forwarded_nothing(
     assert not error.connectivity_loss, (
         f"the {arm} pre-connect path must not be marked continuable — nothing was "
         "forwarded, so there is no answer to continue and no offline inference to draw"
+    )
+
+
+#: The exact in-band error OpenRouter served the sentinel pass when one of its
+#: upstream hosts died mid-body: HTTP 200 already committed, so the failure rode
+#: inside the stream as an error chunk whose ``code`` is the 502 and whose
+#: message names the upstream host and the transport that died.
+_AGGREGATOR_UPSTREAM_CUT = (
+    "provider_unavailable: Upstream error from Together: Stream error: "
+    "h2 protocol error: error reading a body from connection"
+)
+
+#: Every marker the classifier accepts, each on its own, as the gateway's own
+#: wording varies with which host died and how. Kept beside the tuple itself
+#: only as the population the predicate must accept — an empty one would pass
+#: every "does it stay terminal" control below while the fix did nothing.
+_AGGREGATOR_UPSTREAM_CUT_SHAPES = (
+    _AGGREGATOR_UPSTREAM_CUT,
+    "provider_unavailable",
+    "Upstream error from Azure: Stream error",
+    "upstream error from Google AI Studio",
+    "stream error: h2 protocol error",
+    "Network connection lost",
+    "JSON error injected into SSE stream",
+)
+
+
+@pytest.mark.parametrize("message", _AGGREGATOR_UPSTREAM_CUT_SHAPES)
+async def test_aggregator_in_band_upstream_5xx_is_continuable(message: str) -> None:
+    """THE REPORTED INCIDENT: a gateway's upstream host dies mid-body.
+
+    Driven through the REAL driver, so what is asserted is the wiring and not the
+    classifier in isolation: the selector's provider has to reach the marking
+    helper, which is the half of the decision an error object cannot carry.
+
+    Before this fix the driver raised this shape unmarked and the LOOP ended the
+    turn on it — no retry, no failover, no continuation — which is how a
+    scheduled sentinel pass lost 13 minutes of triage and a half-composed ``write``
+    call to a failure OpenRouter would have routed around on the very next
+    request.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, message, retryable=True),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "an aggregator's in-band upstream failure must be RESUMABLE, or the turn "
+        f"dies holding output the user already read: {message}"
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "deepseek"])
+async def test_first_party_5xx_mid_stream_stays_terminal(provider: str) -> None:
+    """The gate that keeps the fix narrow: a DIRECT provider has no sibling host.
+
+    Same status, same words, a provider that is not a gateway. Re-issuing the
+    turn there would re-bill a call we already hold the beginning of while the
+    provider's own service is what failed, so the pre-existing terminal rule is
+    the correct one and must survive this change untouched.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True),
+        deltas=2,
+        request=_request(provider, "some-model"),
+    )
+
+    assert len(forwarded) == 2
+    assert error is not None
+    assert not error.connectivity_loss, (
+        f"{provider} is not an aggregator: an upstream host dying is not a thing "
+        "it can report, so this shape must keep its terminal behaviour"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (400, "invalid_request_error: messages: field required"),
+        (429, "rate limit exceeded: please retry later"),
+        (401, "invalid api key"),
+        (403, "moderation: your request was flagged"),
+        # The DeepSeek thinking-mode echo refusal. The LOOP answers this one by
+        # retrying with thinking off, so reclassifying it here would spend the
+        # continuation budget on a retry that cannot express that fix.
+        (400, "reasoning_content must be passed back in the request"),
+        # A 5xx whose body names NOTHING about routing or transport: "the gateway
+        # 500ed" with no evidence about what failed is not replayable.
+        (500, "internal server error"),
+        # A 5xx on the aggregator that is a REFUSAL in disguise, with no
+        # upstream/stream wording for the shape gate to believe.
+        (503, "no available model for this request"),
+    ],
+)
+async def test_aggregator_in_band_refusals_stay_terminal(status: int, message: str) -> None:
+    """A REFUSAL about the request must stay terminal even from an aggregator.
+
+    Deterministic in its bytes: the same request earns the same answer on the
+    next attempt, so continuing only spends the turn's budget and hides the
+    refusal the operator has to act on (a bad model id, a spent quota, a
+    moderation block).
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(status, message, retryable=status >= 500 or status == 429),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2
+    assert error is not None
+    assert not error.connectivity_loss, f"HTTP {status} from the gateway is not a routing failure"
+
+
+def test_the_recorded_openrouter_error_chunk_classifies_as_resumable() -> None:
+    """The classifier must match the message the CLIENT composes, not a paraphrase.
+
+    Built by pushing the recorded wire chunk through the real
+    ``_compat_stream_error``, so the string under test is whatever the shipped
+    code produces from ``metadata.error_type``, the relay sentence and the
+    upstream's JSON-encoded ``raw`` — the trap an earlier round of these fixtures
+    fell into was asserting a hand-typed shape the client never emits.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    error = _compat_stream_error(
+        {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {
+                    "error_type": "provider_unavailable",
+                    "provider_name": "Together",
+                    "raw": json.dumps(
+                        {
+                            "error": {
+                                "message": (
+                                    "Upstream error from Together: Stream error: "
+                                    "h2 protocol error: error reading a body from connection"
+                                )
+                            }
+                        }
+                    ),
+                },
+            },
+        }
+    )
+
+    assert error.status == 502
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    # The gate, on the same composed message: radient is an aggregator too, and a
+    # first-party provider is not.
+    assert is_aggregator_upstream_stream_failure(error, "radient")
+    assert not is_aggregator_upstream_stream_failure(error, "openai")
+
+
+def test_a_relayed_5xx_with_an_OPAQUE_upstream_body_is_resumable() -> None:
+    """Round-1 m1: the envelope is PROVENANCE, so an opaque body cannot hide it.
+
+    Every fixture above starts from the marker-bearing body, which made the
+    classifier depend on the upstream HOST's wording. This is the same recorded
+    chunk with a body that says nothing at all — the reviewer's exact shape —
+    pushed through the real ``_compat_stream_error``, which renders it
+    ``Provider returned error: "ERROR"``: no marker matches, while the envelope
+    says plainly that the gateway is relaying an upstream death.
+
+    The status gate, not the wording, is what keeps refusals terminal, so
+    admitting the envelope stays bounded: 4xx never reaches the classifier, and
+    a non-aggregator never reaches it at all.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    opaque = {"code": 502, "message": "Provider returned error", "metadata": {"raw": '"ERROR"'}}
+    error = _compat_stream_error({"error": opaque})
+
+    assert error.status == 502
+    assert error.message == 'Provider returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    assert is_aggregator_upstream_stream_failure(error, "radient")
+    assert not is_aggregator_upstream_stream_failure(
+        error, "openai"
+    ), "a direct provider has no sibling host to re-route to"
+
+    # The attributed variant is the same envelope: the composer swaps the
+    # gateway's generic subject for the upstream host's name when the envelope
+    # carries one, so a recogniser keyed on the full generic sentence would miss
+    # half the envelopes on the wire.
+    attributed = _compat_stream_error(
+        {
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {"provider_name": "Together", "raw": '"ERROR"'},
+            }
+        }
+    )
+    assert attributed.message == 'Together returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(attributed, "openrouter")
+
+    # The STATUS gate is what keeps a refusal terminal, not the envelope's
+    # absence: the identical body under a 400 stays a request defect.
+    refusal = _compat_stream_error({"error": {**opaque, "code": 400}})
+    assert not is_aggregator_upstream_stream_failure(refusal, "openrouter")
+
+
+async def test_an_opaquely_worded_relay_5xx_continues_through_the_driver() -> None:
+    """The classifier's new arm has to be reached by the DRIVER's marking helper.
+
+    The classification is inert unless ``_mark_mid_stream_connectivity`` runs on
+    the forwarded-any raise, which is the half an error object cannot carry.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, 'Provider returned error: "ERROR"', retryable=True),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "the gateway's relay envelope says an upstream host died, however opaque "
+        "that host's own body was"
     )
 
 
