@@ -164,6 +164,43 @@ SIDEBAR_SPINNER_INTERVAL_S = 0.15
 
 
 class SessionSidebar(Widget, can_focus=True):
+    #: A pointer press on this list acts on the row under the pointer and nothing
+    #: else: it does NOT move the keyboard (design round, D1).
+    #:
+    #: With Textual's default (``True``) the click-to-focus walk lands on this
+    #: widget (``Screen._forward_event`` -> ``get_focusable_widget_at``,
+    #: ``screen.py:1933-1939``, consulting ``Widget.focus_on_click``) and the
+    #: keyboard LEAVES the composer. Measured on the design round's frames at
+    #: 120x40: a click anywhere in the panel — a row and the dead space below the
+    #: list alike — dimmed the composer's chevron, took the caret, and then
+    #: swallowed everything typed next (four typed keys, a 0-cell frame delta,
+    #: the draft untouched). The user cannot even tell that state apart from
+    #: "nothing holds the keys", and nothing on the frame says typing is going
+    #: nowhere. The gesture is complete when the click lands — it attached a
+    #: session or it missed — and this list has no text input, so it has nothing
+    #: to do with the keys afterwards.
+    #:
+    #: ``can_focus`` deliberately stays ``True``: the list keeps its keyboard
+    #: mode and its arrows/``enter``/cursor tint unchanged, entered only on
+    #: purpose (``f9``, or ``/sidebar focus`` — its own footer names the key) and
+    #: left with Esc or ``f9`` again. The app already behaves this way in the one
+    #: click path that DOES act: clicking the attached session's own row focuses
+    #: the editor itself (:meth:`OperatorApp.on_session_sidebar_selected`), so
+    #: this only makes the rest of the panel agree with it.
+    #:
+    #: Accepted trade-off, stated so it is not discovered later: with the click no
+    #: longer changing the composer's state, ``enter`` right after a row click
+    #: still means "send the draft" (``editor.py`` ``_submit``) rather than "open
+    #: the row". A frame that did not visibly change is the price; the alternative
+    #: was text that vanished with no frame change at all.
+    #:
+    #: Do NOT pair this with forwarding printable keys from ``on_key`` to the
+    #: composer (the mechanism the UX diagnosis floated): under this rule the list
+    #: is only ever entered deliberately, so there is nothing to repair, and the
+    #: forwarding would contradict itself the day the list grows the filter field
+    #: a click on it implies.
+    FOCUS_ON_CLICK = False
+
     #: Textual re-renders a widget on every pointer move to look for link
     #: spans (``Widget.watch_hover_style``, whose own comment notes it fires
     #: "even when there are no links"). That repaint is paid INLINE on the
@@ -878,7 +915,30 @@ class SessionSidebar(Widget, can_focus=True):
         hint = "esc return" if self.has_focus else "f9 focus · ctrl+b hide"
         if len(self.entries) > self.page_size:
             last = min(len(self.entries), self._offset + self.page_size)
-            hint = f"{self._offset + 1}–{last}/{len(self.entries)} · ctrl+b hide"
+            position = f"{self._offset + 1}–{last}/{len(self.entries)}"
+            if self.has_focus:
+                # The page counter may never be the reason the EXIT hint
+                # disappears (design round, D4). It used to REPLACE the hint
+                # outright, so the frame that most needs to name a way out — 41
+                # rows, the cursor deep inside the list — named none: measured,
+                # the focused footer read `1–32/41 · ctrl+b hide` and
+                # `esc return` was gone, in the one state the user reached on
+                # purpose. Longest form that fits, and the exit alone when
+                # nothing else does: the position is discoverable by scrolling
+                # (the cursor row is painted), the exit is not.
+                for candidate in (
+                    f"{position} · {hint} · ctrl+b hide",
+                    f"{position} · {hint}",
+                    hint,
+                ):
+                    if truncate_cells(candidate, width) == candidate:
+                        hint = candidate
+                        break
+            else:
+                # Unfocused, unchanged: the position plus the hide key. Nothing
+                # here can be lost to the counter — an unfocused list owns no
+                # key, so there is no exit hint for the counter to displace.
+                hint = f"{position} · ctrl+b hide"
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
         result.append(
             "\n" + truncate_cells(footer, width),
