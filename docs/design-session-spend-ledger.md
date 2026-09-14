@@ -1185,6 +1185,32 @@ captures: `≥$2.10` → `$4.20`). The remaining 2.5% cannot be priced by any
 resolver, the rebuild correctly refuses to publish, and the mark must STAY — a
 test asserts it, so nobody later "fixes" the lower bound into a false exact.
 
+17. **The cold viewer's two money artifacts are ordered by their own position**
+(QA round 1, Q2). The record is written per CALL and the checkpoint only at a
+turn end, so on any session with a call accrued after the last turn end — and in
+every crash/repair window, which is what this surface exists for — the RECORD is
+the newer of the two. `_seed_cold_usage` preferred the checkpoint whenever it
+carried a figure (`if state.cumulative_parent_cost is None`), so the band painted
+the checkpoint's `$1.00` unmarked and EXACT one screen away from a `/session` row
+reading the record's `$5.00`. Both artifacts are now read with the index at which
+the backward scan met each one (`ReplaySuffix.checkpoint_order`, lower = newer),
+and **the newer one decides the figure and the knowledge state**. When the order
+cannot be established and the two disagree, neither is certified: the figure is
+kept and demoted to `FLOOR`, because an artifact we cannot order is one we cannot
+certify. Order B — the checkpoint newer — is unchanged, and the two agree there.
+Measured both ways by `test_the_newer_money_artifact_decides_the_cold_figure` and
+on the real band by `test_a_cold_open_paints_the_newer_money_artifact`.
+18. **`priced_calls == 0` is UNKNOWN, not a zero total** (QA round 1, Q1), reached
+through the real writer: `accrue_spend(None)` records one call the pricing could
+not size, and the record spells that `priced_calls: 0`. Publishing its `micro`
+made `cumulative_parent_cost` `0.0`, so the band's zero policy dropped the cost
+segment entirely while `/analytics` printed `$—` for the same state and §8.2
+specifies `$—`. The record present branch now leaves the parent cost UNSET when
+nothing was priced — which is also what stops the one-receipt fallback below it
+from re-filling the cell — and `/session` spells the same state `$—` with no micro
+rung. `≥$—` remains impossible by construction: the mark is only applied to a
+figure that exists, so an unknown sum has nothing to qualify.
+
 ## 13. What I could not settle from the code, and what would settle it
 
 1. **SETTLED — measured 2026-09-13, and T7 is DROPPED as a result.** The

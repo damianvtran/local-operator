@@ -31,7 +31,12 @@ from local_operator.harness.types import (
 from local_operator.session import frontend_state as frontend_state_module
 from local_operator.session import session as session_module
 from local_operator.session import spend as spend_module
-from local_operator.session.frontend_state import CostKnowledge
+from local_operator.session.attached import AttachedSession
+from local_operator.session.frontend_state import (
+    FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+    CostKnowledge,
+    FrontendSessionState,
+)
 from local_operator.session.session import Session
 from local_operator.session.spend import (
     SESSION_SPEND_CUSTOM_TYPE,
@@ -1062,6 +1067,154 @@ def test_a_mid_turn_correction_is_not_billed_twice_by_the_remainder(
         assert session.spend.micro == 2_000_000
 
     asyncio.run(main())
+
+
+def _checkpoint_details(sid: str, cost: float, knowledge: str) -> dict[str, Any]:
+    """The turn-end status row a runtime writes, as the cold reader meets it."""
+    raw = FrontendSessionState(session_id=sid, epoch="e1").model_dump(mode="json")
+    raw.update({"cumulative_parent_cost": cost, "cost_knowledge": knowledge})
+    return {"checkpoint_id": "cp", "state": raw}
+
+
+def _cold_open(
+    tmp_path: Path,
+    sid: str,
+    writes: list[tuple[str, dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    """Journal ``writes`` in order (later is NEWER) and open the session COLD.
+
+    The ORDER is the variable under test, so the same two artifacts are written
+    both ways rather than being described as newer and older. The takeover
+    factory fails the test if the cold open reaches for a runtime: every fact
+    here has to come off the disk. ``HOME`` is redirected as well as the config
+    dir because the model catalogue resolves from the home root independently
+    (AGENTS.md: one variable is not isolation), and the paint resolver is
+    trapped so a cold read that tries to price anything through the live
+    catalogue fails loudly instead of quietly reaching the network.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
+    )
+    directory = tmp_path / "sessions" / sid
+    directory.mkdir(parents=True, exist_ok=True)
+
+    async def seed() -> None:
+        transcript = Transcript(directory)
+        for custom_type, details in writes:
+            await transcript.append_custom(custom_type, details)
+
+    asyncio.run(seed())
+
+    async def never() -> None:
+        pytest.fail("the cold open started a runtime")
+
+    async def open_cold() -> Any:
+        return await AttachedSession.cold(
+            sid, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never
+        )
+
+    return asyncio.run(open_cold())
+
+
+def test_the_newer_money_artifact_decides_the_cold_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q2: the cold band may not paint what the record contradicts.
+
+    The record is written per CALL and the checkpoint only at a turn end, so the
+    record is the newer of the two on every path with a call accrued after the
+    last turn end — the crash/repair window this surface exists for. The cold
+    viewer preferred the checkpoint unconditionally, and on such a session the
+    band painted the checkpoint's ``$1.00`` unmarked and EXACT one screen away
+    from a ``/session`` row reading the record's ``$5.00``.
+
+    Magnitude is deliberately not the discriminator: the two fixtures are
+    written in both orders and the ORDER alone decides, which is what makes this
+    a fact about the journal rather than a preference between two sources.
+    """
+    record = SessionSpend(micro=5_000_000, calls=3, priced_calls=3, writer="qa:probe").to_details()
+    checkpoint = _checkpoint_details("coldrecord01", 1.0, "exact")
+    checkpoint_older = _checkpoint_details("coldcheck01", 1.0, "exact")
+
+    newer_record = _cold_open(
+        tmp_path,
+        "coldrecord01",
+        [
+            (FRONTEND_CHECKPOINT_CUSTOM_TYPE, checkpoint),
+            (SESSION_SPEND_CUSTOM_TYPE, record),
+        ],
+        monkeypatch,
+    )
+    assert newer_record.frontend_state.cumulative_cost == 5.0, "the newer record decides"
+    assert newer_record.frontend_state.cost_knowledge is CostKnowledge.EXACT
+
+    newer_checkpoint = _cold_open(
+        tmp_path,
+        "coldcheck01",
+        [
+            (SESSION_SPEND_CUSTOM_TYPE, record),
+            (FRONTEND_CHECKPOINT_CUSTOM_TYPE, checkpoint_older),
+        ],
+        monkeypatch,
+    )
+    assert newer_checkpoint.frontend_state.cumulative_cost == 1.0, "the newer checkpoint stands"
+    assert newer_checkpoint.frontend_state.cost_knowledge is CostKnowledge.EXACT
+
+
+def test_disagreeing_money_with_no_order_is_never_certified_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2's other half: an unorderable disagreement is a lower bound, not a fact.
+
+    When neither artifact's position can be read there is nothing to choose with,
+    and certifying either would be an assertion the journal does not support. The
+    figure is kept — it is where the session's own runtime left the band — and
+    demoted, so the mark says "we cannot certify this" rather than a bare number
+    saying "this is the bill".
+    """
+    viewer = _cold_open(
+        tmp_path,
+        "coldorder01",
+        [(FRONTEND_CHECKPOINT_CUSTOM_TYPE, _checkpoint_details("coldorder01", 1.0, "exact"))],
+        monkeypatch,
+    )
+    # The record arrives with no meeting index (a legacy reader, an artifact read
+    # from another source): the order cannot be established, and the two figures
+    # disagree.
+    viewer._cold_spend = SessionSpend(
+        micro=5_000_000, calls=3, priced_calls=3, writer="x:1"
+    ).to_details()
+    viewer._cold_order = {}
+    state = viewer._seed_cold_usage(viewer.frontend_state)
+    assert state.cumulative_parent_cost == 1.0
+    assert state.cost_knowledge is CostKnowledge.FLOOR
+
+
+def test_an_unpriceable_record_is_unknown_not_a_zero_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: nothing priceable is ``$—``, not ``$0.00``.
+
+    Reached through the real writer: ``accrue_spend(None)`` records one call that
+    could not be priced, which the record spells ``priced_calls: 0``. Publishing
+    its ``micro`` as a total made the band's zero policy drop the cost cell
+    entirely, while ``/analytics`` printed ``$—`` for the same state and §8.2
+    specifies ``$—``. The fix is the distinction, not a spelling: an unknown sum
+    leaves ``cumulative_parent_cost`` unset so the band's own ``$—`` branch fires.
+    """
+    record = SessionSpend(
+        micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="qa:probe"
+    ).to_details()
+    viewer = _cold_open(
+        tmp_path, "coldunknown01", [(SESSION_SPEND_CUSTOM_TYPE, record)], monkeypatch
+    )
+    state = viewer.frontend_state
+    assert state.cumulative_parent_cost is None, "0.0 is a figure the record cannot support"
+    assert state.cost_knowledge is CostKnowledge.UNKNOWN
+    assert state.cumulative_cost is None
 
 
 def test_a_late_correction_is_clamped_exactly_like_a_mid_turn_one(

@@ -739,6 +739,108 @@ async def test_every_writer_of_the_cost_cell_keeps_the_floor_mark(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_cold_open_paints_the_newer_money_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q2 and Q1, on the surface the operator complained about.
+
+    The band is what a cold open shows before any runtime exists, and it used to
+    prefer the turn-end checkpoint's money unconditionally — so a session whose
+    ledger record was NEWER (per-call writes outlive the last turn end on every
+    crash/repair path) painted the checkpoint's ``$1.00`` unmarked and EXACT one
+    screen away from a ``/session`` row reading the record's ``$5.00``. Ordering
+    the two artifacts by their own position in the journal is what fixes it, and
+    only the REAL app can show that the ordering reaches the cell.
+
+    The second case is Q1: a record whose every call was unpriceable has no
+    figure, so the cell must say ``$—`` (as ``/analytics`` already did) rather
+    than dropping the segment, which is what a ``0.0`` total made it do.
+    """
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+    )
+    from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    async def never_take_over(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the cold open reached for a runtime")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    def checkpoint(sid: str, cost: float) -> dict[str, Any]:
+        raw = FrontendSessionState(session_id=sid, epoch="e1").model_dump(mode="json")
+        raw.update({"cumulative_parent_cost": cost, "cost_knowledge": "exact"})
+        return {"checkpoint_id": "cp", "state": raw}
+
+    async def journal(sid: str, writes: list[tuple[str, dict[str, Any]]]) -> None:
+        directory = tmp_path / "sessions" / sid
+        directory.mkdir(parents=True, exist_ok=True)
+        transcript = Transcript(directory)
+        await transcript.append_message(Message.user("hello"))
+        # A signed reading with tokens and no price: the call the pricing could
+        # not size, which is what makes the band's `$—` branch reachable at all.
+        await transcript.append_message(_assistant(output=1_000, context=12_000))
+        for custom_type, details in writes:
+            await transcript.append_custom(custom_type, details)
+
+    async def band_of(sid: str) -> str:
+        async def factory() -> Any:
+            return await AttachedSession.cold(
+                sid, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never_take_over
+            )
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(120, 18)) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            for _ in range(40):
+                await pilot.pause()
+            assert app._status is not None
+            return app._status._cost
+
+    # The record is NEWER than the checkpoint, and it is the one that speaks.
+    newer = "coldbandnewer1"
+    await journal(
+        newer,
+        [
+            (FRONTEND_CHECKPOINT_CUSTOM_TYPE, checkpoint(newer, 1.0)),
+            (
+                SESSION_SPEND_CUSTOM_TYPE,
+                SessionSpend(
+                    micro=5_000_000, calls=3, priced_calls=3, writer="qa:probe"
+                ).to_details(),
+            ),
+        ],
+    )
+    assert await band_of(newer) == "$5.00", "the newer record decides the cold band"
+
+    # Nothing priceable: `$—`, not a dropped segment and not `$0.00`.
+    unpriceable = "coldbandunknown"
+    await journal(
+        unpriceable,
+        [
+            (
+                SESSION_SPEND_CUSTOM_TYPE,
+                SessionSpend(
+                    micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="qa:probe"
+                ).to_details(),
+            )
+        ],
+    )
+    assert await band_of(unpriceable) == "$—", "an unknown sum is a dash, not a zero"
+
+
+@pytest.mark.asyncio
 async def test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

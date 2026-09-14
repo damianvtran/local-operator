@@ -464,6 +464,15 @@ class ReplaySuffix:
     #: Newest row of each requested custom type, keyed by type. Additive: a
     #: caller requesting one type sees the same value in ``checkpoint``.
     checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: WHERE each requested type's newest row sits in the journal, as the
+    #: 1-based index at which the backward scan met it — LOWER IS NEWER, because
+    #: the scan walks from EOF. Two artifacts that disagree about the same fact
+    #: (the ledger record and the turn-end checkpoint, both carrying money) can
+    #: only be reconciled by their own order, and this is that order taken from
+    #: the one pass that already reads both (QA round 1, Q2). A type the scan
+    #: never met is absent, which is the caller's signal that the order cannot be
+    #: established rather than that the type is old.
+    checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
 
@@ -549,6 +558,8 @@ def read_replay_suffix(
     )
     collectible = wanted + opportunistic
     checkpoints: dict[str, dict[str, Any]] = {}
+    checkpoint_order: dict[str, int] = {}
+    met = 0  # 1-based: the scan walks newest-first, so lower means newer
     compaction: TranscriptEntry | None = None
     first_kept_id: str | None = None
     seen_ids: set[str] = set()
@@ -594,6 +605,7 @@ def read_replay_suffix(
                 if entry is None:
                     continue
                 parsed.append(entry)
+                met += 1
                 seen_ids.add(entry.id)
                 if through_id is not None and entry.id == through_id:
                     # Rows after the cursor are discarded by the replay, so a
@@ -621,6 +633,10 @@ def read_replay_suffix(
                     ):
                         details = dict(entry.payload.get("details", {}))
                         checkpoints[custom_type] = details
+                        # First hit wins going backward, so this is the type's
+                        # NEWEST row: its meeting index is what orders it against
+                        # another type's newest row.
+                        checkpoint_order[custom_type] = met
             at_start = position == 0
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
@@ -640,6 +656,7 @@ def read_replay_suffix(
         # passes one type and must see the value it always saw here.
         checkpoint=checkpoints.get(wanted[0]) if wanted else None,
         checkpoints=checkpoints,
+        checkpoint_order=checkpoint_order,
         bytes_read=end_of_file - position,
     )
 
