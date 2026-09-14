@@ -753,6 +753,20 @@ def _matrix(
     )
     on_session("GET  .../{id} (snapshot)", "GET", "")
     on_session("GET  .../{id}/history", "GET", "/history")
+    on_session("GET  .../{id}/variables (code memory)", "GET", "/variables")
+    on_session(
+        "POST .../{id}/variables",
+        "POST",
+        "/variables",
+        {"key": "counter", "value": "1", "type": "int"},
+    )
+    on_session(
+        "PATCH .../{id}/variables/{key}",
+        "PATCH",
+        "/variables/counter",
+        {"value": "2", "type": "int"},
+    )
+    on_session("DELETE .../{id}/variables/{key}", "DELETE", "/variables/counter")
     on_session("GET  .../{id}/failovers", "GET", "/failovers")
     on_session("GET  .../{id}/command-entities", "GET", "/command-entities?command=compact")
     # A standing stream, so it gets a read budget of its own: announced-and-admitted
