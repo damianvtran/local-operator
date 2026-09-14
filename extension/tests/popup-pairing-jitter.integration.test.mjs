@@ -463,6 +463,45 @@ test("the error sits above the button that produced it (D2)", async () => {
   );
 });
 
+/* ------------------------------------------------------------------ J9 ---- */
+
+test("nothing in the popup sizes itself against the popup's own viewport (J9)", async () => {
+  // A Chrome action popup sizes its WINDOW to this document's content, so a
+  // viewport-relative length in popup.css is a length derived from the thing it
+  // decides. `.card` carried `max-height: calc(100vh - 20px)` (design D2's
+  // bounded card) and the feedback loop settled at the collapsed end, measured
+  // through the real toolbar path (chrome.action.openPopup(), no emulated
+  // viewport, Chrome 153): Chrome creates the window at an undersized height,
+  // the clamp then reads that height, the card is clamped to 5px, the document
+  // is 25px, and the window stays there — EVERY state painted as a 300x25 bar
+  // with its header band clipped to a sliver (card 5px, body scrollHeight 386).
+  //
+  // No other assertion in this repo can see that. scripts/popup-states-shot.mjs
+  // opens popup.html as a PAGE at 300x600, where `100vh` is the number the
+  // harness chose, and every stylesheet assertion in this file (the J1/J7 group
+  // above) compares popup.css against itself — a clamp that agrees with its own
+  // constant still collapses the window. So the rule is stated as a rule: the
+  // capped case is handled with `position: sticky` on .head/.foot, which cannot
+  // feed back into the window height, and Chrome's own 600-device-px cap does
+  // the bounding.
+  const css = await readFile(join(HERE, "..", "src", "popup", "popup.css"), "utf8");
+  // Comments are stripped first: this file discusses the removed `100vh` at
+  // length, and a guard that fails on its own explanation is a guard somebody
+  // deletes. The strip cannot rot silently either — that prose is IN popup.css,
+  // so a strip that stopped working turns the assertion below red on its own.
+  const declarations = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const offenders = [...declarations.matchAll(/[\d.]+(?:vh|vw|vmin|vmax|dvh|dvw|svh|svw|lvh|lvw)\b/g)].map(
+    (match) => match[0],
+  );
+  assert.deepEqual(
+    offenders,
+    [],
+    "popup.css must not size anything against its own viewport: the popup window is sized FROM this " +
+      "document, so a viewport unit is circular and collapses the popup. Pin .head/.foot with position: " +
+      "sticky and let Chrome cap the window instead.",
+  );
+});
+
 test("the first paint is pinned to the state this browser will actually reach (D1/D3-1)", async () => {
   // #pending paints on EVERY open, before render()'s awaits resolve, so its
   // pinned height decides how far the card travels. THREE pins now, not a
