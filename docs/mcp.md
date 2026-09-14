@@ -74,7 +74,7 @@ server's reconnect).
 | `${NAME}` as the whole value | the stored value (the only shape the desktop UI's add form accepts) |
 | `Bearer ${NAME}` | each reference substituted, surrounding text kept |
 | `$${NAME}` | the escape: the literal text `${NAME}`, never a reference (no lookup, no refusal) |
-| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`, `${HOME}`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
+| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`, or a name the store does not hold such as `${HOME}`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
 | a `${` whose inner text names a key the store holds, once shell/compose decoration is stripped (`${hubspot-token}`, `${NAME:-}`, `${NAME-SUB}`, `${env:NAME}`, `${ NAME }`) | refused: the key exists, so the fragment cannot be a literal, and passing it through would start the server with the reference as its credential |
 | a well-formed reference mixed with a fragment (`${TOKEN}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
 
