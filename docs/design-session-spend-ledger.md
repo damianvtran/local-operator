@@ -1321,7 +1321,7 @@ silence the paint-resolver's expected cold-miss debug lines.
 
 **A. The restore-vs-sum gap (§2.1, §2.2).** For each session, read the journal
 suffix, apply `usages_since_newest_shrink`, price each row with
-`local_operator.tui.costs.turn_cost` on the row's own `provider/model_id`, and
+`local_operator.model.costs.turn_cost` on the row's own `provider/model_id`, and
 compare the last priced row with their sum. Store-wide this is the median-64x /
 max-9,854x table; the same script reports per-session compaction and prune
 marker counts (`ENTRY_COMPACTION` / `ENTRY_PRUNE` in `suffix.entries`).

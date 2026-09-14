@@ -344,3 +344,45 @@ async def test_a_cut_off_turns_live_cards_are_retired_as_cut_off(tmp_path, monke
         row = card._build_row(100).plain
         assert "cut off" in row, row
         assert "interrupted" not in row, row
+
+
+def test_the_returned_to_turn_notice_carries_an_escalated_stops_attribution() -> None:
+    """Design round 1, D1 on the row the TUI poller and the phone SHARE.
+
+    ``rows.completion_notice`` builds this row for both surfaces, and it was
+    kind-gated: an ``interrupted`` outcome returned the bare word whatever the
+    reason said, so a rung-3 kill and a rung-1 request painted the same eleven
+    cells on the TUI and on the phone. Only the ESCALATED rung appends, because
+    ``Interrupted`` already means the operator stopped it — what they cannot
+    learn from the word is that the ladder had to signal the runtime to make it
+    stop, and that is the fact this PR's marker records.
+    """
+    from local_operator.harness.rows import completion_notice
+    from local_operator.incidents import (
+        CUT_OFF_UNKNOWN,
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    def stop(rung: str, command: str) -> str:
+        return render_cut_off_reason(
+            DELIBERATE_CUT_OFF_CAUSE,
+            detail=render_stop_attribution(rung=rung, command=command, killer_pid=40609),
+        )
+
+    assert completion_notice("interrupted", stop("sigkill", "/stop --all")) == (
+        "Interrupted — killed by /stop --all",
+        "info",
+    )
+    assert completion_notice("interrupted", stop("sigterm", "/stop")) == (
+        "Interrupted — stopped with a signal by /stop",
+        "info",
+    )
+    # Rung 1, a pre-attribution record, and the no-evidence sentence all read
+    # exactly as they did before this change.
+    for quiet in (stop("socket", "/stop"), CUT_OFF_UNKNOWN, ""):
+        assert completion_notice("interrupted", quiet) == ("Interrupted", "info")
+    # The error arm is untouched: it prints the reason whole, and its tier is
+    # still the loud one.
+    assert completion_notice("error", "boom") == ("Stopped with an error — boom", "error")

@@ -325,16 +325,28 @@ record (live pid, stale heartbeat) is degraded-and-named, never reaped.
   rollback. In-flight turns are never cancelled: the residency predicate
   (`process.py:397-470`) decides when a runtime may leave. The UI must not call
   `restart()` around an update.
-- **The daemon itself** is the one participant with no rollout today: it holds no
-  turn, but it does hold `desktop_sessions` state and SSE streams, and nothing
-  restarts a `lop serve` on a new build. Give it the same shape — a poll task
-  using `process.py`'s `BUILD_CHECK_S`/`BUILD_SETTLE_S` semantics (reused, not
-  reinvented) that **announces** by writing `retiring_from`/`retiring_to` into its
-  record and refusing new session spawns, then exits once nothing is in flight,
-  leaving the successor to whoever supervises it: the app (for a daemon it owns,
-  which re-discovers the new pid and port via §3) or launchd. An external,
-  unsupervised daemon is never restarted by the UI — it says so, names `lop
-  update`, and offers to run it if it is the global install.
+- **The daemon itself announces only.** A settled install change writes
+  `retiring_from`/`retiring_to` into its record, but every production daemon
+  continues serving: no build-triggered drain, admission latch, or exit. The
+  legacy field names describe a new-build announcement, not a handoff promise.
+  The daemon DOES own legacy scheduled/async work: `SchedulerService._run_tasks`
+  holds in-process runs and lifespan shutdown cancels them. Detached desktop
+  runtimes are only one execution path; an empty attachment probe does not prove
+  the daemon is safe to stop. Nor does the install marker prove a successor is
+  ready to accept requests.
+  - **Re-read announcements while serving.** Returning to the boot build or an
+    unreadable stamp withdraws the fields; moving on again retargets them. Record
+    identity, discovery, ownership claims, and update installation are unchanged.
+  - **UI contract: do not release SSE/watch on these fields.** Keep the session
+    relay and watch heartbeat alive, including during turns. The announcement
+    alone does not authorize disconnecting, stopping, or rebinding the daemon.
+    A future handoff must first prove successor readiness and protect all
+    daemon-owned work; that protocol is deliberately not implemented here.
+  - **Internal test seam only.** An explicitly injected `exit_process` callback
+    retains the drain/latch tests, including typed `503 daemon-retiring` refusal
+    coverage. Production lifespan supplies no callback, and there is no flag or
+    environment variable to opt into that unsafe path. This is not automatic
+    daemon rollout or a zero-downtime daemon upgrade guarantee.
 - **Bundled venv**: keep the code path, demote its role. It exists so a fresh
   machine has *a* backend; once a global daemon is discoverable it must not be
   started, must not be updated, and must not be what the version banner describes.
@@ -368,8 +380,8 @@ without the posture refactor.
    `desktop_posture()` + `POST /v1/desktop/claim`, and the five predicate sites
    switched to it. Security-sensitive: the only PR here whose QA matrix must cover
    refusal paths, not just the happy path.
-3. `feat(server): retire the daemon onto a new build` — the poll task and the
-   record's `retiring_from`/`retiring_to` fields.
+3. `fix(server): announce daemon build drift without exiting` — the poll task
+   and the record's informational `retiring_from`/`retiring_to` fields.
 
 **UI, one PR:** `src/main/backend/backend-service.ts` (`discoverDaemon`, ranking,
 state machine, pid-scoped shutdown), `src/main/backend/config.ts` (constants, no
@@ -421,10 +433,19 @@ documented at `types.py:255-315`.
    watch for a working `curl` script starting to 401, and for a renderer call site
    still hitting a gated path directly.
 2. **`--reload`** (dev only) publishes from uvicorn's child; verify the reloader's
-   own exit cannot orphan the record.
-3. **The retirement latch.** `begin_retire` (`process.py:397-470`) is what stops a
-   retirement aborting work it had just decided not to disturb; the daemon's
-   version needs the same property or an update cuts a turn.
+   own exit cannot orphan the record. **Resolved for the retirement case, and the
+   first answer was wrong:** the child ran the build watch, so it announced,
+   removed its record and asked its own process to stop — leaving the reloader
+   parent still accepting on the port with no record to explain it, and
+   `/health` timing out (QA round 1, Q3, three runs). The child now runs no
+   build watch at all (`registry.is_reload_child`): a dev-mode supervisor is
+   not a production daemon, cannot hand a socket to a successor, and the
+   operator is watching its console.
+3. **Daemon shutdown cancels owned work.** Production build drift only announces;
+   it must not consult the incomplete attachment drain, latch, or exit. Future
+   daemon handoff needs protection for legacy scheduled/async runs as well as a
+   proven ready successor. Runtime retirement has its own residency predicate
+   and is unchanged by this daemon safety correction.
 4. **Deleting the `pkill` sweeps** exposes anything that silently depended on them
    to clear a wedged child. Verify the quit path against a daemon that ignores
    SIGTERM, and that an orphan becomes a reportable state rather than a leak.

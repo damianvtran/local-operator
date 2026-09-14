@@ -21819,7 +21819,25 @@ class OperatorApp(App[None]):
             # `KeyError` inside the 1 s completion poll is not a trade worth
             # making (review round 2 MINOR-1 ≡ QA Q-3: the earlier wording here
             # claimed a default-to-quiet safety property this code lacks).
-            return BODIES.get(kind, BODY_BACKGROUND)
+            #
+            # THE INTERRUPTED BODY CARRIES THE RUNG WHEN THE STOP ESCALATED
+            # (design round 1, D1). The fixed sentence said only that the turn
+            # stopped early, so the banner for a rung-3 kill and the banner for
+            # a rung-1 request were the same ten words — on the one surface the
+            # operator reads while looking at something else. Only the escalated
+            # rung appends (`incidents.stop_rung_phrase`), so a plain ``/stop``
+            # banner is byte-identical to today's. Sanitized like every other
+            # body on this path even though the phrase is harness-authored: the
+            # command token it carries is read back out of a file on disk, and
+            # the reason the constants are safe raw is that they are constants.
+            body = BODIES.get(kind, BODY_BACKGROUND)
+            if kind == "interrupted":
+                from local_operator.incidents import stop_rung_phrase
+
+                phrase = stop_rung_phrase(entry.completion_reason or "")
+                if phrase:
+                    body = sanitize_text(f"{body} — {phrase}", BACKGROUND_SNIPPET_MAX_CHARS)
+            return body
         if not session_names_in_notifications():
             return BODY_BACKGROUND
         try:
@@ -28486,7 +28504,7 @@ class OperatorApp(App[None]):
             f'stopping "{name}" (pid {record.pid})… waiting for it to answer', "info"
         )
         self._append_block(pending)
-        outcome = await control.stop_session(record, _root=config_dir())
+        outcome = await control.stop_session(record, _root=config_dir(), _command="/stop")
         kind: NoticeKind = (
             "error"
             if outcome.method == "sigkill"
@@ -28661,7 +28679,9 @@ class OperatorApp(App[None]):
         # last below — so the notice the announcement triggers must not
         # attribute it to another terminal (U4-1).
         self._issued_own_stop = True
-        outcomes = await control.stop_all(own_pid=os.getpid(), only_pids=listed, _root=root)
+        outcomes = await control.stop_all(
+            own_pid=os.getpid(), only_pids=listed, _root=root, _command="/stop --all"
+        )
         # Anything that did NOT stop cleanly gets its own line, because the
         # grouped count cannot say WHICH agent was refused or had to be
         # killed, and that is the one thing the user must act on. Clean

@@ -94,6 +94,15 @@ _SIDECAR_NAMES = frozenset(
         # Birth metadata is bookkeeping, not user content: stamping a legacy
         # conversation must not push it across the cleanup size budget.
         "created_at.json",
+        # The durable stop marker a killer stages before an irreversible step
+        # (``registry.STOP_MARKER_NAME``): ~300 B of evidence ABOUT the run, in
+        # every stopped session's directory. It belongs here for the reason
+        # this list exists — the activity clock and ``cleanup._dir_bytes`` must
+        # know a file is bookkeeping rather than content, and the last bug this
+        # module recorded arrived as an unlisted file in a session directory.
+        # Its mtime is a genuine interaction time and can never exceed the
+        # transcript's latest write, so the clock is not moved by it.
+        "runtime-stop.json",
     }
 )
 

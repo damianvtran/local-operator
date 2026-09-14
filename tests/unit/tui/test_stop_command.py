@@ -159,12 +159,21 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
     the shared module's receipt line verbatim."""
     target = _record(77777, "other agent")
     resolved: list[dict[str, Any]] = []
+    commands: list[Any] = []
 
     def fake_resolve(**kwargs: Any):
         resolved.append(kwargs)
         return target, [], ""
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
+        # The front end is RECORDED, not merely accepted: this token is what the
+        # durable stop marker names the killer by, and the TUI is a real front
+        # end (review round 2, NIT-2 — the stubs took the parameter and asserted
+        # nothing about it, so the one place the TUI's spelling could drift was
+        # unpinned).
+        commands.append(_command)
         return control.StopOutcome(
             record.pid, record.session_id, "other agent", "socket", 'stopped "other agent"'
         )
@@ -182,6 +191,7 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
                 break
         assert resolved and resolved[0]["target"] == "other"
         assert 'stopped "other agent"' in _notices(app)
+        assert commands == ["/stop"]
         # This session is untouched: a target stop never ends the caller.
         assert app._session is session
 
@@ -214,12 +224,16 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     inside the window runs the shared ``stop_all`` and reports grouped."""
     targets = [_record(101, "alpha"), _record(102, "beta")]
     calls: list[str] = []
+    commands: list[Any] = []
 
     def fake_targets(root, own_pid=None):  # noqa: ANN001, ANN202
         return targets
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
+        commands.append(_command)
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
         assert own_pid == os.getpid()
@@ -255,6 +269,10 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
             if app._session is None:
                 break
         assert calls == ["all"]
+        # A sweep names itself, not a single stop (review round 2, NIT-2): the
+        # token every target's durable marker carries has to say "the whole
+        # machine" rather than "one session".
+        assert commands == ["/stop --all"]
         # Own session last, ended in-process, and the grouped report says so.
         assert app._session is None
         assert session.disposed
@@ -274,7 +292,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
 async def test_stop_all_repeat_outside_the_window_re_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
@@ -328,7 +348,9 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
     its own warning line so the user can act on it."""
     monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         return [
             control.StopOutcome(9, "sid-9", "z", "refused", 'refused "z" (pid 9) — identity'),
         ]
@@ -481,7 +503,7 @@ async def test_another_tui_is_ended_beneath_a_surviving_process(kill_spy) -> Non
         # Drive the shared ladder as a peer would, concurrently with the app
         # loop — the app must keep running to service the op.
         task = app.run_worker(
-            control.stop_session(own, timeout_s=5.0, _root=control.registry.run_dir()),
+            control.stop_session(own, timeout_s=5.0, _root=control.config_dir()),
             thread=False,
         )
         for _ in range(120):
@@ -521,7 +543,9 @@ async def test_stop_all_re_arms_when_the_listing_changed(monkeypatch: pytest.Mon
     targets = [_record(101, "alpha")]
     calls: list[str] = []
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
         return []
 
@@ -951,7 +975,9 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
         selectors.append(kwargs)
         return target, [], ""
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
             record.pid, record.session_id, "the runaway", "socket", 'stopped "the runaway"'
@@ -1100,7 +1126,9 @@ async def test_the_unbound_stop_never_reaches_a_look_alike_session(
     decoy = _record(4242, f"notes about {watched}")
     stopped: list[str] = []
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
             record.pid, record.session_id, record.conversation_name, "socket", "stopped"
