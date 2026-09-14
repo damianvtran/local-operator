@@ -37,6 +37,20 @@ HOST_BRIDGE = "bridge"
 HOST_UI = "ui"
 
 
+def surface_host(surface_id: str) -> str:
+    """The host named by a surface token's prefix, or "" when it names none.
+
+    One helper rather than a prefix test per caller: the record, the tool's
+    ownership gate and the lane all have to agree about which host a handle
+    belongs to, and three copies of `startswith("ui:")` is three chances to
+    disagree with the one prefix the tokens actually carry.
+    """
+    for name in (HOST_UI, HOST_BRIDGE):
+        if surface_id.startswith(f"{name}:"):
+            return name
+    return ""
+
+
 class OwnershipDiscovery(Protocol):
     """The one discovery question the ownership layer asks, per host.
 
@@ -210,6 +224,11 @@ class BrowserResource:
         #: touches — the `owner_*` transport and the discovery read that feeds
         #: `ownership_mode` — is selected from it.
         #:
+        #: It is the lane's fallback, not its authority: while the record HOLDS a
+        #: capability, its prefix outranks this flag (`_obligation_host`), so a
+        #: lane left naming the host of a tab that has already closed cannot
+        #: address the next allocation's cleanup to it. See `_lane`.
+        #:
         #: "" deliberately means the BRIDGE: a record written before this field
         #: existed belongs to a session that was talking to the daemon, so an old
         #: record behaves exactly as it did before (fail-safe, not fail-open).
@@ -253,21 +272,83 @@ class BrowserResource:
         except (BrowserOwnershipError, OSError, ValueError):
             return ""
 
+    def _obligation_host(self) -> str:
+        """The host that owns the capability this record is HOLDING, or "".
+
+        This is the source of truth for lane selection, and the reason is the
+        failure it removes: a session that closed its bridge tab and then opened
+        a fresh one on the app recorded `host: "ui"` beside a `ui:` handle, but
+        the in-memory lane flag still said `bridge` from the closed tab, so
+        `finish` sent `owner_finish` to the daemon, the app's allocation stayed
+        live, and the record lost the handle it was claiming to clean up (QA
+        Q-5 / review R6-R7).
+
+        The HANDLE decides, in the order the record itself treats as current:
+        the surface the session is actually holding, then the evidence slot it
+        could not prove. `unresolved_surface_id` is deliberately second rather
+        than ignored: it is still a claim on a host that has to hear about it.
+        """
+        for field in ("surface_id", "unresolved_surface_id"):
+            host = surface_host(str(self.record.get(field, "")))
+            if host:
+                return host
+        return ""
+
+    def _retarget_lane(self, host: str) -> None:
+        """Move the lane to `host` and drop every verdict cached for the old one.
+
+        The cached `ownership` verdict and the peer identity it was learned
+        against belong to a PEER, not to the session, so carrying them across a
+        host change would let a link with no ownership lifecycle decide the
+        verdict for a different transport with one. Both are cleared here and
+        re-learned lazily through `ownership_mode()`.
+        """
+        if host and host != self.host:
+            self.ownership = None
+            self._ownership_peer = None
+            self.host = host
+
     def _lane(self) -> OwnershipHost:
-        """The ownership lane for this session: transport + discovery, per host."""
-        return ownership_host(self.host or str(self.record.get("host", "")))
+        """The ownership lane for this session: transport + discovery, per host.
+
+        THE HELD CAPABILITY COMES FIRST, then the learned lane flag, then the
+        record's `host` field. The order is the whole fix for a session whose
+        allocation moved between hosts: the tab the record holds is the only
+        thing that names the host which must receive its cleanup, and every
+        operation that reaches a host — `params()`, `client()`, recover, finish,
+        teardown — resolves its transport through here, so one rule covers them
+        all instead of each call site picking a host for itself.
+        """
+        return ownership_host(
+            self._obligation_host() or self.host or str(self.record.get("host", ""))
+        )
 
     def select_host(self, host: str) -> None:
         """Bind this session's surface to a host, once it is known.
 
         Called by the tool before the lane runs, from the pinned surface prefix
-        when there is one and from the availability probe when there is not. An
-        already-known host wins over the argument: a surface's transport is
-        pinned for its whole life, so a later action cannot silently move an
-        established session to a different lane.
+        when there is one and from the availability probe when there is not.
+
+        A HELD CAPABILITY PINS THE LANE; nothing else does. The earlier rule —
+        "an already-known host wins" — kept a lane on a host whose tab was
+        already closed, so a fresh allocation on the other host was recorded but
+        never used as the lane (QA Q-5). Nothing is in flight in that state, so
+        there is no transport to keep stable and a probe answering with the host
+        that actually serves the session is right.
+
+        While a capability IS held, the probe may still AGREE with it — a
+        resumed session's pinned prefix is read from the handle itself, so the
+        two are the same answer and recording it keeps `host` usable in failure
+        copy — but it may not CONTRADICT it: that surface's transport is pinned
+        for the life of the surface, and a probe answering differently must not
+        move an obligation onto a host that never held the tab.
         """
-        if not self.host and host:
-            self.host = host
+        if not host:
+            return
+        held = self._obligation_host()
+        if held and held != host:
+            return
+        self.host = host
 
     def pinned_host(self) -> str:
         """The host this session's durable state pins it to, or "" for none.
@@ -276,19 +357,23 @@ class BrowserResource:
         on a RESUMED session it is the only one there is: the surface prefix in
         `state.surface_id` is empty until the lane adopts it from this same
         record, which happens well after the gate has to decide. Reading only
-        the availability probes there does not merely guess — `_lane()` prefers
-        `self.host` over `self.record["host"]`, so a probe-selected host
-        OVERRIDES the record and silently moves a resumed session onto whichever
-        host happened to be up, including off the host that owns its tab.
+        the availability probes there does not merely guess — a probe-selected
+        host lands in `self.host`, which `_lane()` reads ahead of
+        `self.record["host"]` and behind only a HELD handle — so it overrides
+        the record's `host` FIELD and silently moves a resumed session onto
+        whichever host happened to be up. What it cannot override is the record's
+        HANDLE: that prefix decides every operation that reaches a host,
+        including this selection, so the tab's own host still wins.
 
         Two spellings of one fact, and the HANDLE is read first:
 
         * `surface_id` names its own host in its prefix, and it is the surface
           the session is actually HOLDING, so it outranks the field beside it.
-          The two can disagree, because `remember("ui:…", host="ui")` passes
-          the truthful host while `select_host` keeps an established lane's
-          host: a session that has been talking to the daemon records
-          `host: "bridge"` beside a `ui:` handle. Reading the field first sends
+          The writer no longer produces the disagreement (`remember` retargets the
+          lane onto the host that allocated the handle), but the READER still has
+          to resolve it: a record left by an earlier client, or by a lane move
+          that never completed, still carries `host: "bridge"` beside a `ui:`
+          handle. Reading the field first sends
           `owner_recover` to the daemon for a tab that lives in the app, the
           daemon answers `unresolved` with no tab, `recover()` moves the handle
           into `unresolved_surface_id`, and the app's live tab is left
@@ -324,9 +409,9 @@ class BrowserResource:
             except (BrowserOwnershipError, OSError, ValueError):
                 return ""
         surface = str(record.get("surface_id", ""))
-        for name in (HOST_UI, HOST_BRIDGE):
-            if surface.startswith(f"{name}:"):
-                return name
+        host = surface_host(surface)
+        if host:
+            return host
         host = str(record.get("host", ""))
         if host and self._record_owes_reconciliation(record):
             return host
@@ -769,10 +854,25 @@ class BrowserResource:
         call that follows a real open. It is only ever SET, never cleared, so a
         later `close` (which remembers an empty surface) cannot erase the lane a
         resumed session still needs to reach its record's owner.
+
+        A NON-EMPTY handle also RETARGETS the lane to the host that actually
+        allocated it (`host`, which every caller passes truthfully from the
+        transport that just answered). That is not the same as the record's
+        `host` field growing a new value: the field is what a RESUMED session
+        reads, while the lane is what this live session's `finish`, `recover`
+        and teardown will dial. Leaving the lane on the host of a tab that has
+        already closed is exactly the defect QA Q-5 reproduced — the app's
+        allocation stayed live while `owner_finish` was sent to the extension.
         """
         self.assert_current()
         if host:
-            self.select_host(host)
+            # Only a fresh allocation may move the lane: an empty surface (a
+            # close) keeps the lane so the record's owner is still reachable, and
+            # a capability held on another host keeps it too (see `select_host`).
+            if surface_id:
+                self._retarget_lane(host)
+            else:
+                self.select_host(host)
         if self.host:
             self.record["host"] = self.host
         self.record["surface_id"] = surface_id

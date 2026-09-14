@@ -30,6 +30,13 @@ class FakeUiClient:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        #: How this host answers `owner_recover`. The default is a session that
+        #: ALREADY holds a tab, which is what most ownership tests describe, and
+        #: `recover()` adopts whatever `tab` it returns into the record — so a test
+        #: about a FRESH session (adoption of a tab the user handed over, where
+        #: nothing is held yet) must say `unresolved` explicitly rather than
+        #: inheriting a held tab from the fixture.
+        self.recover_state = "owned"
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
@@ -40,6 +47,8 @@ class FakeUiClient:
         if method == "tabs":
             return {"tabs": [], "limit": 8}
         if method == "owner_recover":
+            if self.recover_state == "unresolved":
+                return {"ownership_version": 1, "state": "unresolved", "tab": ""}
             return {"ownership_version": 1, "state": "owned", "tab": "ui:100:capability"}
         if method == "owner_retain":
             return {"state": "retained"}
@@ -441,18 +450,26 @@ async def test_a_resumed_legacy_record_keeps_the_bridge_lane_with_the_app_up(
 
 
 def _disagreeing_context(tmp_path: Path) -> tuple[ToolContext, BrowserResource]:
-    """A resumed session whose record names one host in its field and another
-    in its handle, written through the product's own writer.
+    """A record whose field names one host and whose handle names another.
 
-    The disagreement is the writer's normal behaviour, not corruption:
-    `remember("ui:…", host="ui")` passes the truthful host while `select_host`
-    keeps an ESTABLISHED lane's host, so a session that has been talking to the
-    daemon records `host: "bridge"` beside a `ui:` handle.
+    THIS SHAPE IS NOW LEGACY, and that is the point: the writer used to produce
+    it (`select_host` kept an ESTABLISHED lane's host, so `remember("ui:…",
+    host="ui")` recorded `host: "bridge"` beside a `ui:` handle), and R6/R7
+    makes the writer keep the two consistent instead. The disagreement is still
+    reachable — a record written by an earlier client, or one left by a lane
+    move that never completed — so the READER's precedence stays under test
+    rather than the case being deleted along with the bug that produced it.
+
+    The app is DOWN here on purpose: the field, the availability order and the
+    probe all point at the daemon, and only the handle points at the tab.
     """
     previous = BrowserResource(tmp_path, tmp_path.name)
     previous.initialize()
     previous.select_host("bridge")
     previous.remember("ui:100:capability", host="ui")
+    # Force the legacy shape through the same writer, then assert it landed.
+    previous.record["host"] = "bridge"
+    previous._save()
     record = json.loads(previous.path.read_text())
     assert (record["host"], record["surface_id"]) == ("bridge", "ui:100:capability")
     return _context(tmp_path)
@@ -655,3 +672,243 @@ def test_the_handle_prefixes_agree_with_the_record_spelling() -> None:
     # extension"), and `_copy_host` is the single translation.
     assert builtin._copy_host("ui") == HOST_UI
     assert builtin._copy_host("bridge") == builtin._copy_host("") == HOST_EXTENSION
+
+
+@pytest.mark.asyncio
+async def test_a_same_object_lifecycle_moves_the_lane_to_the_host_that_allocated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """R6/R7 + QA Q-5: the host that ALLOCATED the tab is the host that cleans it up.
+
+    The lifecycle is the ordinary one, not a résumé: ONE `BrowserResource` object
+    opens on the reachable host, closes that tab, and then opens again after the
+    other host comes up. The defect this pins was in the second half — the fresh
+    allocation was recorded (`surface_id` became a `ui:` handle and `pinned_host()`
+    answered `ui`) while the LANE still said `bridge`, so `finish` sent
+    `owner_finish` to the daemon, the app's tab stayed live, and the record lost
+    the handle it was claiming to have cleaned up.
+
+    Asserted on the wire rather than on the record alone: the exact methods each
+    host received, the handle that came back, and the cleanup side effects
+    (which host was told to finish, and that the OTHER host was told nothing).
+    """
+    # 1. Only the daemon is up: the first open lands on the extension.
+    _hosts(monkeypatch, ui=False, bridge=True)
+    context, resource = _context(tmp_path)
+    first = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert first.is_error is False, first.text
+    assert resource.record["surface_id"].startswith("bridge:")
+    assert resource.host == "bridge"
+    # The handle the host RETURNED is the handle the call reports and the one the
+    # record holds: a result that named a tab the record does not hold would send
+    # the model to a surface it cannot address.
+    assert first.details is not None
+    assert first.details["surface_id"] == resource.record["surface_id"]
+    assert [method for method, _p in bridge_client.calls] == ["owner_recover", "open"]
+
+    # 2. Close it. The tab is gone, so nothing is in flight any more.
+    closed = await builtin.execute_browser("t", {"action": "close"}, None, None, context)
+    assert closed.is_error is False, closed.text
+    assert resource.record["surface_id"] == ""
+    assert resource.record["state"] == "closed"
+
+    # 3. The app comes up. A FRESH open must use it, and the lane must follow the
+    #    allocation it actually got.
+    _hosts(monkeypatch, ui=True, bridge=True)
+    second = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert second.is_error is False, second.text
+    assert resource.record["surface_id"].startswith("ui:")
+    assert resource.record["host"] == "ui"
+    assert resource.pinned_host() == "ui"
+    assert resource._lane().name == "ui", "the lane still names the closed tab's host"
+    assert second.details is not None
+    assert second.details["surface_id"] == resource.record["surface_id"]
+
+    # 4. Finalization reaches the host HOLDING the tab, and only that host.
+    bridge_before = list(bridge_client.calls)
+    ui_before = list(ui_client.calls)
+    result = await resource.finish(resource.generation, "completed")
+
+    assert result.state == "closed"
+    assert [method for method, _p in ui_client.calls[len(ui_before) :]] == ["owner_finish"]
+    assert (
+        bridge_client.calls == bridge_before
+    ), "the previous host must not receive the new allocation's cleanup"
+    # The handle is cleared only by the host that owned it acknowledging the finish.
+    assert resource.record["surface_id"] == ""
+    assert resource.record["state"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_the_lane_follows_the_allocation_in_the_other_direction_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """The mirror of the lifecycle above: the app first, then the extension.
+
+    Same one-object lifecycle in the OTHER transition direction, because the rule
+    is symmetric only where something proves it is: a `ui:` allocation closes, the
+    app goes away, the extension comes up, and the fresh allocation has to move a
+    lane that was left naming the app. Every assertion the forward test makes is
+    made here in mirror — the field and the handle both end up naming the
+    extension, `finish` reaches the host holding the tab, and the host that no
+    longer holds anything hears NOTHING.
+
+    The two directions are not each other's proof: a rule that pinned the lane to
+    the record's `host` field would pass one of them and fail the other, which is
+    exactly the half-fix review R6/R7 sent back.
+    """
+    # 1. Only the app is up: the first open lands there.
+    _hosts(monkeypatch, ui=True, bridge=False)
+    context, resource = _context(tmp_path)
+    first = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert first.is_error is False, first.text
+    assert resource.record["surface_id"].startswith("ui:")
+    assert resource.host == "ui"
+    assert first.details is not None
+    assert first.details["surface_id"] == resource.record["surface_id"]
+    assert [method for method, _p in ui_client.calls] == ["owner_recover", "open"]
+
+    # 2. Close it: nothing is in flight, so nothing pins the lane any more.
+    closed = await builtin.execute_browser("t", {"action": "close"}, None, None, context)
+    assert closed.is_error is False, closed.text
+    assert resource.record["surface_id"] == ""
+    assert resource.record["state"] == "closed"
+
+    # 3. The app goes away and the daemon is up. The fresh open lands on the
+    #    extension, and the lane must follow the allocation it actually got.
+    _hosts(monkeypatch, ui=False, bridge=True)
+    second = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert second.is_error is False, second.text
+    assert resource.record["surface_id"].startswith("bridge:")
+    assert resource.record["host"] == "bridge"
+    assert resource.pinned_host() == "bridge"
+    assert resource._lane().name == "bridge", "the lane still names the app's closed tab"
+    assert second.details is not None
+    assert second.details["surface_id"] == resource.record["surface_id"]
+
+    # 4. Finalization reaches the host HOLDING the tab, and only that host.
+    ui_before = list(ui_client.calls)
+    bridge_before = list(bridge_client.calls)
+    result = await resource.finish(resource.generation, "completed")
+
+    assert result.state == "closed"
+    assert [method for method, _p in bridge_client.calls[len(bridge_before) :]] == ["owner_finish"]
+    assert (
+        ui_client.calls == ui_before
+    ), "the host with nothing in flight must not receive the new allocation's cleanup"
+    assert resource.record["surface_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_adoption_forwards_the_user_handed_handle_and_refuses_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """The open-tab adoption field: create(url) and adopt(handle) stay distinct.
+
+    A tab the user handed over is neither "resume our own handle" nor "create a
+    new tab": the capability exists already and already belongs to this session.
+    These assertions are the whole contract — the handle is forwarded UNCHANGED
+    (Python has no authority to mint or rewrite one), an adoption carries no URL
+    and must not invent one, and every other spelling is refused before it can
+    reach a host.
+    """
+    _ui_only(monkeypatch)
+    handle = "ui:7:aaaaaaaabbbbccccddddeeeeffff0000"
+    context, resource = _context(tmp_path)
+    # A FRESH session: nothing is held yet, which is the state a handed-over tab
+    # arrives in (the host answers `unresolved` for a recovery of no tab).
+    ui_client.recover_state = "unresolved"
+
+    adopted = await builtin.execute_browser(
+        "t", {"action": "open", "tab": handle}, None, None, context
+    )
+    assert adopted.is_error is False, adopted.text
+    opened = [params for method, params in ui_client.calls if method == "open"]
+    assert len(opened) == 1
+    assert opened[0]["tab"] == handle, "the handle must travel through unchanged"
+    assert opened[0]["url"] == "", "adoption must not invent a URL"
+    assert opened[0]["owner_proof"], "adoption still carries this session's identity"
+    # The record holds the capability the HOST returned, not the one that was
+    # offered: the host is the authority on what this session now holds, and a
+    # record keyed on the request instead of the answer is how a stale handle
+    # gets remembered.
+    assert resource.record["surface_id"] == "ui:100:aaaaaaaabbbbccccddddeeeeffff0000"
+
+    # The same handle on any other action is refused, not silently ignored.
+    other_action_context, _ = _context(tmp_path / "other")
+    for action in ("read", "close", "goto", "tabs"):
+        refused = await builtin.execute_browser(
+            "t", {"action": action, "tab": handle}, None, None, other_action_context
+        )
+        assert refused.is_error is True, action
+        assert "'tab' is only valid for 'open'" in refused.text, refused.text
+
+    # A handle that is not a handle is refused before any host sees it.
+    bad_context, _ = _context(tmp_path / "bad")
+    for bad in ("--help", "../../etc/passwd", "ui:7:not a capability", "surface:1", "7"):
+        refused = await builtin.execute_browser(
+            "t", {"action": "open", "tab": bad}, None, None, bad_context
+        )
+        assert refused.is_error is True, bad
+        assert "refusing 'tab' handle" in refused.text, refused.text
+
+
+@pytest.mark.asyncio
+async def test_adoption_is_refused_while_another_surface_is_held_and_on_cmux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """Two ends of the same rule: one surface at a time, and a host that can adopt.
+
+    Holding a surface and adopting a second one would leave the first tab's
+    cleanup addressed to a lane that no longer names it, so it is refused rather
+    than half-performed. And because cmux keeps no multi-surface registry, a
+    handed-over tab cannot be adopted there at all — falling through to a new cmux
+    surface would report a successful adoption of a tab nobody is driving.
+    """
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    held = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert held.is_error is False, held.text
+    assert resource.record["surface_id"]
+
+    refused = await builtin.execute_browser(
+        "t",
+        {"action": "open", "tab": "ui:9:bbbbbbbbccccddddeeeeffff00001111"},
+        None,
+        None,
+        context,
+    )
+    assert refused.is_error is True
+    assert "already driving a browser tab" in refused.text, refused.text
+
+    # With no non-cmux host reachable, adoption is refused instead of becoming a
+    # brand-new cmux surface.
+    _cmux_only(monkeypatch)
+    cmux_context, _ = _context(tmp_path / "cmux")
+    unavailable = await builtin.execute_browser(
+        "t",
+        {"action": "open", "tab": "ui:9:bbbbbbbbccccddddeeeeffff00001111"},
+        None,
+        None,
+        cmux_context,
+    )
+    assert unavailable.is_error is True
+    assert (
+        "needs the desktop app's browser tab or the browser extension" in unavailable.text
+    ), unavailable.text
