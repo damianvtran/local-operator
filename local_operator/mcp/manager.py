@@ -1036,7 +1036,9 @@ class McpServerStderr:
         """Record one line of the child's stderr."""
         # Stripped: the child may ignore CHILD_QUIET_ENV, and a raw CSI in the
         # log file corrupts `less`/`tail` the same way it corrupted the frame.
-        text = strip_control_sequences(line).rstrip()
+        from local_operator.mcp.redaction import scrub
+
+        text = scrub(strip_control_sequences(line)).rstrip()
         if not text:
             return
         if len(text) > STDERR_LINE_LIMIT:
@@ -1054,8 +1056,19 @@ class McpServerStderr:
         return bool(self._tail)
 
     def tail_text(self) -> str:
-        """The retained tail as one block of text."""
-        return "\n".join(self._tail)
+        """The retained tail as one block of text, scrubbed at READ time.
+
+        Scrubbed twice on purpose. ``feed`` already scrubbed these bytes before
+        they were retained, which is the control; this read-time pass covers the
+        one ordering the write-time pass cannot — a credential registered AFTER
+        a line was retained (a value entered mid-session, then a retry that
+        quotes an older line). It costs one scan of at most
+        ``STDERR_TAIL_LINES`` lines, and the alternative is a retained line that
+        was unsafe by the time anybody read it.
+        """
+        from local_operator.mcp.redaction import scrub
+
+        return scrub("\n".join(self._tail))
 
     def quoted_tail(self, lines: int = STDERR_QUOTED_LINES) -> str:
         """The last few lines, joined and bounded, for a one-line error message."""
@@ -1070,6 +1083,9 @@ class McpServerStderr:
         Once: the connect path and the transport teardown both notice the same
         dead child, and one failure deserves one report.
         """
+        from local_operator.mcp.redaction import scrub
+
+        reason = scrub(reason)
         if self._reported or not self._tail:
             return
         self._reported = True
@@ -1089,9 +1105,15 @@ class McpServerStderr:
         sitting in the tail. This is what puts that reason in
         ``McpStartupOutcome.failures`` and therefore in the TUI's notice.
         """
+        from local_operator.mcp.redaction import sanitize_exception, scrub
+
+        # The cause's own text is sanitized IN PLACE, not dropped: the raised
+        # exception keeps its chain (which the round reads as evidence) while the
+        # value becomes unreachable through it. See `sanitize_exception`.
+        sanitize_exception(exc)
+        detail = scrub(str(exc)).strip() or type(exc).__name__
         if not self._tail:
             return exc
-        detail = str(exc).strip() or type(exc).__name__
         return McpConnectionError(f"{detail}: {self.quoted_tail()}")
 
 
@@ -1209,10 +1231,20 @@ async def _stdio_transport(
         if stderr is None:  # pragma: no cover - PIPE always yields one
             stderr_drained.set()
             return
+        from local_operator.mcp.redaction import StderrRedactor, values
+
+        # Line-bounded holdback: this sink must hand over a COMPLETE line as soon
+        # as it arrives (see the class), because a child that prints its startup
+        # line and then goes quiet is the normal case for a stdio server.
+        redactor = StderrRedactor(values())
         text_stream = TextReceiveStream(stderr, encoding="utf-8", errors="replace")
         try:
             buffer = ""
             async for chunk in text_stream:
+                # Scrub BEFORE line splitting AND before the overflow bound: either
+                # boundary may bisect a credential, and the retained line is what
+                # the error path later quotes.
+                chunk = redactor.feed(chunk.encode())
                 lines = (buffer + chunk).split("\n")
                 buffer = lines.pop()
                 # A single unterminated line must not grow without bound: a
@@ -1223,6 +1255,7 @@ async def _stdio_transport(
                     buffer = ""
                 for line in lines:
                     stderr_log.feed(line)
+            buffer += redactor.feed(b"", final=True)
             if buffer:
                 stderr_log.feed(buffer)
         except Exception:
@@ -1586,8 +1619,13 @@ class McpManager:
         cwd: str | os.PathLike[str],
         tool_cache: McpToolCache | None = None,
         auth_store: ManagedAuthStore | None = None,
+        *,
+        secret_base: os.PathLike[str] | None = None,
+        register_secret: Callable[[str], object] | None = None,
     ) -> None:
         self.cwd = str(cwd)
+        self.secret_base = secret_base
+        self._register_secret = register_secret
         self.tool_cache = tool_cache
         # The session's AuthStore, when injected: every OAuth MCP server's
         # token storage shares it instead of opening its own SQLite
@@ -2238,7 +2276,34 @@ class McpManager:
         hashes for the tool cache) and the live :class:`ServerConnection` keep, so
         no resolved value outlives the transport that needed it.
         """
-        transport_cfg = resolve_config_secrets(name, cfg)
+        from pathlib import Path
+
+        from local_operator.mcp.secret_refs import has_references
+
+        # Registration is COLLECTED in the resolver and applied here on the loop:
+        # the value goes into live redaction sets that this loop iterates while
+        # scrubbing output, and adding to a set another thread is iterating is a
+        # RuntimeError in the response path rather than a scrubbed line.
+        resolved_values: list[str] = []
+        resolve_kwargs = {
+            "base": Path(self.secret_base) if self.secret_base is not None else None,
+            "register": resolved_values.append,
+        }
+        if has_references(cfg):
+            # ONLY here is there blocking disk/broker work to keep off the loop.
+            # A config with no reference resolves to itself in one comparison and
+            # reads no store, so hoisting it would add a thread hop to every
+            # connect and perturb the connect round's cancellation timing for no
+            # benefit at all.
+            transport_cfg = await asyncio.to_thread(
+                resolve_config_secrets, name, cfg, **resolve_kwargs
+            )
+        else:
+            transport_cfg = resolve_config_secrets(name, cfg, **resolve_kwargs)
+        # BEFORE the child can start: the value has to be scrubbable by the time
+        # anything it prints could reach a sink.
+        for value in resolved_values:
+            self.register_secret_redaction(value)
         timeout_s = resolve_mcp_timeout_s(transport_cfg)
         await self._ensure_oauth_fresh(name, transport_cfg)
         stack = AsyncExitStack()
@@ -2494,6 +2559,15 @@ class McpManager:
             if challenge is not None:
                 raise challenge from exc
             stderr_log.report_failure(f"failed to connect: {exc}")
+            # The CAUSE is kept, deliberately, and `from exc` is not a formality:
+            # the round reads the chained exception to tell a cancellation apart
+            # from a network failure, so suppressing it (`from None`) changed how
+            # a bare-cancellation attempt SETTLED and left the startup round
+            # waiting until its ceiling
+            # (`test_a_bare_cancellation_settles_the_round_as_a_network_failure`).
+            # Keeping the chain while losing the secret means sanitizing the
+            # cause's own text instead of dropping it — see
+            # `redaction.sanitize_exception`, which `explain` calls.
             raise stderr_log.explain(exc) from exc
 
         conn.tools = tools
@@ -2504,6 +2578,13 @@ class McpManager:
                 config_digest(self._configs.get(name)),
             )
         return conn
+
+    def register_secret_redaction(self, value: str) -> None:
+        from local_operator.mcp.redaction import register
+
+        register(value)
+        if self._register_secret is not None:
+            self._register_secret(value)
 
     async def _open_transport_and_session(
         self,

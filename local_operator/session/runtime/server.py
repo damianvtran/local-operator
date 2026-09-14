@@ -688,6 +688,7 @@ _PAYLOAD_OPS = {
     "job_trajectory",
     "fork_snapshot",
     "credential",
+    "mcp_credentials",
     # Session code memory: the desktop canvas panel's list/create/update/delete
     # verbs over the session's live eval-kernel namespace. A payload op rather
     # than a receipt op because its answer IS the data the panel renders (and a
@@ -3195,6 +3196,31 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result
+        if op == "mcp_credentials":
+            from local_operator.mcp.credentials import MCPCredentials
+
+            if locality == "remote":
+                return {"code": "remote_client", "saved_ids": [], "failed_ids": []}
+            try:
+                body = MCPCredentials.model_validate(frame.get("body"))
+            except Exception:
+                # Pydantic diagnostics can include invalid raw values. Never
+                # let its exception enter the generic RPC error serializer.
+                raise ValueError("Invalid MCP credential fields") from None
+            operation = getattr(h, "mcp_credentials_op", None)
+            if not callable(operation):
+                raise ValueError("Update the backend for secure MCP key entry")
+            answer = operation(
+                body.model_dump(mode="json")
+                | {"values": {key: value.get_secret_value() for key, value in body.values.items()}}
+            )
+            # Both shapes accepted, exactly as ``credential`` above does it: a
+            # handle may implement the verb synchronously (the in-process session
+            # does) and a routed runtime asynchronously, and the caller must not
+            # care which.
+            if inspect.isawaitable(answer):
+                answer = await answer
+            return answer
         if op == "credential":
             # Validated HERE because the payload path does not run
             # ``validate_control_frame`` the way ``_dispatch`` does (a
