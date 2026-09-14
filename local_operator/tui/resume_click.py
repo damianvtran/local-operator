@@ -207,6 +207,22 @@ def _configured_launch_command() -> list[str]:
     return parts
 
 
+#: A refusal that no rung can override: with this set, a click never launches the
+#: desktop app and falls through to the terminal instead.
+#:
+#: TWO CALLERS, and the second is why it exists. It is a plain user preference —
+#: some people want a banner click to open a terminal, and the setting's default
+#: is discovery, so without this there is no way to say "never" — but it is
+#: ALSO the suite's central gate. Rung 2 looks for `local-operator-ui` on PATH,
+#: which on a developer's machine FINDS IT, so a test that drives `open_session`
+#: and forgets to double this rung starts the operator's real app and leaves it
+#: running. `tests/conftest.py` sets this for every test, exactly as it sets
+#: `LOCAL_OPERATOR_NO_NOTIFICATIONS` for the OS-toast path, and a test that
+#: deliberately exercises the launch ladder clears it (see
+#: `tests/unit/tui/test_resume_click.py`) — the visible, deliberate opt-in.
+DESKTOP_LAUNCH_REFUSED_ENV = "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH"
+
+
 def _launch_desktop(session_id: str) -> bool:
     """Rung 2: launch the desktop app with the session id.
 
@@ -221,9 +237,15 @@ def _launch_desktop(session_id: str) -> bool:
 
     Every candidate is TRIED in order and abandoned only on a non-zero exit, so
     an uninstalled bundle costs one failed ``open`` rather than a dead click.
+
+    REFUSED ENTIRELY under :data:`DESKTOP_LAUNCH_REFUSED_ENV`, checked first so
+    the refusal costs nothing and cannot be reached by any candidate.
     """
     import os
     import shutil
+
+    if os.environ.get(DESKTOP_LAUNCH_REFUSED_ENV):
+        return False
 
     attempts: list[list[str]] = []
     configured = _configured_launch_command()

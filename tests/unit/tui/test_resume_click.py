@@ -57,6 +57,19 @@ class _Launcher:
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
 
+@pytest.fixture(autouse=True)
+def launch_rung_enabled(monkeypatch):
+    """Opt this module OUT of the suite-wide launch refusal, deliberately.
+
+    ``tests/conftest.py`` sets ``LOCAL_OPERATOR_NO_DESKTOP_LAUNCH`` for every
+    test, because rung 2 discovers the real ``local-operator-ui`` on a
+    developer's PATH and would start it. This file is the one place that
+    exercises that rung, so it clears the gate — visibly, here, rather than by
+    leaving it to each test to remember.
+    """
+    monkeypatch.delenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, raising=False)
+
+
 @pytest.fixture
 def no_viewer(monkeypatch):
     """No viewer is running, and the terminal spawn is recorded rather than run."""
@@ -250,3 +263,35 @@ def _configured_with(monkeypatch, raw: str) -> list[str]:
 def test_an_unparseable_command_line_degrades_to_discovery(monkeypatch):
     """An unbalanced quote must not kill the click."""
     assert _configured_with(monkeypatch, "'unbalanced") == []
+
+
+def test_the_refusal_stops_the_launch_rung_and_falls_through(monkeypatch, no_viewer):
+    """The central gate: set, no candidate is even considered.
+
+    This is the escape that keeps a test (or a user who wants a terminal) from
+    reaching a real install, so it is asserted at the ladder rather than trusted:
+    the discovery is given a working candidate and must not run it.
+    """
+    monkeypatch.setenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, "1")
+    monkeypatch.setattr(
+        resume_click, "_configured_launch_command", lambda: ["definitely-a-real-app"]
+    )
+    launcher = _Launcher({"definitely-a-real-app": 0}, monkeypatch)
+
+    assert resume_click.open_session("a1b2c3d4e5f7") is True
+    assert launcher.attempts == [], launcher.attempts
+    assert no_viewer == ["a1b2c3d4e5f7"]
+
+
+def test_the_refusal_is_off_when_the_variable_is_absent(monkeypatch):
+    """The gate must be a refusal, not a switch that ships off.
+
+    A user who never sets the variable gets discovery, which is the documented
+    default, so the variable's ABSENCE has to reach the candidates.
+    """
+    monkeypatch.delenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, raising=False)
+    monkeypatch.setattr(resume_click, "_configured_launch_command", lambda: ["my-app"])
+    launcher = _Launcher({"my-app": 0}, monkeypatch)
+
+    assert resume_click._launch_desktop("a1b2c3d4e5f8") is True
+    assert launcher.attempts == [["my-app"]]
