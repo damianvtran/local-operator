@@ -7,14 +7,17 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import dill
 import pytest
 import requests
 import yaml
+from pydantic import ValidationError
 
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients.tavily import TavilyResponse, TavilyResult
+from local_operator.harness.types import ChatRequest, Message, ModelSpec
 from local_operator.types import (
     AgentState,
     CodeExecutionResult,
@@ -451,7 +454,10 @@ def test_create_agent_duplicate(temp_agents_dir: Path):
                 temperature=0.0,
                 top_p=0.0,
                 top_k=0,
-                max_tokens=0,
+                # ``0`` is rejected at this ingress now (review R2-m2): it was
+                # never "unlimited", it was "nobody asked" read as the model's
+                # published capability by the wire clamp. ``None`` is that value.
+                max_tokens=None,
                 stop=[],
                 frequency_penalty=0.0,
                 presence_penalty=0.0,
@@ -2744,3 +2750,77 @@ def test_admission_error_rejects_untrusted_count_values():
     populated = str(admission_error(ProfileRegistryUnavailable.code, 2))
     for token in ("/Users", "/private", "/tmp", ".yml"):
         assert token not in populated
+
+
+def _new_agent_fields(**overrides: Any) -> AgentEditFields:
+    """An ``AgentEditFields`` with every field spelled out, as every other call
+    site in this module does.
+
+    Not stylistic: the repo's ``pyright`` run reports a partial
+    ``AgentEditFields(...)`` as a call with missing arguments (the whole module
+    writes them out for that reason), so a factory is how a test varies one
+    field without becoming a type error.
+    """
+    base: dict[str, Any] = dict(
+        name="New",
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        description=None,
+        last_message=None,
+        tags=None,
+        categories=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
+def test_a_legacy_stored_zero_max_tokens_loads_and_reads_as_no_ask(temp_agents_dir: Path):
+    """Review R2-m2: a STORED ``0`` must not fail the call, or the load.
+
+    ``max_tokens`` is persisted, and it was unbounded for the whole life of the
+    file, so a record written while ``0`` was accepted is still out there. Both
+    read paths hand it to ``ChatRequest`` (``server/utils/operator.py`` and
+    ``server/routes/speech.py`` through ``configure_model``), whose own bound is
+    ``ge=1`` -- so a hard bound on the stored field would have raised on every
+    call, and (worse, because ``_scan_agents_metadata`` validates every stored
+    agent) turned the record into an unreadable definition. ``0`` meant "no ask
+    of my own" on main, whose wire clamp used ``or``, and it means that here.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    created = registry.create_agent(_new_agent_fields(name="Legacy"))
+    # ``registry.agents_dir``, not the directory we handed in: the registry keeps
+    # its definitions one level down (``<dir>/agents/<id>/agent.yml``).
+    config_path = registry.agents_dir / created.id / "agent.yml"
+    stored = yaml.safe_load(config_path.read_text())
+    stored["max_tokens"] = 0
+    config_path.write_text(yaml.safe_dump(stored))
+
+    # It loads, and it is not counted as an unreadable agent.
+    reloaded = AgentRegistry(temp_agents_dir)
+    agent = reloaded.get_agent(created.id)
+    assert agent is not None
+    assert agent.max_tokens is None
+
+    # And the value builds the request the server is about to send. ``0`` itself
+    # could not -- that is the failure the normalisation removes.
+    spec = ModelSpec(provider="openai", model_id="gpt-4o")
+    request = ChatRequest(model=spec, messages=[Message.user("hi")], max_tokens=agent.max_tokens)
+    assert request.max_tokens is not None
+    with pytest.raises(ValidationError):
+        ChatRequest(model=spec, messages=[Message.user("hi")], max_tokens=0)
+
+    # The ingress that WRITES records refuses it, so nothing re-creates one.
+    with pytest.raises(ValidationError):
+        _new_agent_fields(max_tokens=0)
+    with pytest.raises(ValidationError):
+        _new_agent_fields(max_tokens=-1)

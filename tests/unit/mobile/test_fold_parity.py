@@ -660,6 +660,66 @@ def test_a_wake_receipt_strips_the_model_facing_envelope() -> None:
         assert row.text == "w-9 (1, every 6h) — Check the deploy pipeline"
 
 
+def test_a_length_stop_is_announced_on_both_surfaces() -> None:
+    """Agent review round 1 (B1): nothing folded ``stop_reason == "length"`` into
+    a notice, so a reply cut by the generation bound replayed as a complete one.
+
+    Both variants are asserted because they need opposite treatment: the turn
+    WITH prose is the one whose text lies (it reads as a finished, oddly short
+    answer), and the turn with NOTHING still needs a line because there is no
+    text to explain the silence. The tier is ``warning`` on both, matching the
+    live loop's own truncation notices, so one event is never described in two
+    voices by the two surfaces that render it.
+    """
+    cut = assistant_stop_notice(
+        text="1, 2, 3, 4", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert cut == ("answer cut off at the output limit", "warning")
+
+    empty = assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert empty == ("no answer: the model spent its whole output budget", "warning")
+
+    # A truncated TOOL CALL produced something, but not an ANSWER, so it takes
+    # its own arm rather than the content one: the call card directly above
+    # already says the arguments were cut, and repeating "answer cut off" there
+    # was a second, false row for one event (design round 1, D3).
+    with_call = assistant_stop_notice(
+        text="", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert with_call == ("tool call cut off at the output limit (nothing ran)", "warning")
+
+    # Prose and a cut call together is the content arm: there IS an answer, and
+    # the live loop agrees -- it tests ``has_text`` before ``tool_calls`` too
+    # (design round 2, D7). It used to check the call first, so this same turn
+    # was "mid tool call" live and "answer cut off" here. The call half still
+    # reaches the reader, on its own row: the placeholder result appended for it
+    # says it was cut and nothing ran.
+    both = assistant_stop_notice(
+        text="here is the file", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert both == ("answer cut off at the output limit", "warning")
+
+    # An ordinary stop still needs nothing, which is what keeps the notice
+    # meaningful rather than decorative.
+    assert (
+        assistant_stop_notice(
+            text="done", has_tool_calls=False, stop_reason="stop", provider_payload=None
+        )
+        is None
+    )
+
+    # And the phone's fold actually renders it, on the same history the TUI
+    # would replay: the defect was invisible on BOTH surfaces, so the helper
+    # being right is not on its own the claim.
+    history = [Message.user("count to a million"), _assistant("1, 2, 3", stop="length")]
+    page = [row.kind for row in _page_rows(history)]
+    assert page == ["user", "assistant", "notice"]
+    notice_row = _page_rows(history)[-1]
+    assert "output limit" in notice_row.text
+
+
 def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
     """Review round 1: the two hosts fed the shared helpers differently.
 

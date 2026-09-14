@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
     ModelSpec,
     StreamEndEvent,
@@ -548,6 +549,64 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -> None:
+    """The bound follows the model swap instead of riding the primary's ask.
+
+    The hop used to be ``model_copy(update={"model": spec})``, and ``model_copy``
+    cannot re-run the validator -- so the primary's fill went onto a fallback that
+    publishes a smaller ceiling (34 shipped rows publish under 20,000; here
+    4,096), which is an ask above the target's own published maximum and a
+    provider-dependent 400 where main re-read the spec (review M1 / QA Q5). The
+    reverse direction is the same defect: a small model's ask stayed on a large
+    fallback where a fresh request carries the contract's own. The small-to-big
+    half is pinned at the contract (``tests/unit/harness/test_types.py``); this
+    drives the direction a real chain walk takes.
+    """
+    seen: list[tuple[str, int | None]] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        def wrapper(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            seen.append((request.model.model_id, request.max_tokens))
+            if spec.model_id == "gpt-4o":
+                return ScriptedClient(ProviderError(500, "boom", retryable=True)).stream(
+                    request, api_key
+                )
+            return ScriptedClient(
+                [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+            ).stream(request, api_key)
+
+        return _FnClient(wrapper)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-3-haiku-20240307"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    # The primary names no ask of its own and advertises a capability-shaped
+    # ceiling, so the contract bounds it at the policy; the fallback's own
+    # published 4,096 is the smaller limit and must be what goes out, not the
+    # primary's 131,072.
+    primary = ChatRequest(
+        model=ModelSpec(
+            provider="openai",
+            model_id="gpt-4o",
+            context_window=1_047_576,
+            max_output_tokens=1_047_576,
+        )
+    )
+    got = [event async for event in stream_with_failover(primary, auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # The primary is retried on its own credential before the chain moves, so the
+    # two routes are grouped rather than indexed.
+    assert {ask for model_id, ask in seen if model_id == "gpt-4o"} == {DEFAULT_TURN_OUTPUT_TOKENS}
+    assert [ask for model_id, ask in seen if model_id == "claude-3-haiku-20240307"] == [4_096]
 
 
 class _FailsAfter:
