@@ -438,14 +438,26 @@ class ServingSessionHandle(SessionHandle):
         # synchronously, so the publish reads the settled state
         # (``test_busy_settles`` pins the ordering). Probed so reduced
         # sessions in tests that never grew the attribute keep working.
+        #
+        # ONE SLOT, TWO CONSUMERS. The session offers exactly one turn-boundary
+        # hook and it is already claimed by the busy settle, so the runtime's
+        # own handler owns the slot and calls BOTH — see `_on_turn_settled`.
+        # Adding a second attribute to `Session` would be a second seam to keep
+        # in step for no gain; dropping either call here would leave a record
+        # stuck busy or a completion announced by nobody.
         if hasattr(session, "on_turn_settled"):
-            session.on_turn_settled = self._publish_busy_soon
+            session.on_turn_settled = self._on_turn_settled
+        #: Strong reference to the in-flight rung-4 announcement. A bare
+        #: ``create_task`` whose result nobody holds can be collected before it
+        #: runs, which is the failure this attribute exists to prevent.
+        self._completion_task: asyncio.Task[None] | None = None
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
         if hasattr(session, "_publish_session_started"):
-            session._publish_session_started = self._publish_session_started
-        # Discovery/attachment does not authorize replacing a headless deny
+            session._publish_session_started = (
+                self._publish_session_started
+            )  # Discovery/attachment does not authorize replacing a headless deny
         # gate with a parked interactive gate. Exec opts into that separately.
         #: Why the most recent admitted turn failed, for a headless caller that
         #: has no front end reading the projection. See the drain's handler.
@@ -2541,6 +2553,149 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
 
+    # -- the completion ladder's last rung ---------------------------------
+
+    def _on_turn_settled(self) -> None:
+        """The session's turn-boundary hook, with both consumers on one slot.
+
+        Chained rather than replaced: ``Session.on_turn_settled`` is a single
+        attribute and the record's ``busy`` settle already owns it. Both calls
+        are non-raising by contract, so the order is free and the only thing
+        that matters is that neither is dropped.
+        """
+        self._publish_busy_soon()
+        self._schedule_completion_announce()
+
+    def _schedule_completion_announce(self) -> None:
+        """Run :meth:`_announce_completion` off the event loop.
+
+        The hook fires inside the turn pipeline's ``finally``, still under
+        ``_turn_lock``. The arm takes a SQLite delivery claim and may spawn a
+        notification helper, so running it inline would make the next turn's
+        admission wait on a decorative banner — the same reason the TUI's own
+        background announcer runs in a worker. The task is held by reference:
+        a `create_task` whose result nobody keeps can be collected before it
+        ever runs, which would show up as an intermittently missing toast.
+        """
+        if self._disposing:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            self._completion_task = loop.create_task(asyncio.to_thread(self._announce_completion))
+        except Exception:  # noqa: BLE001 — scheduling is chrome, never the turn
+            logger.debug("could not schedule the completion announcement", exc_info=True)
+
+    def _announce_completion(self) -> None:
+        """RUNG 4: raise a completion's banner when nobody else can.
+
+        THE LAST RUNG, AND A GATE RATHER THAN A RACE. This runs at turn settle,
+        which is EARLIER than every other surface learns about the completion —
+        the desktop feed polls at 100 ms and the TUI at 1 s. Announcing
+        unconditionally would therefore win the claim for the runtime every
+        time and make both richer paths dead: the desktop's composed banner and
+        a running TUI's. So ELIGIBILITY IS DECIDED BEFORE THE CLAIM, which is
+        also the ordering the TUI's own announcer uses when it checks
+        ``live_state`` before claiming.
+
+        The rungs, first match wins, exactly as the design's ladder states them:
+
+        1. **A surface is WATCHING this session** — a TUI attached to it, a
+           phone, or a desktop window actually displaying it. The card is in
+           band there; an OS banner on top would be pure interruption. Note the
+           predicate is the VISIBILITY one, never ``notification_surfaces()``:
+           "a banner could reach somebody somewhere" is not "a person is
+           reading this", and using reachability here suppressed the banner for
+           a session nobody was looking at.
+        2. **A desktop app on this machine can attempt a COMPLETION banner**
+           (:mod:`local_operator.session.runtime.presence`) — the machine-wide
+           feed composes it, so the runtime stays silent. Narrowed by KIND: the
+           feed carries completions only, so this arm is the only place that
+           asks, and a parked ``ask``/``approval`` keeps its per-session lease
+           and its per-session toast untouched.
+        3. **A TUI is running anywhere on this machine** — its 1 s background
+           announcer raises it, and two announcers would be one too many.
+        4. **Nothing** — this arm.
+
+        A claim that then fails to deliver is handed straight back, because a
+        watermark asserting a banner nobody received is the silent hole
+        ``release_delivery`` exists to close.
+        """
+        try:
+            if self._watching_surfaces():
+                # Rung 1. Cheap and first: no store read, no filesystem probe.
+                return
+            from local_operator.paths import config_dir
+            from local_operator.server.utils.desktop_sessions import (
+                BRIDGE_NOTIFIABLE_KINDS,
+            )
+            from local_operator.session.attention import AttentionStore
+            from local_operator.session.runtime.presence import desktop_delivery_present
+
+            root = config_dir()
+            session_id = self._session_id_for_resume()
+            identity = f"session/{session_id}"
+            store = AttentionStore(root / "attention.db")
+            state = store.state(identity)
+            token = state.get("completion_token")
+            kind = state.get("kind")
+            # The store is the authority for "this turn produced a notifiable
+            # outcome", for the same reason the bridge reads it and asks no
+            # questions about jobs: re-deciding here would mean deciding again
+            # in a process with less information.
+            if not token or kind not in BRIDGE_NOTIFIABLE_KINDS or not state.get("unseen"):
+                return
+            if desktop_delivery_present(root, kind):
+                # Rung 2.
+                return
+            if _tui_viewer_running(root):
+                # Rung 3.
+                return
+            if not store.claim_delivery(identity, token, "runtime"):
+                # Another surface reached the watermark first. It is delivering.
+                return
+            delivered = self._raise_completion_banner(str(kind), session_id)
+            if not delivered:
+                store.release_delivery(identity, token)
+        except Exception:  # noqa: BLE001 — chrome must never affect a turn
+            logger.debug("completion announcement failed", exc_info=True)
+
+    def _raise_completion_banner(self, kind: str, session_id: str) -> bool:
+        """Raise the rung-4 OS banner. Reports whether a child was STARTED.
+
+        THE SAME VOCABULARY AS EVERY OTHER SURFACE — ``notifications.compose``
+        — so the banner a user sees when nothing is running reads like the one
+        they see when the app is: same title rules, same privacy flag, same
+        failure sentence. Composition happens here rather than in ``notify``
+        because the privacy flag is a backend fact, and delivery still goes
+        through ``tui.notify.detached_notify``, which keeps the module rule
+        "nothing outside ``tui/`` builds an OS notification" intact — this arm
+        reaches the OS exactly as ``_announce_pending`` does.
+
+        ``argv_safe`` on both strings, matching the TUI's background path: the
+        macOS bundle takes them as positional argv slots, and model-written text
+        can begin with a dash.
+        """
+        from local_operator.notifications import compose
+        from local_operator.tui.notify import argv_safe, detached_notify
+
+        session_dir = getattr(getattr(self._session, "transcript", None), "directory", None)
+        composed = compose(
+            kind,  # type: ignore[arg-type]
+            session_dir=session_dir,
+            session_name=self._notifiable_session_name(),
+        )
+        return bool(
+            detached_notify(
+                argv_safe(composed.title),
+                argv_safe(composed.body),
+                session_id=session_id,
+                subtitle=composed.status,
+            )
+        )
+
     def _publish_pending_gate(self) -> None:
         """Mirror the fold's FRONT card into the canonical full-TUI contract.
 
@@ -4390,6 +4545,39 @@ class ServingSessionHandle(SessionHandle):
             self._fold.set_todos(list(TODO_STORE.get(self._session.session_id, [])))
         except Exception:  # noqa: BLE001 — todos are a panel, never a failure
             logger.debug("todo refresh failed", exc_info=True)
+
+
+def _tui_viewer_running(root: Path) -> bool:
+    """Whether any live TUI window on this machine can raise a completion.
+
+    RUNG 3'S QUESTION. A running TUI polls the attention store once a second and
+    announces every background completion it finds, so the runtime must stay
+    silent while one is up or the two compose the same banner.
+
+    The viewer registry is the right authority rather than the session registry:
+    it is the machine-wide answer to "which window can put a session on screen",
+    it is published once per TUI process (surviving every ``/resume``), and
+    ``scan_viewers`` already reaps a dead pid and a stale heartbeat — so a TUI
+    that crashed does not keep the runtime silent forever.
+
+    Deliberately keyed on the SURFACE rather than on which session it shows:
+    a TUI displaying a different conversation still owns its own background
+    announcer (design matrix row 8), and a TUI displaying THIS one is rung 1.
+
+    KNOWN LIMIT, stated rather than hidden: a TUI whose process has
+    notifications disabled (``LOCAL_OPERATOR_NO_NOTIFICATIONS`` exported into
+    that one process) advertises no such fact, so this reports a running
+    announcer that will stay quiet. The window is narrow — the config flag and
+    the runtime's own env are shared, so only a per-process export reaches it —
+    and the durable unseen mark means nothing is lost, only un-bannered.
+    """
+    try:
+        from local_operator.session.runtime.viewers import scan_viewers
+
+        return any(record.surface == "tui" for record in scan_viewers(root))
+    except Exception:  # noqa: BLE001 — a routing read must not block a notify
+        logger.debug("could not scan for a running TUI", exc_info=True)
+        return False
 
 
 def _effective_label(session: Any) -> str:

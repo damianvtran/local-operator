@@ -2357,15 +2357,56 @@ class RuntimeServer:
         )
 
     def _visible_attach_surfaces(self) -> set[str]:
+        """Which KINDS of surface are actually being LOOKED AT right now.
+
+        The difference between this and :meth:`notification_surfaces` is the
+        whole of rung 1 of the notification ladder. This one answers "is a
+        person reading this session"; that one answers "could a banner reach
+        them somewhere on this machine". Using the reachability predicate as a
+        SUPPRESSION predicate is what made "this machine can banner" read as "a
+        human is reading X": with the panel on X and the window behind another
+        app, every OS surface went quiet while nobody was looking.
+
+        A DESKTOP CONNECTION'S VISIBILITY IS NO LONGER THE RENDERER'S
+        ``document.visibilityState``. That value says nothing sound about the
+        window: a window behind another app is "visible", and a window Electron
+        is throttling can report "hidden" while the user is reading it. So when
+        a machine-wide delivery presence exists, ITS window state is the
+        authority, and it can both grant and deny. When no presence exists — an
+        older app, or none at all — the per-session flag below stands
+        unchanged, which is what keeps this additive: an old UI's behaviour is
+        byte-identical, and only a new one's occluded-window case changes (a
+        banner IS raised, per the design's matrix).
+        """
         return {
             "desktop" if conn.surface == "desktop" else "attach"
             for conn in self._clients.values()
             if conn.kind == "attach"
             and (
                 conn.surface != "desktop"
-                or (self._desktop_lease_live(conn) and conn.desktop_visible)
+                or (self._desktop_lease_live(conn) and self._desktop_visible(conn))
             )
         }
+
+    def _desktop_visible(self, conn: _ClientConn) -> bool:
+        """Whether this session is on a desktop window somebody is looking at.
+
+        See :meth:`_visible_attach_surfaces` for why the machine-wide answer
+        wins where it exists and the renderer's flag is the fallback where it
+        does not.
+        """
+        try:
+            from local_operator.session.runtime.presence import desktop_presence
+
+            presence = desktop_presence(getattr(self, "_config_root", None) or config_dir())
+        except Exception:  # noqa: BLE001 — a presence read must never break a gate
+            logger.debug("could not read the desktop presence", exc_info=True)
+            return conn.desktop_visible
+        if not presence.present:
+            return conn.desktop_visible
+        record = getattr(self, "_record", None)
+        session_id = str(getattr(record, "session_id", "") or "")
+        return presence.attended and presence.session_id == session_id
 
     def notification_surfaces(self) -> frozenset[str]:
         """Delivery reachability is independent of a person viewing a session."""
