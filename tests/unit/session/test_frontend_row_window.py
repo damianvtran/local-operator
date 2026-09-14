@@ -194,6 +194,37 @@ def test_a_tick_that_appended_one_row_freezes_exactly_that_row(
     assert len(store._state.jobs[0].trajectory) == ROWS + 1
 
 
+def test_lineage_stamping_keeps_the_window_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production path always stamps lineage onto the row; it must not rebuild rows.
+
+    ``_with_lineage`` runs whenever the session has a comms registry, which in a
+    live session is always -- and it merges the parent/child identity through
+    ``model_copy``, so the retained window has to survive it by identity.
+    """
+    jobs = [_job("child-0")]
+    session = _session(jobs)
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: list(jobs),
+        node=lambda _job_id: SimpleNamespace(
+            session_id=None,
+            live=False,
+            session_dir=None,
+            parent_job_id="parent-0",
+            launch_message_id="",
+            launch_prompts=None,
+            attempt_aliases=(),
+        ),
+    )
+    store = _store(jobs)
+    work = _warm(store, session, monkeypatch)
+    first = store._state.jobs[0].trajectory
+
+    assert store.refresh_jobs(session) is None
+    assert (work.copies, work.freezes) == (0, 0), "lineage stamping re-materialised the rows"
+    assert store._state.jobs[0].trajectory is first
+    assert store._state.jobs[0].parent_job_id == "parent-0"
+
+
 def test_the_retained_window_is_the_same_object_across_ticks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
