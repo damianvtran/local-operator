@@ -91,6 +91,16 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # ``/info``'s host read and ``/session``'s one-snapshot ledger
+                # report. A NEW key rather than a bump of `catalogues`, and the
+                # rule is the one `session_search` states above: a renderer
+                # renders `/analytics` and `/failovers` perfectly well against a
+                # backend whose two diagnostic routes do not exist, and gating
+                # those working panels on this version would hide them because a
+                # newer one is missing. Only the two new ops read it, and a
+                # renderer that does not see it shows the backend update action
+                # instead of calling them.
+                "diagnostics": 1,
             },
         },
     )

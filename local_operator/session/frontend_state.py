@@ -4618,6 +4618,45 @@ def format_window(window: int) -> str:
     return str(window)
 
 
+def context_block_numbers(data: dict[str, int], total: int) -> dict[str, int]:
+    """The unformatted figures behind the ``/context`` block's rows.
+
+    The rows are PRE-FORMATTED strings (``~12.3k``), which is right for a
+    terminal and useless to a panel that wants to draw a proportion bar: a
+    client parsing them would move its chart whenever a formatter changed. So
+    the numbers the rows were built from ride beside them on the block's
+    ``data``.
+
+    ADDITIVE: nothing reads this today, and a client that does not find
+    ``numbers`` renders the rows with no bars — it MUST NOT recover the figures
+    by parsing ``items``.
+
+    Lives HERE, beside the formatters that consume the same dict, for the reason
+    ``format_context_tokens`` states: this block is built by BOTH hosts — the
+    detached runtime (``session/runtime/serving.py``) and the TUI owner
+    (``tui/app.py::_context_slash_result``) — so one definition is what stops the
+    two surfaces answering the same command with different numbers. ``.get``
+    mirrors the rows' own defensive read, so a breakdown missing a key costs
+    that one figure rather than failing the command, and ``total`` is passed in
+    from the caller's computation rather than re-summed here.
+    """
+    numbers = {
+        key: int(data.get(key, 0))
+        for key in (
+            "instructions",
+            "tool_inventory",
+            "tool_schemas",
+            "environment",
+            "knowledge_mcp_goal",
+            "messages",
+            "context_window",
+            "cache_read",
+        )
+    }
+    numbers["total"] = total
+    return numbers
+
+
 def _slash_capabilities() -> list[SlashCapability]:
     # Imported lazily so module import remains headless-safe; a full frontend
     # store needs the authoritative registry rather than a duplicated name list.
