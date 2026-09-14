@@ -37,6 +37,7 @@ Nothing here raises. A price is never worth a broken frame.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -46,10 +47,105 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, see ``SearchSpendSnapshot.o
 __all__ = [
     "SearchSpendRow",
     "SearchSpendSnapshot",
+    "format_usd",
+    "format_usd_exact",
+    "micro_from_usd",
     "turn_cost",
     "job_cost",
     "cost_summary",
 ]
+
+
+#: Below this many micro-USD a 4dp figure round-trips to ``$0.0000``, which
+#: reads as FREE — the more expensive of the two lies ``turn_cost`` warns about.
+#: 50 µ$ is $0.00005, the rounding boundary of ``{"$%.4f"}``.
+_SUB_CENT_VISIBLE_MICRO = 50
+
+#: THE spelling for "money we cannot state", shared by the surfaces that can
+#: show it. It lives here beside ``LOWER_BOUND_MARK`` for the same reason: two
+#: literals for one honesty vocabulary is how the band and ``/session`` came to
+#: disagree about the same state (QA round 1 Q1, round 2 Q1/Q3).
+UNKNOWN_COST_CELL = "$—"
+
+#: THE lower-bound mark, shared by every surface that has to say "this figure
+#: cannot be whole". It lives here rather than on the band because the band and
+#: ``/session`` both draw it, and two spellings of the same honesty vocabulary is
+#: exactly the defect the panels' single-formatter rule exists to prevent (review
+#: R2-1: ``/session`` printed an unmarked figure for a state the band marked).
+LOWER_BOUND_MARK = "\u2265"
+
+
+def format_usd(micro: int) -> str:
+    """The ONE dollar ladder, from an EXACT integer micro-USD amount.
+
+    Takes micro-USD rather than a float because the ladder's edge cases are
+    decided on the true value: a float that arrived already rounded to ``0.0``
+    cannot be told from a real zero, and the one reading the ladder must never
+    print is ``$0.0000`` for money that was spent. INTEGER in, so the decision
+    is about the money rather than about a rounded copy of it.
+
+    Ladder (rounding, never truncation — an f-string rounds):
+
+    - ``$1.90`` above a dollar, ``$0.213`` above a cent, ``$0.0042`` below it;
+    - a NONZERO amount under half a ten-thousandth of a dollar renders
+      ``<$0.0001`` — the one spelling where the ladder would otherwise lie, and
+      8 cells wide, or 9 when marked (``≥<$0.0001``). The mark and the spelling
+      DO co-occur: an unpriced call makes the total a lower bound regardless of
+      the digits, and the digits round to zero regardless of the mark (review
+      R1-3 corrected the design's earlier "cannot co-occur" claim, which would
+      have budgeted one cell short);
+    - zero renders ``$0.0000``, unchanged: for a genuine zero that spelling is
+      correct, and the band's zero policy already drops the segment entirely.
+
+    Every money surface reads THIS function for its digits; the callers keep
+    their own mark handling (``≥`` on the band, a dim ``+`` in the panels). Two
+    ladders is how ``/analytics`` came to print ``$1.2k`` beside the band's
+    ``$1234.56`` for the same money.
+    """
+    if micro < _SUB_CENT_VISIBLE_MICRO:
+        return "<$0.0001" if micro > 0 else "$0.0000"
+    cost = micro / 1_000_000.0
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    if cost < 1.0:
+        return f"${cost:.3f}"
+    return f"${cost:.2f}"
+
+
+def micro_from_usd(cost: Any) -> int | None:
+    """The exact integer micro-USD of a FLOAT dollar figure, or ``None``.
+
+    ``None`` means "not a figure this ladder can take": non-finite (a NaN
+    restored from a corrupt checkpoint, an inf from a division the accounting
+    did not guard) or not a number at all (a ``None`` from a reduced host).
+    ``int(round(nan))`` RAISES, so the two display wrappers that still hold a
+    float — the band's and ``/analytics``' — used to be able to take a frame
+    down over a bad figure, against this module's own contract that nothing here
+    raises (review R1-7). The caller decides what to print for a value the
+    ladder cannot take; this function only refuses to lie about one.
+    """
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    if not math.isfinite(cost):
+        return None
+    return int(round(cost * 1_000_000))
+
+
+def format_usd_exact(micro: int) -> str:
+    """The exact micro-USD at full precision: ``$1.897843``.
+
+    What ``/session`` shows on demand, so the reader can see that the cents on
+    the band are not the whole number. Six decimal places is the record's own
+    resolution (micro-USD), trailing zeros trimmed to at least the cents, so an
+    exact ``$2.10`` still reads as ``$2.10`` rather than ``$2.1``.
+    """
+    if micro < 0:
+        return f"-{format_usd_exact(-micro)}"
+    whole, _, fraction = f"{micro / 1_000_000:.6f}".partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = (fraction + "00")[:2]
+    return f"${whole}.{fraction}"
 
 
 def _resolve_for_paint(provider: str, model_id: str):

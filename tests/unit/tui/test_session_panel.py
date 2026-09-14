@@ -2076,3 +2076,135 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
         build_session_report(_tool_report(plain), runtime(), 100).plain, "Tool surface"
     )
     assert not any("nested" in r for r in section)
+
+
+def test_a_money_record_with_no_counted_calls_still_gets_its_row():
+    """Q3: the money decides whether a row exists, not the call counts.
+
+    ``{"micro": 500000, "calls": 0}`` is a turn-end remainder — money with no
+    per-call accrual, which ``SessionSpend.adjust``'s own docstring names. The
+    round-1 gate on ``calls`` hid it, so the row simply vanished while the record
+    held a figure and the band could paint a bound above it.
+    """
+    report = _tree_report()
+    remainder = replace(runtime(), spend_micro=500_000, spend_knowledge="exact")
+    row = next(
+        line
+        for line in build_session_report(report, remainder, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "$0.50" in row, row
+    assert "500,000 μ$" in row, row
+
+
+def test_an_unknown_record_signs_no_delta():
+    """Q4: an unknown record has nothing sound to compare the ledger against.
+
+    Signing ``Δ record -0.100000`` beside a ``$—`` treats the unknown as
+    ``$0.000000`` and reports the ledger's whole sum as a difference from it —
+    a comparison against a figure the row above just said it cannot state.
+    """
+    report = _tree_report()
+    unknown = replace(runtime(), spend_micro=0, spend_knowledge="unknown")
+    text = build_session_report(report, unknown, width=120).plain
+    assert "Record total" in text and "$—" in text, text
+    # The ledger still gets its own row; only the difference is withheld.
+    assert "Ledger total" in text, text
+    assert "Δ" not in text, text
+
+
+def test_an_unknown_record_reads_as_no_figure_and_never_as_a_marked_one():
+    """Q1 and §8.2: nothing priceable is ``$—``, and ``≥$—`` is impossible.
+
+    A record whose every call was unpriceable has no figure to show. The band
+    spells that ``$—`` and so must this row -- a ``$0.00`` here would be the
+    "confident zero over billed work" the design names, and a marked ``≥$—``
+    would be a bound on a figure that does not exist. No micro rung either: there
+    is no integer to print.
+    """
+    report = _tree_report()
+    unknown = replace(runtime(), spend_micro=0, spend_knowledge="unknown")
+    row = next(
+        line
+        for line in build_session_report(report, unknown, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "$—" in row, row
+    assert "μ$" not in row, row
+    assert "≥" not in row, row
+
+
+def test_a_bound_record_wears_the_mark_the_band_wears():
+    """R2-1: an exact-looking figure must never stand for a lower bound.
+
+    A record can be a bound (a persisted ``floor: true``, or any ``partial``), and
+    the band marks that state. The row is not allowed to disagree with the band
+    about the same money: it wears the SAME constant, from the same module, and
+    names the state in its note. An exact record is unmarked, because the mark on
+    a whole figure is the same lie in the other direction.
+    """
+    from local_operator.tui.app import RESTORED_COST_PREFIX
+    from local_operator.tui.costs import LOWER_BOUND_MARK
+
+    # One literal, two readers.
+    assert RESTORED_COST_PREFIX == LOWER_BOUND_MARK
+
+    report = _tree_report()
+    bounded = replace(runtime(), spend_micro=2_100_000, spend_knowledge="floor")
+    row = next(
+        line
+        for line in build_session_report(report, bounded, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "≥$2.10" in row, row
+    assert "floor" in row, row
+
+    exact = replace(runtime(), spend_micro=2_100_000, spend_knowledge="exact")
+    plain_row = next(
+        line
+        for line in build_session_report(report, exact, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "≥" not in plain_row, plain_row
+    assert "exact" in plain_row, plain_row
+
+
+def test_exact_figure_and_reconciliation_are_readable_on_demand():
+    """§8.3/§8.4: the band rounds, so `/session` must not.
+
+    The status band's money cell is 4-6 cells wide and always will be; the trade
+    is only honest if the reader can ask for the whole number somewhere and get
+    it. This is the row that answers, beside the analytics ledger's own sum for
+    the same session — two observers that count different events, naming their
+    difference rather than one standing in for the other.
+    """
+    report = _tree_report()
+    exact = replace(runtime(), spend_micro=32_000_123, spend_knowledge="exact")
+    text = build_session_report(report, exact, width=120).plain
+    # The record's own integer, to the micro-dollar, with the unit stated.
+    assert "$32.000123" in text and "32,000,123 μ$" in text
+    # The ledger's own sum, printed the SAME way, so the two are comparable and
+    # neither is the other's rounding.
+    assert "$31.276032" in text
+
+    # D2: BOTH rows are grid rows, so their money sits in the value column the
+    # rest of the screen uses. The first version drew the reconciliation with
+    # ``body.note``, landing its money two columns left of every other value.
+    record_row = next(line for line in text.split("\n") if "Record total" in line)
+    ledger_row = next(line for line in text.split("\n") if "Ledger total" in line)
+    assert record_row.index("$32.000123") == ledger_row.index("$31.276032")
+
+    # D3: the printed Δ is the exact difference of the two printed figures.
+    delta = 32_000_123 - 31_276_032
+    assert f"{delta / 1_000_000:+.6f}" in text, text
+    assert float("+0.724091") == delta / 1_000_000
+
+    # D2: ONE name per sum -- the scope ("all calls") rides the note, not a
+    # second label for the same money.
+    assert "Ledger (all calls)" not in text
+
+    # No record (a pre-ledger session): no exact row, and nothing claiming a
+    # micro-precision the session cannot speak for.
+    plain = build_session_report(report, runtime(), width=120).plain
+    assert "Record total" not in plain
+    assert "μ$" not in plain

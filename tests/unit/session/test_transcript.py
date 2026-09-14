@@ -681,7 +681,7 @@ async def test_replay_suffix_matches_whole_file_parse(tmp_path, shape):
     full = Transcript(directory)
     store = AttachmentStore(directory)
 
-    suffix = read_replay_suffix(directory, checkpoint_type="checkpoint")
+    suffix = read_replay_suffix(directory, checkpoint_types="checkpoint")
     assert _dump(replay_entries(suffix.entries, store)) == _dump(full.build_llm_history())
     assert suffix.checkpoint == full.latest_custom("checkpoint")
     if shape != "no-compaction":
@@ -716,6 +716,48 @@ async def test_replay_suffix_reports_an_unknown_cursor_instead_of_cutting(tmp_pa
     suffix = read_replay_suffix(directory, through_id="not-a-row")
     assert not suffix.through_present
     assert suffix.bytes_read == (directory / "transcript.jsonl").stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_a_type_that_may_be_absent_never_defeats_the_suffix_stop(tmp_path):
+    """Review R1-2: an opportunistic type must not gate the reader's stop.
+
+    The cold path wants the frontend checkpoint AND the spend record out of one
+    pass. Requiring both meant a pre-ledger journal — which by definition has no
+    spend row — could never satisfy the stop, so the reader walked to the start
+    of the file: measured on the operator's store, session ``28a800c6a783``,
+    4,194,304 bytes became **16,701,655** (the whole 16.7 MB journal) on every
+    cold open, plus the ~1.23x-weight parse it pins.
+
+    The assertion is structural rather than a byte budget: adding a type that is
+    absent must not change how far the reader reads, and a row of that type
+    inside the window must still come out of the same pass.
+    """
+    directory = tmp_path / "sess"
+    await _journal(directory, shape="compaction")
+    size = (directory / "transcript.jsonl").stat().st_size
+
+    required_only = read_replay_suffix(directory, checkpoint_types=("checkpoint",))
+    with_absent = read_replay_suffix(
+        directory,
+        checkpoint_types=("checkpoint",),
+        opportunistic_types=("session_spend.v1",),
+    )
+    assert required_only.bytes_read < size, "the reader must not read the whole journal"
+    assert with_absent.bytes_read == required_only.bytes_read
+    assert "session_spend.v1" not in with_absent.checkpoints
+
+    # And the opportunistic row IS collected when the backward scan passes it —
+    # including from the tail, which is where a per-call record always is.
+    await Transcript(directory).append_custom("session_spend.v1", {"version": 1, "micro": 7})
+    with_row = read_replay_suffix(
+        directory,
+        checkpoint_types=("checkpoint",),
+        opportunistic_types=("session_spend.v1",),
+    )
+    assert with_row.checkpoints["session_spend.v1"] == {"version": 1, "micro": 7}
+    assert with_row.checkpoints["checkpoint"] == {"epoch": "e1"}
+    assert with_row.bytes_read < size + 4096, "a row at the tail must not cost a full read"
 
 
 def test_replay_suffix_absent_journal_is_empty_history(tmp_path):

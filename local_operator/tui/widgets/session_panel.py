@@ -36,7 +36,7 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -55,12 +55,16 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
+from local_operator.session.spend import SessionSpend
 from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
     MoneyFigure,
     SearchSpendSnapshot,
     combined_spend,
     cost_label,
     cost_note_rungs,
+    format_usd_exact,
 )
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
@@ -158,6 +162,17 @@ class SessionDiagnostics:
     #: transcript-restoration concept it has no way to know about (and which the
     #: desktop HTTP route that also consumes it has no notion of).
     spend_is_floor: bool = False
+    #: The session's OWN durable spend, exactly as the ``session_spend.v1``
+    #: record carries it, or ``None`` when the session has no record (a
+    #: pre-ledger conversation). The band rounds this by design — the figure is
+    #: 4-6 cells wide there — so ``/session`` is where the EXACT micro-USD is
+    #: readable, which is what makes a rounded reading honest rather than
+    #: lossy: the reader can always ask for the whole number.
+    spend_micro: int | None = None
+    #: The record's knowledge state as a word (``exact``/``partial``/``floor``/
+    #: ``unknown``), so the reconciliation row can say WHICH deficit it is
+    #: describing rather than re-deriving one from the band's mark.
+    spend_knowledge: str = ""
     #: This session's web-search spend, frozen, or ``None`` when the host has no
     #: search ledger to read (a test double, a reduced facade). App state read
     #: from the process-wide ledger rather than session state, which is why it
@@ -179,6 +194,19 @@ class SessionDiagnostics:
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)
         model = session.effective_model
+        # ``restored_spend`` is the DURABLE record, and only that: it answers
+        # ``None`` for a session with no record on disk. The live accumulator is
+        # deliberately NOT a fallback for these two fields (review R2-1): a
+        # pre-ledger session's accumulator holds a SEEDED lower bound, so
+        # printing it under a row named "Record total" showed an unmarked,
+        # exact-looking figure for the same state the band marks ``≥`` — two
+        # surfaces disagreeing about one sum. The band owns that state; this
+        # screen simply has nothing durable to add until a record exists.
+        restored_spend = getattr(session, "restored_spend", None)
+        # ``cast`` because the declaration lives on ``SessionProtocol`` while this
+        # probe is duck-typed: pyright sees ``object`` here, and the ``callable``
+        # guard is the actual runtime contract.
+        spend = cast("SessionSpend | None", restored_spend()) if callable(restored_spend) else None
         return cls(
             session_id=session.session_id,
             name=session.conversation_name,
@@ -191,6 +219,23 @@ class SessionDiagnostics:
             context_is_estimate=getattr(state, "context_is_estimate", None),
             generation=getattr(state, "generation", None),
             epoch=getattr(state, "epoch", None),
+            # The MONEY decides whether a row exists, never the call counts:
+            # ``has_money`` is ``micro > 0``, and a record can hold a turn-end
+            # remainder with ``calls == 0`` (QA round 2, Q3 -- the round-1 gate on
+            # ``calls`` hid exactly that money on both surfaces). An UNKNOWN
+            # record still gets its row, because "we cannot state this" is a fact
+            # worth printing; a record holding nothing at all gets none, matching
+            # the band's no-cell behaviour instead of ``$0.00``.
+            spend_micro=(
+                spend.micro
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else None
+            ),
+            spend_knowledge=(
+                spend.knowledge().value
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else ""
+            ),
         )
 
 
@@ -1113,6 +1158,91 @@ def _draw_recorded_usage(
             f"{report.missing_usage_calls:,} requests missing usage · "
             f"{report.unknown_usage_calls:,} unknown"
         )
+    # THE EXACT FIGURE, on demand. The band has 4-6 cells and must round; this
+    # screen has room, so the RECORD's own integer micro-USD is readable here to
+    # the micro-dollar -- which is what makes the band's rounding a convenience
+    # rather than a loss. ``μ$`` in the note says the unit outright, because
+    # ``$1.897843`` invites the reader to wonder whether the last digits are
+    # cents or noise. Labelled "Record" and not "Ledger": this screen IS the
+    # ledger, and two rows calling different sums by the same name is how a
+    # reader concludes one of them is wrong.
+    #
+    # A record can be a LOWER BOUND -- a persisted ``floor: true`` record, or any
+    # ``partial`` one -- so the row wears the same mark the band does, from the
+    # same constant, and names the state in its note (review R2-1). An exact
+    # record is unmarked, because a mark on a whole figure is the same lie in the
+    # other direction.
+    if runtime.spend_micro is not None:
+        bound = runtime.spend_knowledge in {"floor", "partial"}
+        state = runtime.spend_knowledge or "unknown"
+        micro_text = f"{runtime.spend_micro:,} μ$"
+        if state == "unknown":
+            # §8.2: nothing priceable is ``$—``, never ``$0.00``. It carries no
+            # mark and no micro rung either, because ``≥$—`` is a contradiction
+            # -- there is no figure for a bound to qualify (QA round 1, Q1). The
+            # spelling is the band's own constant, so the two cannot drift.
+            body.kv(
+                "Record total",
+                UNKNOWN_COST_CELL,
+                notes=("nothing priceable · this session", "this session"),
+            )
+        else:
+            body.kv(
+                "Record total",
+                f"{LOWER_BOUND_MARK if bound else ''}{format_usd_exact(runtime.spend_micro)}",
+                notes=(
+                    f"{state} · {micro_text} · this session",
+                    f"{micro_text} · this session",
+                    "this session",
+                ),
+            )
+        # RECONCILIATION, as a row rather than a prose apology, and as a row the
+        # GRID owns (design round 1, D2): the first version drew it with
+        # ``body.note``, so its money landed at column 21 where every other value
+        # sits at 24 and the reader's eye had no column to follow. The record and
+        # the ledger count different events -- the ledger sees naming calls,
+        # asides and failed attempts the turn rows never carry, and it is the only
+        # observer that can see a call whose persist was lost -- so naming the
+        # difference is the honest move, while quietly switching either figure for
+        # the other would hide the one signal that says a write was dropped.
+        # Q4: with an UNKNOWN record there is nothing sound to compare against —
+        # the row above says "we cannot state this figure", so signing a Δ against
+        # it would silently substitute ``$0.000000`` for the unknown and report the
+        # ledger's whole sum as a difference from it. The ledger keeps its own row;
+        # only the difference is withheld.
+        ledger = report.aggregate
+        ledger_micro = getattr(ledger, "cost_micro", None) if ledger is not None else None
+        if (
+            state != "unknown"
+            and ledger is not None
+            and ledger.cost_is_known
+            and isinstance(ledger_micro, int)
+        ):
+            # BOTH figures are printed from their exact integer micro-USD, and the
+            # Δ is their exact difference, so the arithmetic on screen checks out
+            # (D3). The first version printed the ledger at 2dp and the Δ from the
+            # unrounded value, so 1.897843 - 1.20 could not produce +0.6984.
+            delta_micro = runtime.spend_micro - ledger_micro
+            # R2-4: the sign alone was ambiguous -- "Δ +0.500750 vs the record"
+            # on the Ledger row left the reader to guess which operand was
+            # subtracted from which. The word names the minuend, so the sign has
+            # a direction without the reader reconstructing it.
+            delta_text = (
+                f"record {'+' if delta_micro >= 0 else '-'}{abs(delta_micro) / 1_000_000:.6f}"
+            )
+            body.kv(
+                # ONE name for one figure (D2): "all calls" is the SCOPE and lives
+                # in the notes, where the ledger's own vocabulary names the sum.
+                "Ledger total",
+                format_usd_exact(ledger_micro),
+                notes=(
+                    f"Δ {delta_text} vs this row · all calls",
+                    f"Δ {delta_text}",
+                    "all calls",
+                ),
+            )
+        elif ledger is not None and ledger.cost_is_known:
+            body.kv("Ledger total", format_cost(ledger), notes=("all calls",))
     if runtime.spend_is_floor:
         # Reconcile the band's ≥ against this screen's figure instead of copying
         # the mark over. They measure different deficits (see
