@@ -293,11 +293,27 @@ def _hosting_qualified_bare_id(hosting: str, model: str) -> Optional[str]:
     HuggingFace names — so a leading segment there is part of the model and
     stripping it would send a different model name to the endpoint.
 
+    Aggregators are excluded for the same reason, and they are the case that
+    proves the prefix rule cannot be trusted on its own: OpenRouter PUBLISHES
+    real ids that begin with its own name — ``openrouter/auto``,
+    ``openrouter/auto-beta``, ``openrouter/fusion``, ``openrouter/pareto-code``,
+    ``openrouter/free``, ``openrouter/bodybuilder`` (its public catalogue; there
+    is no bare ``auto``/``free``) — so for an aggregator the leading segment is a
+    namespace the ROUTE owns, not a provider prefix. Stripping it rewrote
+    ``openrouter/auto`` to ``auto`` and put a name no provider serves into the
+    request body, turning a working model into a first-turn failure.
+
     The trailing id must be non-empty: a bare ``"deepseek/"`` is a malformed id,
     not a qualified one, and it must fall through to the unknown sentinel rather
     than resolving to something by accident.
     """
-    if hosting in LOCAL_PROVIDER_IDS:
+    # Function-local, like every other `providers.registry` import in this layer:
+    # that module reaches back into this one for `SupportedHostingProviders`, and
+    # a module-level import here would become a cycle the moment it stops being
+    # lazy.
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if hosting in LOCAL_PROVIDER_IDS or hosting in AGGREGATOR_PROVIDERS:
         return None
     prefix = f"{hosting}/"
     if model.startswith(prefix) and len(model) > len(prefix):
