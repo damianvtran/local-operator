@@ -50,6 +50,7 @@ from local_operator.model.catalogue import (
     MISS_REFETCH_MIN_AGE_S,
     SOFT_TTL_S,
     Listing,
+    default_cache_dir,
     invalidate,
     invalidate_documents,
     peek_listing,
@@ -1924,6 +1925,67 @@ def cached_available_models(
         return merge_models(rows, None), "static"
 
     return merge_models(rows, live_rows, include_static_only=not authoritative), "cached"
+
+
+def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set[str] | None:
+    """The model ids ``provider_id``'s catalogue offers, or ``None`` when that
+    question cannot be answered without the network.
+
+    One authority for one question. A caller that is about to REFUSE a
+    ``provider``/``model`` pair (a hand-edited record, a typed id, a stale
+    picker row) needs the same set the picker painted from, or the two disagree
+    in the direction that hurts: a chip the UI offered and the backend refuses.
+
+    ``None`` is a real answer and callers must accept the pair rather than
+    refuse it. Two provider shapes cannot be enumerated offline at all: an
+    aggregator (OpenRouter, Radient) publishes no static rows, and a local
+    endpoint's ids live behind a configured server. For those, "not in the
+    set" would mean "we have not looked", and refusing on it kills working
+    selections.
+
+    The scope sweep is load-bearing rather than thoroughness. A listing
+    document is keyed by CREDENTIAL scope (``credential_provider_id`` plus, for
+    an account-scoped catalogue, a per-account hash), so a ChatGPT-login
+    OpenAI catalogue is written under a key the plain cache reader does not
+    look at -- and a set built only from ``cached_available_models`` would
+    refuse exactly the ids that login had just offered. Enumerating the
+    provider's own documents is the same sweep ``invalidate_documents``
+    documents, for the same reason: one credential identity owns several
+    documents and the caller cannot know which one the next read will pick.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None:
+        return None
+    from local_operator.model.defaults import default_model_for
+
+    storage_id = credential_provider_id(definition.id)
+    # The CATALOGUE half: what the shipped registry describes for this provider
+    # plus every listing document on disk for it. A DEFAULT model is added below
+    # but deliberately does not count toward enumerability -- a provider with one
+    # known default and no catalogue is not a provider whose catalogue we have
+    # read, and treating it as one would refuse every other id it serves.
+    primary_key = _cache_key(storage_id)
+    catalogue_ids = set(_static_rows(definition.id))
+    directory = cache_dir or default_cache_dir()
+    try:
+        keys = {primary_key} | {
+            document.name[: -len(".json")]
+            for document in directory.glob(f"{storage_id}.*listing.json")
+        }
+    except OSError:  # pragma: no cover - unreadable cache dir
+        keys = {primary_key}
+    capture = listing_capture_version(storage_id)
+    for key in sorted(keys):
+        try:
+            rows = _rows_from_payload(peek_listing(key, cache_dir=directory).payload, capture)
+        except Exception:  # noqa: BLE001 — an unreadable document is not an answer
+            continue
+        if rows:
+            catalogue_ids |= {row.id for row in rows}
+    if not catalogue_ids:
+        return None
+    default = default_model_for(definition.id)
+    return catalogue_ids | ({default} if default else set())
 
 
 def available_models(

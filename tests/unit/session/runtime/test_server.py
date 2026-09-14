@@ -135,6 +135,9 @@ class FakeHandle:
     async def set_model(self, provider, model_id):  # noqa: ANN001, ANN202
         return await self._record("set_model", provider, model_id)
 
+    async def set_model_effort(self, provider, model_id, effort):  # noqa: ANN001, ANN202
+        return await self._record("set_model_effort", provider, model_id, effort)
+
     async def set_effort(self, effort):  # noqa: ANN001, ANN202
         return await self._record("set_effort", effort)
 
@@ -540,6 +543,101 @@ async def test_peer_message_dispatches_with_parsed_args() -> None:
         assert kwargs["wake"] is True
         sender = cast("dict[str, Any]", kwargs["sender"])
         assert sender["pid"] == 4242
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class NoEffortHandle(FakeHandle):
+    """An owner runtime that predates a chosen reasoning level.
+
+    The dispatch probes ``set_model_effort`` with getattr, so a handle that
+    simply lacks the method must still answer the two-argument switch it does
+    implement — the same optional-capability contract ``NoPeerHandle`` and
+    ``recall_steer`` document. The consequence, stated rather than discovered:
+    against such an owner the chosen level is not applied, and the turn runs at
+    the model's own default level.
+    """
+
+    set_model_effort = None  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_effort_dispatches_to_the_optional_capability() -> None:
+    """The level rides the SAME frame as the pair, and only when one was chosen.
+
+    Two frames, one op: with a level it must reach the effort-carrying method,
+    and without one it must stay byte-for-byte the call every owner has always
+    received (the frame carries no ``effort`` key at all in that case, which is
+    what an older viewer sends).
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        for req, frame in (
+            (
+                21,
+                {
+                    "op": "set_model",
+                    "req": 21,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "effort": "max",
+                },
+            ),
+            (
+                22,
+                {
+                    "op": "set_model",
+                    "req": 22,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                },
+            ),
+        ):
+            writer.write(json.dumps(frame).encode() + b"\n")
+            await writer.drain()
+            await _until(reader, "ack", req)
+        assert handle.calls[0][0:2] == (
+            "set_model_effort",
+            ("deepseek", "deepseek-flash", "max"),
+        )
+        assert handle.calls[1][0:2] == ("set_model", ("deepseek", "deepseek-flash"))
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -> None:
+    handle = NoEffortHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "set_model",
+                    "req": 23,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "effort": "max",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert (await _until(reader, "ack", 23))["detail"] == "set_model ok"
+        assert handle.calls[-1][0:2] == ("set_model", ("deepseek", "deepseek-flash"))
     finally:
         if writer is not None:
             writer.close()

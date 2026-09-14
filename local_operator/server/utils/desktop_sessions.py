@@ -25,6 +25,7 @@ from typing import Any
 
 from anyio import CancelScope
 
+from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
     ORIGIN_SUBAGENT,
     is_user_session,
@@ -37,6 +38,7 @@ from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import load_catalog
+from local_operator.session.cold_model import resolve_birth_effort
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
@@ -139,6 +141,140 @@ def resolve_working_directory(cwd: str) -> Path:
     return directory
 
 
+#: The ``desktop.json`` key carrying the model a draft was CREATED on. Additive
+#: on purpose: a marker written before this key existed (``{"version": 1,
+#: "cwd": ...}``) must keep loading exactly as it did, and every other reader of
+#: the marker (``session.catalog``, ``DesktopSessionBridge``'s cwd lookup) reads
+#: the keys it knows and ignores the rest.
+DRAFT_MODEL_KEY = "model"
+
+
+#: The three fields the draft selection travels with, on the HTTP wire and inside
+#: the marker: the same shape the canonical frontend state publishes for a
+#: conversation's model, so the picker's row can be handed back unmodified.
+DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort")
+
+
+def read_desktop_marker(session_dir: Path) -> dict[str, Any] | None:
+    """Parse ``desktop.json``, or ``None`` when it is absent or unusable.
+
+    Tolerant on the same terms as :func:`local_operator.resume.read_session_attachment`
+    and for the same reason: this file is written by a process that can be killed
+    mid-write, and a marker that cannot be read must cost the caller the value it
+    was after — never the session. A caller that has no use for an unreadable
+    marker (a cwd lookup) falls back exactly as it did when the file was missing.
+    """
+    try:
+        raw = (session_dir / DESKTOP_MARKER_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] | None:
+    """The draft selection a marker carries, or ``None`` when it carries none.
+
+    Every field is re-checked here rather than trusted: the marker is a plain
+    JSON document that a hand edit, an interrupted write or an older build can
+    shape arbitrarily, and the value this feeds (a model the child runtime will
+    run on) must not depend on it having been written by this code.
+    """
+    choice = (marker or {}).get(DRAFT_MODEL_KEY)
+    if not isinstance(choice, dict):
+        return None
+    provider = choice.get("provider")
+    model_id = choice.get("model_id")
+    if not isinstance(provider, str) or not provider:
+        return None
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    effort = choice.get("reasoning_effort")
+    return {
+        "provider": provider,
+        "model_id": model_id,
+        "reasoning_effort": effort if isinstance(effort, str) and effort else None,
+    }
+
+
+def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
+    """The selection a session was CREATED on, or ``None`` to use today's answer.
+
+    This is the ONE place the birth choice is turned into a spec, and it returns
+    ``None`` — meaning "no seed, resolve from config/journal exactly as before" —
+    in every case where seeding would be wrong or impossible:
+
+    * the marker carries no selection (every session created by an older build,
+      by the TUI, or by a desktop create that omitted ``model``): the launch is
+      then byte-for-byte today's;
+    * the session's own journal already owns a selection. ``read_model_selection``
+      is consulted here rather than left to :func:`cold_model.resolve_conversation_model`
+      because the birth seed travels with ``model_selection_override``, and an
+      override applied to a conversation that later switched models would drag it
+      back to its birth model on the next open. The journal's precedence is only
+      real if the override is never set in the first place;
+    * the stored provider is gone from the registry, or the stored model id is no
+      longer served by that provider's catalogue: a vanished pair must degrade to
+      the configured default, never fail a resume or 400 the first turn;
+    * the pair cannot be resolved into a spec at all (metadata is best-effort by
+      contract, and a missing window is not worth a failed open).
+
+    A stored level of ``null`` is the one case that seeds the PAIR and the
+    machine's CONFIGURED level: the marker records a model the user picked and no
+    choice about its reasoning effort, so the level is the one every launch that
+    named no level resolves (R1). The marker itself keeps the ``null`` — the
+    reading here is what the first turn will RUN at, not a choice that was made.
+
+    Runs OFF the event loop: it reads the marker, the journal and — for an
+    unshipped model — the provider's cached listing. The journal scan is guarded
+    by the marker check above, so a session that carries no birth choice (the
+    overwhelming majority) pays nothing for this.
+    """
+    choice = stored_draft_model(read_desktop_marker(root / "sessions" / session_id))
+    if choice is None:
+        return None
+    from local_operator.providers.registry import get_provider_definition
+
+    provider = str(choice["provider"])
+    model_id = str(choice["model_id"])
+    if get_provider_definition(provider) is None:
+        logger.info("draft birth model names an unknown provider; using the default")
+        return None
+    from local_operator.model.discovery import offered_model_ids
+
+    known = offered_model_ids(provider)
+    if known is not None and model_id not in known:
+        logger.info("draft birth model is no longer served; using the default")
+        return None
+    from local_operator.session.model_selection import read_model_selection
+
+    if read_model_selection(root / "sessions" / session_id) is not None:
+        return None
+    from local_operator.model.configure import build_model_spec
+
+    try:
+        spec = build_model_spec(provider, model_id)
+    except Exception:  # noqa: BLE001 — metadata is never worth a failed open
+        logger.debug("draft birth model could not be resolved", exc_info=True)
+        return None
+    # The level the first turn will RUN at: the stored choice clipped to today's
+    # ladder, or — for a marker that stored ``null`` ("this model, no level") — the
+    # machine's configured level, and the model's own seed only when the config has
+    # no opinion. See :func:`session.cold_model.resolve_birth_effort` — the ONE
+    # resolver, which the preview answers through the same synthesis, so the pane and
+    # the first cold frame cannot disagree.
+    #
+    # ``spec`` still carries its SEED here (it is ``build_model_spec``'s result),
+    # which that function's third case requires.
+    resolved = resolve_birth_effort(spec, choice["reasoning_effort"], root)
+    if resolved != spec.reasoning_effort:
+        spec = spec.model_copy(update={"reasoning_effort": resolved})
+    return spec
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -197,12 +333,26 @@ class DesktopSessionBridge:
             self.touched = time.monotonic()
             try:
                 if self.remote is None:
+                    # The birth selection this draft was created with, and the
+                    # deliberate override that makes the child PIN it (a config
+                    # edit must not re-select a conversation the user chose a
+                    # model for). Both are ``None``/``False`` for every session
+                    # that carries no stored choice, which is every session an
+                    # older build created — and for one whose own journal already
+                    # owns a selection, so a switched conversation is never
+                    # dragged back to the model it was born on (see
+                    # :func:`draft_birth_selection`).
+                    birth = await asyncio.to_thread(
+                        draft_birth_selection, self.root, self.session_id
+                    )
                     remote = await AttachedSession.cold(
                         self.session_id,
                         config_dir=self.root,
                         cwd=self.cwd,
                         takeover_factory=_no_takeover,
                         surface="desktop",
+                        initial_model=birth,
+                        model_selection_override=birth is not None,
                     )
                     self.remote = remote
                     # A detached interval has no receipt feed. A new epoch makes
@@ -1558,7 +1708,20 @@ class DesktopSessions:
 
         return await asyncio.to_thread(read)
 
-    async def create(self, cwd: str, *, target: dict[str, str] | None = None) -> str:
+    async def create(
+        self,
+        cwd: str,
+        *,
+        target: dict[str, str] | None = None,
+        model: dict[str, str | None] | None = None,
+    ) -> str:
+        """Create a draft session's record.
+
+        ``model`` is the caller-validated birth selection (see the route), stored
+        in the session's own marker so the FIRST turn can be born on it. It is
+        additive and optional: an omitted ``model`` writes the marker byte-for-byte
+        as before, which is what makes an older client's create identical.
+        """
         directory = resolve_working_directory(cwd)
         binding = {"agent": "", "team": ""}
         if target:
@@ -1593,8 +1756,16 @@ class DesktopSessions:
                     )
             # An explicitly created desktop draft needs an identity after an
             # HTTP restart, unlike the TUI's uncommitted welcome-screen draft.
+            # The chosen model is ADDITIVE: a marker written without it is the
+            # document every earlier build wrote, and every reader here reads
+            # ``cwd`` by key. A stored pair is what makes the choice survive the
+            # window that chose it — the record outlives the request, and the
+            # first turn is born from it (``draft_birth_selection``).
             marker = path / DESKTOP_MARKER_NAME
-            marker.write_text(json.dumps({"version": 1, "cwd": str(directory)}))
+            payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
+            if model is not None:
+                payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+            marker.write_text(json.dumps(payload))
             marker.chmod(0o600)
 
         await asyncio.to_thread(persist)
@@ -1652,9 +1823,18 @@ class DesktopSessions:
                 def locate() -> str:
                     if not path.is_dir() or not is_user_session(path):
                         raise KeyError("Unknown session")
-                    marker = path / DESKTOP_MARKER_NAME
-                    if marker.exists():
-                        return str(json.loads(marker.read_text())["cwd"])
+                    # Through the TOLERANT reader, not ``json.loads``: a marker this
+                    # code cannot parse (a hand edit, an interrupted write, a
+                    # directory where the document should be) is a document with no
+                    # cwd, and a session whose marker has no readable cwd still opens
+                    # here — on the checkpoint fallback below — instead of failing the
+                    # open with a 409/404 raised out of a parse error. Round 1 of
+                    # #1110 wrote the coverage for a malformed marker and found the
+                    # strict read behind it (R3).
+                    stored = read_desktop_marker(path)
+                    marker_cwd = (stored or {}).get("cwd")
+                    if isinstance(marker_cwd, str) and marker_cwd:
+                        return marker_cwd
                     # The cold facade restores cwd from the durable canonical
                     # checkpoint. This fallback is only used by pre-checkpoint
                     # transcripts, whose historical launch directory is unknown.
