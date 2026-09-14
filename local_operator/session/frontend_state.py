@@ -1481,6 +1481,60 @@ def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) 
     )
 
 
+def _capped_overlap_tail(old: Sequence[Any], trajectory: Sequence[Any]) -> list[Any] | None:
+    """The appended tail when ``trajectory`` is ``old`` with rows evicted from the front.
+
+    THE second half of the append/replacement decision, and the one that decides
+    whether a long-running child costs one row per frame or five hundred. The
+    writer keeps a bounded window: it appends one row and deletes the oldest past
+    ``TRAJECTORY_CAP`` (``harness/subagent.py``, ``relay``). A prefix test cannot
+    see that -- eviction breaks ``new[:len(old)] == old`` on EVERY append once the
+    window is full -- so the old classifier called a full-cap rotation a
+    "replacement" and shipped all 500 rows per job per frame (measured: ~634 KB
+    per frame against 6.5 KB for the uncapped shape, on 6 children).
+
+    WHY THE RESULT IS EXACT RATHER THAN APPROXIMATE. The receiver's rule is
+    already ``(old + tail)[-CAP:]``, for the plain append branch and this one
+    alike. So if ``old`` and ``trajectory`` share a NONEMPTY overlap of ``k`` rows
+    at the front of ``trajectory``/back of ``old``, and ``trajectory`` is exactly
+    ``CAP`` long, then ``len(old) + len(tail) - CAP == len(old) - k``: the
+    receiver's own trim drops precisely the rows before the overlap and lands on
+    ``trajectory``. No new wire field, no capability handshake, and an older
+    receiver that already trims at the cap reconstructs it without knowing the
+    owner evicted anything.
+
+    WHY A STAMP IS ONLY A CANDIDATE. ``_lo_seq`` counts RELAYS, so it locates an
+    overlap cheaply but cannot establish one: a restart can reissue stamps, two
+    rows can be equal, and an interior edit can leave both endpoints agreeing.
+    Every returned tail is therefore backed by one full element-wise comparison of
+    the proposed overlap, and an unprovable input returns ``None`` so the caller
+    keeps the replacement it has always sent. That is the conservative direction
+    on purpose -- a wrong tail ships the WRONG ROWS to a viewer, which is worse
+    than shipping too many.
+
+    Refused deliberately, each for its own reason: a window shorter than the cap
+    (a front deletion cannot be reconstructed by append+trim, even when every
+    surviving row is an equal suffix), an empty or over-cap prior, a zero-length
+    or full-length overlap (nothing to append), and a non-integer or non-monotone
+    stamp pair. Those all fall back to the existing full replacement.
+    """
+    if len(trajectory) != _TRAJECTORY_CAP or not 0 < len(old) <= _TRAJECTORY_CAP:
+        return None
+    tail_start = _trajectory_row_seq(old[-1])
+    head_start = _trajectory_row_seq(trajectory[0])
+    if tail_start is None or head_start is None:
+        return None
+    # The stamp distance between the two windows IS the overlap: at the cap the
+    # stamps advance by one per retained row, so the row that was last in ``old``
+    # sits exactly that far into ``trajectory``.
+    overlap = tail_start - head_start + 1
+    if not 0 < overlap < len(trajectory) or overlap > len(old):
+        return None
+    if list(old[len(old) - overlap :]) != list(trajectory[:overlap]):
+        return None
+    return list(trajectory[overlap:])
+
+
 def _freeze_job(job: "JobState") -> "JobState":
     """Detach the owning model and freeze every nested canonical value."""
     values = {
@@ -4264,9 +4318,19 @@ class FrontendStateStore:
                 if prior is None or prior.todos != job.todos:
                     todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
+                # THREE arms, in order of cost, and the middle one is what keeps
+                # a long-running child cheap. See `_capped_overlap_tail` for the
+                # algebra and the refusals.
+                appended = None
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
+                    # The window rotated past its cap (or was rebuilt). Recover
+                    # the appended tail when the rotation is provable, so a full
+                    # window costs one row per frame rather than all 500; only a
+                    # genuinely unprovable difference pays a replacement.
+                    appended = _capped_overlap_tail(old, trajectory)
+                if appended is None:
                     # The runtime's list rotated past its cap (or was rebuilt):
                     # a suffix no longer exists, so ship a replacement once
                     # rather than the whole list disguised as appends forever.

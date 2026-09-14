@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.subagent import TRAJECTORY_CAP
 from local_operator.session import frontend_state as module
 from local_operator.session.frontend_state import (
@@ -599,3 +600,296 @@ def test_mutating_delta_and_public_shell_cannot_change_retained_rows() -> None:
     with pytest.raises(TypeError):
         public.jobs[0].trajectory[-1]["result"]["content"][0]["text"] = "changed"
     assert follower.state == expected
+
+
+# --------------------------------------------------------------------------
+# The producer's append/replacement classifier at the CAP.
+#
+# `_Wire` grows its window forever, so the prefix test always held and the
+# replacement arm was never exercised against a real rotation. A child that has
+# been running a while is exactly the case that matters: eviction breaks the
+# prefix on EVERY append, so a prefix-only classifier ships all 500 rows per job
+# per frame (measured at ~634 KB/frame against 6.5 KB for the uncapped shape).
+# --------------------------------------------------------------------------
+
+
+def _stamped_row(index: int, stamp: int, *, text: str = "x" * 16) -> dict[str, Any]:
+    """One retained row carrying the writer's own append stamp."""
+    return {**_row(index, text=text), TRAJECTORY_SEQ_KEY: stamp}
+
+
+def _stamped_state(children: int, rows: int) -> FrontendSessionState:
+    return FrontendSessionState(
+        session_id="capped-wire",
+        epoch="e1",
+        jobs=[
+            JobState(
+                id=f"child-{child}",
+                type="task",
+                label=f"child-{child}",
+                status="running",
+                trajectory=[_stamped_row(index, index) for index in range(rows)],
+                trajectory_length=rows,
+            )
+            for child in range(children)
+        ],
+    )
+
+
+class _CappedWire:
+    """A producer whose window is FULL, so every append evicts from the front.
+
+    The shape ``harness/subagent.py`` actually writes — stamp the event, append
+    it, drop the overflow — driven through the production writer
+    (``FrontendStateStore.mutate``) exactly as ``_Wire`` is, so the frames under
+    test are the ones the wire carries rather than hand-built deltas.
+    """
+
+    def __init__(self, children: int, rows: int = TRAJECTORY_CAP) -> None:
+        self.start = _stamped_state(children, rows)
+        self.state = self.start
+        self.owner = FrontendStateStore(self.start)
+        self.jobs = list(self.start.jobs)
+        self.relayed = [rows] * children
+
+    def _publish(self, jobs: list[JobState]) -> FrontendUpdate:
+        self.jobs = jobs
+        update = self.owner.mutate(jobs=jobs)
+        assert update is not None, "the producer published no frame"
+        assert update.epoch == self.start.epoch
+        self.state = self.owner.state
+        return update
+
+    def rotate(self, count: int = 1) -> FrontendUpdate:
+        """Append ``count`` stamped rows per child and evict the overflow."""
+        rotated = []
+        for child, job in enumerate(self.jobs):
+            rows = list(job.trajectory)
+            for _ in range(count):
+                rows.append(_stamped_row(10_000 + self.relayed[child], self.relayed[child]))
+                self.relayed[child] += 1
+            if len(rows) > TRAJECTORY_CAP:
+                del rows[: len(rows) - TRAJECTORY_CAP]
+            rotated.append(
+                job.model_copy(update={"trajectory": rows, "trajectory_length": len(rows)})
+            )
+        return self._publish(rotated)
+
+
+def test_a_capped_rotation_ships_the_appended_row_not_the_whole_window() -> None:
+    """The defect this classifier exists for: a full window costs a tail."""
+    wire = _CappedWire(children=3)
+    follower = _follower(wire)
+    follower.apply_update(wire.rotate())
+
+    update = wire.rotate()
+
+    assert update.job_trajectory_replacements == [], (
+        "a provable cap rotation was reported as a replacement, so every frame "
+        "carries the whole retained window"
+    )
+    assert all(len(rows) == 1 for rows in update.job_trajectory_appends.values())
+    assert (
+        len(update.model_dump_json()) < 8_000
+    ), "the frame still carries the whole window rather than the appended row"
+
+
+def test_a_hydrated_follower_equals_the_producer_through_cap_rotations() -> None:
+    """Reconstruction is EXACT, not merely close — checked past the first tick."""
+    wire = _CappedWire(children=2)
+    follower = _follower(wire)
+    for _ in range(8):
+        follower.apply_update(wire.rotate())
+
+    assert follower.state == wire.owner.state
+
+    for count in (1, 2, 50, TRAJECTORY_CAP - 1):
+        rotated = wire.rotate(count)
+        follower.apply_update(rotated)
+        assert follower.state == wire.owner.state, f"a +{count} rotation diverged"
+        assert rotated.job_trajectory_replacements == []
+
+    follower.apply_update(wire.rotate())
+    assert follower._state.jobs[0].trajectory == wire.owner.state.jobs[0].trajectory
+
+
+def test_a_follower_that_kept_no_memo_reconstructs_the_tail() -> None:
+    """The existing receiver needs no new field: it already trims at the cap.
+
+    A cold follower has no proof to consult, so it takes the ordinary rebuild
+    path — appends applied to what it holds, then trimmed — which is the code an
+    older release runs for every delta. Dropping the memo between ticks is the
+    faithful way to exercise it without checking out a second tree.
+    """
+    wire = _CappedWire(children=2)
+    follower = _follower(wire)
+    for _ in range(3):
+        follower.apply_update(wire.rotate())
+        follower._follower_windows.reset(follower._state.epoch)
+
+    update = wire.rotate()
+    follower._follower_windows.reset(follower._state.epoch)
+    follower.apply_update(update)
+
+    assert update.job_trajectory_replacements == []
+    assert follower._state.jobs[0].trajectory == wire.owner.state.jobs[0].trajectory
+
+
+def test_a_capped_follower_keeps_the_rotated_rows_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transfer that matters: the suffix win now applies at the cap too."""
+    wire = _CappedWire(children=1)
+    follower = _follower(wire)
+    follower.apply_update(wire.rotate())
+    before = follower._state.jobs[0].trajectory
+    # The frame is BUILT first and the counter installed after it, so only the
+    # FOLLOWER's work is measured: building a frame runs the producer, whose own
+    # freezing would otherwise land in this total and make a memo hit look like
+    # a rebuild. Measured on the SECOND rotation because the first has no proof
+    # to consult and pays one full freeze by design.
+    update = wire.rotate()
+    work = _RowWork(monkeypatch)
+
+    follower.apply_update(update)
+
+    after = follower._state.jobs[0].trajectory
+    assert work.rows == 1, "a provable rotation re-froze the whole window"
+    assert after[0] is before[1], "the rotated window was rebuilt rather than re-sliced"
+    assert list(after) == list(wire.owner.state.jobs[0].trajectory)
+
+
+def _capped_tail(old: list[Any], new: list[Any]) -> list[Any] | None:
+    return module._capped_overlap_tail(old, new)
+
+
+@pytest.mark.parametrize(
+    ("prior", "appended"),
+    [
+        (TRAJECTORY_CAP, 1),
+        (TRAJECTORY_CAP, 2),
+        (TRAJECTORY_CAP, 50),
+        (TRAJECTORY_CAP - 1, 2),
+    ],
+)
+def test_the_classifier_proves_the_rotations_the_runtime_produces(
+    prior: int, appended: int
+) -> None:
+    """Each cell is replayed through the receiver's own rule and compared.
+
+    A rotation lands on a window of exactly the cap, so the overlap is
+    ``CAP - appended`` and the tail is the rows the owner appended. The last
+    cell CROSSES the cap: a 499-row window plus two appends is a full 500-row
+    window, and requiring the prior window to be full as well would refuse a
+    rotation the receiver handles exactly.
+    """
+    overlap = TRAJECTORY_CAP - appended
+    old = [_stamped_row(index, index) for index in range(prior)]
+    new = [
+        _stamped_row(prior - overlap + step, prior - overlap + step)
+        for step in range(TRAJECTORY_CAP)
+    ]
+    assert new[:overlap] == old[prior - overlap :]
+
+    tail = _capped_tail(old, new)
+
+    assert tail is not None, f"a provable rotation ({prior}->{len(new)}) was refused"
+    assert tail == new[overlap:]
+    assert len(tail) == appended
+    assert list(list(old) + list(tail))[-TRAJECTORY_CAP:] == new
+
+
+@pytest.mark.parametrize("prior", [TRAJECTORY_CAP, TRAJECTORY_CAP - 1])
+def test_a_window_shorter_than_the_cap_is_still_a_replacement(prior: int) -> None:
+    """A short window cannot be rebuilt by append+trim even as an equal suffix.
+
+    The cap-equality guard is load-bearing rather than incidental: with fewer
+    rows than the receiver keeps, its trim has nothing to drop, so the rows a
+    front deletion removed would stay missing and the reconstruction would be a
+    silently short window. Replace instead.
+    """
+    old = [_stamped_row(index, index) for index in range(prior)]
+    new = old[3:] + [_stamped_row(30_000, 10_000)]
+    assert len(new) < TRAJECTORY_CAP
+
+    assert _capped_tail(old, new) is None
+
+
+def test_an_unprovable_rotation_keeps_the_replacement() -> None:
+    """Refusals are conservative, and a refusal is never the only correct answer.
+
+    Each cell pins what the classifier owes its caller: a WRONG tail is
+    unacceptable, so an overlap it cannot prove must fall back to the replacement
+    it has always sent. Where a rotation happens to be provable anyway (a reorder
+    that still leaves a genuine overlap), the tail it returns must reconstruct
+    the new window exactly -- refusing a provable frame is allowed to cost bytes,
+    never correctness, so both answers are checked against the receiver's rule
+    rather than against a preferred branch.
+    """
+    old = [_stamped_row(index, index) for index in range(TRAJECTORY_CAP)]
+    rotated = old[1:] + [_stamped_row(30_000, TRAJECTORY_CAP)]
+
+    # An interior edit with both endpoints agreeing: the stamp distance still
+    # proposes the right offset, and only the row comparison can refuse it.
+    edited = [dict(row) for row in rotated]
+    edited[10] = _stamped_row(10, 10, text="edited")
+    assert _capped_tail(old, edited) is None, "an interior edit was accepted as a rotation"
+
+    # Stamps that cannot propose an offset at all.
+    unstamped = [
+        {key: value for key, value in row.items() if key != TRAJECTORY_SEQ_KEY} for row in rotated
+    ]
+    assert _capped_tail(old, unstamped) is None
+    assert _capped_tail(old, [{**rotated[0], TRAJECTORY_SEQ_KEY: True}, *rotated[1:]]) is None
+    assert _capped_tail(old, [{**rotated[0], TRAJECTORY_SEQ_KEY: "7"}, *rotated[1:]]) is None
+
+    # A reset or repeated stamp sequence is a hint that cannot be trusted, and
+    # the offset it proposes fails the comparison.
+    reset = [{**row, TRAJECTORY_SEQ_KEY: 0} for row in rotated]
+    assert _capped_tail(old, reset) is None
+
+    # No eviction at all, and nothing appended: there is no tail to ship.
+    assert _capped_tail(old, old) is None
+    assert _capped_tail([], rotated) is None
+
+    # A prior window SHORTER than the cap is legal — the guard is on the NEW
+    # window, because that is the one the receiver trims against — as is a
+    # reorder that still leaves a genuine overlap. Both may be accepted, and an
+    # accepted tail must land on the new window under the receiver's own rule.
+    for name, prior, candidate in (
+        ("short prior", old[:100], rotated),
+        ("reorder", old, [*rotated[1:], rotated[0]]),
+    ):
+        tail = _capped_tail(prior, candidate)
+        assert tail is not None, f"{name}: a provable rotation was refused"
+        assert list(list(prior) + list(tail))[-TRAJECTORY_CAP:] == candidate, name
+
+
+def test_a_full_window_never_loses_a_row_to_the_classifier() -> None:
+    """A replacement and a proven tail must land on the same canonical state.
+
+    The comparison is a replacement AGAINST a tail rather than two tails, so the
+    two arms are proven equivalent rather than merely both passing.
+    """
+    tail_wire = _CappedWire(children=1)
+    tail_follower = _follower(tail_wire)
+    for _ in range(4):
+        tail_follower.apply_update(tail_wire.rotate())
+    tail_follower.apply_update(tail_wire.rotate())
+
+    # The same sequence, expressed as the frame a REFUSING classifier emits: the
+    # appended rows ARE the whole new window and the marker is set. That is the
+    # shape the replacement arm has always carried, so the two frames differ only
+    # in how they were classified.
+    replacement_wire = _CappedWire(children=1)
+    replacement_follower = _follower(replacement_wire)
+    for _ in range(4):
+        replacement_follower.apply_update(replacement_wire.rotate())
+    refused = replacement_wire.rotate()
+    window = replacement_wire.owner.state.jobs[0].trajectory
+    refused.job_trajectory_appends["child-0"] = [module._wire_value(row) for row in window]
+    refused.job_trajectory_replacements = ["child-0"]
+    replacement_follower.apply_update(refused)
+
+    assert replacement_follower.state == tail_follower.state
+    assert replacement_wire.owner.state == tail_wire.owner.state
