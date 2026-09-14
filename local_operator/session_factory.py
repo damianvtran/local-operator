@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from local_operator.providers.auth_store import AuthStore
     from local_operator.session.goal import GoalState
     from local_operator.session.protocol import SessionProtocol
+    from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session.session import Session
     from local_operator.skills.discovery import Skill
     from local_operator.skills.index import SkillIndex
@@ -2709,6 +2710,76 @@ def attach_config_watch(session: Session, config_dir: Path) -> None:
         logger.warning("config watcher could not be attached to the session", exc_info=True)
 
 
+#: The module chain ``wire_mcp_into_session`` imports before its first await,
+#: plus the chain its discovery path imports later (``local_operator.mcp.manager``
+#: reaches ``local_operator.mcp.auth`` at module scope, and the connect path
+#: imports ``mcp.types`` from INSIDE a function, so it is paid on the first
+#: connect rather than at package import).
+#:
+#: The figures that made this a tuple with a comment: measured on a loaded host
+#: with a single HTTP server declared on a CLOSED port (nothing spawned, the
+#: refusal immediate), ``import local_operator.mcp.manager`` was 2.0-2.7 s and
+#: ``import mcp`` 8.3 s, and a loop-gap probe over the same wiring measured the
+#: event loop BLOCKED for 10.38 s of a 10.41 s span. The wiring is import time,
+#: not I/O, which is why ordering alone cannot make it cheap.
+_MCP_WIRING_IMPORTS: tuple[str, ...] = (
+    (
+        # ``wire_mcp_into_session``'s OWN function-local imports. They are not in the
+        # factory's warm list because nothing else on the boot path wants them.
+        "local_operator.session.mcp_status",
+        "local_operator.mcp",
+    )
+    + tuple(
+        # ... DERIVED from the factory's own warm list rather than restated. The two
+        # lists describe the same import chain, and a second hand-maintained copy is
+        # how they would drift: add a module to the wiring and the loop stall comes
+        # back silently, with every gate still green because the correspondence is
+        # what proves the warm covers the wiring's synchronous prefix.
+        name
+        for name in _WARM_IMPORTS
+        if name == "mcp" or name.startswith("local_operator.mcp")
+    )
+    + (
+        # The SDK submodules the discovery path imports from INSIDE functions, so
+        # they are paid on the first connect rather than at package import and the
+        # factory's list cannot see them.
+        "mcp.types",
+        "mcp.client.stdio",
+        "mcp.client.streamable_http",
+    )
+)
+
+
+def _warm_mcp_wiring_imports() -> None:
+    """Import the MCP wiring's module chain, for a caller that is NOT the loop.
+
+    WHY THIS EXISTS, given the deferred wiring already exists. The deferral was
+    written so MCP cannot sit between the user and a bound session, and it did
+    not achieve that: the work is synchronous module import (see
+    ``_MCP_WIRING_IMPORTS``), so wherever it runs on a single-threaded loop it
+    takes the loop for that whole duration. The engaging client's own round
+    trips — the attach welcome, the prompt admission — queue behind it, so
+    moving it after publication moves the cost into the dial instead of removing
+    it (measured: ``dial`` absorbed 10.4 s while publication got 1.5 s earlier).
+
+    A worker thread is what keeps the loop serving. The import costs the same
+    wall time and the same CPU; what changes is that the process keeps answering
+    while it happens.
+
+    Failures are swallowed PER MODULE on purpose: a machine without the MCP SDK
+    is a supported configuration, and ``wire_mcp_into_session`` already handles
+    its absence and records an outcome. A warm that raised would replace that
+    recorded degradation with a boot fault.
+    """
+    import importlib
+
+    for name in _MCP_WIRING_IMPORTS:
+        try:
+            importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — an absent SDK is the wiring's own case
+            logger.debug("MCP import warm skipped %s", name, exc_info=True)
+
+
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
@@ -2719,6 +2790,7 @@ async def create_session(
     cwd: str | None = None,
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
+    mcp_publication_gate: "PublicationGate | None" = None,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -2747,6 +2819,38 @@ async def create_session(
     settles sees the same non-MCP tool surface as a session whose servers
     missed the gate today, and the ``refresh_selected`` merge lands
     mid-session exactly as a late ``list_changed`` event already does.
+
+    ``mcp_publication_gate`` is the RUNTIME CHILD's half of that deferral,
+    and it exists because deferring the dispatch did not defer the work. The
+    background task's first instruction is a function-local import of the MCP
+    SDK plus the config parse, and a task cannot run until the loop is free —
+    in ``process.amain`` the first free instant is ``await
+    _drain_inbox_into(handle)``, which sits BEFORE ``RecordPublisher``. So a
+    declared server's SDK import ran to completion inside the pre-publication
+    window anyway: measured 2.3 s on a machine with two servers declared, in
+    14 of 14 runs, all of it before the record was written and therefore in
+    front of the user. ``spawn_owned_session`` passes an event here and
+    ``RuntimeServer._serve`` sets it the moment the record exists, so the
+    wiring starts where ``serving.spawn_owned_session`` says it should —
+    after the record, riding it.
+
+    ``None`` means NO GATE, and that default is the whole safety of this change:
+    a latch that applied to a caller which never publishes a record would park
+    its MCP wiring for the session's life — MCP silently never wired, which is
+    the failure the latch exists to prevent, arrived at from the other side. So
+    the gate is only ever created by ``spawn_owned_session``, the one spawn site
+    whose runtime publishes.
+
+    Who exercises the ungated path in this tree: ``tests/`` (it is the default),
+    and two operator scripts that build an in-process Session for a screenshot
+    or a cleanup sweep (``scripts/evidence_session_cleanup.py``,
+    ``scripts/cleanup_notice_shot.py``). The TUI process does NOT — on this
+    release its owner path is gone from ``lop`` (see ``cli.py``'s "THE OWNER
+    PATH IS GONE" note, which says the TUI process never builds a ``Session``)
+    and no TUI code passes ``defer_mcp_wiring=True``, so nothing about the
+    TUI's own import behaviour changes here. The ungated branch is kept as the
+    default because it is the honest answer for a caller with no publisher,
+    not because a TUI depends on it.
 
     Raises ``ValueError`` (caught by the CLI's red-banner handler) when the
     hosting/model configuration is missing.
@@ -2850,13 +2954,19 @@ async def create_session(
     # front end with a full-screen terminal reads session.mcp_startup instead
     # of being written over by a stderr warning.
     #
-    # DEFERRED wiring is the TUI boot path's opt-in (``defer_mcp_wiring``):
-    # the session returns immediately and the same wiring runs as a background
+    # DEFERRED wiring is the runtime child's opt-in (``defer_mcp_wiring``): it
+    # was written for the TUI's in-process Session, which this release no longer
+    # builds in that process at all (``cli.py``: the owner path is gone from
+    # ``lop``). The caller that matters today is the runtime child, and the gate
+    # it passes below is what keeps the wiring off the record's own publication
+    # path.
+    #
+    # The session returns immediately and the same wiring runs as a background
     # task. The task is tracked on the session's dispose hooks so a quit
     # mid-wiring cancels it (a ``disconnect_all`` on a half-wired manager is
     # exactly the teardown the manager already handles); nothing else differs —
     # the outcome lands in ``session.mcp_startup`` and the settle sink fires
-    # when the TUI has installed it, which is the same late-attach the 250 ms
+    # when a front end has installed it, which is the same late-attach the 250 ms
     # gate already produces for slow OAuth servers.
     if defer_mcp_wiring:
 
@@ -2867,6 +2977,27 @@ async def create_session(
             # a genuine coding fault is logged rather than killing the task
             # silently, and the session keeps its non-MCP surface — the same
             # state a machine with no ``.mcp.json`` boots into.
+            #
+            # A GATED task parks HERE, before its first instruction, which is
+            # the whole point: the SDK import below is synchronous, so on a
+            # single-threaded loop it does not merely take time — it takes the
+            # loop. Waiting on the publication latch is what keeps that import
+            # out of the runtime's pre-publication window; without the wait the
+            # task's first step lands on the drain's first await and the record
+            # is held back behind an integration we deliberately do not gate
+            # the session on. ``None`` means no publisher, so there is nothing
+            # to wait for (see the parameter's docstring).
+            if mcp_publication_gate is not None:
+                await mcp_publication_gate.wait()
+            # KEEP THE LOOP. The latch above fixes the ORDERING — the wiring no
+            # longer holds the record back — and ordering alone does not deliver
+            # it, because the wiring's first instruction is a synchronous import
+            # of the MCP SDK and a task cannot run until the loop is free. Landing
+            # that import on the loop right after publication simply moves the
+            # stall to the client's own dial and welcome (measured: dial absorbed
+            # 10.4 s while publication gained 1.5 s). Warming the same chain in a
+            # worker thread is what makes the saving reach the user.
+            await asyncio.to_thread(_warm_mcp_wiring_imports)
             try:
                 manager = await wire_mcp_into_session(
                     session,

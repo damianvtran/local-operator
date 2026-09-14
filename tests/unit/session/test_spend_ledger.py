@@ -1096,7 +1096,7 @@ def _cold_open(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
     )
     directory = tmp_path / "sessions" / sid
     directory.mkdir(parents=True, exist_ok=True)
