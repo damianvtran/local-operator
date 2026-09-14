@@ -2847,15 +2847,43 @@ class TranscriptScreen(Screen[None]):
             redirected = self._redirect_gutter_grab(event)
             if redirected is not None:
                 event = redirected
+        # THE CAUSE of a pointer-path focus loss, marked for `set_focus`.
+        # Textual's `NoWidget` branch runs INSIDE this call, so a flag around it
+        # is what lets the repair tell "a pointer event landed on nothing"
+        # apart from "something deliberately un-focused the composer" — the
+        # state alone cannot, and repair-the-state-alone is what broke two
+        # shipped behaviours (see `set_focus`). `finally`, so a handler that
+        # raises cannot leave it set for the next, unrelated re-focus.
+        if isinstance(event, events.MouseEvent):
+            self._pointer_forwarding = True
+            try:
+                super()._forward_event(event)
+            finally:
+                self._pointer_forwarding = False
+            return
         super()._forward_event(event)
 
-    # -- the keyboard is never parked on nothing ---------------------------
+    # -- the keyboard is never parked on nothing by a POINTER event ---------
     #
     # One rule for this screen, which is the one the composer lives on in every
-    # non-modal mode: while the composer is usable, the app is never left with
-    # NO focused widget. All four composer-focus routes in this codebase
-    # (`composer_focus.py`) restore focus when a GESTURE asks for it; none of
-    # them runs for a pointer event that lands on nothing at all.
+    # non-modal mode: while the composer is usable, a pointer event must not
+    # leave the app with NO focused widget. All four composer-focus routes in
+    # this codebase (`composer_focus.py`) restore focus when a GESTURE asks for
+    # it; none of them runs for a pointer event that lands on nothing at all.
+
+    #: True only while a POINTER event is being forwarded by this screen.
+    #:
+    #: `set_focus(None)` is how the app and Textual DELIBERATELY park the
+    #: keyboard as well as how a pointer event loses it, and the two are
+    #: indistinguishable from the state: repairing both resurrects a composer
+    #: the app has just blurred on purpose. Two shipped behaviours pin that
+    #: (`test_the_focused_composer_shows_a_caret_and_the_blurred_one_shows_none`
+    #: — a blurred composer paints no caret; and
+    #: `test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to` — the
+    #: Ctrl+C deferral follows the paint, not the focus), and both went red in
+    #: CI when the repair fired on every transition to `focused=None`. So the
+    #: cause is marked here, where the pointer event enters.
+    _pointer_forwarding = False
 
     def set_focus(
         self,
@@ -2863,7 +2891,7 @@ class TranscriptScreen(Screen[None]):
         scroll_visible: bool = True,
         from_app_focus: bool = False,
     ) -> None:
-        """Hand the keyboard back when a focus transition would park it on nothing.
+        """Hand the keyboard back when a POINTER event parks it on nothing.
 
         THE DEFECT THIS CLOSES (reproduced on this tree, 200x50). A pointer
         event whose cell falls outside this screen's composited grid takes
@@ -2879,12 +2907,24 @@ class TranscriptScreen(Screen[None]):
         cell tested was fine, so the COORDINATE — not the gesture and not the
         encoding — is the trigger.
 
-        WHY AT THE FOCUS TRANSITION rather than in a mouse handler. This is the
-        one point every route to that state passes through, and it is PUBLIC
-        API — ``set_focus(None)`` is documented as "un-focus" — where Textual's
-        ``_forward_event`` is private, so a guard here cannot be left dead by
-        an upgrade that moves the focus handling without moving this seam. It
-        deliberately runs AFTER ``super()``: ``set_focus`` finishes its own
+        WHY THE CAUSE IS TESTED, NOT JUST THE STATE. ``set_focus(None)`` is
+        also how this app and Textual park the keyboard DELIBERATELY, and
+        repairing those reverses a decision instead of repairing one: the two
+        tests named on :attr:`_pointer_forwarding` are what that costs, and
+        they were red in CI on the first revision of this change (agent/QA
+        round 1, Q1). So the repair fires only while
+        :attr:`_pointer_forwarding` is set — the one path that produces the
+        silent-loss state — and a deliberate un-focus (`App.set_focus(None)`,
+        `Widget.blur()`) leaves focus exactly where it was put.
+
+        WHY THE CHECK STILL SITS AT THIS SEAM. The repair hangs on the public
+        ``set_focus`` — Textual documents it as "un-focus", where
+        ``_forward_event`` is private — so the STATE that must not persist is
+        tested where Textual defines it, and the CAUSE is supplied by the
+        pointer forwarding above it. Neither half substitutes for the other: a
+        bare state test repairs the deliberate blurs, and a bare cause test at
+        the forwarder would have to re-derive a state this seam already owns.
+        It deliberately runs AFTER ``super()``: ``set_focus`` finishes its own
         bookkeeping (``_update_focus_styles``, ``call_after_refresh(
         refresh_bindings)``) after the reactive assignment, and a ``focused``
         watcher doing this work would re-enter ``set_focus`` mid-flight and can
@@ -2907,17 +2947,16 @@ class TranscriptScreen(Screen[None]):
         - ``self.app.app_focus``: on terminal blur Textual parks focus and
           stashes the widget to restore on the next key (``App._watch_app_focus``),
           a dance this app relies on and documents in its own override of that
-          watcher. Re-focusing here would relight the composer in a window the
-          user is not in and buy nothing: measured, alt-tab away leaves
-          ``focused=None`` and the keystroke after the return still lands in
-          the composer.
-        - ``_return_focus_to_composer``'s own ``_focus_is_claimed()``: a pushed
-          screen, a live approval or ask, the aside, the full-page modes, the
-          focused sidebar and a READ-ONLY composer (``_set_composer_read_only``
-          clears focus on purpose) all keep their claim. Measured after this
-          change: with the composer read-only, and with a settings or aside
-          mode up, the off-frame event still leaves the app unfocused rather
-          than handing a field that refuses every key a caret.
+          watcher. Measured: alt-tab away, then fire an off-frame pointer event
+          while parked — focus stays parked, and the keystroke after the return
+          still lands, because Textual restores what it stashed.
+        - ``_return_focus_to_composer``'s own ``_focus_is_claimed()``: a live
+          approval or ask, a pushed screen, the aside, the full-page modes and a
+          READ-ONLY composer (``_set_composer_read_only`` clears focus on
+          purpose) all keep their claim. Measured with each claim: the composer
+          does not take the keyboard, and after the claim is released the same
+          event DOES hand it back — so the refusal is the claim's doing rather
+          than nothing happening.
 
         NOT the narrower alternative of clamping or dropping an out-of-frame
         coordinate in ``input_decode.x10_mouse_to_sgr``: that covers only the
@@ -2926,7 +2965,12 @@ class TranscriptScreen(Screen[None]):
         nothing while leaving the state it produced in place.
         """
         super().set_focus(widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus)
-        if widget is not None or self.focused is not None or not self.app.app_focus:
+        if (
+            widget is not None
+            or self.focused is not None
+            or not self._pointer_forwarding
+            or not self.app.app_focus
+        ):
             return
         repair = getattr(self.app, "_return_focus_to_composer", None)
         if not callable(repair):
@@ -35280,6 +35324,18 @@ class OperatorApp(App[None]):
         # can now shrink to a row or go away (#525).
         lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        # Directly under it, because it is the same surface, and it is now the
+        # ONLY way into that panel's keyboard mode: a pointer press on the list
+        # no longer takes the keyboard (design round D1), so the route in has to
+        # be named somewhere durable. The list's own footer says `f9 focus`
+        # while the panel is on the frame — which is not while the composer has
+        # the keys, i.e. exactly when the question is asked — and a full list's
+        # footer is further squeezed by the page counter (U1). One row carries
+        # both ends: in with `f9`, back out with `esc`. Lowercase `f9` to match
+        # the copy the panel paints, not the `F8` spelling of the row above.
+        # MEASURED: 35 description cells, well inside the 74-cell ceiling this
+        # block documents (and below the ~55 the description column wraps past).
+        lines.append(_key_row("f9", "keys the sessions list; esc returns"))
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).

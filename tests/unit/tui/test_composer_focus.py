@@ -1194,28 +1194,48 @@ async def test_off_frame_pointer_event_leaves_the_composer_focused(
 
 
 #: The claims an off-frame event can meet while the app is still ON the default
-#: screen, so the repair is genuinely consulted and genuinely refuses. A pushed
-#: screen is the fourth case below and is answered one level down — see its note.
+#: screen, with the real route IN and the real route OUT for each. The release
+#: route is what makes these tests discriminate instead of restating the code: a
+#: test that only asserts "the composer did not take the keyboard" passes on a
+#: tree with no repair at all, which is exactly what it did on the base commit
+#: (agent review round 1, R-4).
+async def _release_aside(pilot: Any, app: OperatorApp) -> None:
+    assert app._close_aside() is True, "premise: the aside was open"
+
+
+async def _release_settings(pilot: Any, app: OperatorApp) -> None:
+    assert app._close_settings_view() is True, "premise: the settings page was open"
+
+
+async def _release_read_only(pilot: Any, app: OperatorApp) -> None:
+    app._set_composer_read_only(False)
+    await pilot.pause()
+
+
 CLAIMED_AT_THE_COMPOSER = [
-    ("aside", _claim_aside),
-    ("settings", _claim_settings),
-    ("read-only", _claim_read_only),
+    ("aside", _claim_aside, _release_aside),
+    ("settings", _claim_settings, _release_settings),
+    ("read-only", _claim_read_only, _release_read_only),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "name,opener", CLAIMED_AT_THE_COMPOSER, ids=[n for n, _ in CLAIMED_AT_THE_COMPOSER]
+    "name,opener,releaser",
+    CLAIMED_AT_THE_COMPOSER,
+    ids=[n for n, _, _ in CLAIMED_AT_THE_COMPOSER],
 )
 async def test_the_restoration_refuses_while_a_surface_claims_the_keyboard(
-    name: str, opener: Any, tmp_path: Path
+    name: str, opener: Any, releaser: Any, tmp_path: Path
 ) -> None:
-    """The new restoration must not weaken `_focus_is_claimed` by one surface.
+    """A claim is the only thing refusing, and the second half proves it.
 
-    Every one of these is opened through the route a user takes, never by
-    assigning the attribute the predicate reads. The assertion is that the
-    composer does NOT take the keyboard — not that focus ends up somewhere
-    specific, because where it ends up belongs to the surface that owns it.
+    Every claim is opened and closed through the route a user takes, never by
+    assigning the attribute the predicate reads. The refusal is asserted as
+    "the composer did NOT take the keyboard", which is a fact about the state —
+    so the test also RELEASES the claim and fires the same event again, where the
+    composer must now take it. Without that half, a tree with no repair passes
+    the first half for free (R-4).
     """
     session = FakeSession()
     session.team_registry = _chart_registry()  # type: ignore[attr-defined]
@@ -1230,9 +1250,23 @@ async def test_the_restoration_refuses_while_a_surface_claims_the_keyboard(
         app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
         for _ in range(3):
             await pilot.pause()
-
         assert app.focused is not editor, f"{name}: the composer took the keyboard"
         assert not editor.has_focus, f"{name}: the composer ended up focused"
+
+        await releaser(pilot, app)
+        for _ in range(3):
+            await pilot.pause()
+        assert app._focus_is_claimed() is False, f"premise: {name}'s claim was released"
+
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+        assert (
+            app.focused is editor
+        ), f"{name}: with the claim released the pointer path stopped restoring the keyboard"
+        await pilot.press("Z")
+        await pilot.pause()
+        assert editor.text == "Z", f"{name}: the key after the released claim was lost"
 
 
 @pytest.mark.asyncio
@@ -1244,6 +1278,9 @@ async def test_a_pushed_screen_keeps_the_off_frame_event_from_the_composer() -> 
     restoration, and that is exactly why the case is worth pinning: it fails if
     the restoration is ever moved somewhere that does not respect a pushed
     screen, which is the shape a "just fix it globally" follow-up would take.
+
+    The second half is the discriminating one (R-4): pop the overlay and the
+    same event must restore the composer, which a tree with no repair cannot do.
     """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -1265,23 +1302,85 @@ async def test_a_pushed_screen_keeps_the_off_frame_event_from_the_composer() -> 
         await pilot.pause()
         assert editor.text == "", "a keystroke behind a modal reached the composer"
 
+        app.pop_screen()
+        for _ in range(4):
+            await pilot.pause()
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+        assert app.focused is editor, "the pointer path stopped restoring after the modal closed"
 
-# -- a pointer press never takes the keyboard off the composer --------------
-#
-# Design round D1/D2, which reversed the app's earlier behaviour here. Measured
-# on the round's frames at 120x40: a click anywhere in the Sessions panel moved
-# the keyboard to the list (`focused=SessionSidebar`), and everything typed next
-# was discarded — four typed keys, a 0-cell frame delta, the draft untouched.
-# Nothing on the frame distinguished "the list owns the keys" from "nothing owns
-# the keys", and the composer kept painting the draft exactly as before.
-#
-# The rule the round settled: a pointer press on the list acts on the row under
-# the pointer and NOTHING ELSE (the list's keyboard mode is entered only by f9 /
-# `/sidebar focus`, and left with Esc or f9 again), and a gesture landing on the
-# composer's own chrome takes the keyboard back from the list. A claim refuses
-# only when taking the keyboard would destroy keys the claimant needs — which is
-# why the list's claim is SOFT (`_focus_is_claimed`) while a live prompt's is
-# not.
+
+@pytest.mark.asyncio
+async def test_the_repair_stands_down_while_the_terminal_is_unfocused() -> None:
+    """The one un-focus the repair must not override — and it costs nothing (R-5).
+
+    Textual parks focus when the terminal itself loses it and stashes the widget
+    to restore on the next key (``App._watch_app_focus``, which this app
+    overrides and documents). An off-frame event arriving while parked must
+    leave focus parked — and the keystroke after the return must still land,
+    because what Textual stashed is what it restores. The first half is the
+    control that makes this a regression test: on a tree with no repair the
+    un-parked case never restores, so the premise fails there (R-4's shape).
+    """
+    app = _app()
+    async with app.run_test(size=(200, 50)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+        assert app.focused is editor, "premise: with the app focused the repair hands it back"
+
+        app.app_focus = False
+        for _ in range(3):
+            await pilot.pause()
+        assert app.focused is None, "premise: Textual's blur park cleared focus"
+
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+        assert app.focused is None, "the repair overrode the parked focus"
+
+        app.app_focus = True
+        for _ in range(5):
+            await pilot.pause()
+        await pilot.press("Z")
+        await pilot.pause()
+        assert editor.text == "Z", "the parked composer was not restored by Textual"
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_un_focus_is_not_repaired() -> None:
+    """The gate is the CAUSE, not the state — the two shipped tests, pinned here.
+
+    ``App.set_focus(None)`` is how the app and Textual deliberately clear the
+    keyboard, and it is what
+    ``test_app_pilot.py::test_the_focused_composer_shows_a_caret_and_the_blurred_one_shows_none``
+    (a blurred composer paints no caret, which is the half that makes a caret
+    mean anything) and
+    ``test_transcript_selection.py::test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to``
+    (the Ctrl+C deferral follows the paint, not the focus) pin. Both went red in
+    CI when this repair fired on every transition to ``focused=None`` (QA round
+    1, Q1). Asserted here as well, so a future widening of the gate fails beside
+    the rule it breaks rather than only in those two files.
+    """
+    app = _app()
+    async with app.run_test(size=(200, 50)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        app.set_focus(None)
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app.focused is None, "the repair resurrected a deliberately cleared focus"
+        assert not editor.has_focus
 
 
 def _catalog(*session_ids: str) -> list[Any]:

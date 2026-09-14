@@ -916,29 +916,36 @@ class SessionSidebar(Widget, can_focus=True):
         if len(self.entries) > self.page_size:
             last = min(len(self.entries), self._offset + self.page_size)
             position = f"{self._offset + 1}–{last}/{len(self.entries)}"
-            if self.has_focus:
-                # The page counter may never be the reason the EXIT hint
-                # disappears (design round, D4). It used to REPLACE the hint
-                # outright, so the frame that most needs to name a way out — 41
-                # rows, the cursor deep inside the list — named none: measured,
-                # the focused footer read `1–32/41 · ctrl+b hide` and
-                # `esc return` was gone, in the one state the user reached on
-                # purpose. Longest form that fits, and the exit alone when
-                # nothing else does: the position is discoverable by scrolling
-                # (the cursor row is painted), the exit is not.
-                for candidate in (
-                    f"{position} · {hint} · ctrl+b hide",
-                    f"{position} · {hint}",
-                    hint,
-                ):
-                    if truncate_cells(candidate, width) == candidate:
-                        hint = candidate
-                        break
-            else:
-                # Unfocused, unchanged: the position plus the hide key. Nothing
-                # here can be lost to the counter — an unfocused list owns no
-                # key, so there is no exit hint for the counter to displace.
-                hint = f"{position} · ctrl+b hide"
+            # TWO rules, one helper, and they are the same rule applied to the
+            # two ends of the list's keyboard mode. D4: the counter may never be
+            # the reason the EXIT hint disappears — it used to REPLACE the hint
+            # outright, so the focused frame that most needs to name a way out
+            # (41 rows, cursor deep inside) read `1–32/41 · ctrl+b hide` and
+            # `esc return` was gone. U1: the same counter left a full list
+            # naming NOWHERE how to enter that mode — a whole-frame search for
+            # `f9`/`focus` found nothing at 120x40 or 70x24, focused or not, so
+            # the only route in (f9, or `/sidebar focus`) was advertised solely
+            # by the copy the counter had just displaced.
+            #
+            # Longest form that fits, then the lead key WITH the position, then
+            # today's unpaginated copy. The lead key is the exit when the list
+            # has the keyboard and the way IN when it does not, so the counter
+            # can never be the reason either one is missing. `ctrl+b hide` is
+            # what gives way: the position is discoverable by scrolling (the
+            # cursor row is painted) and the panel's own toggle is on the frame
+            # that opens it.
+            lead = "esc return" if self.has_focus else "f9 focus"
+            hint = next(
+                (
+                    candidate
+                    for candidate in (
+                        f"{position} · {lead} · ctrl+b hide",
+                        f"{position} · {lead}",
+                    )
+                    if truncate_cells(candidate, width) == candidate
+                ),
+                hint,
+            )
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
         result.append(
             "\n" + truncate_cells(footer, width),
