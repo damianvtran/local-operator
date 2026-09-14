@@ -3234,23 +3234,38 @@ def sessions_command(args: argparse.Namespace) -> int:
             line += f" {age:>11}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
-            line += f" {cell:<{WHY_COLUMN_WIDTH}}"
+            # Padded by CELLS rather than by the format spec's character count,
+            # which is the clamp's own mistake one line over: a fitted
+            # wide-glyph cell has fewer characters than the cells it occupies,
+            # so `:<48` would hand it 48 characters PLUS the blanks it never
+            # needed — a row wider than the header in trailing spaces. The
+            # header itself is ASCII and is unaffected.
+            line += f" {cell}{' ' * max(0, WHY_COLUMN_WIDTH - _cell_len(cell))}"
         print(line)
     return 0
 
 
 def _clamp_reason_cell(summary: str) -> str:
-    """A WHY cell inside :data:`WHY_COLUMN_WIDTH`, marked when it had to cut.
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
-    column's whole purpose is to answer "why did this session die". A slice at
-    exactly the width used to drop the last word (``CUT_OFF_UNKNOWN`` is 58
-    cells, so the row ended ``...the cause could not be `` with ``determined``
-    gone) and read as a finished sentence that happens to stop mid-clause. The
-    previous worst case, the involuntary ``runtime-killed`` reason at 47 cells,
-    filled the column exactly — which is why nothing clipped until this branch
-    added a longer reason, so the marker is what keeps the next longer sentence
-    honest rather than what fixes one string.
+    column's whole purpose is to answer "why did this session die". The column
+    was ALREADY clipping silently before the marker existed: the involuntary
+    ``runtime-killed`` summary is 104 cells, and the old slice cut it at 47 and
+    landed on a word boundary, so the row ended ``...exiting cleanly `` and read
+    as a finished sentence that happened to stop mid-clause — that is what design
+    round 2 saw as the one case that "fitted exactly", and it is why the marker
+    is what keeps the next longer sentence honest rather than what fixes one
+    string.
+
+    CELLS, NOT CHARACTERS (design round 3, D9). The budget is a COLUMN width,
+    and the strings reaching here are not all harness-authored: a FAILED turn's
+    reason is the provider's own error text (``session.py``'s turn-end writer
+    publishes ``outcome.error`` verbatim, ``attention`` replays it into the
+    store, and ``completion_reason`` arrives in this cell). A localised provider
+    error of 29 characters is 58 cells, so a ``len()`` comparison returned it
+    UNCUT and the row rendered 208 cells against a 179-cell header — the reflow
+    this clamp exists to prevent, in its own blind spot.
 
     The ellipsis is INSIDE the budget, so the table's fixed width and every
     other row's columns are unchanged; a summary that already fits is returned
@@ -3258,9 +3273,43 @@ def _clamp_reason_cell(summary: str) -> str:
     happen. The full sentence stays one flag away in ``--json``'s
     ``completion_reason``, which is what this column is a summary OF.
     """
-    if len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
         return summary
-    return summary[: WHY_COLUMN_WIDTH - 1] + "…"
+    # The marker's OWN measured width, not a hard-coded 1: the budget is
+    # arithmetic, so a future marker must not be able to push the cell over.
+    marker = "…"
+    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+
+
+def _cut_to_cells(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` that fits ``budget`` display cells.
+
+    A cell bound cannot be a slice: one East-Asian character is two cells, so
+    ``text[:n]`` overshoots by however many wide glyphs it happens to contain.
+    The loop stops BEFORE the character that would overflow, which keeps the
+    result inside the budget and leaves a combining mark attached to its base
+    rather than orphaned by a character-count cut.
+    """
+    used = 0
+    for index, char in enumerate(text):
+        width = _cell_len(char)
+        if used + width > budget:
+            return text[:index]
+        used += width
+    return text
+
+
+def _cell_len(text: str) -> int:
+    """``len`` in terminal CELLS — what a fixed-width column is measured in.
+
+    Imported at the point of use because this module's contract is that
+    everything third-party stays out of its module-level imports so ``import
+    local_operator.cli`` stays cheap (see the module docstring); ``rich`` is
+    already a hard dependency and ``rich.cells`` is its width primitive.
+    """
+    from rich.cells import cell_len
+
+    return cell_len(text)
 
 
 def _wake_create(args: argparse.Namespace) -> int:
@@ -4063,11 +4112,11 @@ def _elide_id(session_id: str, width: int) -> str:
     return session_id[: max(width - 1, 1)] + "…"
 
 
-#: Width of `lop sessions`' trailing WHY column, in characters.
+#: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
 #: exiting cleanly while this turn was running, and nothing recorded a stop``
-#: is 96 cells — and an unbounded column re-flows the whole table on a normal
+#: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
