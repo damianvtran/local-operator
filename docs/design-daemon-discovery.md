@@ -234,10 +234,25 @@ claim flips the daemon into managed mode, which **tightens** the legacy control
 surface (`app.py:326`) and therefore gates `/v1/agents`, `/v1/jobs`,
 `/v1/schedules`, `/v1/config`, `/v1/credentials`, `/v1/models` for every other
 local caller — open question 1. The CORS half of that tightening is scoped to
-the POSTURE, never to a configured allowlist: a governed daemon with an EMPTY
-allowlist admits no browser origin, so a native (Origin-less) claim closes the
-wildcard echo too. Reading "no allowlist" as "no tightening in force" left the
-drive-by surface open for precisely the caller this feature exists for.
+the ALLOWLIST IN FORCE, so it narrows only where the plane actually admits a
+browser origin: a claim that declared an origin (or a daemon with
+``LOCAL_OPERATOR_DESKTOP_ORIGINS`` set) admits exactly that origin and strips
+the grant from every other. An EMPTY admitted set keeps the historical wildcard
+echo, deliberately and as a measured correction (#1093 shipped the opposite and
+broke the app): the shipped renderer is loaded with
+``mainWindow.loadFile(...)``, so it runs at ``file://`` and every request it
+makes carries the opaque origin ``"null"``, which this plane never admits to an
+allowlist. The app sets the token but no origins list, and it reads ``/health``
+DIRECTLY as its "server offline" signal — suppressing the echo there removed
+``Access-Control-Allow-Origin`` from a 200 and made the app report a healthy
+daemon as down. So the residual is named rather than closed: on an
+allowlist-less daemon the wildcard echo stays. What protects that state is the
+CONTROL half — ``require_desktop`` on ``/v1/credentials``, ``/v1/models``,
+``/v1/config`` and the ``/v1/agents``/``/v1/jobs``/``/v1/schedules`` families,
+plus the legacy boundary — which is unchanged, and the UI PR removes the last
+dependence on the echo by probing health/version from the main process.
+(`/v1/chat` is deliberately outside both gate families, so it is unauthenticated
+either way — see `DESKTOP_API.md`.)
 
 ## 5. "Down" semantics and the state machine
 
@@ -466,6 +481,23 @@ where noted, and each carries the reason it was chosen.
    described by the version banner.
 5. **Quit leaves the daemon running** (both owned and external); the app offers
    an explicit "Stop server" action instead of a quit-path sweep.
+6. **The CORS echo is scoped to a NON-EMPTY admitlist, not to the posture**
+   (corrects #1093, which scoped it to ``posture.enabled``). The claim still
+   tightens the CONTROL surface unconditionally; what changed back is only the
+   echo: with ``desktop_posture().origins`` empty the response is returned
+   untouched. Measured reason: the SHIPPED app's renderer is loaded with
+   ``mainWindow.loadFile(...)``, so it runs at ``file://`` and every request it
+   makes carries the opaque origin ``"null"`` (a value this plane never admits
+   to an allowlist). The app sets the token but never an origins list, and it
+   reads ``/health`` DIRECTLY as its "server offline" signal, so scoping the
+   suppression to the posture removed ``Access-Control-Allow-Origin`` from a
+   ``200`` ``/health`` and the app reported a live daemon as down — the exact
+   symptom this program exists to remove. Named residual: an allowlist-less
+   daemon (the app-managed default, and a native claim that declared nothing)
+   keeps the historical wildcard echo, i.e. this host's pre-program posture.
+   The control half is what protects that state, it is unaffected, and the
+   residual retires when the UI PR probes health/version from main instead of
+   from the renderer (the renderer call sites named in open question 1).
 
 PR split is confirmed as three backend PRs plus one UI PR (§8), with the first
 merged before the other two branch, so both of them build on the record module.

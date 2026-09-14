@@ -471,7 +471,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def desktop_origin_cors(request: Request, call_next):
-    """Stop echoing arbitrary origins once the desktop plane is governed.
+    """Stop echoing arbitrary origins once the admitted allowlist is non-empty.
 
     ``CORSMiddleware`` is registered with ``allow_origins=["*"]`` and
     ``allow_credentials=True``, which makes Starlette ECHO the requesting
@@ -486,31 +486,42 @@ async def desktop_origin_cors(request: Request, call_next):
     above it sees no ``Access-Control-Allow-Origin`` at all (verified, not
     assumed) and would silently strip nothing.
 
-    Scoped to the POSTURE, never to a non-empty allowlist. The first version
-    returned early on ``if not allowed``, which read an empty allowlist as
-    "no tightening in force" -- and an empty allowlist is exactly what a
-    native (Origin-less) claim installs, so the drive-by surface stayed open
-    on the very caller this plane's claim exists for, while ``require_desktop``
-    on the gated families refused every Origin-bearing request in that same
-    state. On a governed daemon an empty allowlist therefore means "no browser
-    origin is admitted"; only a plane nobody governs keeps the historical
-    wildcard CORS, so CLI clients, scripts and existing embedders are
-    untouched.
+    Scoped to a NON-EMPTY admitted set -- ``desktop_posture().origins``, the
+    environment's list UNIONED with whatever an accepted claim installed. With
+    nothing admitted the response is returned untouched and the historical
+    wildcard echo stands, which the SHIPPED app depends on: its renderer is
+    loaded with ``mainWindow.loadFile(...)``, so it runs at ``file://`` and
+    every request it makes carries the opaque origin ``"null"`` (a value this
+    plane never admits to an allowlist). The app sets the token but never an
+    origins list, so scoping the suppression to ``posture.enabled`` instead --
+    what the first version of this middleware did -- stripped the grant from
+    ``/health`` itself, which that renderer reads DIRECTLY as its "server
+    offline" signal, and the app reported a healthy daemon as down. That false
+    negative is the failure this whole program exists to remove.
+
+    The residual is deliberate: an allowlist-less daemon -- the app-managed
+    default, and a native claim that declared nothing -- still echoes, exactly
+    as every daemon in this shape did before the claim work. It is not the
+    tightening that protects a plane in that state; the CONTROL half is
+    (``require_desktop`` on the credential/configuration families, and the
+    legacy boundary), and it is untouched here. Closing the echo for an
+    allowlist-less daemon needs the app to stop reading ``/health`` from the
+    renderer, which the UI PR does by probing health/version from main.
     """
     response = await call_next(request)
-    posture = desktop_posture()
-    if not posture.enabled:
-        return response
     # The allowlist in force: the environment's, UNIONED with the origins the
     # accepted claim installed (see ``desktop_posture``). So a claim both keeps
     # this middleware from echoing arbitrary origins back to a page AND admits
     # the app that claimed the plane -- the two halves have to come from one
     # value or the app would claim its way into a CORS wall of its own making.
     # An app that declared a renderer origin in its claim body gets exactly
-    # that, and the packaged app that declares none gets no browser grant at
-    # all -- correct, since its renderer goes through main.
+    # that, and a plane with nothing admitted keeps the echo its renderer reads
+    # ``/health`` with.
+    allowed = desktop_posture().origins
+    if not allowed:
+        return response
     origin = request.headers.get("origin")
-    if origin is not None and origin not in posture.origins:
+    if origin is not None and origin not in allowed:
         # Removed rather than set to a placeholder: absent means "no CORS grant",
         # which is what a browser must conclude. Credentials must go with it, or
         # the pair reads as a grant to the wildcard.

@@ -396,8 +396,8 @@ async def test_absent_origin_is_refused_only_for_browser_shaped_requests(desktop
     ).status_code == 200
 
 
-async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Path, monkeypatch):
-    """A hostile origin must get no ``Access-Control-Allow-Origin`` at all.
+async def test_the_cors_echo_follows_the_admitted_set(tmp_path: Path, monkeypatch):
+    """The CORS echo is scoped to the ALLOWLIST IN FORCE, not to the posture.
 
     The app is mounted with ``allow_origins=["*"]`` and
     ``allow_credentials=True``, which makes Starlette ECHO the caller's origin
@@ -406,10 +406,11 @@ async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Pa
     port. Missing auth was only half of QA's Q2; this is the half that made it
     browser-exploitable rather than curl-only.
 
-    Three states, because the rule is scoped to the POSTURE and the middle one
-    is the regression: unmanaged keeps the historical wildcard; governed
-    without a list admits nothing browser-shaped; governed with a list admits
-    exactly that list.
+    Three states, because the rule is scoped to the ADMITTED SET: unmanaged and
+    allowlist-less keep the historical wildcard echo (which the packaged app's
+    ``file://`` renderer reads ``/health`` with -- suppressing it there made a
+    live daemon report as down); an allowlist admits exactly its own origins
+    and strips the grant from every other.
     """
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -444,18 +445,23 @@ async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Pa
         hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
         assert hostile.headers.get("access-control-allow-origin") == "http://evil.example"
 
-        # A token WITHOUT a list: the plane IS governed, so an empty allowlist
-        # means "no browser origin is admitted" -- the answer
-        # ``require_desktop`` already gives on the gated families, and the
-        # reason a native (Origin-less) claim can close this surface too. Reads
-        # this as "tightening is off" was the bug: the daemon the app started
-        # itself was the only one still echoing, which is backwards.
+        # A token WITHOUT a list: the app-managed default, and the state the
+        # PACKAGED app runs in. Its renderer is loaded with
+        # ``mainWindow.loadFile(...)``, so it runs at ``file://``, every request
+        # it makes carries the opaque origin ``"null"``, and it reads
+        # ``/health`` DIRECTLY as its "server offline" signal. Suppressing the
+        # echo here -- which #1093 did, by scoping to the posture instead of to
+        # the admitted set -- stripped the grant from that reply and made the
+        # app report a live daemon as down. So with nothing admitted the echo
+        # STANDS, and the control half (``require_desktop`` on the gated
+        # families) is what protects the plane in this state.
         monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
-        hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
-        assert hostile.status_code == 200
-        assert "access-control-allow-origin" not in hostile.headers
-        # Credentials must go with the grant, or the pair reads as a wildcard one.
-        assert "access-control-allow-credentials" not in hostile.headers
+        for origin in ("http://evil.example", "null"):
+            hostile = await client.get("/health", headers={"Origin": origin})
+            assert hostile.status_code == 200
+            assert hostile.headers.get("access-control-allow-origin") == origin, origin
+            # Credentials must go with the grant, or the pair reads as a wildcard.
+            assert hostile.headers.get("access-control-allow-credentials") == "true", origin
 
         # A configured list still admits exactly its own origin, and nothing else.
         monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
