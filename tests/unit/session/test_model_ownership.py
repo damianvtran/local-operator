@@ -255,6 +255,59 @@ A = ModelSpec(provider="test", model_id="conversation-a", context_window=100_000
 B = A.model_copy(update={"model_id": "default-b"})
 
 
+@pytest.mark.asyncio
+async def test_the_chosen_effort_rides_the_intent_rpc_with_the_model(tmp_path):
+    """The LEVEL is sent WITH the pair, never left to be re-applied later.
+
+    The owner's ``set_model`` rebuilds the spec from the model's own metadata,
+    which seeds the model's DEFAULT level, and ``Session.set_model`` assigns that
+    spec before its same-pair early return — so a pair-only intent RPC would
+    silently replace the level the user chose, on the very send that consumes the
+    intent. Asserted on the call the owner receives, because that is where the
+    level either travels or is lost.
+
+    The negative half lives in
+    ``test_explicit_resume_intent_survives_rpc_errors_and_owner_snapshots``: a
+    birth sample with no level still sends the two-argument frame every older
+    client and owner already understand.
+    """
+    from unittest.mock import AsyncMock
+
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    chosen = B.model_copy(update={"reasoning_effort": "high"})
+
+    async def no_takeover():
+        raise AssertionError("viewer cannot take ownership")
+
+    viewer = await AttachedSession.cold(
+        "effort-intent",
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+        initial_model=chosen,
+        model_selection_override=True,
+    )
+    client = SimpleNamespace(connected=True, set_model=AsyncMock(return_value="selected"))
+    viewer._client = cast(Any, client)
+    viewer._ready_for_events = True
+    viewer._install_frontend(
+        viewer.frontend_state.model_copy(
+            update={
+                "epoch": "winning-owner",
+                "selected_model": FrontendModelSpec(**A.model_dump()),
+            }
+        )
+    )
+    try:
+        await viewer._ensure_bound(foreground=True)
+        assert client.set_model.call_args.args == (B.provider, B.model_id, "high")
+        assert viewer._model_selection_override is False
+    finally:
+        viewer._client = None
+        await viewer.dispose()
+
+
 def session(directory: Path, *, model=A, source="config", defer=False):
     stream = ScriptedStream([text_turn("ok") for _ in range(8)])
     owner = Session(

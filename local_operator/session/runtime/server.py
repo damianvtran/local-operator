@@ -2881,7 +2881,24 @@ class RuntimeServer:
             typed_cancel = cast(Callable[[], Awaitable[str]], cancel)
             return await typed_cancel()
         if op == "set_model":
-            return await h.set_model(str(frame.get("provider", "")), str(frame.get("model_id", "")))
+            provider = str(frame.get("provider", ""))
+            model_id = str(frame.get("model_id", ""))
+            effort = frame.get("effort")
+            if effort:
+                # Optional capability, getattr-probed like every other addition
+                # to this dispatch, and for the reason the ``cancel`` arm states:
+                # the handle is duck-typed across several owners (the serving
+                # session, a TUI-hosted one, and a long tail of test doubles),
+                # so a third POSITIONAL argument would break every handler that
+                # implements the two-argument call the protocol declares. An
+                # owner without this method keeps answering ``set_model``, and
+                # the level then degrades to the model's own default instead of
+                # failing a switch the user asked for.
+                with_effort = getattr(h, "set_model_effort", None)
+                if callable(with_effort):
+                    typed_model = cast(Callable[[str, str, str], Awaitable[str]], with_effort)
+                    return await typed_model(provider, model_id, str(effort))
+            return await h.set_model(provider, model_id)
         if op == "set_effort":
             return await h.set_effort(str(frame.get("effort", "")))
         if op == "complete_aside":

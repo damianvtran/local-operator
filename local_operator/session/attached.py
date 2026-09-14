@@ -2803,7 +2803,20 @@ class AttachedSession:
             return
         if client is None or self._recovering or self.is_cold:
             raise ConnectionError(_MODEL_INTENT_PENDING)
-        await client.set_model(requested.provider, requested.model_id)
+        # The chosen reasoning level rides WITH the pair rather than in a second
+        # RPC, and that is a correctness requirement rather than tidiness: the
+        # owner's ``set_model`` rebuilds the spec from the model's own metadata,
+        # which seeds the model's DEFAULT level, and ``Session.set_model``
+        # assigns that spec before its same-pair early return — so a pair-only
+        # switch would silently replace the level this viewer was born with,
+        # on the very send that consumes the intent. Sent only when a level was
+        # chosen, so every caller who chose none (the CLI's ``--model`` birth,
+        # and every older client) sends exactly the frame it always sent.
+        requested_effort = getattr(requested, "reasoning_effort", None)
+        if requested_effort:
+            await client.set_model(requested.provider, requested.model_id, requested_effort)
+        else:
+            await client.set_model(requested.provider, requested.model_id)
         self._model_selection_override = False
 
     async def _bind_to(
