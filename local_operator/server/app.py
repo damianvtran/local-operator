@@ -220,13 +220,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         serve_heartbeat = asyncio.create_task(serve_registry.heartbeat_loop(serve_publisher))
         app.state.serve_heartbeat = serve_heartbeat
 
-        # And the build watch: poll the install on disk and, when the build has
-        # moved under this process, ANNOUNCE the handover in the record and keep
-        # serving; then, once nothing is in flight, latch against new work and
-        # leave (`server/retire.py`). Started HERE, beside the publisher,
-        # because the announcement it writes IS this record — and only when a
-        # record was published, for the same reason: no record, no way to say
-        # where the daemon went.
+        # Announce changed builds, but deliberately pass NO exit callback.
+        # This process owns legacy scheduled/async work; shutdown below cancels
+        # SchedulerService._run_tasks. A marker proves neither a safe drain nor
+        # a ready successor, so production must keep serving, never latch/exit.
+        # Clients must not release SSE/watch leases merely on these fields.
+        # The poll lives beside its publisher because the record is its channel.
         #
         # NOT ON A `--reload` CHILD (`serve_registry.is_reload_child`): that
         # child's port belongs to uvicorn's supervisor, so a child that retired
@@ -243,9 +242,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             # Observed, not merely held: the task is cancelled at teardown and
             # nothing else ever awaits it, so a task that DIED would be silent —
-            # a daemon that never retires, with no line saying why, which is the
-            # silent no-rollout this change removes arrived at from the other
-            # side (review round 1, MINOR-3).
+            # a daemon still serving with stale build announcements and no
+            # explanation of why its record stopped tracking the install.
             retire_task.add_done_callback(serve_retire.observe_poll)
             app.state.serve_retire = retire_task
             app.state.serve_retire_stop = retire_stop

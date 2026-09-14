@@ -1,25 +1,9 @@
-"""The serve daemon's build watch: announce, keep serving, then refuse and leave.
+"""Build announcements in production; drain/latch only with an injected callback.
 
-The daemon is the one participant on this host that used to have no rollout for
-a new build — it kept serving the old one until somebody killed it. These tests
-drive the three halves of the replacement separately, because they fail
-differently: the POLL decides when to announce and when to leave, the PREDICATE
-decides how long the daemon keeps serving, and the REFUSAL is what a client
-sees once it has latched.
-
-The poll is driven for real (with ``BUILD_CHECK_S`` shortened) rather than by
-calling its internals, so the shared settle rule, the announce-then-drain order
-and the exit are exercised as the lifespan starts them. ``update.installed_build``
-and ``build_marker_age_s`` are faked the way
-``tests/unit/session/runtime/test_process_refresh.py`` fakes them for the
-runtime, so both watchers are pinned against the same rule.
-
-THE TWO-PHASE SHAPE IS THE POINT OF THE ROUND-2 REWRITE, so most tests below
-assert it in the same three lines: the announcement is readable in the record,
-the daemon is NOT latched, and it has not exited. The hold that matters is the
-desktop app's own relay — held through the ROUTE, not through a hand-built
-``users=1`` bridge, which is exactly how the first round's tests missed it
-(``test_a_desktop_relay_holds_an_announced_daemon_that_keeps_serving``).
+Most tests explicitly opt into the internal exit seam to retain refusal and
+attachment-predicate coverage. The assembled lifespan regression at the end
+pins the production contract: no callback, no latch, no exit. Real CLI and
+scheduler-owned-work evidence lives in tests/e2e/test_serve_build_announcement.py.
 """
 
 from __future__ import annotations
@@ -136,7 +120,7 @@ async def _start(
     publisher: FakePublisher,
     exit_process: Any = None,
 ) -> tuple[asyncio.Task[None], asyncio.Event, list[bool]]:
-    """Run the poll as the lifespan does, with the exit recorded instead taken."""
+    """Opt into the internal drain/latch seam; production supplies no callback."""
     stop = asyncio.Event()
     exited: list[bool] = []
     task = asyncio.create_task(
@@ -1730,7 +1714,7 @@ async def test_a_dead_poll_is_logged_rather_than_silent(
         with pytest.raises(RuntimeError, match="the poll exploded"):
             await task
         await asyncio.sleep(0)  # the done-callback runs on its own turn
-    assert "will not retire" in caplog.text
+    assert "new-build announcements will not refresh" in caplog.text
 
     # A cancelled poll is an ordinary teardown, not a failure to report.
     caplog.clear()
@@ -1919,10 +1903,10 @@ async def test_a_flip_right_after_the_record_appears_is_still_detected(
     output. This test flips the marker the moment the record exists, which is the
     window that used to swallow it.
 
-    ``retire._request_shutdown`` is replaced with a recorder because the real one
-    SIGTERMs this process: in production that is exactly right (uvicorn's clean
-    shutdown, which removes the record), and in a unit test it would kill the
-    test runner.
+    The real lifespan must supply no exit callback. The shutdown recorder is a
+    tripwire, not an injected exit opt-in: even with no attachments, production
+    keeps serving because scheduler ownership and successor readiness are not
+    proved by the attachment predicate.
     """
     from local_operator.server.app import app, lifespan
 
@@ -1931,6 +1915,19 @@ async def test_a_flip_right_after_the_record_appears_is_still_detected(
     path = serve_registry.record_path(os.getpid(), tmp_path)
     exits: list[bool] = []
     monkeypatch.setattr(retire, "_request_shutdown", lambda: exits.append(True))
+    callback_arguments: list[Any] = []
+    real_poll = retire.retirement_poll
+
+    async def observed_poll(*args: Any, **kwargs: Any) -> None:
+        callback_arguments.append(kwargs.get("exit_process"))
+        await real_poll(*args, **kwargs)
+
+    monkeypatch.setattr(retire, "retirement_poll", observed_poll)
+
+    def forbidden_drain(_app: Any) -> None:
+        raise AssertionError("production must not consult the incomplete attachment drain")
+
+    monkeypatch.setattr(retire, "in_flight", forbidden_drain)
 
     with _capture("local_operator.server.retire") as records:
         async with lifespan(app):
@@ -1943,13 +1940,11 @@ async def test_a_flip_right_after_the_record_appears_is_still_detected(
             else:
                 pytest.fail("a flip made right after the record appeared was never detected")
 
-            # ... and with nothing in flight the NEXT check latches and asks the
-            # process to stop (recorded here, delivered in production).
-            for _ in range(200):
-                if exits:
-                    break
-                await asyncio.sleep(0.02)
-            assert exits == [True], "an announced daemon with an empty drain leaves"
+            await asyncio.sleep(QUIET_S)
+            assert exits == [], "production build drift must never request shutdown"
+            assert not retire.retiring(app)
+            assert not app.state.serve_retire.done()
+            assert callback_arguments == [None], "production supplies no exit callback"
     assert any(
         "build watch baseline" in record.getMessage() for record in records
     ), "the baseline is logged, not silent"
