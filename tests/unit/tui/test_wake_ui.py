@@ -10,6 +10,8 @@ empty) — plus the session event that carries a live fire to the front end.
 
 from __future__ import annotations
 
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -473,3 +475,147 @@ async def test_live_wake_fire_emits_a_delivery_receipt(tmp_path) -> None:
     assert receipts[0].catchup is False
     assert "wake up" in receipts[0].text
     await session.dispose()
+
+
+class TestWakePanelOwedState:
+    """The panel is where the incident's operator was looking (design D1).
+
+    Before this, an owed wake, a wake owed after five failed attempts and a
+    healthy one painted as three indistinguishable dim rows: nothing under
+    ``local_operator/tui/`` read the supervisor's ledger, so the one surface
+    that names a session's wakes could not say a wake was not firing.
+    """
+
+    @staticmethod
+    def _session(schedules: list[WakeSchedule]) -> _FakeSession:
+        session = _FakeSession(schedules)
+        session.session_id = "sess"  # type: ignore[attr-defined]
+        return session
+
+    async def _paint_owed(
+        self, tmp_path: Path, schedules: list[WakeSchedule], *, state: str = "retrying"
+    ) -> str:
+        import json
+        import time as _time
+
+        from local_operator.wakes import deliveries
+
+        now = int(_time.time() * 1000)
+        due = schedules[0].next_due_at
+        record = {
+            "schema": 1,
+            "session_id": "sess",
+            "occurrence_ms": due,
+            "state": state,
+            "attempts": 1 if state == "retrying" else 5,
+            "first_attempt_ms": now - 9 * 86_400_000,
+            "last_attempt_ms": now - 60_000,
+            "next_attempt_ms": now + 240_000,
+            "last_error": "could not reach a runtime for session sess within 180s",
+        }
+        directory = deliveries.deliveries_dir(tmp_path)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "sess.json").write_text(json.dumps(record), encoding="utf-8")
+
+        app = _PanelHost()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(WakePanel)
+            panel.sync(self._session(schedules))
+            await pilot.pause()
+            return str(panel._body.content)
+
+    @pytest.mark.asyncio
+    async def test_an_owed_fire_carries_its_state_and_age_and_a_healthy_one_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        now = int(time.time() * 1000)
+        owed = _schedule("w1", "stale but owed")
+        owed.next_due_at = now - 9 * 86_400_000
+        healthy = _schedule("w2", "fresh, due in 5m")
+        healthy.next_due_at = now + 300_000
+
+        out = await self._paint_owed(tmp_path, [owed, healthy])
+
+        owed_row = next(line for line in out.splitlines() if line.startswith("- w1"))
+        healthy_row = next(line for line in out.splitlines() if line.startswith("- w2"))
+        assert "retrying · owed 1w2d" in owed_row, owed_row
+        assert "retrying" not in healthy_row and "owed" not in healthy_row, healthy_row
+        # One row per schedule, and the band keeps its height: the state word and
+        # the age replace the due label rather than adding a row.
+        assert len([line for line in out.splitlines() if line.startswith("- ")]) == 2, out
+
+    @pytest.mark.asyncio
+    async def test_the_undelivered_word_is_the_ledger_state_not_a_second_vocabulary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        now = int(time.time() * 1000)
+        owed = _schedule("w1", "many failures")
+        owed.next_due_at = now - 600_000
+
+        out = await self._paint_owed(tmp_path, [owed], state="undelivered")
+
+        assert "undelivered · owed" in out, out
+
+    @pytest.mark.asyncio
+    async def test_the_ledger_is_read_on_change_not_on_every_tick(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Memoised on the ledger DIRECTORY's mtime: this runs at 1 Hz.
+
+        Every mutation goes through ``os.replace``/``unlink`` inside that
+        directory, so its ``st_mtime_ns`` moves with it — the poll pays a stat,
+        not a read per owed wake.
+        """
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        from local_operator.wakes import deliveries
+
+        reads: list[Path] = []
+        real = deliveries.read_deliveries
+
+        def counting(root: Path):  # noqa: ANN202
+            reads.append(root)
+            return real(root)
+
+        monkeypatch.setattr(deliveries, "read_deliveries", counting)
+        # The directory must exist for the stat to succeed: a store with no
+        # ledger at all is the cheaper path (one failing stat, no read), and
+        # that path has its own test below.
+        deliveries.deliveries_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        session = self._session([_schedule("w1", "x")])
+
+        app = _PanelHost()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(WakePanel)
+            panel.sync(session)
+            await pilot.pause()
+            assert len(reads) == 1, reads
+            panel.sync(session)
+            await pilot.pause()
+            assert len(reads) == 1, f"the ledger was re-read for an unchanged store: {reads}"
+
+            deliveries.note_failure(
+                tmp_path,
+                "sess",
+                session.wake_scheduler.schedules[0].next_due_at,
+                error="unreachable",
+                now_ms=int(time.time() * 1000),
+            )
+            panel.sync(session)
+            await pilot.pause()
+            assert len(reads) == 2, f"a written record did not invalidate the read: {reads}"
+
+    @pytest.mark.asyncio
+    async def test_a_session_with_no_id_or_no_store_still_paints(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A delivery mark is an addition to the row, never a precondition for it."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "missing"))
+        app = _PanelHost()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(WakePanel)
+            panel.sync(_FakeSession([_schedule("w1", "no id, no store")]))  # no session_id
+            await pilot.pause()
+            assert panel.display is True
+            assert "w1" in str(panel._body.content)

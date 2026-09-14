@@ -1564,3 +1564,82 @@ def test_a_dormant_session_keeps_its_owed_fire(tmp_path: Path) -> None:
     mod._reconcile_deliveries(tmp_path, index, loaded)
 
     assert deliveries.read_delivery(tmp_path, "dormant000001") is not None
+
+
+def test_an_owed_fire_is_engaged_even_beside_a_younger_due_sibling(tmp_path: Path) -> None:
+    """Review round 1, MINOR 1: the record was a fallback, so it was stranded.
+
+    `_due_sessions` consulted the recorded occurrence only when no other
+    schedule was due, so an entry holding a stale owed fire beside a younger due
+    sibling engaged the sibling, never retried the owed one, and kept reporting
+    it as `retrying` forever while nothing was retrying it — the same "owed fire
+    that quietly stops being retried" class this record exists to close. The owed
+    occurrence is the oldest candidate, which is also the order the sweep's own
+    oldest-first sort claims.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes.supervisor import _due_sessions
+
+    now_ms = int(time.time() * 1000)
+    entry = _mixed_entry(now_ms)
+    index = {"mixedentry01": entry}
+    owed_due = now_ms - 9 * 86400_000
+
+    # Without a record the live sibling is the wake that fires: the behaviour the
+    # R7 test above pins, and the control for this one.
+    assert [due for _, _, due in _due_sessions(index, now_ms)] == [now_ms - 5_000]
+
+    # Recorded nine days ago, so the record's own backoff has long since
+    # elapsed: this is the stranded state, not a fire held for its retry.
+    deliveries.note_failure(
+        tmp_path, "mixedentry01", owed_due, error="unreachable", now_ms=owed_due
+    )
+    ledger = deliveries.read_deliveries(tmp_path)
+
+    engagements = _due_sessions(index, now_ms, deliveries=ledger)
+    assert [due for _, _, due in engagements] == [
+        owed_due
+    ], f"the owed occurrence was stranded behind its younger due sibling: {engagements}"
+    # And the record's own pacing still applies to that occurrence, which is what
+    # makes engaging it a retry rather than a new attempt on every pass.
+    held = {
+        **ledger,
+        "mixedentry01": {**ledger["mixedentry01"], "next_attempt_ms": now_ms + 60_000},
+    }
+    assert _due_sessions(index, now_ms, deliveries=held) == []
+
+
+@pytest.mark.asyncio
+async def test_an_unwritable_ledger_does_not_claim_durability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_live_runtimes, caplog
+) -> None:
+    """Review round 1, MINOR 2: the line must not promise what the store refused.
+
+    `note_failure` used to answer with the in-memory record whether or not the
+    write landed, so a config dir that would not take it produced
+    "STILL OWED … 'lop wake status' reports it" while that surface had nothing
+    to report — a lie in exactly the case the durability work exists for. The
+    engage is still what fires the wake, so degradation stays best-effort; what
+    changes is that the log says so.
+    """
+    from local_operator.wakes import deliveries
+
+    monkeypatch.setattr(deliveries, "write_delivery", lambda *_a, **_k: None)
+
+    calls: list[str] = []
+
+    async def _times_out(session_id, *_args: object, **_kwargs: object) -> None:
+        calls.append(session_id)
+        raise TimeoutError("no runtime answered")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _times_out)
+    write_entry(tmp_path, "nowritable01", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
+
+    with caplog.at_level("WARNING"):
+        assert await fire_due_wakes(tmp_path) == 0  # the count reports STARTS
+
+    assert calls == ["nowritable01"], "the attempt itself must still be made"
+    assert deliveries.read_deliveries(tmp_path) == {}, "the seam was supposed to refuse the write"
+    assert "STILL OWED" not in caplog.text, caplog.text
+    assert "lop wake status' reports it" not in caplog.text, caplog.text
+    assert "cannot record the failed attempt" in caplog.text, caplog.text

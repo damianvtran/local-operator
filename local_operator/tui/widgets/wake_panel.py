@@ -7,10 +7,20 @@ from the screen so the band stays inside short terminals. The point of the
 panel is that a session's autonomy is otherwise invisible: a wake fires with
 no keystroke, and without a standing list the only way to know the session
 will wake at 09:00 is to catch the delivery line as it scrolls past.
+
+**It also reports a wake that is NOT being delivered.** A schedule whose
+supervisor engagement keeps failing used to paint exactly like a healthy one,
+so the surface an operator actually watches could not say the thing the wake
+subsystem exists to prevent (scheduled work silently not running). The due
+slot now shows the supervisor's delivery state and how long the fire has been
+owed, in the warning ink, read from the supervisor's own ledger
+(:mod:`local_operator.wakes.deliveries`) — one vocabulary with ``lop wake
+status``, and one fact (the age) the row otherwise lacks.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from rich.style import Style
@@ -60,6 +70,8 @@ class WakePanel(Container):
         #: moved (``TodoPanel``'s discipline — same contents, different space
         #: is a different paint).
         self._shown: tuple[tuple[tuple[str, ...], ...], int, int] | None = None
+        #: ``(config root, deliveries dir mtime_ns, ledger)`` — see :meth:`_owed`.
+        self._owed_cache: tuple[str, int, dict[str, dict[str, Any]]] | None = None
         # Hidden until the first schedule exists: an empty panel is not content.
         self.display = False
 
@@ -73,13 +85,16 @@ class WakePanel(Container):
         Called on the app's 1 Hz band poll. A wake's next-fire time moves with
         the wall clock between events, so the due label rides IN the
         fingerprint and the once-a-minute rollover is caught on the next poll
-        rather than a tick late. Never raises: a status surface must not be
-        able to take the app down.
+        rather than a tick late. The supervisor's delivery state rides in it too
+        (:meth:`_owed`), so a wake whose engagement starts failing repaints on
+        the next tick without either surface polling harder. Never raises: a
+        status surface must not be able to take the app down.
         """
         try:
             scheduler = getattr(session, "wake_scheduler", None)
             schedules = list(scheduler.schedules) if scheduler is not None else []
-            fingerprint = tuple(self._fingerprint(schedule) for schedule in schedules)
+            owed = self._owed(session)
+            fingerprint = tuple(self._fingerprint(schedule, owed) for schedule in schedules)
             budget = self._body_rows()
             state = (fingerprint, budget, self._row_cells())
             if state == self._shown:
@@ -93,23 +108,94 @@ class WakePanel(Container):
         except Exception:
             self.display = False
 
+    # -- the supervisor's delivery ledger --------------------------------------
+    def _owed(self, session: Any) -> dict[str, Any] | None:
+        """The session's owed fire from the supervisor's ledger, if it has one.
+
+        MEMOISED ON THE LEDGER DIRECTORY'S MTIME, because this runs on the 1 Hz
+        band poll: every mutation of a record goes through ``write_delivery``'s
+        ``os.replace`` or ``remove_delivery``'s ``unlink``, both of which land
+        inside that directory and move its ``st_mtime_ns``, so the common case
+        costs one ``stat`` per tick rather than one read per owed wake. A
+        filesystem with coarser timestamp resolution can serve a record up to
+        its own granularity late — bounded by the tick that would have read it
+        again anyway.
+
+        Reads the same root the CLI and the supervisor use, so both surfaces
+        make one statement about one file. Returns ``None`` for a session with
+        no id, no ledger, or an unreadable one: a delivery mark is an addition
+        to the row, never a precondition for painting it.
+        """
+        try:
+            session_id = str(getattr(session, "session_id", "") or "")
+            if not session_id:
+                return None
+            from local_operator.paths import config_dir
+            from local_operator.wakes import deliveries
+
+            root = config_dir()
+            directory = deliveries.deliveries_dir(root)
+            try:
+                stamp = directory.stat().st_mtime_ns
+            except OSError:
+                self._owed_cache = None
+                return None
+            if self._owed_cache is None or self._owed_cache[:2] != (str(directory), stamp):
+                self._owed_cache = (str(directory), stamp, deliveries.read_deliveries(root))
+            return self._owed_cache[2].get(session_id)
+        except Exception:
+            return None
+
     @staticmethod
-    def _fingerprint(schedule: Any) -> tuple[str, ...]:
+    def _owed_label(owed: dict[str, Any], now_ms: int) -> str:
+        """``retrying · owed 9d`` for the due slot, or ``""`` when not owed.
+
+        The AGE is the fact the row lacked, and it is the one that separates
+        "about to fire on a busy host" from "stuck since last week" without
+        the reader having to know what the state words mean. A record with no
+        usable first-attempt stamp still gets its state word.
+        """
+        state = str(owed.get("state") or "retrying")
+        first = owed.get("first_attempt_ms")
+        if isinstance(first, int) and not isinstance(first, bool):
+            # WHOLE SECONDS: `format_duration` is a compound renderer that falls
+            # back to raw milliseconds for a sub-second remainder, which turned a
+            # nine-day age into `777600440ms`. The remainder carries no
+            # information at this granularity.
+            age_ms = max(now_ms - first, 0) // 1000 * 1000
+            return f"{state} · owed {format_duration(age_ms)}"
+        return state
+
+    @classmethod
+    def _fingerprint(cls, schedule: Any, owed: dict[str, Any] | None = None) -> tuple[str, ...]:
         """One schedule as a paint-relevant tuple.
 
         The due label is rounded to the MINUTE: a sub-minute drift in the wall
         clock must not count as a change, or the once-a-second poll would
         repaint a panel whose visible text did not move.
+
+        ``owed`` is the session's ledger record. It replaces the due label —
+        which is the state the reader needs — when the record names THIS
+        occurrence, and its presence is also what selects the warning ink, so a
+        delivery that starts or stops failing is a repaint at the next tick.
         """
         due_label = format_wake_time(schedule.next_due_at)
+        ink = "dim"
+        record = owed
+        if record is not None and record.get("occurrence_ms") == schedule.next_due_at:
+            label = cls._owed_label(record, int(time.time() * 1000))
+            if label:
+                due_label = label
+                ink = "warning"
         every = f"every {format_duration(schedule.every_ms)}" if schedule.every_ms else "once"
         message = " ".join(str(schedule.message).split())
-        return (str(schedule.id), due_label, every, message)
+        return (str(schedule.id), due_label, every, message, ink)
 
     # -- rendering ------------------------------------------------------------
     def _build(self, rows: tuple[tuple[str, ...], ...]) -> Text:
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
+        warning = Style(color=theme_mod.semantic_color("warning"))
 
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Wakes", style=muted)
@@ -133,11 +219,17 @@ class WakePanel(Container):
 
         cells = self._row_cells()
         lines = [header]
-        for wake_id, due_label, every, message in visible:
+        for wake_id, due_label, every, message, ink in visible:
             row = Text(no_wrap=True, overflow="ellipsis")
             row.append("- ", style=dim)
             row.append(wake_id, style=muted)
-            row.append(f" {due_label} · {every}", style=dim)
+            row.append(" ", style=dim)
+            # THE SLOT CARRIES THE INK: a healthy wake's due label is dim like
+            # the rest of the row, an owed fire's state is the warning colour —
+            # the same two-fact split the CLI's DUE column makes, in a band that
+            # cannot afford a column of its own.
+            row.append(due_label, style=warning if ink == "warning" else dim)
+            row.append(f" · {every}", style=dim)
             if message:
                 row.append(f" — {message}", style=dim)
             lines.append(row)

@@ -369,8 +369,21 @@ def _due_sessions(
         # reason to hold an engagement; ``_reconcile_deliveries`` drops it on
         # the next pass, and this guard keeps the sweep correct in the window
         # before that happens.
-        if record is not None and fireable is not None and record.get("occurrence_ms") != fireable:
-            record = None
+        owed_ms = record.get("occurrence_ms") if record else None
+        if not isinstance(owed_ms, int) or isinstance(owed_ms, bool):
+            owed_ms = None
+        elif owed_ms not in _schedule_due_times(entry):
+            owed_ms = None
+        if owed_ms is not None and fireable is not None and owed_ms != fireable:
+            # AN OWED OCCURRENCE IS A CANDIDATE IN ITS OWN RIGHT, not a fallback
+            # the due time can hide (review round 1, MINOR 1). The old guard
+            # dropped the record whenever a DIFFERENT due time existed — so an
+            # entry holding a stale owed occurrence beside a younger due sibling
+            # engaged only the sibling, never retried the owed fire, and went on
+            # reporting it as `retrying` forever while nothing was retrying it.
+            # The oldest owed-or-due occurrence wins, which is also the order the
+            # sweep's own oldest-first sort claims.
+            fireable = min(fireable, owed_ms)
         if fireable is None:
             # OWED PAST THE STALENESS BOUND. The rule below is unchanged for a
             # wake the supervisor has never delivered: the session's own resume
@@ -465,10 +478,10 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
         return True
 
 
-def _load_state(
+def _load_and_reconcile_state(
     config_dir: Path,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Read the index and the ledger in ONE thread hop, reconciled together.
+    """Read the index and the ledger in ONE thread hop, RECONCILED here.
 
     ONE hop, not two. This runs once per slice pass, in a process whose whole
     justification is staying cheap, and the two reads must agree anyway: the
@@ -476,6 +489,11 @@ def _load_state(
     apart would let a pass decide on an index its records were not checked
     against. The ledger is one small file per session with an undelivered fire —
     an empty directory on a healthy machine.
+
+    The NAME carries the reconciliation because it DELETES (review round 1,
+    NIT 1): a helper called like a read, from a retirement predicate, must not
+    quietly unlink files. What it drops is only ever a record whose occurrence is
+    no longer owed — an entry that is gone, or a schedule that has moved past it.
     """
     from local_operator.wakes.deliveries import read_deliveries
     from local_operator.wakes.store import read_index
@@ -732,7 +750,7 @@ async def _engage_one(
         # RECOVERED: the failure keys are cleared only once an engage actually
         # succeeds, so the next failure after a working run is announced at
         # full volume instead of inheriting the old silence.
-        _skip_log.forget(session_id, "failed", "error", "backoff", "undelivered")
+        _skip_log.forget(session_id, "failed", "error", "backoff", "undelivered", "ledger")
         cleared = await asyncio.to_thread(_note_delivered, config_dir, session_id, due_ms)
         if cleared:
             # A recovery is worth its own line: the operator's question is not
@@ -772,11 +790,28 @@ def _note_failure(
     from local_operator.wakes.deliveries import STATE_UNDELIVERED, note_failure
 
     record = note_failure(config_dir, session_id, due_ms, error=error)
+    if record is None:
+        # THE LEDGER REFUSED THE WRITE, so there is nothing durable and nothing
+        # for the status surface to report. Saying "STILL OWED … 'lop wake
+        # status' reports it" here would be a lie in exactly the case the
+        # feature exists for (review round 1, MINOR 2). Best-effort degradation
+        # is the contract — the engage is still what fires the wake, and the
+        # schedule is still due — so this is a warning about the STORE, once per
+        # burst, and not a durability claim.
+        if _skip_log.should_log(session_id, "ledger"):
+            logger.warning(
+                "cannot record the failed attempt for %s: the delivery ledger at %s is not "
+                "writable, so this fire is tracked only by its schedule (best-effort by "
+                "contract; the wake still fires if a runtime can be reached)",
+                session_id,
+                config_dir,
+            )
+        return
     if record.get("state") == STATE_UNDELIVERED and _skip_log.should_log(session_id, "undelivered"):
         logger.error(
             "undelivered: %s — %d consecutive attempts have failed to reach a runtime "
-            "for its wake, which is %.1fs overdue and STILL OWED (retried with backoff, "
-            "no longer silently dropped). Last error: %s. 'lop wake status' reports it.",
+            "for its wake, which is %.1fs overdue and STILL OWED (retried with backoff). "
+            "Last error: %s. 'lop wake status' reports it.",
             session_id,
             record.get("attempts"),
             overdue_s,
@@ -920,7 +955,7 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
     the loop (see that class for why).
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
-    index, deliveries = await asyncio.to_thread(_load_state, config_dir)
+    index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
     sweeper = _Sweeper()
     sweeper.sweep(config_dir, index, moment, deliveries=deliveries)
     return await sweeper.drain()
@@ -1069,7 +1104,7 @@ async def _should_retire(config_dir: Path) -> bool:
     genuinely empty index is still prompt.
     """
     await asyncio.sleep(min(SLICE_S, MAX_SLEEP_S))
-    index, deliveries = await asyncio.to_thread(_load_state, config_dir)
+    index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
     return not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries)
 
 
@@ -1093,7 +1128,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     sweeper = _Sweeper()
     try:
         while True:
-            index, deliveries = await asyncio.to_thread(_load_state, config_dir)
+            index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
             if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
                 if once:
                     # `--once` IS THE DIAGNOSTIC, so it must not be the quiet
@@ -1141,7 +1176,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # Recomputed from the index AFTER the sweep started, so a schedule
             # an already-finished runtime advanced is reflected rather than
             # re-read stale.
-            index, deliveries = await asyncio.to_thread(_load_state, config_dir)
+            index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
             if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
                 continue  # retirement is decided at the top, with its grace
 

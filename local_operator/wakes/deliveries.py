@@ -233,8 +233,14 @@ def note_failure(
     *,
     error: str,
     now_ms: int | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Record one failed attempt on an owed fire, and schedule the next.
+
+    Returns the record as STORED, or ``None`` when the ledger would not take it
+    (review round 1, MINOR 2 — the caller must not claim a durability that did
+    not happen: the old shape returned the in-memory record either way, so a
+    full disk produced the "STILL OWED … 'lop wake status' reports it" line
+    while that surface had nothing to report).
 
     ``attempts`` counts consecutive failures for THIS occurrence; a record for
     a different occurrence is replaced rather than incremented, because the one
@@ -246,7 +252,12 @@ def note_failure(
     first = None
     attempts = 0
     if existing is not None and existing.get("occurrence_ms") == occurrence_ms:
-        first = existing.get("first_attempt_ms")
+        prior_first = existing.get("first_attempt_ms")
+        first = (
+            prior_first
+            if isinstance(prior_first, int) and not isinstance(prior_first, bool)
+            else None
+        )
         prior = existing.get("attempts")
         attempts = prior if isinstance(prior, int) and not isinstance(prior, bool) else 0
     attempts += 1
@@ -262,7 +273,9 @@ def note_failure(
         # is rendered in a table.
         "last_error": error[:400],
     }
-    return write_delivery(config_dir, session_id, record) or record
+    # ``write_delivery`` answers with the stored body or ``None``; the caller
+    # needs to know which (see the docstring).
+    return write_delivery(config_dir, session_id, record)
 
 
 def note_delivered(config_dir: Path, session_id: str, occurrence_ms: int) -> int:
@@ -271,13 +284,26 @@ def note_delivered(config_dir: Path, session_id: str, occurrence_ms: int) -> int
     Returns how many failed attempts it took, so the caller can log the
     recovery with the figure that makes it worth reading ("delivered after 4
     attempts" is what tells an operator the host was struggling; a bare
-    "delivered" does not). The record is DELETED rather than kept as a
-    completed row: success is visible on the surfaces that already answer it —
-    the record's absence from ``lop wake status``, and the session's own
-    ``last fired`` stamp on the entry once the runtime actually runs the
-    occurrence. A record kept here would need a lifetime, a grace, and a
-    re-arm rule for the case where the runtime died before advancing the
-    schedule — all of which the existing store already gets right.
+    "delivered" does not).
+
+    SCOPED RESIDUAL (review round 1, MINOR 3): this clears on HANDOVER, which is
+    where the supervisor's job ends — the runtime exists, and by design the
+    session's own scheduler is what fires the occurrence. A runtime that then
+    dies before advancing the schedule leaves the occurrence due with no record,
+    so the next pass re-engages at full deadline cost: the backoff paces failed
+    ATTEMPTS, not a handover that did not run. That is the same shape and the
+    same cost a first-time due wake has (and the shape ``main`` has for every
+    attempt), so it is not a regression this record introduced; removing it needs
+    a record that outlives the handover and a rule for "the occurrence actually
+    ran", which is a design change rather than a constant.
+
+    THE RECORD IS DELETED rather than kept as a completed row: success is
+    visible on the surfaces that already answer it — the record's absence from
+    ``lop wake status``, and the session's own ``last fired`` stamp on the entry
+    once the runtime actually runs the occurrence. A record kept here would need
+    a lifetime, a grace, and a re-arm rule for the case where the runtime died
+    before advancing the schedule — all of which the existing store already gets
+    right.
     """
     existing = read_delivery(config_dir, session_id)
     attempts = 0
