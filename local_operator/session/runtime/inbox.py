@@ -63,12 +63,22 @@ MAX_INBOX_ROWS = 500
 
 @dataclass(frozen=True, slots=True)
 class InboxLine:
-    """One spooled message, in the order it was written."""
+    """One spooled message, in the order it was written.
+
+    ``wake`` is what the sender ASKED FOR, carried across the handover rather
+    than decided by the reader. A row spooled because the receiving runtime was
+    leaving a replaced build may have been a wake — a scheduled alarm the
+    session owes a turn for, or a peer ``send --wake`` — and a successor that
+    delivered it as a quiet note would keep the reminder and never do the work
+    (review round 1, MINOR 3). Absent in rows written before this field
+    existed, which reads as the old quiet-note behaviour: False.
+    """
 
     text: str
     sender: dict[str, Any]
     mode: str = "mailbox"
     written_at: float = 0.0
+    wake: bool = False
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -78,6 +88,7 @@ class InboxLine:
             sender=dict(sender) if isinstance(sender, dict) else {},
             mode=str(payload.get("mode", "mailbox") or "mailbox"),
             written_at=float(payload.get("written_at", 0.0) or 0.0),
+            wake=bool(payload.get("wake", False)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -86,6 +97,7 @@ class InboxLine:
             "sender": self.sender,
             "mode": self.mode,
             "written_at": self.written_at,
+            "wake": self.wake,
         }
 
 

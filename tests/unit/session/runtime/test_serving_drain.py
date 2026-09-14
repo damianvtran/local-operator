@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.wake import WakeSchedule
 from local_operator.session.runtime.inbox import INBOX_NAME, peek_inbox
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
@@ -192,25 +193,47 @@ def test_a_user_stop_during_the_drain_is_still_the_users_own(tmp_path: Path) -> 
 
 
 class WakeHost:
-    """``Session``'s two wake-spooling methods over a stub transcript."""
+    """``Session``'s wake-handover methods over a stub transcript and scheduler."""
 
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
     _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _queue_wake_rearm = Session._queue_wake_rearm
+    hand_wakes_to_successor = Session.hand_wakes_to_successor
 
-    def __init__(self, directory: Path | None) -> None:
+    #: Declared for the type checker, which cannot see an attribute a borrowed
+    #: method assigns on the instance (``retire_wakes_to_inbox`` sets it).
+    _wake_rearms: list[Any]
+
+    def __init__(self, directory: Path | None, *, live: tuple[Any, ...] = ()) -> None:
         self._transcript = SimpleNamespace(directory=directory)
         self._wake_deliver_hook: Any = None
+        self._wake = SimpleNamespace(schedules=live)
+        self.persisted: list[list[Any]] = []
 
     def _missed_delivery_note(self, _due: Any) -> None:
         return None
 
+    async def _persist_wake_schedules(self, schedules: list[Any]) -> None:
+        self.persisted.append(list(schedules))
 
-def _due(text: str = "check the deploy") -> Any:
+
+def _due(text: str = "check the deploy", *, final: bool = False) -> Any:
     return SimpleNamespace(
         schedule=SimpleNamespace(id="w1", every_ms=None, message=text),
         occurrence=1,
         planned_total=None,
-        final=False,
+        final=final,
+    )
+
+
+def _final_due(text: str = "check the deploy") -> Any:
+    """A fire that RETIRED its schedule: a real ``WakeSchedule``, so the hook can
+    copy it into the one-shot the successor owes."""
+    return SimpleNamespace(
+        schedule=WakeSchedule(id="w1", message=text, next_due_at=1),
+        occurrence=1,
+        planned_total=1,
+        final=True,
     )
 
 
@@ -224,7 +247,68 @@ async def test_a_wake_fired_during_the_drain_lands_in_the_inbox(tmp_path: Path) 
     rows = peek_inbox(tmp_path)
     assert len(rows) == 1
     assert "check the deploy" in rows[0].text
-    assert rows[0].mode == "mailbox", "read on the next engage, never a turn of its own"
+    assert rows[0].mode == "mailbox", "the same mailbox vehicle, never a new one"
+    assert rows[0].wake is True, "a fired wake asked for a turn; the successor owes it one"
+
+
+@pytest.mark.asyncio
+async def test_a_retiring_schedule_is_re_armed_instead_of_spooled(tmp_path: Path) -> None:
+    """MINOR 3, the sharp half: a fire that RETIRES its schedule leaves nothing
+    able to engage the session.
+
+    No index row survives it and no errand is raised for a schedule that has
+    already fired, so a spooled note would keep the reminder and never run the
+    work until a human opened the conversation. Re-armed as a one-shot due now,
+    the supervisor starts a runtime for it and the successor folds it as an
+    overdue occurrence.
+    """
+    host = WakeHost(tmp_path)
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_final_due())
+
+    assert peek_inbox(tmp_path) == [], "the re-arm carries it; a note would double it"
+    assert len(host._wake_rearms) == 1
+    rearmed = host._wake_rearms[0]
+    assert (rearmed.id, rearmed.message) == ("w1", "check the deploy"), "same handle, cancellable"
+    assert rearmed.every_ms is None and rearmed.limit is None and rearmed.until_at is None
+    assert rearmed.next_due_at > 0, "due now, so the supervisor engages on its next pass"
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_cannot_be_re_armed_is_still_spooled(tmp_path: Path) -> None:
+    """The outcome this path must never produce: an occurrence that exists
+    neither as a schedule nor as a spooled reminder.
+
+    The fake's schedule here cannot be copied, standing in for any re-arm
+    failure (a shape the harness does not model, an OOM between the two writes);
+    the hook falls back to the note, loudly.
+    """
+    host = WakeHost(tmp_path)
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_due(final=True))
+
+    rows = peek_inbox(tmp_path)
+    assert len(rows) == 1 and rows[0].wake is True
+    assert host._wake_rearms == [], "nothing to hand over, and nothing claimed"
+
+
+@pytest.mark.asyncio
+async def test_the_handover_writes_live_and_re_armed_wakes_once(tmp_path: Path) -> None:
+    """The successor is engaged by the INDEX, so the re-arm has to reach it
+    through the one writer of schedule state — with the same id appearing once,
+    the live copy of a re-armed schedule dropped in favour of the one-shot."""
+    live = WakeSchedule(id="w2", message="hourly", next_due_at=2, every_ms=3_600_000)
+    superseded = WakeSchedule(id="w1", message="check the deploy", next_due_at=1)
+    host = WakeHost(tmp_path, live=(live, superseded))
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_final_due())
+
+    assert await host.hand_wakes_to_successor() == 1
+    assert len(host.persisted) == 1, "one write, transcript-then-index"
+    written = host.persisted[0]
+    assert [schedule.id for schedule in written] == ["w2", "w1"], "one row per id, re-arm last"
+    assert written[1].every_ms is None, "and the surviving w1 is the one-shot"
+    assert await host.hand_wakes_to_successor() == 0, "handed over exactly once"
 
 
 @pytest.mark.asyncio
