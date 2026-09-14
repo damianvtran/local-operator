@@ -2849,6 +2849,93 @@ class TranscriptScreen(Screen[None]):
                 event = redirected
         super()._forward_event(event)
 
+    # -- the keyboard is never parked on nothing ---------------------------
+    #
+    # One rule for this screen, which is the one the composer lives on in every
+    # non-modal mode: while the composer is usable, the app is never left with
+    # NO focused widget. All four composer-focus routes in this codebase
+    # (`composer_focus.py`) restore focus when a GESTURE asks for it; none of
+    # them runs for a pointer event that lands on nothing at all.
+
+    def set_focus(
+        self,
+        widget: Widget | None,
+        scroll_visible: bool = True,
+        from_app_focus: bool = False,
+    ) -> None:
+        """Hand the keyboard back when a focus transition would park it on nothing.
+
+        THE DEFECT THIS CLOSES (reproduced on this tree, 200x50). A pointer
+        event whose cell falls outside this screen's composited grid takes
+        Textual's own focus path — ``Screen._forward_event``'s
+        ``except NoWidget: self.set_focus(None)`` (``textual/screen.py:1929-1931``)
+        — BEFORE any handler here can see the event, and it forwards nothing
+        afterwards either: with no widget under the pointer there is no child
+        to receive it and nothing is posted to the App. The app was left with
+        NO focused widget, and silently — the draft stayed painted, the frame
+        still read as live, and every later keystroke went to a screen with no
+        text input and was discarded. Measured with an X10 press at column
+        215, an SGR click at 215 and an SGR wheel notch at 215; every in-frame
+        cell tested was fine, so the COORDINATE — not the gesture and not the
+        encoding — is the trigger.
+
+        WHY AT THE FOCUS TRANSITION rather than in a mouse handler. This is the
+        one point every route to that state passes through, and it is PUBLIC
+        API — ``set_focus(None)`` is documented as "un-focus" — where Textual's
+        ``_forward_event`` is private, so a guard here cannot be left dead by
+        an upgrade that moves the focus handling without moving this seam. It
+        deliberately runs AFTER ``super()``: ``set_focus`` finishes its own
+        bookkeeping (``_update_focus_styles``, ``call_after_refresh(
+        refresh_bindings)``) after the reactive assignment, and a ``focused``
+        watcher doing this work would re-enter ``set_focus`` mid-flight and can
+        leave the blurred styles applied to a widget that is focused again.
+
+        WHY ``_return_focus_to_composer`` and not ``composer_focus``'s helper,
+        which is the same rule: that helper reports "nothing moved" against
+        ``editor.has_focus`` — a widget REACTIVE set when the widget processes
+        its ``events.Blur`` (``textual/widget.py:360``), which is a message-pump
+        cycle after this call returns. At this instant it still reads True for
+        a composer that has already lost the screen's focus, so the helper is a
+        silent no-op here. Measured: ``composer_may_take_focus=True``,
+        ``_focus_is_claimed()=False``, ``editor.has_focus=True``, and the
+        repair did nothing.
+
+        THE GUARDS, each load-bearing:
+
+        - ``widget is not None or self.focused is not None``: only a transition
+          that actually left the screen unfocused is repaired.
+        - ``self.app.app_focus``: on terminal blur Textual parks focus and
+          stashes the widget to restore on the next key (``App._watch_app_focus``),
+          a dance this app relies on and documents in its own override of that
+          watcher. Re-focusing here would relight the composer in a window the
+          user is not in and buy nothing: measured, alt-tab away leaves
+          ``focused=None`` and the keystroke after the return still lands in
+          the composer.
+        - ``_return_focus_to_composer``'s own ``_focus_is_claimed()``: a pushed
+          screen, a live approval or ask, the aside, the full-page modes, the
+          focused sidebar and a READ-ONLY composer (``_set_composer_read_only``
+          clears focus on purpose) all keep their claim. Measured after this
+          change: with the composer read-only, and with a settings or aside
+          mode up, the off-frame event still leaves the app unfocused rather
+          than handing a field that refuses every key a caret.
+
+        NOT the narrower alternative of clamping or dropping an out-of-frame
+        coordinate in ``input_decode.x10_mouse_to_sgr``: that covers only the
+        legacy encoding (an SGR click and an SGR wheel notch reproduce this
+        identically), and it would drop a click that was already going to hit
+        nothing while leaving the state it produced in place.
+        """
+        super().set_focus(widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus)
+        if widget is not None or self.focused is not None or not self.app.app_focus:
+            return
+        repair = getattr(self.app, "_return_focus_to_composer", None)
+        if not callable(repair):
+            return
+        try:
+            repair()
+        except Exception:  # noqa: BLE001 — never raise out of a focus path
+            pass
+
 
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
@@ -18159,6 +18246,12 @@ class OperatorApp(App[None]):
         approval/ask conditions (answered, settled, attached) are subtle enough
         that a second copy would drift, and this predicate wants exactly the
         prompt that method already defines.
+
+        A claim belongs in here only if TAKING the keyboard would destroy keys
+        the claimant needs. The focused Sessions list is the one claimant that
+        does not need any key to stay usable, so its claim is SOFT and is not
+        reported — the note below the full-page-modes branch is where that is
+        argued, and it is the only place the answer for it is written.
         """
         # An unanswered approval or an unsettled ask owns the keys the composer
         # would otherwise swallow.
@@ -18184,11 +18277,24 @@ class OperatorApp(App[None]):
                 return True
         except Exception:  # noqa: BLE001
             return True
-        try:
-            if self._session_sidebar.has_focus:
-                return True
-        except Exception:  # noqa: BLE001
-            return True
+        # The focused Sessions list is deliberately ABSENT from this list, and
+        # that absence is the whole content of design round D2: its claim is
+        # SOFT. It was a hard claim here, which meant a click on the composer's
+        # OWN chrome was refused while the list held the keyboard — measured: a
+        # click on the dock's padding cells, chevron cell included, changed
+        # 0 cells and the next key was still discarded, re-creating for the list
+        # the exact dead zone `ComposerDock`'s docstring was written to remove
+        # for the ToolCard. A claim belongs here only if TAKING it would destroy
+        # keys the claimant needs — a live prompt's answer keys, a pushed
+        # screen's, a read-only composer's. The list answers arrows/enter with
+        # its own bindings while it has focus; it needs no key to stay usable,
+        # so a gesture that lands on the composer's own chrome may take the
+        # keyboard back, and the list is still reachable exactly as before (f9
+        # or `/sidebar focus` in, Esc or f9 out — note that a dismissal is not a
+        # stop). Fixed in the predicate rather than at the dock call site so all
+        # four composer-focus routes keep ONE rule: a bypass at the dock would
+        # leave the transcript's click, the transcript's key and a row's `tab`
+        # binding reading a predicate that still refuses.
         # The catch-all, and the reason a future overlay is safe by DEFAULT
         # rather than by someone remembering to extend the list above: any
         # pushed Screen is a modal route (`/resume`'s session picker is one —

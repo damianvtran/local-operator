@@ -40,11 +40,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual import events
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static
 from textual.widgets.text_area import Selection
 
+from local_operator.resume import SessionRow
+from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -370,6 +373,14 @@ async def _claim_read_only(pilot: Any, app: OperatorApp) -> None:
 #: Every claimant in the design's Q3 table, plus the negative. Each is opened
 #: through the route a user takes, never by assigning the attribute the
 #: predicate reads — that would be a test of the assignment.
+#:
+#: TWO of them answer ``False``, for different reasons. ``resting`` is the
+#: negative. ``sidebar-focused`` is the SOFT claim (design round D2): the focused
+#: list needs no key to stay usable, so a gesture landing on the composer's own
+#: chrome may take the keyboard back from it — while every other claim here
+#: would lose keys it needs (a live prompt's answer keys, a pushed screen's, a
+#: full-page mode's, and a read-only composer's, which has no caret to type
+#: into at all).
 CLAIMANTS = [
     ("resting", _claim_nothing, False),
     ("approval", _claim_approval, True),
@@ -378,7 +389,7 @@ CLAIMANTS = [
     ("subagent-view", _claim_subagent_view, True),
     ("org-chart", _claim_org_chart, True),
     ("settings", _claim_settings, True),
-    ("sidebar-focused", _claim_sidebar, True),
+    ("sidebar-focused-soft", _claim_sidebar, False),
     ("pushed-screen", _claim_pushed_screen, True),
     ("read-only", _claim_read_only, True),
 ]
@@ -867,6 +878,11 @@ async def test_the_sidebars_own_escape_still_owns_the_key() -> None:
     landing place alone would pass whichever mechanism ran, and would quietly
     stop testing the sidebar the day the binding was removed. The guard itself
     is pinned by the multi-select above, where the two outcomes differ.
+
+    The focused list does NOT claim the keyboard (design round D2, which made
+    its claim SOFT), so the premise below asserts that instead of the old
+    ``True``. Nothing about this key changes with it: the binding is found
+    before any restoration route is consulted.
     """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -875,7 +891,10 @@ async def test_the_sidebars_own_escape_still_owns_the_key() -> None:
         await pilot.pause()
         sidebar = app._session_sidebar
         assert sidebar.has_focus, "premise: f9 focused the sidebar"
-        assert app._focus_is_claimed() is True, "premise: a focused sidebar claims the keyboard"
+        assert app._focus_is_claimed() is False, (
+            "premise: the focused list's claim is SOFT (design round D2) — it "
+            "needs no key to stay usable, so it refuses no composer route"
+        )
 
         await pilot.press("escape")
         await pilot.pause()
@@ -1081,3 +1100,326 @@ async def test_the_composer_is_focused_after_any_ordinary_gesture() -> None:
         await pilot.press("escape")
         await pilot.pause()
         home("escape from a focused row")
+
+
+# -- an off-frame pointer event never parks the keyboard on nothing ----------
+#
+# U1, reported as "a click anywhere stops typed text reaching the composer" and
+# measured down to its real trigger: not the click, not the encoding, but a
+# POINTER EVENT AT A CELL OUTSIDE THE APP'S FRAME. Textual's
+# `Screen._forward_event` clears focus for any pointer event with nothing under
+# it (`textual/screen.py:1929-1931`) and then forwards nothing, `get_widget_at`
+# having already raised — so no handler in this codebase ever saw the event.
+# The app was left with `focused=None`: the draft stayed painted, the chevron
+# merely dimmed, and every later keystroke was discarded in silence until the
+# user clicked back into the composer or pressed Esc.
+#
+# WHY THE EVENT IS POSTED TO THE SCREEN rather than driven through the pilot: an
+# out-of-frame coordinate is precisely what `Pilot._post_mouse_events` rejects
+# (`OutOfBounds` against `screen.size.region`, `pilot.py:440-443`), which is why
+# the reporter's gesture could not be reproduced by ANY in-frame click site.
+# `Screen._forward_event` is the production path either way — `App.on_event`'s
+# mouse branch is a bare call to it — so posting the event exercises the same
+# code without the pilot's own bounds check. Same shape, and the same reason, as
+# `test_transcript_scrollbar_grab.py` (its target column is the frame's last).
+#
+# Two trigger classes, because the wheel is the one an ordinary hand emits:
+# measured pre-fix, `MouseDown`, `MouseScrollDown` and a synthesised SGR click at
+# an out-of-frame column all cleared focus, while every in-frame cell tested left
+# the composer focused.
+
+#: Column 215 of a 200-wide frame — inside no widget and outside the grid. This
+#: is the coordinate the pair of X10 reports in the original report decodes to.
+OFF_FRAME = (215, 44)
+
+
+def _off_frame_event(cls: type[events.MouseEvent], x: int, y: int) -> events.MouseEvent:
+    """A pointer event at a cell that is in no widget, as the driver delivers it.
+
+    ``widget`` is ``None`` and the coordinate is set both as the cell and as the
+    screen offset, exactly as `Screen._forward_event` receives it from a real
+    terminal and from `Pilot._post_mouse_events`.
+    """
+    return cls(
+        widget=None,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_cls", [events.MouseDown, events.MouseScrollDown], ids=["press", "wheel"]
+)
+async def test_off_frame_pointer_event_leaves_the_composer_focused(
+    event_cls: type[events.MouseEvent],
+) -> None:
+    """The defect: the app must not be left with no widget holding the keyboard.
+
+    BOTH halves are asserted, and the second is the one that matters. The whole
+    failure is silent — no exception, no dropped event, just a keystroke that
+    goes nowhere — so "a focused widget remains" alone would pass on a repair
+    that put the keyboard somewhere else that swallows text. The typed character
+    is the assertion that it landed somewhere usable.
+    """
+    app = _app()
+    async with app.run_test(size=(200, 50)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("A")
+        await pilot.pause()
+        assert editor.text == "A", "premise: the composer takes typed text"
+
+        app.screen._forward_event(_off_frame_event(event_cls, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app._focus_is_claimed() is False, "premise: nothing claims the keyboard"
+        assert app.focused is not None, "the off-frame event left the app with no focused widget"
+        assert app.focused is editor, f"focus landed on {type(app.focused).__name__}"
+
+        await pilot.press("B")
+        await pilot.pause()
+        assert editor.text == "AB", "the keystroke after the event never reached the composer"
+
+
+#: The claims an off-frame event can meet while the app is still ON the default
+#: screen, so the repair is genuinely consulted and genuinely refuses. A pushed
+#: screen is the fourth case below and is answered one level down — see its note.
+CLAIMED_AT_THE_COMPOSER = [
+    ("aside", _claim_aside),
+    ("settings", _claim_settings),
+    ("read-only", _claim_read_only),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,opener", CLAIMED_AT_THE_COMPOSER, ids=[n for n, _ in CLAIMED_AT_THE_COMPOSER]
+)
+async def test_the_restoration_refuses_while_a_surface_claims_the_keyboard(
+    name: str, opener: Any, tmp_path: Path
+) -> None:
+    """The new restoration must not weaken `_focus_is_claimed` by one surface.
+
+    Every one of these is opened through the route a user takes, never by
+    assigning the attribute the predicate reads. The assertion is that the
+    composer does NOT take the keyboard — not that focus ends up somewhere
+    specific, because where it ends up belongs to the surface that owns it.
+    """
+    session = FakeSession()
+    session.team_registry = _chart_registry()  # type: ignore[attr-defined]
+    app = OperatorApp(lambda: _factory(session), provider_controller=_controller(tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+
+        await opener(pilot, app)
+        assert app._focus_is_claimed() is True, f"premise: {name} claims the keyboard"
+
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app.focused is not editor, f"{name}: the composer took the keyboard"
+        assert not editor.has_focus, f"{name}: the composer ended up focused"
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_screen_keeps_the_off_frame_event_from_the_composer() -> None:
+    """A modal overlay: the composer must not take the keyboard behind it.
+
+    The event is forwarded by the OVERLAY screen — a plain ``Screen``, not this
+    one — so what answers here is Textual's own screen routing rather than the
+    restoration, and that is exactly why the case is worth pinning: it fails if
+    the restoration is ever moved somewhere that does not respect a pushed
+    screen, which is the shape a "just fix it globally" follow-up would take.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        await _claim_pushed_screen(pilot, app)
+
+        app.screen._forward_event(_off_frame_event(events.MouseDown, *OFF_FRAME))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app._focus_is_claimed() is True, "premise: the pushed screen claims the keyboard"
+        assert app.focused is not editor, "the composer took the keyboard behind a modal"
+        # Not `editor.has_focus`: a widget's `has_focus` is a reactive that a
+        # pushed screen need not clear, so it is the wrong instrument for "does
+        # this widget hold the keyboard". What the user can observe is where the
+        # next key goes.
+        await pilot.press("B")
+        await pilot.pause()
+        assert editor.text == "", "a keystroke behind a modal reached the composer"
+
+
+# -- a pointer press never takes the keyboard off the composer --------------
+#
+# Design round D1/D2, which reversed the app's earlier behaviour here. Measured
+# on the round's frames at 120x40: a click anywhere in the Sessions panel moved
+# the keyboard to the list (`focused=SessionSidebar`), and everything typed next
+# was discarded — four typed keys, a 0-cell frame delta, the draft untouched.
+# Nothing on the frame distinguished "the list owns the keys" from "nothing owns
+# the keys", and the composer kept painting the draft exactly as before.
+#
+# The rule the round settled: a pointer press on the list acts on the row under
+# the pointer and NOTHING ELSE (the list's keyboard mode is entered only by f9 /
+# `/sidebar focus`, and left with Esc or f9 again), and a gesture landing on the
+# composer's own chrome takes the keyboard back from the list. A claim refuses
+# only when taking the keyboard would destroy keys the claimant needs — which is
+# why the list's claim is SOFT (`_focus_is_claimed`) while a live prompt's is
+# not.
+
+
+def _catalog(*session_ids: str) -> list[Any]:
+    """List entries newest-first, one per id, as the app's refresh builds them."""
+    return [
+        CatalogEntry(SessionRow(sid, 1_000.0 - index, f"Conversation {sid}", live_state="idle"))
+        for index, sid in enumerate(session_ids)
+    ]
+
+
+async def _open_list(pilot: Any, app: OperatorApp, *session_ids: str) -> Any:
+    """The list OPEN and populated, with the composer still holding the keyboard.
+
+    The app's own catalog refresh is paused first: it rebuilds ``entries`` from
+    the session store on a timer, and the pilot's ``FakeSession`` does not put
+    the two rows these tests click on into it. Pausing the timer is what keeps
+    the SEEDED list in place for the length of the gesture — the same mechanism
+    the design round's probe used.
+    """
+    sidebar = app._session_sidebar
+    app._set_sidebar_open(True)
+    for _ in range(8):
+        await pilot.pause()
+    refresh = app._sidebar_timer
+    if refresh is not None:
+        refresh.pause()
+    spinner = sidebar._timer
+    if spinner is not None:
+        spinner.pause()
+    sidebar.current_id = session_ids[0]
+    sidebar.cursor_id = session_ids[0]
+    sidebar.set_entries(_catalog(*session_ids))
+    for _ in range(4):
+        await pilot.pause()
+    assert sidebar.display, "premise: the list is on the frame"
+    assert not sidebar.has_focus, "premise: opening it did not move the keyboard"
+    return sidebar
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_list_does_not_move_the_keyboard() -> None:
+    """D1: the panel's dead space and its rows alike leave focus where it was.
+
+    Both halves matter. The keyboard staying put is the user-visible repair; the
+    row click still moving the list's cursor is the proof that the click was not
+    swallowed — the gesture acts, it just no longer has anything to do with the
+    keys afterwards.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        sidebar = await _open_list(pilot, app, "sess-a", "sess-b")
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press("A")
+        await pilot.pause()
+        assert editor.text == "A", "premise: the composer takes typed text"
+
+        # The dead space below the rows. Derived from the region, not hardcoded:
+        # the panel's height depends on the terminal.
+        await pilot.click(offset=(sidebar.region.x + 5, sidebar.region.bottom - 3))
+        for _ in range(3):
+            await pilot.pause()
+        assert app.focused is editor, f"the panel's dead space took the keyboard: {app.focused!r}"
+
+        # A row: the click still acts on it …
+        rows = {entry.id: y for y, entry in _visible_rows(app, sidebar)}
+        assert "sess-b" in rows, "premise: the second session has a painted row"
+        await pilot.click(offset=(sidebar.region.x + 2, rows["sess-b"]))
+        for _ in range(4):
+            await pilot.pause()
+        assert sidebar.cursor_id == "sess-b", "the row click no longer acts on the list"
+        # … and the keyboard has not moved for it.
+        assert app.focused is editor, f"a row click took the keyboard: {app.focused!r}"
+
+        await pilot.press("B")
+        await pilot.pause()
+        assert editor.text == "AB", "the key after a list click never reached the composer"
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_switched_session_ends_with_the_keyboard_in_the_composer() -> None:
+    """D1 for the SWITCHING branch — the case the design round could not render.
+
+    Its harness's fake session cannot bind, so it left this path reasoned from
+    the code (:meth:`OperatorApp.on_session_sidebar_selected` focuses the editor
+    only on the attached-row branch and leaves focus alone on the switch branch)
+    rather than measured, and asked for it to be measured here.
+
+    The switch itself is stubbed — a real binding needs a runtime socket, and it
+    is not what this test is about — while the GESTURE and the handler it reaches
+    are the app's real ones. The stub records the id so the test cannot pass
+    vacuously by taking the attached-row branch instead.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        sidebar = await _open_list(pilot, app, "sess-a", "sess-b")
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        started: list[str] = []
+        real_select = app._sidebar_navigation.select
+
+        def _record(session_id: str) -> Any:
+            started.append(session_id)
+            return None
+
+        app._sidebar_navigation.select = _record  # type: ignore[method-assign]
+        try:
+            # The row of the OTHER conversation: the switch branch.
+            rows = {entry.id: y for y, entry in _visible_rows(app, sidebar)}
+            assert "sess-b" in rows, "premise: the other session has a painted row"
+            await pilot.click(offset=(sidebar.region.x + 2, rows["sess-b"]))
+            for _ in range(6):
+                await pilot.pause()
+        finally:
+            app._sidebar_navigation.select = real_select  # type: ignore[method-assign]
+
+        assert started, "premise: the click did not take the switch branch"
+        assert app.focused is editor, f"the switch left the keyboard on {app.focused!r}"
+        await pilot.press("C")
+        await pilot.pause()
+        assert editor.text == "C", "the key after a switch click never reached the composer"
+
+
+def _visible_rows(app: OperatorApp, sidebar: Any) -> list[tuple[int, Any]]:
+    """``(0-based screen y, entry)`` for every painted row of the list.
+
+    Read from the widget's own geometry rather than assumed, so a layout change
+    moves the test with it instead of silently clicking the wrong row. The y is
+    the pilot's own coordinate — the panel's origin plus the widget-local row.
+    """
+    origin = sidebar.region.y
+    return [
+        (origin + y, entry)
+        for y in range(sidebar.size.height)
+        if (entry := sidebar._entry_at(y)) is not None
+    ]
