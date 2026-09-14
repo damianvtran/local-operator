@@ -4359,7 +4359,7 @@ def format_window(window: int) -> str:
     return str(window)
 
 
-def context_block_numbers(data: "dict[str, int]", total: int) -> dict[str, int]:
+def context_block_numbers(data: dict[str, int], total: int) -> dict[str, int]:
     """The unformatted figures behind the ``/context`` block's rows.
 
     The rows are PRE-FORMATTED strings (``~12.3k``), which is right for a

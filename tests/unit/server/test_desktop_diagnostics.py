@@ -49,7 +49,6 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.include_router(capabilities.router)
     app.include_router(desktop_catalogues.router)
     app.state.config_manager = ConfigManager(tmp_path)
-    app.state.credential_manager = CredentialManager(tmp_path)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
@@ -190,16 +189,89 @@ async def test_info_route_serves_a_host_snapshot_in_the_reply_envelope(desktop):
     )
     assert isinstance(data["install"]["version"], str)
 
-    # The live half is empty BY CONSTRUCTION (`LiveState()` with no session) and
-    # the panel must never read it: those facts belong to the conversation the
-    # desktop already mirrors, and filling them here would give one live fact two
-    # sources of truth. Pinned so a later "make the numbers nicer" edit cannot
-    # put a confident zero in front of the user.
-    assert data["agents"]["tree"] == []
-    assert data["agents"]["running"] == 0
-    assert data["agents"]["queued"] == 0
-    assert data["env"]["mcp_connected"] == 0
-    assert data["env"]["approval_mode"] == ""
+    # The live half is NOT MEASURED by this read (`LiveState()` with no session),
+    # and the route says so with `None` — the contract's unknown spelling — rather
+    # than shipping the dataclass defaults. The panel must never render these:
+    # those facts belong to the conversation the desktop already mirrors, and
+    # filling them here would give one live fact two sources of truth. Pinned so a
+    # later "make the numbers nicer" edit cannot put a confident zero in front of
+    # the user; the contract calls that indistinguishability its riskiest
+    # assumption.
+    assert data["agents"]["tree"] is None
+    assert data["agents"]["running"] is None
+    assert data["agents"]["queued"] is None
+    assert data["agents"]["roster_unread"] is None
+    assert data["env"]["mcp_connected"] is None
+    assert data["env"]["mcp_settling"] is None
+    assert data["env"]["approval_mode"] is None
+    assert data["env"]["skills"] is None
+    # ... while the HOST half of the very same blocks stays a real reading: a
+    # registry scan that finds nothing genuinely measured nothing.
+    assert data["agents"]["profiles"] == 0
+    assert data["agents"]["teams"] == 0
+    assert isinstance(data["sessions"]["total"], int)
+    assert isinstance(data["env"]["guides"], int)
+    assert isinstance(data["env"]["credential_keys"], list)
+
+
+async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_path):
+    """A read path must not leave the store it reads behind.
+
+    ``CredentialManager.__init__`` creates the config directory and an empty
+    ``credentials.env``, so the credential probe used to WRITE while answering a
+    question about a host — the fault class this collector's own comment bans.
+    The store is absent before the call and absent after it.
+    """
+    client, _ = desktop
+    credentials = tmp_path / "credentials.env"
+    assert not credentials.exists(), "the fixture must not have created the store"
+
+    data = (await client.get("/v1/desktop/info")).json()["result"]["data"]
+
+    assert data["env"]["credential_keys"] == []
+    assert not credentials.exists()
+    # Scoped to the credential store on purpose: the registry probes in this same
+    # snapshot legitimately materialise their OWN directories (``agents/``,
+    # ``run/``), which is how those stores work everywhere. The claim here is
+    # that the CREDENTIAL probe no longer creates the store it reads.
+
+
+async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
+    """§5.3: the two side attributes, and what an UNNAMED session looks like.
+
+    No test covered these two fields at all, and their failure mode is silent: a
+    rename of the store's ``setattr`` flattens the panel's session tree to hex
+    ids with no failing test and no ``degraded`` entry.
+    """
+    client, _ = desktop
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    base = replace(_snap(session_id=PARENT), request_id="r1")
+    assert (
+        store.record_batch(
+            [base, replace(base, session_id=CHILD, parent_session_id=PARENT, request_id="r2")]
+        )
+        == 2
+    )
+    store.upsert_session_name(PARENT, "Named parent")
+    store.close()
+
+    response = await client.get("/v1/desktop/analytics", params={"days": 7})
+    assert response.status_code == 200, response.text
+    data = json.loads(response.text)["result"]["data"]
+
+    assert data["session_parents"] == {CHILD: PARENT}
+    # The UNNAMED session is ABSENT, not present-with-``""``: a client reading
+    # ``names?.[id] ?? id`` renders the id only when the key is missing, so an
+    # empty string would paint a blank cell styled as an id.
+    assert data["session_names"] == {PARENT: "Named parent"}
+    assert CHILD not in data["session_names"]
+    # The complement pins every map-valued key on this payload, so a breakdown
+    # that arrives as an OBJECT fails here even though no list names it.
+    assert {key for key, value in data.items() if isinstance(value, dict)} == {
+        "aggregate",
+        "session_names",
+        "session_parents",
+    }
 
 
 async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_path):
@@ -281,10 +353,13 @@ async def test_every_group_by_is_an_array_of_keyed_objects(desktop, tmp_path):
     keys are tuples, which JSON cannot carry. ``by_purpose`` is keyed by a
     string and serialised as an OBJECT by accident of its key type, which is not
     a decision about the wire: a response carrying three sibling group-bys in two
-    encodings makes the client keep a shape per breakdown. The failure this test
-    exists to catch is the next group-by being added in the object shape and
-    nobody noticing, so it asserts the SHAPE of all three rather than the values
-    of any one.
+    encodings makes the client keep a shape per breakdown.
+
+    The failure this exists to catch is the next group-by being added in the
+    object shape and nobody noticing, so it is asserted on the COMPLEMENT as well
+    as on a table of the three: a hard-coded table alone cannot see a fourth key
+    it has never heard of, while the set of map-valued top-level keys changes the
+    moment one arrives as an object.
     """
     client, _ = desktop
     store = AnalyticsStore(tmp_path / "analytics.db")
@@ -320,6 +395,17 @@ async def test_every_group_by_is_an_array_of_keyed_objects(desktop, tmp_path):
     # assertion is about the encoding, not about SQLite's sort collation.
     calls_by_purpose = {row["purpose"]: row["aggregate"]["calls"] for row in data["by_purpose"]}
     assert calls_by_purpose == {"turn": 2, "compaction": 1}
+    # The complement: the group-bys are the only things that could arrive as
+    # objects, so every map-valued key this payload may carry is pinned — a
+    # fourth breakdown added later in the object shape fails here even though the
+    # table above has never heard of it. ``descendants_aggregate`` is a map when
+    # the subtree walk ran and ``null`` when it could not (that is its own
+    # contract), and ``timings`` groups three summaries by name.
+    assert {key for key, value in data.items() if isinstance(value, dict)} == {
+        "aggregate",
+        "descendants_aggregate",
+        "timings",
+    }
 
 
 async def test_recent_limit_defaults_and_is_clamped_not_rejected(desktop, tmp_path):
