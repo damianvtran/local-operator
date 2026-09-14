@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: Bumped on any breaking change to control frames or web payloads. The
 #: runtime and daemon always ship together; the phone UI learns the
@@ -225,6 +228,29 @@ RUN_DIRNAME = "run/mobile"
 #: way and for the same reason: a pid is a process's uniqueness token, and
 #: ``kill -9`` leaves exactly one file behind for the next scan to reap.
 SERVE_RUN_DIRNAME = "run/serve"
+
+#: Directory (under the config root) holding one directory per conversation.
+#:
+#: Named here because the DURABLE STOP MARKER (see ``registry.STOP_MARKER_NAME``)
+#: has to be found from two sides that never meet: ``control.stop_session``
+#: writes it from a discovery record plus a config root, while
+#: ``attention._classify_orphaned_run`` reads it starting from the transcript
+#: directory. One spelling, so a marker written by a stop is always the marker
+#: the classifier reads — a reader that derived the path differently would
+#: report every deliberate stop as an unexplained death, which is the exact
+#: failure the marker exists to remove.
+SESSIONS_DIRNAME = "sessions"
+
+
+def session_dir(root: "Path", session_id: str) -> "Path":
+    """The conversation directory ``root/sessions/<session_id>``.
+
+    A function rather than a bare join so the writer side of the stop marker
+    names the same directory the transcript (and therefore the classifier)
+    lives in, without either module re-deriving the layout.
+    """
+    return root / SESSIONS_DIRNAME / session_id
+
 
 #: How often a runtime rewrites its record's ``heartbeat_at``. The daemon
 #: treats a record as wedged (not merely quiet) after ``HEARTBEAT_TIMEOUT_S``.

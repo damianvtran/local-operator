@@ -30,6 +30,7 @@ from unittest import mock
 
 import pytest
 
+from local_operator.paths import config_dir
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.types import SessionRecord
 from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
@@ -127,9 +128,7 @@ async def test_graceful_socket_rung_stops_the_runtime(no_signals) -> None:
     state["handle"] = handle
     server, record = await _serve(handle)
     try:
-        outcome = await control.stop_session(
-            _record_for(record), timeout_s=3.0, _root=registry.run_dir()
-        )
+        outcome = await control.stop_session(_record_for(record), timeout_s=3.0, _root=config_dir())
         assert outcome.method == "socket"
         assert record.conversation_name in outcome.line
         assert "stopped" in outcome.line
@@ -153,7 +152,7 @@ async def test_identity_mismatch_refuses_and_signals_nobody(no_signals) -> None:
     try:
         impostor = _record_for(record, session_id="someone-elses-session")
         signalled, _ = no_signals
-        outcome = await control.stop_session(impostor, timeout_s=2.0, _root=registry.run_dir())
+        outcome = await control.stop_session(impostor, timeout_s=2.0, _root=config_dir())
         assert outcome.method == "refused"
         assert signalled == []
         assert "refused" in outcome.line
@@ -173,7 +172,7 @@ async def test_dead_pid_reports_already_exited(monkeypatch: pytest.MonkeyPatch) 
     registry.publish(ghost)
     monkeypatch.setattr(registry, "pid_alive", lambda pid, **_: False)
     try:
-        outcome = await control.stop_session(ghost, timeout_s=1.0, _root=registry.run_dir())
+        outcome = await control.stop_session(ghost, timeout_s=1.0, _root=config_dir())
         assert outcome.method == "gone"
         assert "already exited" in outcome.line
     finally:
@@ -259,7 +258,7 @@ async def test_stop_all_never_targets_the_callers_own_pid(
             lambda root=None: [(own, "live"), (other, "live")],
         )
         monkeypatch.setattr(control, "_same_uid", lambda rec: True)
-        outcomes = await control.stop_all(own_pid=424242, _root=registry.run_dir())
+        outcomes = await control.stop_all(own_pid=424242, _root=config_dir())
         assert [o.session_id for o in outcomes] == [other.session_id]
         assert [o.method for o in outcomes] == ["socket"]
         assert no_signals[0] == []
@@ -283,9 +282,7 @@ async def test_stop_all_only_pids_restricts_to_the_listed_set(
             control.registry, "scan", lambda root=None: [(record, "live"), (newcomer, "live")]
         )
         monkeypatch.setattr(control, "_same_uid", lambda rec: True)
-        outcomes = await control.stop_all(
-            own_pid=None, only_pids={record.pid}, _root=registry.run_dir()
-        )
+        outcomes = await control.stop_all(own_pid=None, only_pids={record.pid}, _root=config_dir())
         assert [o.session_id for o in outcomes] == [record.session_id]
         assert no_signals[0] == []
     finally:
@@ -317,7 +314,7 @@ async def test_refusal_line_names_the_session_then_the_pid_once(no_signals) -> N
     server, record = await _serve()
     try:
         impostor = _record_for(record, session_id="someone-elses-session", conversation_name="x")
-        outcome = await control.stop_session(impostor, timeout_s=2.0, _root=registry.run_dir())
+        outcome = await control.stop_session(impostor, timeout_s=2.0, _root=config_dir())
         assert outcome.method == "refused"
         assert outcome.line.startswith(f'refused "x" (pid {record.pid}) — it serves session "')
         assert no_signals[0] == []
@@ -381,12 +378,12 @@ async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_sign
             return False, control._SOCKET_SILENT
 
         with mock.patch.object(control, "_confirmed_session_id", _never):
-            refused = await control.stop_session(target, timeout_s=0.5, _root=registry.run_dir())
+            refused = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
             assert refused.method == "refused"
             assert "must lapse" in refused.line  # the named wait (U2-3)
             assert no_signals[0] == []
             stopped = await control.stop_session(
-                target, timeout_s=0.5, force=True, _root=registry.run_dir()
+                target, timeout_s=0.5, force=True, _root=config_dir()
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -413,10 +410,140 @@ async def test_force_still_refuses_a_stale_record_over_a_recycled_pid(no_signals
         stale = _record_for(record, pid=os.getpid())
         stale.heartbeat_at = time.time() - 3600  # long past the window
         registry.publish(stale)
-        outcome = await control.stop_session(
-            stale, timeout_s=1.0, force=True, _root=registry.run_dir()
-        )
+        outcome = await control.stop_session(stale, timeout_s=1.0, force=True, _root=config_dir())
         assert outcome.method == "refused"
         assert no_signals[0] == []  # nothing was signalled
     finally:
         pass
+
+
+def test_record_retired_reads_the_root_the_caller_injected(tmp_path: Path) -> None:
+    """A stop's landing is decided against the root the caller TARGETED.
+
+    ``_record_retired`` used to read the ambient ``registry.run_dir()`` while the
+    ladder's other root reads (``_park_wakes``, ``_recover_record``) used the
+    injected one, so an injected-root caller's missing file read as "retired"
+    and the ladder returned a confident ``socket`` receipt — ``0.01 s`` — for a
+    stop that had landed nowhere, with the target still alive and serving
+    (design §1e, found by running the ladder against an isolated root). The
+    three assertions below are the whole defect: what is in the injected root
+    decides, what is only in the ambient root must not.
+    """
+    injected = tmp_path / "injected"
+    record = SessionRecord(
+        pid=2**22 - 5,
+        kind="tui",
+        session_id="s-root",
+        conversation_name="root",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    registry.publish(record, root=injected)
+
+    assert control._record_retired(record, injected) is False
+    # The ambient root (the suite's isolated config dir) holds nothing for this
+    # pid: before the fix this answer was the one the ladder used for BOTH.
+    assert control._record_retired(record, config_dir()) is True
+
+    # A record that now names another session is retired too — the pid was
+    # recycled by a new runtime, which is what the read is guarding against.
+    other = SessionRecord(**{**record.to_json(), "session_id": "s-someone-else"})
+    registry.publish(other, root=injected)
+    assert control._record_retired(record, injected) is True
+
+
+def test_the_marker_payload_names_the_run_the_rung_the_killer_and_the_build() -> None:
+    """The durable marker's fields are the attribution, so they are pinned.
+
+    Each one answers a question the incident could not answer afterwards: which
+    RUN (the ``(session_id, pid, started_at)`` key a stale marker is refused
+    by), which RUNG (how hard the stop pushed), whether it was ASKED FOR (the
+    flag that must never be set by anything but this ladder), WHO (the fact the
+    investigation could not recover at all) and which BUILD the target was
+    running.
+    """
+    record = SessionRecord(
+        pid=4242,
+        kind="exec",
+        session_id="s-payload",
+        conversation_name="payload",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = 1_760_000_000.0
+    record.version = "0.54.39"
+    record.source_ref = "dec7933"
+
+    payload = control._stop_marker_payload(record, "sigkill", command="lop stop --all")
+
+    assert payload["session_id"] == "s-payload"
+    assert payload["pid"] == 4242
+    assert payload["started_at"] == 1_760_000_000.0
+    assert payload["rung"] == "sigkill"
+    assert payload["deliberate"] is True
+    assert payload["killer"] == {
+        "pid": os.getpid(),
+        "argv0": payload["killer"]["argv0"],
+        "command": "lop stop --all",
+    }
+    assert payload["killer"]["argv0"]
+    assert payload["build"] == "0.54.39@dec7933"
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_staged_only_by_a_rung_that_acts(no_signals) -> None:
+    """A refusal leaves NO marker; the rung that fires leaves exactly one.
+
+    The invariant the whole change rests on: the file says "this rung of this
+    ladder took this runtime down", so a rung that never ran must not leave
+    one, or a later involuntary death of the same session would be narrated as
+    the user's own stop. The first half is the fresh-heartbeat refusal — the
+    socket is silent and identity cannot be confirmed, so the ladder declines
+    and nothing may be staged — and the second half is the same target under
+    ``--force``, which escalates to the signal rungs and stages the marker
+    naming the rung that acted.
+    """
+    from local_operator.session.runtime.types import session_dir
+
+    server, record = await _serve()
+    try:
+        target = _record_for(record, pid=os.getpid())
+        target.heartbeat_at = time.time()
+        registry.publish(target, root=config_dir())
+        conversation = session_dir(config_dir(), target.session_id)
+        # The runtime that owns a session has a conversation directory (its
+        # transcript lives there) — the in-process double does not, and the
+        # marker writer deliberately refuses to invent one.
+        conversation.mkdir(parents=True, exist_ok=True)
+
+        # A starved-but-fresh runtime: the dial says nothing, the heartbeat says
+        # it was alive moments ago, so no signal is safe yet.
+        async def _never(*args: Any, **kwargs: Any) -> Any:
+            return False, control._SOCKET_SILENT
+
+        with mock.patch.object(control, "_confirmed_session_id", _never):
+            refused = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
+            assert refused.method == "refused"
+            assert no_signals[0] == []
+            assert (
+                registry.read_stop_marker(conversation) is None
+            ), "a refused stop must not attest to a stop that did not happen"
+
+            stopped = await control.stop_session(
+                target, timeout_s=0.5, force=True, _root=config_dir()
+            )
+        assert stopped.method in ("sigterm", "sigkill")
+        marker = registry.read_stop_marker(conversation)
+        assert marker is not None, "the rung that acted must have staged its evidence"
+        assert marker["rung"] == stopped.method
+        assert marker["deliberate"] is True
+        assert marker["killer"]["pid"] == os.getpid()
+        assert marker["killer"]["command"] == "control.stop_session"
+        assert marker["pid"] == target.pid
+        assert marker["started_at"] == target.started_at
+    finally:
+        server.close()

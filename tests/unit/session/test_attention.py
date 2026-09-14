@@ -905,18 +905,19 @@ def test_the_started_at_is_one_token_so_a_wrap_cannot_split_it() -> None:
     assert not re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", detail), detail
 
 
-def test_a_reaped_death_is_classified_from_the_record_the_scan_deleted(
-    tmp_path: Path,
-) -> None:
-    """MINOR-1: the daemon's own sweep deletes the evidence it then classifies.
+def test_a_reaped_death_survives_the_sweep_that_reaped_it(tmp_path: Path) -> None:
+    """The sweep reaps by MOVING, so the evidence outlives the sweep.
 
-    ``registry.scan`` UNLINKS a stale record as it reports it, so the mobile
-    daemon's discovery loop — whose classification re-reads the run directory —
-    found nothing and landed every discovered death on the no-evidence arm: "the
-    cause could not be determined" for the one shape where the daemon had just
-    proved the pid dead. Passing the record the caller is already holding is the
-    fix, and the CONTROL below is what that bug looked like (same death, same
-    moment, record not handed in).
+    ``registry.scan`` used to unlink a stale record as it reported it, and it IS
+    the mobile daemon's discovery loop — so a sweep that ran before the
+    classification destroyed the answer before anyone asked the question, and
+    the same death read as "the cause could not be determined" purely because of
+    the order two reads happened in (INCIDENT 2026-09-13, session
+    ``5e109d459222``). Three properties together are the fix: the record is
+    moved to ``reaped/`` rather than deleted, the classifier reads both
+    directories, and the sidecar stays invisible to discovery (a reaped record
+    must never come back as a session). The handed-in ``reaped_owner`` still
+    works — it is now belt-and-braces rather than the only road to an answer.
 
     The live-owner gate is deliberately not under test here: it runs before the
     classification and is pinned by the tests above.
@@ -925,38 +926,151 @@ def test_a_reaped_death_is_classified_from_the_record_the_scan_deleted(
     from local_operator.session.runtime import registry
     from local_operator.session.transcript import Transcript
 
-    fixed_id, control_id = "reaped1", "reaped2"
-    _seed_started(tmp_path, fixed_id)
-    _seed_started(tmp_path, control_id)
+    handed_id, swept_id = "reaped1", "reaped2"
+    _seed_started(tmp_path, handed_id)
+    _seed_started(tmp_path, swept_id)
     dead_pid = 2**22 + 11
-    _write_record(tmp_path, fixed_id, dead_pid)
-    _write_record(tmp_path, control_id, dead_pid + 1)
+    _write_record(tmp_path, handed_id, dead_pid)
+    _write_record(tmp_path, swept_id, dead_pid + 1)
 
     scanned = registry.scan(tmp_path)
     by_session = {record.session_id: record for record, _state in scanned}
     assert {state for _record, state in scanned} == {"stale"}
     for pid in (dead_pid, dead_pid + 1):
-        assert not (
-            tmp_path / "run" / "mobile" / f"{pid}.json"
-        ).exists(), "the premise: the scan is what deletes the record"
+        assert not (tmp_path / "run" / "mobile" / f"{pid}.json").exists()
+        assert (tmp_path / "run" / "mobile" / registry.REAPED_DIRNAME / f"{pid}.json").exists()
+    # Invisible to discovery: the sidecar is evidence, never a second listing.
+    assert registry.scan(tmp_path) == []
 
-    fixed = bootstrap_transcript(
-        Transcript(tmp_path / "sessions" / fixed_id),
-        AttentionStore(tmp_path / "fixed.db"),
-        reaped_owner=by_session[fixed_id],
+    handed = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / handed_id),
+        AttentionStore(tmp_path / "handed.db"),
+        reaped_owner=by_session[handed_id],
     )
-    assert fixed is not None
-    assert (fixed[0], fixed[1]) == ("error", "runtime-killed"), fixed
-    assert f"pid {dead_pid}" in fixed[2], fixed[2]
+    assert handed is not None
+    assert (handed[0], handed[1]) == ("error", "runtime-killed"), handed
+    assert f"pid {dead_pid}" in handed[2], handed[2]
 
-    # CONTROL, and it is the bug rather than a second property: with the record
-    # gone and nothing handed in, the same death reads as unexplained.
-    before = bootstrap_transcript(
-        Transcript(tmp_path / "sessions" / control_id),
-        AttentionStore(tmp_path / "before.db"),
+    # The half the incident turned on: nothing handed in, record long since
+    # swept, and the death is STILL named — which is what makes a second scan
+    # harmless rather than destructive.
+    swept = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / swept_id),
+        AttentionStore(tmp_path / "swept.db"),
     )
-    assert before is not None
-    assert (before[0], before[1]) == ("error", ""), before
+    assert swept is not None
+    assert (swept[0], swept[1]) == ("error", "runtime-killed"), swept
+    assert f"pid {dead_pid + 1}" in swept[2], swept[2]
+
+
+def _write_stop_marker(
+    root: Path, session_id: str, *, rung: str = "sigkill", **overrides: Any
+) -> None:
+    """The marker ``control._write_stop_marker`` stages, without the ladder."""
+    from local_operator.session.runtime import registry
+
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "pid": 2**22 + 21,
+        "started_at": 1_760_000_000.0,
+        "at": time.time(),
+        "rung": rung,
+        "deliberate": True,
+        "killer": {"pid": 61123, "argv0": "lop", "command": "control.stop_session"},
+        "build": "0.54.39@dec7933",
+        "reason": "a deliberate stop was requested through the control plane",
+    }
+    payload.update(overrides)
+    registry.write_stop_marker(root / "sessions" / session_id, payload)
+
+
+def test_one_evidence_subset_reads_as_exactly_one_verdict(tmp_path: Path) -> None:
+    """The four evidence shapes, table driven: one event, one verdict.
+
+    This is the incident's whole complaint — the same death reaching the
+    operator as ``runtime-killed``, as no cause at all, and as ``owner-lost`` —
+    reduced to the classifier's own inputs. Each row is one run's leavings and
+    the ONE line it must produce; the first row is the rung that had no voice
+    before (a runtime SIGKILLed while frozen records nothing, so only the killer
+    could attest to it).
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    marker_id = "killmarker"
+    _seed_started(tmp_path, marker_id)
+    _write_stop_marker(tmp_path, marker_id)
+
+    wake_id = "wakemark"
+    _seed_started(tmp_path, wake_id)
+    from local_operator.wakes import store as wake_store
+
+    wake_store.write_entry(
+        tmp_path,
+        wake_id,
+        cwd="/tmp",
+        schedules=[{"id": "w1", "message": "m", "every_ms": 60000, "next_due_at": 1}],
+        preserve={"stopped_at": int(time.time() * 1000)},
+    )
+
+    record_id = "deadrecord"
+    _seed_started(tmp_path, record_id)
+    _write_record(tmp_path, record_id, 2**22 + 31)
+
+    none_id = "noevidence"
+    _seed_started(tmp_path, none_id)
+
+    expected = {
+        marker_id: ("interrupted", "user-stop"),
+        wake_id: ("interrupted", "user-stop"),
+        record_id: ("error", "runtime-killed"),
+        none_id: ("error", ""),
+    }
+    for session_id, want in expected.items():
+        result = bootstrap_transcript(
+            Transcript(tmp_path / "sessions" / session_id),
+            AttentionStore(tmp_path / f"{session_id}.db"),
+        )
+        assert result is not None, session_id
+        assert (result[0], result[1]) == want, (session_id, result)
+
+    # The rung-3 marker names HOW and WHO, which is what makes a deliberate
+    # stop tell itself apart from the mystery it used to read as.
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / marker_id),
+        AttentionStore(tmp_path / "killmarker-again.db"),
+    )
+    assert result is not None
+    assert "SIGKILL" in result[2], result[2]
+    assert "control.stop_session" in result[2], result[2]
+    assert "pid 61123" in result[2], result[2]
+
+
+def test_a_marker_from_an_earlier_run_does_not_label_a_later_death(tmp_path: Path) -> None:
+    """The stale-marker guard: the one misreading a marker could introduce.
+
+    A session is stopped deliberately (marker, sigkill), reopened, runs again,
+    and THAT runtime dies involuntarily. The old marker is still on disk; if the
+    classifier trusted it by session alone, a crash would be reported as the
+    user's own stop. The marker is keyed to a RUN — pid and start time — so this
+    one goes quiet and the dead record answers instead.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "stale"
+    _seed_started(tmp_path, session_id)
+    # The marker names the PREVIOUS run's pid; the record on disk names this one.
+    _write_stop_marker(tmp_path, session_id, pid=2**22 + 41)
+    _write_record(tmp_path, session_id, 2**22 + 42)
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "stale.db"),
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-killed"), result
+    assert f"pid {2**22 + 42}" in result[2], result[2]
 
 
 @pytest.mark.asyncio

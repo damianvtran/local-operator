@@ -45,6 +45,20 @@ outlive their turn, and :mod:`local_operator.tools.group_reaper` owns their
 lifecycle. Escalating to ``killpg`` would tear through a job the user asked
 to keep running — the exact thing ``background=true`` exists for — so every
 signal here targets the single recorded pid.
+
+**Every rung leaves durable evidence BEFORE it acts.** Each rung stages a stop
+marker (``registry.STOP_MARKER_NAME``) into the target's conversation
+directory immediately before the irreversible thing it does — the target's own
+clean exit once the ``stop`` op has been acked, or the signal it sends itself.
+The kill switch is the only party that CAN attest to a forced stop: at the
+SIGKILL rung the target is not executing, and
+the 2026-09-13 kill wave is what the absence of that attestation cost — the
+same event reached the operator as ``runtime-killed``, as no cause at all, and
+as ``owner-lost``, because the classifier could only reconstruct a deliberate
+act out of a missing record and a silent socket. The marker is what turns "the
+runtime disappeared without exiting cleanly" into "the user's stop reached the
+sigkill rung, run by pid N". It is staged per rung and OVERWRITTEN as the
+ladder escalates, so the file always names the rung that actually acted.
 """
 
 from __future__ import annotations
@@ -52,13 +66,19 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
+from local_operator.session.runtime.types import (
+    HEARTBEAT_TIMEOUT_S,
+    RUN_DIRNAME,
+    SessionRecord,
+    session_dir,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -596,7 +616,7 @@ async def _park_wakes(record: SessionRecord, root: Path) -> int:
         return 0
 
 
-def _record_retired(record: SessionRecord) -> bool:
+def _record_retired(record: SessionRecord, root: Path) -> bool:
     """True once the record on disk no longer describes this session.
 
     The graceful op's observable end is NOT always a process exit: a
@@ -605,10 +625,21 @@ def _record_retired(record: SessionRecord) -> bool:
     the file rather than ``registry.scan`` keeps this a single stat+read on
     the 100 ms poll, and a file that now names a different session (the
     process reopened something else) counts as retired too.
+
+    ``root`` is the root the CALLER targeted, never the ambient one. This
+    read is the ladder's only proof that a graceful stop landed, and reading
+    ``registry.run_dir()`` here made an injected-root caller answer against a
+    DIFFERENT root's run directory: a missing file read as "retired", so the
+    ladder returned a confident ``socket`` receipt — ``(socket, 0.01s)`` — for
+    a stop that had been acked by nobody, while the target was still alive and
+    still serving. Production callers pass ``root=config_dir()``, where the two
+    agree; the defect was only reachable from another root (the phone's, a
+    supervisor's, a test's), and that is precisely where the receipt was then
+    taken at face value (design §1e).
     """
     import json
 
-    path = registry.run_dir() / f"{record.pid}.json"
+    path = root / RUN_DIRNAME / f"{record.pid}.json"
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -616,7 +647,7 @@ def _record_retired(record: SessionRecord) -> bool:
     return data.get("session_id") != record.session_id
 
 
-async def _await_stopped(record: SessionRecord, timeout_s: float) -> bool:
+async def _await_stopped(record: SessionRecord, timeout_s: float, root: Path) -> bool:
     """Wait for the stop to land, bounded by ``timeout_s``.
 
     Landed means the pid left the process table (a runtime process) OR the
@@ -627,10 +658,13 @@ async def _await_stopped(record: SessionRecord, timeout_s: float) -> bool:
     (sub-second in the common case) is observed almost immediately, and
     cheap enough to hold for 10 s without cost. Returns False on timeout —
     the caller's next escalation rung.
+
+    ``root`` rides through to :func:`_record_retired` so the check runs
+    against the same root the caller targeted (see the note there).
     """
     deadline = asyncio.get_running_loop().time() + timeout_s
     while True:
-        if not registry.pid_alive(record.pid) or _record_retired(record):
+        if not registry.pid_alive(record.pid) or _record_retired(record, root):
             return True
         if asyncio.get_running_loop().time() >= deadline:
             return False
@@ -675,7 +709,79 @@ def _stopped_line(
     return f'{verb} "{name}"{rung}{proof}{wakes_part}'
 
 
-async def _graceful_stop(record: SessionRecord, timeout_s: float) -> bool:
+def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -> dict[str, Any]:
+    """The durable evidence ONE rung of the ladder leaves behind.
+
+    Written by the KILLER (this process), never by the target: at the SIGKILL
+    rung the target is not executing and cannot record anything, which is why
+    the 2026-09-13 wave could only be described as a runtime that "disappeared
+    without exiting cleanly". The fields are exactly the facts a reader needs
+    to attribute the death in one look:
+
+    * ``session_id`` / ``pid`` / ``started_at`` — the RUN KEY. The classifier
+      refuses a marker that does not match the run it is classifying, so a
+      marker left by an EARLIER run of the same session cannot narrate a
+      later, involuntary death as the user's own act.
+    * ``rung`` — which rung actually acted, and therefore how hard the target
+      resisted: ``socket`` is the runtime's own clean exit, ``sigterm`` its
+      handler, ``sigkill`` nothing at all (state orphaned).
+    * ``deliberate`` — always true HERE, and only here. A kill by a supervisor
+      or by anything outside this ladder must not set it; the flag is what
+      keeps an involuntary death reading as one.
+    * ``killer`` — pid, argv0 and the front end's command name, so "who did
+      this" is answered by the artifact rather than by the operator's shell
+      history — being unrecoverable from the artifacts on this host is
+      exactly what made one incident read as three different stories.
+    * ``build`` — the TARGET's ``version@source_ref``, because the question
+      this answers is which runtime died.
+    """
+    if record.version and record.source_ref:
+        build = f"{record.version}@{record.source_ref}"
+    else:
+        build = record.version or record.source_ref or ""
+    argv0 = os.path.basename(sys.argv[0] or "") or sys.executable
+    return {
+        "session_id": record.session_id,
+        "pid": record.pid,
+        "started_at": record.started_at,
+        "at": time.time(),
+        "rung": rung,
+        "deliberate": True,
+        "killer": {"pid": os.getpid(), "argv0": argv0, "command": command},
+        "build": build,
+        "reason": "a deliberate stop was requested through the control plane",
+    }
+
+
+def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
+    """Stage the durable stop marker BEFORE the step it attests to.
+
+    Best-effort, and the swallow is the decision rather than an oversight: a
+    stop the user asked for must still happen when a sidecar cannot be
+    written, so failing to attest never aborts the ladder. The cost is bounded
+    and stated — the receipt is unaffected, and that one death falls back to
+    the dead-record rung, which is where it stood before this existed.
+
+    Sits next to the rung it describes rather than in a wrapper, because the
+    ordering IS the invariant: the file must be on disk before the signal, and
+    a caller that ever moves one of these calls below its rung has broken the
+    thing the file is for. The same invariant is why there is NO removal path
+    for a marker: only a rung that ACTS stages one, so the two shapes that must
+    not attest to anything — an unacked socket request, a refusal — never write
+    one in the first place.
+    """
+    try:
+        registry.write_stop_marker(
+            session_dir(root, record.session_id),
+            _stop_marker_payload(record, rung, command=command),
+        )
+    except OSError:
+        pass
+
+
+async def _graceful_stop(
+    record: SessionRecord, timeout_s: float, root: Path, *, command: str
+) -> bool:
     """Rung 1: ask the runtime to stop itself, wait out the clean exit.
 
     The op the runtime serves (``RuntimeServer._dispatch``'s ``stop`` case)
@@ -686,11 +792,20 @@ async def _graceful_stop(record: SessionRecord, timeout_s: float) -> bool:
     reply (an old runtime that predates the op) is a scheduled miss, not a
     failure — the ladder proceeds to identity confirmation and SIGTERM, which
     every runtime already handles, so mixed-version machines never wedge.
+
+    THE MARKER GOES AFTER THE ACK AND BEFORE THE WAIT. This rung's
+    irreversible step is the target's clean EXIT, which the ack sets in
+    motion — not the request, which the target is free to refuse and a silent
+    socket never even received. Staging it before the exchange would leave a
+    "deliberate stop" marker behind for a rung that never acted, which is the
+    one misreading the marker must not create: an unacked socket request to a
+    process that had already crashed would then read as the user's own stop.
     """
     reply = await _exchange(record, {"op": "stop"}, reply_timeout_s=timeout_s)
     if reply is None or reply.get("op") != "ack":
         return False
-    return await _await_stopped(record, timeout_s)
+    _write_stop_marker(record, root, "socket", command=command)
+    return await _await_stopped(record, timeout_s, root)
 
 
 async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grace_s: float) -> bool:
@@ -710,7 +825,7 @@ async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grac
     return await _await_pid_exit(record.pid, grace_s)
 
 
-def _recover_record(record: SessionRecord) -> None:
+def _recover_record(record: SessionRecord, root: Path) -> None:
     """Best-effort stale-record cleanup after a confirmed exit.
 
     A clean stop unpublishes its own record; the SIGKILL rung cannot (the
@@ -718,10 +833,16 @@ def _recover_record(record: SessionRecord) -> None:
     reader's next pass, so this is not load-bearing — it is the polite
     version that makes `lop sessions` correct immediately instead of at the
     next scan, and it must never raise over a file that is already gone.
+
+    ``root`` for the same reason :func:`_record_retired` takes it: the
+    record to clean up is the one in the CALLER's root. Unpublishing the
+    ambient root's ``<pid>.json`` while the caller targeted another one left
+    the real record behind (seen as a stale row until a scan reaped it) and,
+    worse, could delete an unrelated record that happened to share the pid.
     """
     if registry.pid_alive(record.pid):
         return
-    registry.unpublish(record.pid)
+    registry.unpublish(record.pid, root)
 
 
 async def stop_session(
@@ -730,6 +851,7 @@ async def stop_session(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     force: bool = False,
     _root: Path | None = None,
+    _command: str = "control.stop_session",
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
 
@@ -744,6 +866,13 @@ async def stop_session(
 
     ``_root`` is the config root (tests inject one); production callers use
     the ambient ``config_dir()``.
+
+    ``_command`` is the front end the stop came from, carried verbatim into
+    every rung's stop marker so the artifact can name its author
+    (``control.stop_session`` for a single stop, ``lop stop --all`` for the
+    sweep). It is the caller's to set because only the caller knows which
+    request the user actually made — and the marker's whole value is that the
+    answer survives the process that knew it.
     """
     root = _root if _root is not None else config_dir()
     name = record.conversation_name or record.session_id
@@ -751,9 +880,9 @@ async def stop_session(
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
     # an unreachable socket means already-gone-or-crashed, an error reply
     # means an older runtime. Either way the ladder continues.
-    if await _graceful_stop(record, timeout_s):
+    if await _graceful_stop(record, timeout_s, root, command=_command):
         wakes = await _park_wakes(record, root)
-        _recover_record(record)
+        _recover_record(record, root)
         method: Method = "socket"
         return StopOutcome(
             pid=record.pid,
@@ -768,9 +897,15 @@ async def stop_session(
     # (crash, or an old runtime that exited on its own). Nothing to signal;
     # reap the record, park the wakes, report it as already gone — a clean
     # resolution, not a refusal, so `--all` over a dead record exits 0.
+    #
+    # No stop marker here, deliberately: this branch is the one shape where
+    # the ladder proved NO rung acted (no ack, and nothing left to signal), so
+    # attesting a deliberate stop would be a fiction. Note this is also why
+    # the marker is staged AFTER the graceful ack and not before the request:
+    # a request the target never received is not a stop.
     if not registry.pid_alive(record.pid):
         wakes = await _park_wakes(record, root)
-        _recover_record(record)
+        _recover_record(record, root)
         method = "gone"
         return StopOutcome(
             pid=record.pid,
@@ -834,10 +969,15 @@ async def stop_session(
         )
 
     # Rung 2 — SIGTERM: the runtime's existing handler runs the same clean
-    # exit the socket op would have.
+    # exit the socket op would have. Marker first, then the signal: this rung
+    # cannot be attested by its target any more than rung 3 can — a SIGTERM
+    # that the process never gets to handle (frozen, starved) is
+    # indistinguishable afterwards from a crash, UNLESS the sender said so
+    # before sending.
+    _write_stop_marker(record, root, "sigterm", command=_command)
     if await _signal_and_confirm(record, signal.SIGTERM, SIGTERM_GRACE_S):
         wakes = await _park_wakes(record, root)
-        _recover_record(record)
+        _recover_record(record, root)
         method = "sigterm"
         return StopOutcome(
             pid=record.pid,
@@ -850,9 +990,18 @@ async def stop_session(
 
     # Rung 3 — SIGKILL. State is orphaned by design; stale-record reaping
     # and the lease's dead-owner recovery pick it up. Report the rung used.
+    #
+    # THE MARKER IS THE POINT OF THIS RUNG. Everything the runtime could have
+    # said about its own death is gone the moment this signal lands — the
+    # frozen runtime in the 2026-09-13 repro logged NOTHING at all, and the
+    # operator was left reading "disappeared without exiting cleanly" for a
+    # stop the user had asked for. The write is immediately before the signal
+    # and names sigkill, so the next reader learns which rung killed it, that
+    # it was deliberate, and who did it.
+    _write_stop_marker(record, root, "sigkill", command=_command)
     await _signal_and_confirm(record, signal.SIGKILL, SIGTERM_GRACE_S)
     wakes = await _park_wakes(record, root)
-    _recover_record(record)
+    _recover_record(record, root)
     method = "sigkill"
     return StopOutcome(
         pid=record.pid,
@@ -936,7 +1085,11 @@ async def stop_all(
                 )
             )
             continue
-        outcomes.append(await stop_session(record, timeout_s=timeout_s, force=force, _root=root))
+        outcomes.append(
+            await stop_session(
+                record, timeout_s=timeout_s, force=force, _root=root, _command="lop stop --all"
+            )
+        )
     return outcomes
 
 
