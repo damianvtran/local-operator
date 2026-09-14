@@ -363,8 +363,9 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s at cap 8:
 # 6 beat 3 in that run and 8 beat 6 by 9%. An independent A/B (review round 1,
 # 2026-09-14) reproduced the ORDERING but not the magnitude - 15-16% against a
-# different baseline - so the direction is what this file claims: the percentage
-# those waves produced is withdrawn and is not quoted anywhere here.
+# different baseline - so the direction is what this file claims for the
+# cap-6-over-cap-3 comparison: that speedup percentage is withdrawn as a claim,
+# while the 9% for cap 8 over cap 6 and the CPU deltas above stand as measured.
 #
 # Hence the reserve CAP moved (`min(3072, total/8)` -> `min(2048, total/8)`; the
 # 1/8 fraction is unchanged, so every small-host floor is exactly what it was)

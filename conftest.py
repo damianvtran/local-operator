@@ -128,10 +128,12 @@ and the three instances' total CPU:
 * cap 3 (what this host resolved): 313.3 s, 225.2 s over two rounds; 118.4 s and
   107.8 s of CPU.
 * cap 6: 188.9 s, 161.6 s, 188.7 s over three rounds; 129.2 s, 123.9 s, 129.5 s.
-  Faster per instance in that run at ~12% MORE CPU. No percentage from these
-  waves is quoted here or in the docs: the independent A/B below measured 15-16%
-  against a different baseline and did not reproduce the magnitude, so the claim
-  is the direction only.
+  Faster per instance in that run at ~12% MORE CPU. No speedup percentage from
+  these waves is CLAIMED: their deltas are quoted as this run's own numbers (the
+  PR body carries them), the independent A/B below measured 15-16% for the same
+  comparison against a different baseline without reproducing the magnitude, and
+  the direction is what is claimed. The CPU deltas and the cap-8-vs-6 9% below
+  were never withdrawn and stay as measured.
 * cap 8: 171.3 s (one paired round); 150.2 s of CPU. 9% faster than cap 6 for
   16% more CPU - it does NOT clear the >=15% bar that would justify a wider run,
   so the 2..8 clamp and the 0.5 CPU share are untouched.
@@ -144,10 +146,11 @@ per-instance medians 139.3 s against 165.9 s - but at **15-16%**, and against a
 different baseline (its cap-3 arm measured 157-182 s where the waves above
 measured 225-313 s). Absolute wall times taken minutes apart on a box with a
 live fleet of unknown depth are not comparable, which is why the waves above
-produced no reproducible magnitude: **their percentage is withdrawn and is quoted
-nowhere in this file or in the docs**, and the only figure that survives anywhere
-is the independent run's 15-16%, carried as one measurement rather than as a
-headline. What both runs agree on, and all that is claimed here: 6 beats 3 on
+produced no reproducible magnitude: **the cap-6-over-cap-3 speedup from those
+waves is withdrawn as a claim** (their own deltas stay, quoted as this run's
+numbers), and the figure to quote in its place is the independent run's 15-16%,
+carried as one measurement rather than as a headline. What both runs agree on,
+and all that is claimed here: 6 beats 3 on
 this host, and the CPU the raised arm spends is real - ~11% more in the waves
 above, ~33% more in the independent one. The mechanism is the reason to believe
 it at all: the suite is wait-bound, so extra workers hide latency until the

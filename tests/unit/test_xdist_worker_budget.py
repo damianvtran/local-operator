@@ -551,10 +551,11 @@ def test_total_memory_probe_reads_this_host(hook_module: types.ModuleType) -> No
 #: arm is the one that decides. The raise over the released constants is one
 #: worker at 4,964-5,313 MB free and two at 4,848 MB, from the reserve cap alone;
 #: the A/B behind it measured cap 6 against cap 3 and only its DIRECTION
-#: reproduced (15-16% on the independent pass, against a different baseline;
-#: the first pass's own percentage is withdrawn), so quote the direction and
-#: never a headline range. See ``conftest.py``'s module docstring for the full
-#: table and for why the count is 4 and not the 6 the earlier revision bought.
+#: reproduced (15-16% on the independent pass, against a different baseline; the
+#: first pass's cap-6-over-cap-3 speedup is withdrawn as a claim, not its CPU
+#: deltas), so quote the direction and never a headline speedup figure. See
+#: ``conftest.py``'s module docstring for the full table and for why the count is
+#: 4 and not the 6 the earlier revision bought.
 _CHRONIC_PRESSURE_MB = 5000
 #: Below the reserve, where ``_MIN_WORKERS`` is the term that decides.
 _FLOOR_BINDING_MB = 1000
