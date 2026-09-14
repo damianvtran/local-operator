@@ -5,6 +5,7 @@ It securely stores credentials in a local config file and provides methods
 for accessing them when needed.
 """
 
+import errno
 import getpass
 import os
 import sys
@@ -91,18 +92,35 @@ class CredentialManager:
         of construction stay in one file, and an edit to :meth:`_bind` or to the
         parser has one place to keep true.
 
-        A store that does not exist is an ANSWER — "no credentials recorded" —
-        and returns ``[]``; it is not a reason to create one. A store that IS
-        there but cannot be read (``EACCES`` on the file or on its directory, a
-        symlink loop) still raises: "none set" and "could not look" are
-        different answers, and the caller reports the raise as degraded instead
-        of as an authoritative empty list.
+        A store that is ABSENT is an answer — "no credentials recorded" — and
+        returns ``[]``; it is not a reason to create one. Absent means exactly
+        one errno: ``ENOENT``. Everything else is a "could not look" and is
+        raised for the caller to report as degraded — ``EACCES`` on the store or
+        on a directory on the way to it, ``ELOOP`` from a store symlinked to
+        itself, ``ENOTDIR`` when the config root is not a directory at all,
+        ``EISDIR`` for a directory in the store's place — because "none set" and
+        "could not look" are different answers and ``[]`` states the first.
+
+        That policy cannot be expressed with an existence probe, which is what
+        the previous ``Path.is_file()`` spelling got wrong: it answers ``False``
+        for ``ENOENT``, ``ENOTDIR``, ``EBADF`` and ``ELOOP`` (pathlib's
+        ``_ignore_error`` tuple, i.e. the errors it chose to treat as "no"), and
+        CPython 3.14 changed it again to delegate to ``os.path.isfile()``, which
+        swallows EVERY ``OSError``. So the same call told two different lies —
+        an untraversable root read as "no store" on 3.14, a symlink loop on
+        3.12 — neither of them the file's absence (QA round 1, Q1/Q2). An errno
+        comparison is what makes the answer version-independent. The read
+        itself is asked rather than a separate probe, so there is also no window
+        in which the store disappears between the two calls.
         """
-        if not (config_dir / CREDENTIALS_FILE_NAME).is_file():
-            return []
         manager = cls.__new__(cls)
         manager._bind(config_dir)
-        manager.load_from_file()
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return []
+            raise
         return manager.list_credential_keys(non_empty=non_empty)
 
     def load_from_file(self) -> Dict[str, SecretStr]:

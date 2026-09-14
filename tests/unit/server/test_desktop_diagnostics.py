@@ -239,6 +239,12 @@ async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_
 
     assert data["env"]["credential_keys"] == []
     assert not credentials.exists()
+    # ... and this ordinary case must NOT be disclosed as a failure. A missing
+    # store is an answer ("none recorded"), not a "could not look", so a raise
+    # on ENOENT would paint a degraded row on every healthy host and still pass
+    # every other assertion in this file (review round 1, R1-F2).
+    named = {name for name, _reason in data["degraded"]}
+    assert "env.credentials" not in named, data["degraded"]
     # Scoped to the credential store on purpose: the registry probes in this same
     # snapshot legitimately materialise their OWN directories (``agents/``,
     # ``run/``), which is how those stores work everywhere. The claim here is

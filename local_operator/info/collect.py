@@ -859,9 +859,9 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     exists to describe a host — including a broken one — and leaving new state
     on it is the same fault class as ``check_latest()`` rewriting the cache,
     which this module's docstring bans outright. The read-only construction and
-    the "a missing store is no credentials, an unreadable one raises" policy
-    both live on the class now (``CredentialManager.read_key_names``); what is
-    left here is the collector's own policy about the ROOT.
+    the "only ``ENOENT`` means the store is absent, every other failure raises"
+    policy both live on the class now (``CredentialManager.read_key_names``);
+    what is left here is the collector's own policy about the ROOT.
 
     ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
     previous form short-circuited on ``is_file()``, which is False on the

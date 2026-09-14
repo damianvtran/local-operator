@@ -1,3 +1,4 @@
+import errno
 import os
 import tempfile
 from pathlib import Path
@@ -276,3 +277,70 @@ class _TtyStub:
 
     def isatty(self) -> bool:
         return True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="File modes are only meaningful on POSIX")
+def test_read_key_names_neither_creates_nor_tightens_the_store(tmp_path: Path) -> None:
+    """The read-only construction, including the mode it must NOT change.
+
+    ``__init__`` runs ``_ensure_config_exists()``, which creates the store and
+    re-tightens a loose one to 0600. ``read_key_names`` exists to do neither: it
+    is the read ``/info`` performs on a host it is describing, so a store it
+    chmods is a store it has already failed to leave alone. This half of the
+    property had no test at any level (review round 1, R1-F2).
+    """
+    store = tmp_path / CREDENTIALS_FILE_NAME
+    store.write_text("DEEPSEEK_API_KEY=test_key\nEMPTY_KEY=\n")
+    store.chmod(0o644)
+
+    # The empty-valued key is dropped by ``list_credential_keys``' default, so
+    # this also pins that the read goes through the class's own parser.
+    assert CredentialManager.read_key_names(tmp_path) == ["DEEPSEEK_API_KEY"]
+
+    assert store.stat().st_mode & 0o777 == 0o644, "the read must not re-tighten the store"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [CREDENTIALS_FILE_NAME]
+
+
+def test_read_key_names_returns_empty_only_when_the_store_is_absent(tmp_path: Path) -> None:
+    """Q1/Q2: ``[]`` is ``ENOENT``'s answer and nobody else's.
+
+    The previous spelling asked ``Path.is_file()``, which answers ``False`` for
+    ``ENOENT``, ``ENOTDIR``, ``EBADF`` and ``ELOOP`` and — from CPython 3.14 —
+    swallows every ``OSError``, so a config root the process could not traverse
+    and a store symlinked to itself both came back as "no credentials
+    recorded". Each case is pinned to the raise here; the collector's
+    ``degraded`` row is pinned in tests/unit/info/test_collect.py.
+    """
+    import os
+
+    # ENOENT: genuinely nothing there. This is the ONE empty answer.
+    assert CredentialManager.read_key_names(tmp_path) == []
+
+    if os.name != "posix":
+        pytest.skip("mode bits and symlink loops are POSIX-only")
+
+    # ENOTDIR: the config root is a regular file, so the store cannot exist.
+    root_is_a_file = tmp_path / "file-root"
+    root_is_a_file.write_text("")
+    with pytest.raises(NotADirectoryError):
+        CredentialManager.read_key_names(root_is_a_file)
+
+    # ELOOP: the store is a symlink to itself.
+    looped = tmp_path / "loop-root"
+    looped.mkdir()
+    (looped / CREDENTIALS_FILE_NAME).symlink_to(CREDENTIALS_FILE_NAME)
+    with pytest.raises(OSError) as loop_error:
+        CredentialManager.read_key_names(looped)
+    assert loop_error.value.errno == errno.ELOOP
+
+    # EACCES: a directory on the way to the store cannot be searched.
+    locked = tmp_path / "locked-root"
+    locked.mkdir()
+    (locked / CREDENTIALS_FILE_NAME).write_text("DEEPSEEK_API_KEY=test_key\n")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            CredentialManager.read_key_names(locked)
+    finally:
+        # Restore traversal so the tmp_path tree can still be cleaned up.
+        locked.chmod(0o700)
