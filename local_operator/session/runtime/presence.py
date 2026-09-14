@@ -218,7 +218,12 @@ def read_delivery(root: Path | None = None) -> DesktopPresence:
     if time.time() - heartbeat > PRESENCE_TTL_S:
         return NO_DESKTOP_PRESENCE
     subscribers = int(data.get("subscribers") or 0)
-    window = data.get("window") if isinstance(data.get("window"), dict) else {}
+    # ANNOTATED ON PURPOSE. `data` is whatever `json.loads` produced, so the
+    # window object arrives untyped and the type checker cannot see that the
+    # `isinstance` below is what makes every `.get` on it safe. The annotation
+    # is the reader's promise that the branch really did run.
+    raw_window = data.get("window")
+    window: dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
     session_id = str(data.get("session_id") or "")
     has_window = bool(window.get("exists"))
     raw_kinds = data.get("can_notify_kinds")
