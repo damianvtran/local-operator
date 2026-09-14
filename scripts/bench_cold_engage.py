@@ -49,6 +49,8 @@ USAGE
 =====
     .venv/bin/python scripts/bench_cold_engage.py --pairs 5
     .venv/bin/python scripts/bench_cold_engage.py --pairs 5 --json out.json
+    .venv/bin/python scripts/bench_cold_engage.py --pairs 5 \
+        --measured-tree 2bf8cb890 --label "pre-fix arm"
 
 ``--pairs N`` runs N interleaved passes over the variants, so a load spike on
 this host lands on every variant rather than on whichever one ran during it.
@@ -56,10 +58,19 @@ Report the MEDIAN, not the mean: the distribution has a long right tail.
 
 The ``idle anchor`` column rescales every median by ``1146 / total(base)``,
 where 1146 ms is the repo's own measured cold-engage figure on an idle machine
-(``server/utils/desktop_sessions.py``). This host runs at a load average of
-50-90 on 14 cores, which inflates absolute milliseconds by roughly 2.5-3.5x; the
-SHARES are the durable result and the anchored column is how to read them as a
+(``server/utils/desktop_sessions.py``). How far a campaign sits above it is a
+PER-CAMPAIGN quantity, not a constant: measured here, one arm's own base sat at
+2.52x the anchor and another's at 3.53x twenty minutes later, while a loaded
+campaign earlier in the same session sat at 11x. So the SHARES and the paired
+deltas are the durable results and the anchored column is how to read them as a
 user would on an idle machine. It is a projection, not a measurement.
+
+MEASURED TREE. ``--measured-tree`` names the commit whose ``local_operator/``
+this run measures and is VERIFIED against the subtree on disk (``bench_tree``),
+because the before arm of a before/after pair is measured with the subtree
+checked out of another commit while the worktree HEAD stays put. Until round 2
+that case recorded the worktree HEAD, i.e. the wrong commit, in the one field
+the provenance claim rests on.
 """
 
 from __future__ import annotations
@@ -70,7 +81,6 @@ import json
 import os
 import shutil
 import statistics
-import subprocess
 import sys
 import tempfile
 import threading
@@ -83,6 +93,8 @@ from typing import Any
 # the venv was installed from (AGENTS.md, "Every feature worktree owns its own
 # venv"). Without this a benchmark run in a worktree silently measures main.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import bench_tree  # noqa: E402
 
 #: The child-side instrument. It is COPIED into each run's temp root before use
 #: (see ``_one_run``), so nothing on ``PYTHONPATH`` points into this repo.
@@ -138,27 +150,6 @@ def _write_mcp_config(root: Path, variant: str, stub: Path) -> None:
         entry = {"command": sys.executable, "args": ["-u", str(stub)]}
     payload = {"mcpServers": {"bench-slow": entry}}
     (root / ".mcp.json").write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _git_rev() -> str:
-    """The exact commit under test, recorded next to the numbers.
-
-    These figures are only comparable to another campaign's when the rev is in
-    the artefact rather than in someone's memory of which worktree produced them
-    (review round 1, R5). Best-effort: a missing ``git`` or an unpacked tree
-    reports ``unknown`` instead of failing the measurement.
-    """
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(Path(__file__).resolve().parents[1]),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    return completed.stdout.strip() or "unknown"
 
 
 class Timeline:
@@ -915,7 +906,25 @@ async def _main() -> int:
             "``local_operator/`` out of the parent commit)"
         ),
     )
+    parser.add_argument(
+        "--measured-tree",
+        type=str,
+        default="",
+        help=(
+            "commit whose local_operator/ this run measures (default: the "
+            "worktree HEAD). VERIFIED against the subtree on disk — the run is "
+            "refused when they disagree, so the artefact's rev always names a "
+            "tree this run actually measured (review round 2, R2-1)"
+        ),
+    )
     args = parser.parse_args()
+    try:
+        tree = bench_tree.describe(args.measured_tree)
+    except bench_tree.MeasuredTreeError as exc:
+        # Refuse BEFORE measuring: a campaign that runs for minutes and then
+        # records a commit it did not measure is worse than one that never ran.
+        print(f"REFUSING TO MEASURE: {exc}", flush=True)
+        return 2
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for variant in variants:
@@ -938,8 +947,7 @@ async def _main() -> int:
 
     _instrument_parent()
 
-    rev = _git_rev()
-    print(f"  measured tree: {rev[:9]}", flush=True)
+    print(bench_tree.format_banner(tree), flush=True)
     if args.label:
         print(f"  label: {args.label}", flush=True)
 
@@ -977,7 +985,9 @@ async def _main() -> int:
             )
 
     summary = _print_summary(rows, variants)
-    summary["rev"] = rev
+    summary["rev"] = tree["rev"]
+    summary["worktree_head"] = tree["worktree_head"]
+    summary["measured_tree_verified"] = tree["verified"]
     summary["label"] = args.label
     loads = [r["loadavg"] for r in rows if isinstance(r.get("loadavg"), float)]
     if loads:

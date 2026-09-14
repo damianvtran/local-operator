@@ -607,3 +607,114 @@ def test_the_warm_swallows_a_module_that_cannot_import(monkeypatch) -> None:
 
     monkeypatch.setattr(session_factory, "_MCP_WIRING_IMPORTS", ("definitely.not.a.real.module",))
     session_factory._warm_mcp_wiring_imports()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bind_still_releases_the_wiring_and_still_raises(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bind that raises must not strand the wiring for the session's life.
+
+    ``RuntimeServer._serve``'s ``finally`` is the only place the latch opens, and
+    this is the branch whose absence costs a session its MCP tools *forever*: in
+    thread mode ``_run`` swallows the exception and the process lives on with no
+    record and a permanently shut latch. Both halves are asserted, because they
+    are the two ways this could be "fixed" wrongly — a release that swallows the
+    fault, or a fault that skips the release (QA round 1, Q4; the branch had no
+    test, so a regression there shipped green).
+    """
+    from local_operator import session_factory
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import spawn_owned_session
+
+    entered = asyncio.Event()
+
+    async def spy(session: Any, tools: Any, cwd: str, **kwargs: Any) -> Any:
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", spy)
+
+    handle = await asyncio.wait_for(
+        spawn_owned_session(
+            asyncio.get_running_loop(),
+            cwd=str(isolated_config),
+            provider="test",
+            model_id="mock",
+        ),
+        timeout=GUARD_S,
+    )
+    session = handle._session
+    server = RuntimeServer(handle, kind="daemon")
+
+    async def failing_bind(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("bind refused")
+
+    monkeypatch.setattr(asyncio, "start_server", failing_bind)
+    try:
+        with pytest.raises(OSError, match="bind refused"):
+            await server.start_in_process()
+
+        gate = handle.mcp_publication_gate
+        assert gate is not None, "the spawn path stopped handing out a latch"
+        assert gate.is_set(), (
+            "a failed bind left the latch shut: this process can live on (thread "
+            "mode) with MCP never wired at all"
+        )
+        assert await asyncio.wait_for(
+            entered.wait(), timeout=GUARD_S
+        ), "the latch opened but the deferred wiring never ran"
+    finally:
+        server.close()
+        await session.dispose()
+
+
+def test_the_wiring_synchronous_prefix_imports_only_warmed_modules() -> None:
+    """The direction R3 named, and the only one that can actually drift.
+
+    The derived-list test above pins ``factory_warm ⊆ wiring_warm`` — the
+    direction that cannot drift, because the list is built from it. The direction
+    that CAN is the other one: add an ``mcp.client.*`` import to
+    ``wire_mcp_into_session`` before its first ``await`` and the loop stall comes
+    back with every gate test still green, because nothing else ties what that
+    function imports *synchronously* to what the warm imports off the loop (round
+    1 R3, still open in round 2's R2-3). So the source is walked: every module the
+    function imports before its first await must be in ``_MCP_WIRING_IMPORTS``.
+    """
+    import ast
+
+    from local_operator import session_factory
+
+    source = Path(session_factory.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "wire_mcp_into_session"
+    )
+    # The first await ANYWHERE in the function, which is where the loop's
+    # synchronous stretch ends — the same definition the warm list exists for.
+    first_await = min(node.lineno for node in ast.walk(function) if isinstance(node, ast.Await))
+    prefix: set[str] = set()
+    for node in ast.walk(function):
+        # ``ast.walk`` also yields nodes with no position (``arguments``,
+        # ``keyword``); they cannot carry an import, so they are skipped rather
+        # than given a line number they do not have.
+        if getattr(node, "lineno", first_await) >= first_await:
+            continue
+        if isinstance(node, ast.Import):
+            prefix.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            prefix.add(node.module)
+
+    assert prefix, (
+        "the wiring imports nothing synchronously any more, so this test is "
+        "vacuous — delete it or re-derive what the warm list is for"
+    )
+    missing = sorted(name for name in prefix if name not in session_factory._MCP_WIRING_IMPORTS)
+    assert not missing, (
+        "wire_mcp_into_session imports these before its first await and they are "
+        f"not in _MCP_WIRING_IMPORTS: {missing}. A synchronous import here takes "
+        "the child's loop for its whole duration wherever the wiring runs on it, "
+        "which is the stall the warm list exists to prevent."
+    )
