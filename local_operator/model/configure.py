@@ -580,15 +580,23 @@ def reasoning_echo_required(provider: str, model_id: str) -> bool:
 def deepseek_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
     """The native ladder for a direct-DeepSeek route, or ``()`` when not one.
 
-    The second half of the pair :func:`reasoning_echo_required` answers, and
-    exported for the same reason: the ladder decides whether the harness can
-    retreat to thinking-OFF when a route refuses the echo, so a spec that lost
-    the ladder lost its only recovery as well.
+    The builder's own single spelling of the ladder and of the ids it is
+    documented for, so ``build_model_spec`` no longer restates either inline.
 
     ``()`` is the honest answer for every other route -- including an
     AGGREGATOR route to these same ids, which owns its own effort gate and
     default (see ``build_model_spec``), and the dated snapshots, which the
     endpoint serves with no ladder.
+
+    **Deliberately NOT called from ``ModelSpec``'s construction hook**, and that
+    is a review outcome rather than an oversight. The ladder is not only a wire
+    input: it decides whether the status band paints an effort segment at all,
+    and the cold viewer and the desktop draft preview render specs built by that
+    path -- so deriving it there moved a rendered surface for a backend
+    resilience fix. It also gave the ladder a SECOND owner that cannot see a
+    provider listing, while this function's branches below run behind
+    ``build_model_spec``'s listing precedence. One owner, and it is the one that
+    can resolve a listing.
 
     Accepts the ``<hosting>/`` qualified spelling of the id for the same reason
     :func:`build_model_spec` strips it: one string is the ``provider/model``
@@ -758,11 +766,13 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     listing_levels = _listing_effort(canonical, model_name)
     # The native endpoint documents none/low/high/max, high by default. Scope
     # this to the route: aggregators own their own effort gate (and defaults).
-    # Both halves of the DeepSeek thinking-mode contract come from
-    # ``model.configure``'s own helpers rather than being spelled here, because
-    # ``ModelSpec`` derives them at construction too (see
-    # ``harness/types.py``) and two copies is how the builder and a directly
-    # built spec end up disagreeing about the same model.
+    # Both the ladder and the echo rule come from ``model.configure``'s own
+    # helpers rather than being spelled here, because ``ModelSpec``'s
+    # construction hook derives the ECHO too (see ``harness/types.py``) and two
+    # spellings of either rule is how the builder and a directly built spec end
+    # up disagreeing about the same model. The LADDER has this one owner on
+    # purpose -- it is a rendered input as well as a wire one, and a hook cannot
+    # see a provider listing.
     direct_levels = deepseek_effort_ladder(canonical, model_name)
     direct_deepseek = bool(direct_levels)
     fallback_levels = direct_levels or supported_efforts(model_name)
