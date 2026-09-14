@@ -44,6 +44,7 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
+from local_operator.session.runtime.viewers import ViewerRecord
 from local_operator.session.runtime.presence import (
     delivery_path,
     desktop_delivery_present,
@@ -379,6 +380,13 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
             switched.append(session_id)
             return f"displayed {session_id}"
 
+        async def viewer_focus_window(self) -> str:
+            # The protocol's second op, present so the host satisfies
+            # ``ViewerHost``: `ViewerServer` advertises `focus-window-v1` from
+            # `hasattr(host, "viewer_focus_window")`, so a host without it
+            # silently changes what the record claims about itself.
+            return "raised"
+
     server = ViewerServer(_Host(), surface=DESKTOP_SURFACE, root=root)
     server.start()
     assert server.ready.wait(timeout=5.0), "viewer endpoint never bound"
@@ -398,7 +406,7 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
         server.close()
 
 
-def _scan(root: Path) -> list:
+def _scan(root: Path) -> list[ViewerRecord]:
     from local_operator.session.runtime.viewers import scan_viewers
 
     return scan_viewers(root)

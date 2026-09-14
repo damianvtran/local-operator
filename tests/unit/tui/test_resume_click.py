@@ -47,7 +47,7 @@ class _Launcher:
             outcome = self.outcomes.get(argv[0], 1)
 
             class _Process:
-                def wait(self, timeout=None):  # noqa: ANN001
+                def wait(self, timeout: float | None = None) -> int:
                     if outcome is None:
                         raise subprocess.TimeoutExpired(argv, timeout)
                     return outcome

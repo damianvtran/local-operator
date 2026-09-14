@@ -1095,13 +1095,11 @@ async def test_the_desktop_presence_decides_whether_the_runtime_speaks(
                 assert len(banners) == 1, "a notify-capable desktop must silence the runtime"
 
             # The socket is closed, so the lease is revoked with it.
+            from local_operator.session.runtime.presence import desktop_delivery_present
+
             for _ in range(100):
                 await asyncio.sleep(0.05)
                 reset_cache()
-                from local_operator.session.runtime.presence import (
-                    desktop_delivery_present,
-                )
-
                 if not desktop_delivery_present(root, "complete"):
                     break
             assert not desktop_delivery_present(root, "complete")
