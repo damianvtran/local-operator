@@ -98,6 +98,51 @@ claimant must BE the deliverer — the app claims immediately before constructin
 the OS notification and after its focus gate, because a claim taken for a banner
 it then suppresses would mark the completion delivered to nobody, for good.
 
+## Who raises the banner: the eligibility ladder
+
+`claim_delivery` arbitrates among surfaces that are ALREADY eligible. Eligibility
+itself is a separate decision, first match wins, and it is a gate rather than a
+race — a surface that is not eligible never takes a claim, so the watermark stays
+free for the one that will actually deliver:
+
+1. **A surface is WATCHING the session** — a TUI attached to it, a phone, or a
+   desktop window genuinely displaying it. The card is in band; no OS banner is
+   raised. The predicate is VISIBILITY (`RuntimeServer.watching_surfaces()`),
+   never `notification_surfaces()`: the latter answers "could a banner reach
+   somebody somewhere", and using reachability to suppress meant "this machine
+   can banner" read as "a human is reading X" — with the panel on X and the
+   window behind another app, every OS surface went quiet while nobody looked.
+2. **A notify-capable desktop app** on this host claims the completion kind. The
+   machine-wide feed (`docs/DESKTOP_API.md`) composes and publishes it, so the
+   runtime and a TUI stay silent.
+3. **A TUI is running anywhere on this machine** — its 1 s background announcer
+   raises it. Its viewer record is the signal, so a crashed TUI does not hold
+   this rung forever.
+4. **Nothing** — the session RUNTIME raises the banner itself. This rung did not
+   exist before: with no TUI and no app, a finished turn was announced by
+   nobody. It claims with `backend="runtime"` and hands the claim back through
+   `release_delivery` when the spawn reports nothing went out, because a
+   watermark asserting a banner nobody received is the silent hole that
+   primitive exists to close.
+
+Rung 4 is a GATE and not a claim race, deliberately: the runtime learns about a
+completion at turn settle, EARLIER than the feed's 100 ms poll or the TUI's 1 s
+tick, so an arm that announced unconditionally would win every completion and
+make both richer paths dead. Eligibility first, claim second.
+
+**Rungs 2 and 3 are narrowed by KIND**, and the gate path is not touched. The
+machine-wide presence advertises `can_notify_kinds` (`["complete","error"]`)
+because the feed carries completions only; a parked `ask`/`approval` therefore
+keeps the per-session lease and the per-session backend toast it has today.
+Widening that suppression to the machine-wide lease would have silenced a
+background session's parked question with nothing to replace it.
+
+**A burst is capped.** At most `BURST_LIMIT` (3) individual banners per poll, on
+both transports (the feed's frames and the TUI's own announcer, asserted equal by
+a test). The remainder is announced as ONE digest naming the count rather than
+dropped, and the feed's digest carries the member session ids so a click can land
+on the catalogue instead of on an arbitrary member.
+
 ## What a frontend can acknowledge
 
 The selected result must actually be rendered, uncovered, and visible in a
