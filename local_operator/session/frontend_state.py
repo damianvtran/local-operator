@@ -1186,25 +1186,48 @@ def _freeze_row(row: Any) -> Any:
     return _freeze_value(row)
 
 
-def _retained_row(event: Any) -> Any | None:
-    """``event`` as a retained row, or ``None`` when it is not one.
+def _is_retained_row(event: Any) -> bool:
+    """Whether ``event`` is a row canonical state may hold.
 
-    THE one definition of what a retained row IS, and the reason it is a function
-    rather than a test written twice: a job's ``trajectory`` may be any iterable,
-    and canonical state may only ever hold rows that came back through this
-    predicate. ``JobState.from_job`` skips everything else, so a second copy of the
-    rule in the retained-window memo could drift -- and the drift is not a style
-    problem. A window holding anything else is frozen straight into canonical
-    state, where ``FrontendUpdate(job_trajectory_appends=...)`` rejects it with a
-    ``ValidationError`` that escapes ``refresh_jobs`` and, on the roster path, the
-    pump's bare ``call_later`` callback (measured: three loop-handler exceptions
-    for a mapping, a string and a tuple of strings, against zero before the memo).
+    THE one definition of what a retained row IS. :func:`_retained_row` materialises
+    exactly what this accepts, and BOTH readers (``JobState.from_job`` and the
+    retained-window memo) decide through these two functions rather than restating
+    the test: a second spelling would drift, and the drift lands in canonical state,
+    where ``FrontendUpdate(job_trajectory_appends=...)`` rejects a non-dict and the
+    ``ValidationError`` escapes ``refresh_jobs`` -- and, on the roster path, the
+    pump's bare ``call_later`` callback.
     """
+    return hasattr(event, "model_dump") or isinstance(event, dict)
+
+
+def _retained_row(event: Any) -> Any | None:
+    """``event`` as a row ready for canonical state, or ``None`` when it is not one."""
+    if not _is_retained_row(event):
+        return None
     if hasattr(event, "model_dump"):
         return event.model_dump(mode="json")
-    if isinstance(event, dict):
-        return copy.deepcopy(event)
-    return None
+    return copy.deepcopy(event)
+
+
+def _row_items(rows: list[Any]) -> list[Any]:
+    """``rows`` ITSELF when every item is a row, else only the items that are rows.
+
+    WHY. The memo's fast path freezes what a ``list`` holds, while
+    ``JobState.from_job`` keeps only rows -- so a list carrying anything else was
+    served by the memo as a row the one-off reader drops, and canonical state then
+    handed the appends writer a non-dict for it. The merge-base answered 0 rows
+    quietly for that shape; a window that differs from what a plain rebuild would
+    hold is the one thing a memo may never produce, in either direction.
+
+    COST. An all-rows list comes back BY IDENTITY, so nothing is rebuilt and the
+    scan is one ``hasattr``/``isinstance`` per item with no copy -- and it is only
+    reached on a tick that was going to freeze anyway, because the O(1) memo HIT
+    returns before this. A tick whose window did not move never runs it.
+    """
+    for item in rows:
+        if not _is_retained_row(item):
+            return [row for row in (_retained_row(item) for item in rows) if row is not None]
+    return rows
 
 
 def _freeze_rows(rows: Iterable[Any]) -> _FrozenSequence:
@@ -3342,6 +3365,12 @@ class _TrajectoryWindows:
     something other than rows gets the same answer it always got. Emptied is the
     one answer the rows of a real sequence must never get -- that is a job whose
     rows are silently gone.
+
+    Nor is a ``list`` whose ITEMS are not rows (:func:`_row_items`): the fingerprint
+    reads a list's identity, length and end stamps, so it cannot see that an item in
+    the middle is not a row at all. Both readers must agree on what a row is, in
+    both directions -- the memo may not keep a row a plain rebuild drops, and it may
+    not drop one a plain rebuild keeps.
     """
 
     __slots__ = ("_by_job", "_epoch")
@@ -3445,6 +3474,15 @@ class _TrajectoryWindows:
             entry = None
         if entry is not None and self._matches(entry, rows, count, first_seq, last_seq):
             return entry.rows
+        filtered = _row_items(rows)
+        if filtered is not rows:
+            # See ``_row_items``: a list whose ITEMS are not rows is never memoised
+            # and never extended -- how many of its items are rows is a fact about
+            # the list's CONTENT, which the fingerprint (identity, count, end stamps)
+            # cannot see. Extended naively, ``[row, row, row, "x"]`` would reuse a
+            # two-row window while a plain rebuild materialises three.
+            self._by_job.pop(job_id, None)
+            return _freeze_rows(filtered)
         if entry is not None and first_seq is not None and last_seq is not None:
             extended = self._extended(entry, rows, count, first_seq, last_seq)
             if extended is not None:
