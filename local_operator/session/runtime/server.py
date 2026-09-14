@@ -677,6 +677,14 @@ _PAYLOAD_OPS = {
     "job_trajectory",
     "fork_snapshot",
     "credential",
+    # Session code memory: the desktop canvas panel's list/create/update/delete
+    # verbs over the session's live eval-kernel namespace. A payload op rather
+    # than a receipt op because its answer IS the data the panel renders (and a
+    # `busy`/refusal state it must not paint as an empty list). Additive on the
+    # wire: an older runtime does not list it in `_PAYLOAD_OPS`, so it answers
+    # `unknown op`, which the viewer reports as `unsupported` — the honest
+    # "this backend cannot read code memory" the panel has a sentence for.
+    "variables",
     # The §6 redaction forward: the ONE other op that carries a secret's value,
     # and only in its own named field. It is a distinct op from ``credential``
     # on purpose — the handler registers the value with the runtime's redactor,
@@ -3114,6 +3122,36 @@ class RuntimeServer:
                 action,
                 str(frame.get("key", "")),
                 str(frame.get("value", "")),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        if op == "variables":
+            # Validated HERE for the same reason ``credential`` is: the payload
+            # path does not run ``validate_control_frame``, and this op both
+            # writes into a live namespace and reads values back out of it. The
+            # frame carries no session identity — the owner answers for the
+            # session it IS (``ServingSessionHandle.variables_op``), so a viewer
+            # cannot reach another conversation's code memory by naming it.
+            from local_operator.mobile.types import validate_control_frame
+
+            validate_control_frame(frame)
+            # Optional capability, getattr-probed like ``credential``: a reduced
+            # handle (a test host, a TUI-owned handle) cannot answer it. The
+            # refusal is worded as the unknown-op error the transport already
+            # raises for an op an older runtime does not list at all, because
+            # that is the same fact seen from the viewer's side — and the viewer
+            # classifies ``unsupported`` on exactly that string. A descriptive
+            # sentence of its own would reach the panel as a 503 instead of its
+            # "update the backend" state.
+            variables = getattr(h, "variables_op", None)
+            if not callable(variables):
+                raise ValueError("unknown op: 'variables'")
+            result = variables(
+                str(frame.get("action", "")),
+                str(frame.get("key", "")),
+                str(frame.get("value", "")),
+                str(frame.get("type", "")),
             )
             if inspect.isawaitable(result):
                 result = await result
