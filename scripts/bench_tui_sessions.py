@@ -47,9 +47,9 @@ an idle box produces much smaller numbers. CPU is ``time.thread_time()`` on the
 loop thread (AGENTS.md, "If you must measure, measure CPU, not wall time"), which
 is load-robust but blind to a pure blocking sleep — which is why the loop
 canaries assert BOTH a CPU and a wall reading rather than one. Achieved frames
-per second is the user-visible number: frames actually handed to the compositor
-per wall second while the load streams, reported beside frames per loop CPU
-second so a saturated loop can be told apart from a descheduled one.
+per second counts completed compositor updates, NOT terminal presentation.
+Use ``--continuous`` to maintain redraw demand: natural-demand counts are not
+render capacity. The CPU accounting ratio is not an idle-host FPS prediction.
 """
 
 from __future__ import annotations
@@ -83,6 +83,12 @@ import tests  # noqa: E402,F401
 
 sys.path.insert(0, str(Path(_source_args.source_root).resolve()))
 import scripts.probe_isolation  # noqa: E402,F401
+
+# Older source roots only scrub CMUX variables in probe_isolation. A benchmark
+# launched by a runtime must not inherit adoption/provider flags into its app.
+for _key in tuple(os.environ):
+    if _key.startswith(("CMUX_", "LOP_")):
+        os.environ.pop(_key)
 
 # Isolation normally disables shimmer for stills. The timing workload must keep
 # production animation enabled, or the measurement removes the work it studies.
@@ -240,14 +246,20 @@ class ProducerRoster:
     exposed — ``jobs``, ``model``, ``_subagent_comms``.
     """
 
-    def __init__(self, session_id: str, children: int, rows: int) -> None:
+    def __init__(
+        self, session_id: str, children: int, rows: int, *, capped: bool = True
+    ) -> None:
         self.session_id = session_id
+        self.capped = capped
+        self.relayed = rows
         self.model = None
         # No lineage graph: a synthetic roster has no nested subagent tree, and
         # `_jobs` folds lineage only when a comms ledger is present.
         self._subagent_comms = None
         self.manager = AsyncJobManager(on_job_change=lambda: None)
-        now = time.time()
+        # Fixed-width wall timestamps keep before/after frame sizes comparable
+        # without changing the elapsed-time presentation into a synthetic age.
+        now = float(int(time.time()))
         self.children: list[AsyncJob] = []
         for index in range(children):
             job = AsyncJob(
@@ -260,7 +272,10 @@ class ProducerRoster:
                 # A `task` job with no events is `None`, not `[]`: the roster
                 # reader has to be able to tell "no events recorded" from "this
                 # job type has none", and `--rows 0` exercises that shape.
-                trajectory=_events(rows) or None,
+                trajectory=[
+                    {**row, TRAJECTORY_SEQ_KEY: sequence}
+                    for sequence, row in enumerate(_events(((rows + 4) // 5) * 5)[:rows])
+                ] or None,
                 agent_role="coder",
                 prompt="Synthetic load only",
             )
@@ -288,26 +303,28 @@ class ProducerRoster:
     def tick(self, wave: int) -> dict[str, Any]:
         """Append one relayed event per child; return one canonical jobs delta.
 
-        Appending to ``AsyncJob.trajectory`` is what the child runner does per
-        relayed event, and it is what makes ``mutate`` ship
-        ``job_trajectory_appends`` instead of a whole-list replacement — the shape
-        the audit measured at 6.8 ms/delta. The row carries the writer's own
-        ``TRAJECTORY_SEQ_KEY`` stamp for the same reason production does: readers
-        must never identify an event by its list position, which moves as the
-        window evicts from the front.
+        Mirror ``subagent.relay``: stamps advance independently of retained
+        length and the oldest rows are removed at the cap. The current producer
+        emits a full replacement when that trim breaks its prefix proof. The
+        optional uncapped variant isolates suffix cost but is NOT a faithful
+        long-running runtime workload.
         """
         for index, job in enumerate(self.children):
-            rows = list(job.trajectory or ())
-            rows.append({**_appended_row(wave, index), TRAJECTORY_SEQ_KEY: len(rows) + 1})
+            # The runner mutates the SAME list. Replacing it per tick defeats
+            # the producer's identity-based memo and measures the wrong path.
+            rows = job.trajectory if job.trajectory is not None else []
+            rows.append({**_appended_row(wave, index), TRAJECTORY_SEQ_KEY: self.relayed})
+            if self.capped and len(rows) > _TRAJECTORY_CAP:
+                del rows[: len(rows) - _TRAJECTORY_CAP]
             job.trajectory = rows
+        self.relayed += 1
         update = self.store.refresh_jobs(self)
         if update is None:
             raise AssertionError("a moving roster must publish a delta")
         payload = update.model_dump(mode="json")
         if not payload.get("job_trajectory_appends"):
-            # Asserting the SHAPE here, not merely the delivery: a payload with no
-            # appends is either a replacement frame or a summary-only frame, and
-            # both would measure a different cost than the one this sweep claims.
+            # Replacement rows also travel in job_trajectory_appends; requiring
+            # the body detects an accidentally summary-only timing workload.
             raise AssertionError("expected a delta carrying job_trajectory_appends")
         return payload
 
@@ -373,6 +390,15 @@ class AttachedFacade(FakeSession):
     def frontend_state(self) -> Any:
         return self.viewer._frontend_store.state
 
+    @property
+    def has_running_job(self) -> bool:
+        # Baseline trees retain their historical clone cost rather than silently
+        # gaining the production narrow-read optimization in this facade.
+        narrow = getattr(self.viewer, "has_running_job", None)
+        if isinstance(narrow, bool):
+            return narrow
+        return any(job.status == "running" for job in self.frontend_state.jobs)
+
     def subscribe_frontend(self, callback: Any) -> Any:
         return self.viewer._frontend_store.subscribe(callback)
 
@@ -391,7 +417,10 @@ class PaintProbe:
     counted at the same boundary the latency is measured at.
     """
 
-    def __init__(self, app: OperatorApp) -> None:
+    def __init__(self, app: OperatorApp, *, continuous: bool = False) -> None:
+        self.continuous = continuous
+        self.frame_times: list[float] = []
+        self.message_queue_peak = 0
         self.pending: list[tuple[str, float]] = []
         self.samples: list[float] = []
         self.frames = 0
@@ -424,6 +453,12 @@ class PaintProbe:
             text = "".join(lines).replace(" ", "")
             self.frames += 1
             now = time.perf_counter()
+            self.frame_times.append(now)
+            self.message_queue_peak = max(self.message_queue_peak, app._message_queue.qsize())
+            if self.continuous:
+                # Demand another real frame without bypassing the refresh timer
+                # or doing a synchronous render inside the measuring probe.
+                app.call_later(app.screen.refresh)
             for marker, started in self.pending[:]:
                 if marker in text:
                     self.samples.append(now - started)
@@ -540,10 +575,16 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
     # the producer's sequence forward, so a pool built before the install would
     # leave every viewer expecting a sequence the producer has already passed and
     # every delta would be refused by the follower's exact-sequence check.
-    rosters = [ProducerRoster(session_id, args.children, args.rows) for session_id in ids]
+    rosters = [
+        ProducerRoster(session_id, args.children, args.rows, capped=args.workload == "capped")
+        for session_id in ids
+    ]
     viewers = [
         build_viewer(session_id, config_dir, roster.store.state)
         for session_id, roster in zip(ids, rosters, strict=True)
+    ]
+    viewers_seed_rows = [
+        [list(job.trajectory) for job in viewer._frontend_store.state.jobs] for viewer in viewers
     ]
     pool_started = time.perf_counter()
     pool = [build_pool(roster, args.pool) for roster in rosters]
@@ -606,8 +647,12 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
             )
             spans.wrap(app, "_apply_frontend_state", "OperatorApp._apply_frontend_state")
 
-        paint = PaintProbe(app)
+        paint = PaintProbe(app, continuous=args.continuous)
+        if args.continuous:
+            app.screen.refresh()
         stop = asyncio.Event()
+        delivery_lags: list[float] = []
+        pending_rounds: list[int] = []
 
         async def stream() -> None:
             """Offer one delta round per cadence until the last key has PAINTED.
@@ -620,12 +665,24 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
             the injecting thread's liveness, with a round budget as the backstop.
             """
             round_index = 0
+            deadline = time.perf_counter()
             while (
                 round_index < args.deltas
                 or key_thread.is_alive()
                 or len(paint.samples) < args.samples
             ) and round_index < args.max_rounds:
-                await asyncio.sleep(DELTA_INTERVAL_S)
+                # Fixed deadlines avoid understating offered load when reduction
+                # is slow; sleeping after each round would throttle the producer.
+                deadline += DELTA_INTERVAL_S
+                await asyncio.sleep(max(0.0, deadline - time.perf_counter()))
+                lag = max(0.0, time.perf_counter() - deadline)
+                delivery_lags.append(lag)
+                # Virtual queue: frames are generated from a bounded reusable
+                # pool, never an unbounded task backlog. Report overdue offered
+                # rounds instead of hiding overload behind successful delivery.
+                pending_rounds.append(
+                    min(args.max_rounds - round_index, 1 + int(lag / DELTA_INTERVAL_S))
+                )
                 for view, viewer in enumerate(viewers):
                     payload = pool[view][round_index % args.pool]
                     # Only the sequence is rewritten. The frame's CONTENT is a
@@ -635,10 +692,17 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
                     next_sequence[view] += 1
                     viewer._on_frontend_update(payload)
                     delivered[view] += 1
+                paint.message_queue_peak = max(
+                    paint.message_queue_peak, app._message_queue.qsize()
+                )
                 round_index += 1
             rounds_done[0] = round_index
+            stream_finished[0] = time.perf_counter()
+            stream_cpu_finished[0] = time.thread_time()
 
         rounds_done = [0]
+        stream_finished = [0.0]
+        stream_cpu_finished = [0.0]
         probe_task = asyncio.create_task(loop_probe(stop, wall_gaps, cpu_gaps))
         typed = "".join(random.Random(KEY_SEED).choices(string.ascii_letters, k=args.samples))
 
@@ -667,13 +731,22 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
         await stream_task
         stop.set()
         await probe_task
-        elapsed = time.perf_counter() - started
-        cpu_used = time.thread_time() - cpu_started
+        # End at the last delivered round, not the later pilot/probe drain.
+        # Counting quiet frames after load stopped would inflate loaded FPS.
+        finished = stream_finished[0]
+        elapsed = finished - started
+        cpu_used = stream_cpu_finished[0] - cpu_started
+        paint.continuous = False
+        measured_frames = [stamp for stamp in paint.frame_times if started <= stamp <= finished]
+        frame_gaps = [right - left for left, right in zip(measured_frames, measured_frames[1:])]
+        frames_painted = len(measured_frames)
 
         if args.capture:
             root = Path(args.capture)
             root.mkdir(parents=True, exist_ok=True)
             save_capture(app, str(root / f"sessions-{count}.svg"))
+            await pilot.pause()
+            save_capture(app, str(root / f"sessions-{count}-settled.svg"))
 
         # -- correctness. Every assertion here is a way the instrument could return
         # -- a plausible readout while measuring something else, so they run while
@@ -695,6 +768,19 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
                     store.state.sequence,
                     value,
                 )
+                seed_jobs = rosters[ids.index(session_id)].store.state.jobs
+                # Length alone cannot detect a dropped/reordered append. Rebuild
+                # the expected tail from the actual offered pool for every job.
+                for job_index, job in enumerate(store.state.jobs):
+                    expected = list(viewers_seed_rows[ids.index(session_id)][job_index])
+                    for tick in range(value):
+                        frame = pool[ids.index(session_id)][tick % args.pool]
+                        if job.id in frame.get("job_trajectory_replacements", ()):
+                            expected = []
+                        expected.extend(frame.get("job_trajectory_appends", {}).get(job.id, []))
+                        expected = expected[-_TRAJECTORY_CAP:]
+                    assert list(job.trajectory) == expected, (session_id, job.id)
+                    assert job.status == seed_jobs[job_index].status
             if args.children and args.rows:
                 first = viewers[0]._frontend_store.state.jobs[0]
                 # Every append landed, and the reducer's own cap is what bounds the
@@ -712,6 +798,11 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
     total_deltas = sum(delivered)
     result = {
         "sessions": count,
+        "workload": args.workload,
+        "replacement_jobs_per_frame": (
+            [len(frame.get("job_trajectory_replacements", ())) for frame in pool[0]]
+            if pool else []
+        ),
         "children": args.children,
         "retained_rows": args.rows,
         "retained_roster_rows_per_session": args.children * args.rows,
@@ -724,13 +815,22 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
         "loop_wall_gap": summary(wall_gaps),
         "loop_cpu_gap": summary(cpu_gaps),
         "window_s": elapsed,
-        "frames_painted": paint.frames,
-        "achieved_fps_wall": paint.frames / elapsed if elapsed else 0.0,
+        "measurement_window": "stream_start_to_last_delivered_round_no_drain",
+        "render_demand": "continuously_dirty" if args.continuous else "natural_demand",
+        "compositor_frame_gap": summary(frame_gaps),
+        "frames_painted": frames_painted,
+        "achieved_fps_wall": frames_painted / elapsed if elapsed else 0.0,
         "loop_cpu_s": cpu_used,
-        # Frames per loop CPU second: the same number with the descheduling
-        # removed, which is what makes two cells comparable on a shared host.
-        "achieved_fps_cpu": paint.frames / cpu_used if cpu_used else 0.0,
+        # An accounting ratio, NOT idle-host FPS: Textual timers and offered
+        # demand still use wall time, which cannot be divided away.
+        "frames_per_loop_cpu_second": frames_painted / cpu_used if cpu_used else 0.0,
         "loop_cpu_share_of_wall": cpu_used / elapsed if elapsed else 0.0,
+        "offered_interval_ms": DELTA_INTERVAL_S * 1000,
+        "delivery_deadline_lag": summary(delivery_lags),
+        "pending_offered_rounds_peak": max(pending_rounds, default=0),
+        "pending_rounds_capacity": args.max_rounds,
+        "queued_input_at_finish": len(paint.pending),
+        "textual_message_queue_peak_observed": paint.message_queue_peak,
         "deltas_delivered": total_deltas,
         "deltas_per_session": delivered,
         "deltas_per_s": total_deltas / elapsed if elapsed else 0.0,
@@ -770,6 +870,10 @@ async def main() -> None:
     )
     parser.add_argument("--children", type=int, default=6, help="running children per session")
     parser.add_argument(
+        "--workload", choices=("capped", "suffix"), default="capped",
+        help="capped mirrors runtime eviction; suffix isolates uncapped append cost only",
+    )
+    parser.add_argument(
         "--rows",
         type=int,
         default=500,
@@ -790,6 +894,11 @@ async def main() -> None:
     )
     parser.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS)
     parser.add_argument("--source-root", default=_source_args.source_root)
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="keep compositor dirty; natural-demand frame counts are not capacity FPS",
+    )
     parser.add_argument("--capture")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
