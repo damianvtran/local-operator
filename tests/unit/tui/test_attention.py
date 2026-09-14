@@ -120,12 +120,38 @@ class FencedReceiptSession(ReceiptSession):
         return await asyncio.to_thread(self.store.acknowledge, "session/sess", token)
 
 
+#: Pauses ``_settle`` may spend waiting for a laid-out anchor before it fails.
+#:
+#: A BOUND on a real wait, not a calibrated frame count: the anchor is laid out by
+#: the compositor, so how many pauses a healthy settle costs moves with host load.
+#: What the bound must not do is give up SILENTLY. The first run of the two
+#: attention files in QA round 3 reported two unrelated-looking failures under
+#: load average ~158 that three identical reruns did not reproduce, and a
+#: ``_settle`` that returns on exhaustion hands the failure to whichever
+#: assertion runs next -- the run names the symptom and never the cause. The
+#: budget stays a generous multiple of the healthy case so that load alone
+#: cannot trip it; exceeding it is reported as what it is.
+_SETTLE_PAUSES = 50
+
+
 async def _settle(app: Any, pilot: Any, anchor: str) -> None:
-    """Pump until the anchored block is laid out and hit-testable."""
-    for _ in range(50):
+    """Pump until the anchored block is laid out and hit-testable.
+
+    Raises rather than returning quietly when the budget in ``_SETTLE_PAUSES``
+    runs out: every caller's next line asserts on the geometry this establishes,
+    so a silent return only relocates the failure.
+    """
+    for _ in range(_SETTLE_PAUSES):
         await pilot.pause()
         if app._completion_anchor_visible(anchor):
             return
+    transcript = app._transcript_view()
+    raise AssertionError(
+        f"the anchored block {anchor!r} was never laid out and hit-testable within "
+        f"{_SETTLE_PAUSES} pauses "
+        f"(transcript displayed: {transcript.display}, "
+        f"near bottom: {transcript.is_near_bottom()})"
+    )
 
 
 @pytest.mark.asyncio
