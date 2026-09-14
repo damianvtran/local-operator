@@ -218,8 +218,12 @@ class SessionDiagnostics:
             context_is_estimate=getattr(state, "context_is_estimate", None),
             generation=getattr(state, "generation", None),
             epoch=getattr(state, "epoch", None),
-            spend_micro=(spend.micro if spend is not None else None),
-            spend_knowledge=(spend.knowledge().value if spend is not None else ""),
+            # ``calls`` is the same gate the band applies by construction: a
+            # record with no calls holds no money, so this screen has nothing
+            # durable to add and omits the row rather than printing ``$0.00``
+            # beside a band that shows no cell at all (QA round 1, Q1).
+            spend_micro=(spend.micro if spend is not None and spend.calls else None),
+            spend_knowledge=(spend.knowledge().value if spend is not None and spend.calls else ""),
         )
 
 
@@ -1160,15 +1164,25 @@ def _draw_recorded_usage(
         bound = runtime.spend_knowledge in {"floor", "partial"}
         state = runtime.spend_knowledge or "unknown"
         micro_text = f"{runtime.spend_micro:,} μ$"
-        body.kv(
-            "Record total",
-            f"{LOWER_BOUND_MARK if bound else ''}{format_usd_exact(runtime.spend_micro)}",
-            notes=(
-                f"{state} · {micro_text} · this session",
-                f"{micro_text} · this session",
-                "this session",
-            ),
-        )
+        if state == "unknown":
+            # §8.2: nothing priceable is ``$—``, never ``$0.00``. It carries no
+            # mark and no micro rung either, because ``≥$—`` is a contradiction
+            # -- there is no figure for a bound to qualify (QA round 1, Q1).
+            body.kv(
+                "Record total",
+                "$—",
+                notes=("nothing priceable · this session", "this session"),
+            )
+        else:
+            body.kv(
+                "Record total",
+                f"{LOWER_BOUND_MARK if bound else ''}{format_usd_exact(runtime.spend_micro)}",
+                notes=(
+                    f"{state} · {micro_text} · this session",
+                    f"{micro_text} · this session",
+                    "this session",
+                ),
+            )
         # RECONCILIATION, as a row rather than a prose apology, and as a row the
         # GRID owns (design round 1, D2): the first version drew it with
         # ``body.note``, so its money landed at column 21 where every other value

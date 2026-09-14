@@ -910,6 +910,12 @@ class AttachedSession:
         #: longer has — the classic "fixed one end, left the mirror" defect
         #: (design R5).
         self._cold_spend: dict[str, Any] | None = None
+        #: Where the spend record and the turn-end checkpoint sat in the journal,
+        #: from the same suffix read (``ReplaySuffix.checkpoint_order``; LOWER is
+        #: NEWER). The two carry money and can disagree, and only their own order
+        #: in the transcript can settle which one speaks for the session — see
+        #: ``_seed_cold_usage`` (QA round 1, Q2).
+        self._cold_order: dict[str, int] = {}
         #: The conversation's own journalled model selection, as read while
         #: synthesising cold state. Held so the seeding can attribute a receipt
         #: that predates the serving-identity stamp (``usage_seed.reading_
@@ -1473,16 +1479,21 @@ class AttachedSession:
         holds those readings; ``_cold_seed_usage`` is the one the suffix read
         stashed (``_read_transcript._replay``).
 
-        For MONEY the order is: the checkpoint's accumulator, then the durable
-        ``session_spend.v1`` record (the same suffix read, the same O(1) lookup
-        the owner path gets), and only then the one-receipt floor. The record
-        exists precisely so a cold surface does not have to reconstruct a total
-        from a point-in-time reading — and it is durable without a UI attached,
-        which is the property the checkpoint lacks (design §2.3, R5).
+        For MONEY the order is: WHICHEVER of the checkpoint's accumulator and the
+        durable ``session_spend.v1`` record is NEWER in the journal (their own
+        order, from the same suffix read — see ``_cold_record_is_newer``), then
+        the one-receipt floor. The record exists precisely so a cold surface does
+        not have to reconstruct a total from a point-in-time reading — and it is
+        durable without a UI attached, which is the property the checkpoint lacks
+        (design §2.3, R5) — but it is written per CALL while the checkpoint is
+        written per TURN END, so either can be the newer, and only the journal can
+        say which (QA round 1, Q2).
 
-        FILLS ONLY, field by field, and that order is the contract: a checkpoint
-        that carried accounting wins, because it is the conversation's LAST
-        turn-end state whereas a receipt is one point in time. EVERY write below
+        FILLS ONLY, field by field, for every field EXCEPT the money, which the
+        ordering above may OVERRIDE: a checkpoint that carried accounting is the
+        conversation's last turn-end state, and a record that outlived it is
+        newer still. When the two disagree and no order can be established, the
+        figure is kept but demoted to a lower bound rather than certified. EVERY write below
         is therefore gated on its own target field still being unset — including
         the window, which is the one that must not be imported under a stored
         numerator (a checkpoint at 500_000/1_050_000 read as 390.6% of a fresh
@@ -1517,9 +1528,43 @@ class AttachedSession:
         changes: dict[str, Any] = {}
         # Money first, and independent of the model spec below: the record is a
         # total, not a reading that has to be attributed to a model.
-        if state.cumulative_parent_cost is None and spend is not None and spend.calls:
-            changes["cumulative_parent_cost"] = spend.usd
-            changes["cost_knowledge"] = spend.knowledge()
+        #
+        # WHICH of the two money artifacts speaks for the session is decided by
+        # their own ORDER in the journal, newest first (QA round 1, Q2). The
+        # record is written per call and the checkpoint only at a turn end, so
+        # the record can be the NEWER of the two — any call accrued after the
+        # last turn end, and every crash/repair window — and the cold viewer
+        # used to prefer the checkpoint unconditionally: a session the record
+        # says cost $5.00 painted ``$1.00`` unmarked and EXACT on the band, one
+        # screen away from a ``/session`` row quoting the record. Ordering them
+        # by the read's own meeting index makes the choice a fact about the
+        # journal instead of a preference between two sources.
+        #
+        # When the order cannot be established AND the two disagree, neither is
+        # presented as exact: the cell keeps the checkpoint's figure and wears
+        # the lower-bound mark. A figure whose provenance cannot be ordered is a
+        # figure we cannot certify, so silence and a bare number are both claims
+        # the artifacts do not support.
+        if spend is not None and spend.calls:
+            known = state.cumulative_parent_cost is not None
+            record_is_newer = self._cold_record_is_newer()
+            if not known or record_is_newer is True:
+                # ``priced_calls == 0`` is the UNKNOWN state, NOT a zero total
+                # (QA round 1, Q1): a session whose every call was unpriceable
+                # has no figure to show, and design §8.2 spells that ``$—``.
+                # Publishing ``0.0`` made the band drop the cell entirely (its
+                # zero policy: a confident ``$0.0000`` over billed tokens) while
+                # ``/analytics`` printed ``$—`` for the same state. The same
+                # rule covers the record that is NEWER and unpriced: it cannot
+                # certify a figure, so the cell stops asserting one rather than
+                # repeating the older artifact's number.
+                changes["cumulative_parent_cost"] = spend.usd if spend.priced_calls else None
+                changes["cost_knowledge"] = spend.knowledge()
+            elif record_is_newer is None and self._cold_money_disagrees(spend, state):
+                from local_operator.session.frontend_state import CostKnowledge
+
+                changes["cost_knowledge"] = CostKnowledge.FLOOR
+
         spec = state.effective_model or state.selected_model
         if spec is None:
             return state.model_copy(update=changes) if changes else state
@@ -1567,6 +1612,44 @@ class AttachedSession:
         if not changes:
             return state
         return state.model_copy(update=changes)
+
+    def _cold_record_is_newer(self) -> bool | None:
+        """Did the ledger record land after the newest turn-end checkpoint?
+
+        ``None`` when the order cannot be established — one of the two was never
+        met by the suffix read, so the journal in hand does not say which is
+        newer. The caller must treat that as "do not certify", never as "the
+        checkpoint wins": this method exists because that assumption WAS the
+        Q2 defect.
+        """
+        spend_met = self._cold_order.get(SESSION_SPEND_CUSTOM_TYPE)
+        checkpoint_met = self._cold_order.get(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+        if spend_met is None or checkpoint_met is None or spend_met == checkpoint_met:
+            return None
+        # LOWER is NEWER: the scan walks from EOF.
+        return spend_met < checkpoint_met
+
+    @staticmethod
+    def _cold_money_disagrees(spend: SessionSpend, state: FrontendSessionState) -> bool:
+        """Do the record and the checkpoint tell different money stories?
+
+        Compared as integer micro-USD, the unit both artifacts are exact in, and
+        on the knowledge state as well as the figure: a checkpoint claiming EXACT
+        beside a record that is a partial sum is a disagreement even when the two
+        numbers happen to match, because the next call would move only one of
+        them.
+        """
+        baseline = state.cumulative_parent_cost
+        if baseline is None:
+            return False
+        if int(round(float(baseline) * 1_000_000)) != spend.micro:
+            return True
+        from local_operator.session.frontend_state import CostKnowledge
+
+        return (
+            state.cost_knowledge is CostKnowledge.EXACT
+            and spend.knowledge() is not CostKnowledge.EXACT
+        )
 
     def _restore_cold_subagents(self, state: FrontendSessionState) -> FrontendSessionState:
         """Overlay the independently committed roster and lifetime ledger.
@@ -3839,6 +3922,7 @@ class AttachedSession:
             if want_checkpoint:
                 self._cold_checkpoint = suffix.checkpoint
                 self._cold_spend = suffix.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE)
+                self._cold_order = dict(suffix.checkpoint_order)
                 # The accounting fallback rides the SAME read, from the rows
                 # already in hand: the suffix reader stops only once the newest
                 # shrink and its kept window are buffered, so every post-shrink

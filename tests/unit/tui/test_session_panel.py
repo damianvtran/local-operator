@@ -2078,6 +2078,27 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
     assert not any("nested" in r for r in section)
 
 
+def test_an_unknown_record_reads_as_no_figure_and_never_as_a_marked_one():
+    """Q1 and §8.2: nothing priceable is ``$—``, and ``≥$—`` is impossible.
+
+    A record whose every call was unpriceable has no figure to show. The band
+    spells that ``$—`` and so must this row -- a ``$0.00`` here would be the
+    "confident zero over billed work" the design names, and a marked ``≥$—``
+    would be a bound on a figure that does not exist. No micro rung either: there
+    is no integer to print.
+    """
+    report = _tree_report()
+    unknown = replace(runtime(), spend_micro=0, spend_knowledge="unknown")
+    row = next(
+        line
+        for line in build_session_report(report, unknown, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "$—" in row, row
+    assert "μ$" not in row, row
+    assert "≥" not in row, row
+
+
 def test_a_bound_record_wears_the_mark_the_band_wears():
     """R2-1: an exact-looking figure must never stand for a lower bound.
 
