@@ -180,7 +180,7 @@ def _kill_runtime(config_dir: Path, session_id: str) -> None:
         pass
 
 
-def _declared_servers(client: Any, session_id: str) -> list[str]:
+def _declared_servers(client: Any, session_id: str) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
     A benchmark whose "declared" arm declares nothing is measuring its own
@@ -190,15 +190,22 @@ def _declared_servers(client: Any, session_id: str) -> list[str]:
     session and recorded in the row, and ``_summarize`` grades it: the arm's own
     output now carries the proof that it measured what it claims.
 
-    Never raises: a run whose declaration cannot be read is a recorded unknown
-    rather than a dead campaign.
+    Read the cold GET before the timed send: it resolves the session's actual
+    cwd without binding a runtime. The live POST refuses while the deferred
+    manager is starting (and forever for a no-server session), so that refusal
+    cannot distinguish absent configuration from wiring that is merely pending.
+    Require the cold marker as well: verification must not warm the measured path.
+    An unreadable response is unknown, never a successful empty control.
     """
     try:
-        listed = client.post(f"/v1/desktop/sessions/{session_id}/mcp", json={"action": "list"})
-        data = listed.json().get("result", {}).get("data", {}) or {}
-        return sorted(str(server.get("name")) for server in data.get("servers", []))
+        listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
+        listed.raise_for_status()
+        data = listed.json()["result"]["data"]
+        if data.get("cold") is not True:
+            return None
+        return sorted(str(server["name"]) for server in data["servers"])
     except Exception:  # noqa: BLE001 — a record we could not read is not a result
-        return []
+        return None
 
 
 def _one_run(
@@ -218,15 +225,13 @@ def _one_run(
     created_body = created.json()
     session_id = created_body["result"]["session_id"]
 
+    declared = _declared_servers(client, session_id)
     started = time.perf_counter()
     sent = client.post(
         f"/v1/desktop/sessions/{session_id}/messages",
         json={"request_id": str(uuid.uuid4()), "text": "bench: one word"},
     )
     first_send_ms = round((time.perf_counter() - started) * 1000.0, 1)
-
-    # AFTER the timed window, so the extra round trip cannot land in the number.
-    declared = _declared_servers(client, session_id)
 
     result = {
         "run": index,
@@ -235,7 +240,7 @@ def _one_run(
         "loadavg": round(loadavg, 1),
         "variant": variant,
         "mcp_declared_servers": declared,
-        "mcp_declaration_correct": bool(declared) == (variant != "none"),
+        "mcp_declaration_correct": declared == (["bench-slow"] if variant == "mcpx" else []),
         "create_status": created.status_code,
         "create_body": created_body,
         "send_status": sent.status_code,
@@ -253,7 +258,7 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     values = [row["first_send_ms"] for row in rows]
     if not values:
         return {}
-    declared = sorted({name for row in rows for name in row.get("mcp_declared_servers", [])})
+    declared = sorted({name for row in rows for name in (row.get("mcp_declared_servers") or [])})
     correct = [row.get("mcp_declaration_correct") for row in rows]
     return {
         "median": round(statistics.median(values), 1),
