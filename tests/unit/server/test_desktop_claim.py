@@ -11,9 +11,13 @@ take on faith:
 * that a browser cannot reach the door AT ALL, even holding the key, because a
   ``Sec-Fetch-Site``-bearing claim is refused outright, before any key is read;
 * that a claim TIGHTENS the legacy control surface rather than merely turning
-  the desktop routers on (the half of the bug that option A exists to close),
-  for the NATIVE caller too — an empty allowlist means "no browser origin is
-  admitted", never "no tightening in force";
+  the desktop routers on (the half of the bug that option A exists to close):
+  the gated families refuse a foreign page and require the bearer from a native
+  caller. The CORS echo is narrowed by the same claim only when it actually
+  ADMITS an origin — it never pretends an empty allowlist cannot be read two
+  ways, because a daemon whose allowlist is empty (the app-managed default, and
+  a native claim that declared nothing) must keep the wildcard echo its
+  ``file://`` renderer reads ``/health`` with;
 * that the claim can install the origins its renderer declares, and that a
   declaration it cannot install is refused with its own sentence;
 * that the record stops saying the plane is ungoverned, without re-minting the
@@ -628,20 +632,24 @@ async def test_a_claim_stops_echoing_foreign_origins(plane):
     assert "access-control-allow-credentials" not in after.headers
 
 
-async def test_a_native_claim_also_stops_echoing_foreign_origins(plane):
-    """G2: the caller this feature exists for is the one that installs NO origin.
+async def test_a_native_claim_keeps_the_echo_the_packaged_renderer_reads(plane):
+    """The deliberate residual: a claim that installs NO origin cannot tighten
+    the CORS echo, and #1093 made it do exactly that -- and broke the app.
 
     Electron main sends no ``Origin``, so a native claim installs an empty
-    allowlist — and the first version of ``desktop_origin_cors`` read "empty
-    allowlist" as "no tightening in force", which left the wildcard echo (and
-    ``allow-credentials``) on every non-gated legacy path for exactly that
-    daemon. QA measured it against ``/v1/models/providers``; the middleware is
-    the same one here.
+    allowlist. #1093 read that as "no browser origin is admitted" and dropped
+    the wildcard echo on every non-gated legacy path. But the app's OWN
+    renderer needs that echo: ``mainWindow.loadFile(...)`` serves it from
+    ``file://``, so its requests carry the opaque origin ``"null"``, and it
+    calls ``/health`` -- the app's "server offline" signal -- DIRECTLY. With
+    the grant stripped, the app reported a daemon it had just claimed as down.
 
-    An empty allowlist on a GOVERNED plane means "no browser origin is
-    admitted", which is what ``require_desktop`` already does on the gated
-    families — so the app, which sends no Origin, loses nothing. That half is
-    asserted below.
+    So a declared-nothing claim leaves the pre-existing wildcard echo in place
+    (this host's posture before the claim program) and the tightening that
+    survives is the CONTROL half, asserted below: ``require_desktop`` still
+    refuses ``/v1/config`` for a foreign page and still requires the bearer
+    from a native caller. Closing the echo for an allowlist-less daemon needs
+    the renderer to stop reading ``/health`` directly, which the UI PR does.
     """
     client, _ = plane
     page = {"Origin": PAGE_ORIGIN}
@@ -651,35 +659,50 @@ async def test_a_native_claim_also_stops_echoing_foreign_origins(plane):
     assert (await claim(client)).status_code == 200  # native: no Origin at all
     assert desktop.desktop_posture().origins == frozenset()
 
-    for origin in (PAGE_ORIGIN, APP_ORIGIN):
+    # "null" is the renderer's real origin; the other two are the shapes the
+    # suppression used to cover.
+    for origin in (PAGE_ORIGIN, APP_ORIGIN, "null"):
         after = await client.get("/v1/capabilities", headers={"Origin": origin})
         assert after.status_code == 200
-        assert "access-control-allow-origin" not in after.headers, origin
-        assert "access-control-allow-credentials" not in after.headers, origin
+        assert after.headers["access-control-allow-origin"] == origin, origin
 
     # The app's own shape — no Origin — is untouched, on a gated route or not.
     assert (await client.get("/v1/capabilities")).status_code == 200
+    # ...and the control half stayed shut on the gated family.
+    assert (await client.get("/v1/config", headers=page)).status_code == 403
+    assert (await client.get("/v1/config")).status_code == 401
 
 
-async def test_an_env_token_daemon_without_a_list_admits_no_browser_origin(plane, monkeypatch):
-    """G2, the app-managed half: the app is not broken by the tightening.
+async def test_an_app_managed_daemon_without_a_list_keeps_the_echo_its_renderer_needs(
+    plane, monkeypatch
+):
+    """The app-managed default, which is the regression #1093 shipped.
 
-    A daemon the app started with a token and NO ``ORIGINS`` list already
-    refuses every Origin-bearing request on the gated families (403, asserted
-    below) — its renderer goes through main, which sends none. The CORS grant
-    now agrees with that gate instead of contradicting it.
+    A daemon the app started itself sets the token and NO ``ORIGINS`` list,
+    and that is the packaging default. Its renderer is loaded with
+    ``mainWindow.loadFile(...)``, so it runs at ``file://`` and every request
+    it makes carries the opaque origin ``"null"``; it reads ``/health``
+    DIRECTLY as the app's "server offline" signal. Scoping the CORS
+    suppression to the posture — what #1093 did — stripped
+    ``Access-Control-Allow-Origin`` from that reply, the renderer's fetch
+    failed, and the app announced a live daemon as down. So an empty allowlist
+    keeps the echo; it is the CONTROL half that protects this state.
     """
     client, _ = plane
     monkeypatch.setenv(desktop.TOKEN_ENV, "env-token")
     assert desktop.desktop_posture().origins == frozenset()
 
-    for origin in (APP_ORIGIN, PAGE_ORIGIN):
+    for origin in (APP_ORIGIN, PAGE_ORIGIN, "null"):
         response = await client.get("/v1/capabilities", headers={"Origin": origin})
         assert response.status_code == 200
-        assert "access-control-allow-origin" not in response.headers, origin
+        assert response.headers["access-control-allow-origin"] == origin, origin
+        assert response.headers["access-control-allow-credentials"] == "true", origin
 
-    # The same state on a gated route: already refused before this change, so
-    # nothing regresses for the app's main-process caller below.
+    # The control half is untouched by this narrowing: on a gated family this
+    # same state already refused an Origin-bearing request. That 403 is what
+    # the renderer's own DIRECT calls to the gated families meet — which is why
+    # the UI PR moves those probes to the main process instead of trying to
+    # re-open the gate here.
     assert (
         await client.get(
             "/v1/settings",
