@@ -11595,6 +11595,67 @@ class Session:
         self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
+    def retire_wakes_to_inbox(self) -> None:
+        """From now on, a fired wake is SPOOLED for whoever opens next.
+
+        Called when this session's runtime has committed to leaving for a build
+        it can no longer be trusted to run (``ServingSessionHandle.begin_drain``,
+        driven by ``process._BuildWatch``'s bound or its files-gone probe). The
+        invariant it holds is the one the wake layer would otherwise break: a
+        wake that comes due while the runtime is draining must not open a turn
+        against a build whose files are being replaced, and must not be silently
+        DROPPED either — by the time the scheduler delivers an occurrence it has
+        already advanced and persisted the schedule, so a wake swallowed here is
+        a reminder the user never gets and never hears about.
+
+        The inbox is the vehicle because it is the one channel that survives the
+        handover: ``process._drain_inbox_into`` reads it at the successor's boot,
+        BEFORE the control socket listens, so the row lands ahead of anything a
+        client can send. It is delivered as a QUIET note (``mode="mailbox"``,
+        no wake): the schedule that asked for attention has already been
+        advanced, and the successor's job is to read this when it next runs, not
+        to be driven by an occurrence the index has moved past.
+
+        Overwrites the resume catch-up shim if one is installed, deliberately: a
+        runtime that is leaving does not owe a catch-up of its own — the
+        successor loads the same index and folds the same overdue wakes.
+        """
+        self._wake_deliver_hook = self._spool_wake_to_inbox
+
+    async def _spool_wake_to_inbox(self, due: DueWake) -> None:
+        """The draining hook: spool one fired wake as a quiet note. Never raises.
+
+        Loud on failure rather than silent: a wake that could not be spooled is
+        lost work the user is waiting on, and the log line is the only trace
+        that it existed (``design-runtime-autorefresh`` §5.3).
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        text = format_wake_delivery_text(due)
+        missed_note = self._missed_delivery_note(due)
+        if missed_note:
+            text = f"{missed_note}\n\n{text}"
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            logger.warning(
+                "wake %s fired while draining and could not be spooled (no session dir)",
+                due.schedule.id,
+            )
+            return
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(text=text, sender={}, mode="mailbox", written_at=time.time()),
+            )
+        except Exception:  # noqa: BLE001 — a drain must not die on a spool write
+            logger.warning(
+                "wake %s could not be spooled while draining", due.schedule.id, exc_info=True
+            )
+            return
+        if not written:
+            logger.warning("wake %s could not be spooled while draining", due.schedule.id)
+
     def _prepare_missed_wake_catchup(self) -> None:
         """Snapshot the overdue schedules load() just adopted and compose the
         single aggregated catch-up prompt for them. Runs in ``__init__`` so the

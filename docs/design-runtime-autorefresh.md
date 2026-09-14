@@ -486,6 +486,54 @@ viewer never waits on a runtime that is "about to" leave.
 | `update.py` | `build_marker_age_s()` (mtime of `.lop-source` or dist-info) |
 | `cli.py` | nothing (record fields unchanged) |
 
+### 3.7 The hard-stale rung: bounding how long the refusal may repeat
+
+§3.2's predicate is a SAMPLE, so it can only act at an instant where nothing
+would be lost. A session busy for hours never reaches one — and `lop-update`'s
+`uv tool install --force` replaces the install tree WHOLESALE, so that runtime
+keeps executing a build whose files are gone. Measured on this host while an
+unrelated defect was being investigated: eight runtimes still on 0.54.33 and two
+on 0.54.35 while the install had moved to 0.54.39 across six generations, and no
+retire line for the last replacement because those runtimes were never idle.
+
+Two bounds on the refusal, plus a latch that does not wait for idle:
+
+- **The count** (`BUILD_MAX_STALE_GENERATIONS = 3`): observations, at
+  `BUILD_CHECK_S`, of the SAME newer stamp that this runtime declined. Measured
+  against the cadence rather than in the abstract — ~15 s of busy after an
+  install lands.
+- **The clock** (`BUILD_MAX_STALENESS_S = 30 min`): the age of the FIRST
+  decline, which is the bound for a stamp that keeps MOVING — a rebuild per
+  check would otherwise reset a per-stamp count back to one every time.
+- **`begin_drain(cause)`** (`serving.py`): §3.2's admission refusal kept, its
+  idle gate dropped. Admissions refuse from that instant; the live turn, its
+  subagents, its jobs and a parked gate run to completion; the process leaves at
+  the first instant that work is done. `retiring` is announced at DRAIN START,
+  not at the exit — §3.4's "announced after the stagger" is the idle case only,
+  and the drain's whole point is that the runtime stops taking work while it is
+  still busy, so the first refused message must read as a handover rather than
+  as an error. `BUILD_STAGGER_S` covers these exits too.
+- **A wake or peer message arriving mid-drain is SPOOLED**, to `inbox.jsonl`,
+  which the successor drains at boot before its socket listens. Refusing would
+  lose a wake somebody is waiting on; running it would run new work against the
+  build that is leaving.
+- **A files-gone probe** on the same 5 s cadence: the package root and a sample
+  of the loaded module paths, keyed on EXISTENCE and the install stamp and
+  NEVER on mtime — an editable worktree legitimately looks stale by mtime, and
+  its files legitimately appear and vanish under a long-lived runtime. Armed
+  only where the installer's own metadata says the tree is a managed install,
+  and only once an absence has outlived `BUILD_SETTLE_S`: a single missing-path
+  observation is the shape of a NORMAL in-place upgrade, and retiring inside it
+  would send the viewer's successor at a half-written tree.
+
+Invariants held by construction: no new work after the commit; nothing in
+flight aborted by this path; a message arriving mid-drain deferred rather than
+dropped; the announcement preceding the refusal. Exercised against a real
+`process.py` in `tests/e2e/test_runtime_refresh_e2e.py` (drain, refused prompt,
+spooled peer message, successor on the new build), with the negative control —
+an editable install with a loaded module file DELETED — keeping the runtime
+resident.
+
 ## 4. PR B — disconnect and relay hardening
 
 ### 4.1 Defer the synthesised abort
