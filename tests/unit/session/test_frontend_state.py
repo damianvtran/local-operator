@@ -1230,6 +1230,9 @@ def test_a_repeated_supersession_is_idempotent_in_the_seed() -> None:
 # widget, because a widget test can only observe what these already published:
 #
 # * ``live_tool_started_at`` — one epoch per call executing now, for the row.
+#   Membership answers "has this call started" (a replay needs it to tell a
+#   queued call from an executing one) and the value is the instant to count
+#   from, ``None`` when the start carried no epoch.
 # * ``activity_phase``/``activity_phase_started_at`` — the phase edge, for the
 #   band's ``thinking``/``responding``/``composing`` arm, which has no call
 #   behind it at all.
@@ -1298,14 +1301,17 @@ def test_live_tool_starts_fold_per_call_and_pop_on_their_own_end() -> None:
     assert store.live_tool_start_epochs() == {"call-bash": started}
 
 
-def test_a_start_without_an_epoch_contributes_no_anchor() -> None:
-    """The refusal, asserted directly: no epoch means no entry, never a stamp.
+def test_a_start_without_an_epoch_records_the_start_but_no_instant() -> None:
+    """A legacy start is PRESENT with ``None``: the fact yes, the stamp never.
 
     An older runtime's events carry no ``started_at_epoch``, and an attached
     viewer that substituted its own fold instant would be inventing the age the
-    whole change exists to stop inventing. Absence here is what makes the
-    widget withhold the clock instead — which is why this is the failure mode
-    worth pinning rather than an edge case.
+    whole change exists to stop inventing. What the event DOES carry is the
+    fact that the call began, and the map has to keep the two apart: a replay
+    that painted a merely ANNOUNCED call — queued behind a sibling's execution
+    group — as executing used to answer "has it started?" by the same absence
+    this refusal produced for a genuinely running legacy call. Presence is the
+    start fact; ``None`` is what makes the widget withhold the clock.
     """
     store = FrontendStateStore(_state())
     session = _live_session()
@@ -1313,7 +1319,10 @@ def test_a_start_without_an_epoch_contributes_no_anchor() -> None:
     store.observe_event(
         session, ToolExecutionStartEvent(tool_call_id="call-legacy", tool_name="bash", args={})
     )
-    assert store.live_tool_start_epochs() == {}
+    assert store.live_tool_start_epochs() == {"call-legacy": None}
+    # A call that never started is absent entirely, and that is the other half
+    # of the same contract: no event, no entry.
+    assert "call-never-announced" not in store.live_tool_start_epochs()
     # And the phase is still folded: the SEQ is knowable even when the instant
     # is not, and the two answers are independent on purpose.
     assert store.state.activity_phase == "running"

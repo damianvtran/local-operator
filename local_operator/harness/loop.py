@@ -137,6 +137,22 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 
+#: Cap on the reason carried by a never-run call's terminal compose frame.
+#:
+#: The frame rides the live relay and the reconnect seed, and the seed measures
+#: every row it retains against ``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``; the
+#: synthetic result it is drawn from can hold an invalid-arguments dump of any
+#: size. The unit is CODEPOINTS — ``len()`` on a ``str``, the clip below — and
+#: it is the one bound on this wire NOT measured in terminal cells or serialized
+#: bytes, so the worst case is worth stating rather than assuming: a CJK reason
+#: is ~2 cells and ~3 UTF-8 bytes per code point, i.e. ~600 cells / ~800 bytes
+#: at this cap. 200 code points is the first line of a diagnostic and nothing
+#: more — enough for `Tool not found: <name>` or a JSON-validation complaint,
+#: two orders of magnitude inside that 60 KB budget, and clipped rather than
+#: dropped so the row can never say "something went wrong" where it could name
+#: the thing.
+NOT_RUN_REASON_MAX_CHARS = 200
+
 # Why a tool call did not run cleanly, classified WHERE THE REASON IS KNOWN and
 # carried on ``ToolResult.details["__fault"]`` to the one place that reports it
 # (``park``). Deriving the class at ``park`` instead would mean text-matching
@@ -1675,7 +1691,6 @@ class AgentLoop:
                             # once its real id has replaced it. Retained for
                             # the rest of the stream — see the emission below.
                             "supersedes": None,
-                            "reported": -1,
                             # Bounded copy of the head of the argument stream,
                             # kept only until the intent scrape resolves. `None`
                             # means scanning is over — see below.
@@ -1781,7 +1796,6 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1799,7 +1813,6 @@ class AgentLoop:
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
                             state["announced"] = now
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1810,12 +1823,44 @@ class AgentLoop:
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):
-                    # Flush what the throttle swallowed. Arguments commonly land
-                    # in one burst inside a single window, so without this the
-                    # row's size could report a fraction of the call — or, when
-                    # the whole payload arrives faster than one window, never
-                    # display a size at all. It matters most on an aborted turn,
-                    # where the frozen row is what the user is left reading.
+                    # Flush EVERY latched call here, and make the flush TERMINAL.
+                    #
+                    # The gate this loop used to carry (`bytes != reported`)
+                    # existed to flush what the throttle swallowed: arguments
+                    # commonly land in one burst inside a single window, so
+                    # without it a row could report a fraction of the call —
+                    # or, when the whole payload arrived faster than one
+                    # window, never display a size at all. That is still true
+                    # and it is now the smaller half of the job.
+                    #
+                    # This frame is also the ONE the composing row has been
+                    # waiting for since it was mounted. This is the instant the
+                    # model stopped writing the call, and nothing later in the
+                    # step says so: the batch has not run yet
+                    # (`_execute_tool_calls` follows the `MessageEndEvent`
+                    # yielded below), and the call may be queued behind a
+                    # sibling's execution group for that sibling's whole
+                    # duration — a `wait(wait_ms=1800000)` ahead of an
+                    # `exclusive` tool is the reported half-hour — or never run
+                    # at all. So it is emitted UNCONDITIONALLY, for every
+                    # latched call, rather than only when the size moved: a
+                    # consumer that reads it as "the dictation is over" must
+                    # not be able to miss it because the model happened to stop
+                    # mid-window with nothing new to report.
+                    #
+                    # `dictation_complete` is what says so, and it is additive
+                    # by design (see `ToolCallComposeEvent`): a viewer that
+                    # predates the field ignores it and keeps today's
+                    # behaviour, and a viewer meeting a producer that never
+                    # sets it sees no such frame and behaves exactly as before.
+                    #
+                    # `supersedes_tool_call_id` is REPEATED here for the reason
+                    # the promotion above already repeats it on every frame:
+                    # anything between this and a viewer may legitimately drop
+                    # frames, so the one frame that must not be lost is not the
+                    # only carrier of the identity hand-off. Applying it twice
+                    # stays idempotent — a consumer that already rekeyed finds
+                    # nothing to drop.
                     for state in tool_states.values():
                         if not state["name"]:
                             continue
@@ -1854,19 +1899,19 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            # Force the announcement below: the identity change
-                            # must reach consumers even when the size has not
-                            # moved since the last frame.
-                            state["reported"] = -1
-                        if state["bytes"] != state["reported"]:
-                            state["reported"] = state["bytes"]
-                            yield ToolCallComposeEvent(
-                                tool_call_id=state["key"] or "compose:0",
-                                tool_name=state["name"],
-                                argument_bytes=state["bytes"],
-                                intent=state["intent"],
-                                supersedes_tool_call_id=state["supersedes"],
-                            )
+                        # No throttle bookkeeping to stamp here: the emission
+                        # below is not gated on ``bytes != reported`` any more
+                        # (a dictation that ends without another delta must still
+                        # be told it ended), and this block is the call's last
+                        # word in this stream, so nothing reads a stamp from it.
+                        yield ToolCallComposeEvent(
+                            tool_call_id=state["key"] or "compose:0",
+                            tool_name=state["name"],
+                            argument_bytes=state["bytes"],
+                            intent=state["intent"],
+                            supersedes_tool_call_id=state["supersedes"],
+                            dictation_complete=True,
+                        )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
                         usage = event.usage
@@ -2021,6 +2066,66 @@ class AgentLoop:
     # Tool execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _not_run_compose_frame(call: ToolCall, reason: str) -> ToolCallComposeEvent:
+        """The terminal compose frame for a call that will never START.
+
+        A call parked at planning (an unknown tool, invalid arguments, a
+        duplicate id whose twin won the slot) or skipped by steering gets no
+        ``tool_execution_start`` and — deliberately — no ``tool_execution_end``
+        either: the API server matches tool records by id, and an end with no
+        start "either resurrects a record that was never opened or, when a
+        duplicate id collides, closes the REAL call's record early" (see
+        ``_execute_batch.park``). It also never ran, so a start would claim the
+        tool executed, moving approval, reporting and the analytics chokepoint
+        (``_report_tool_call``) with it.
+
+        That suppression is right, and it left the COMPOSE surface with no
+        ending at all: the row the model's dictation announced stayed
+        ``composing…``, with a ticking clock, until the TURN ended — settled
+        then as ``never sent · N composed`` under the word ``interrupted``,
+        which describes a call that was never interrupted. This frame is the
+        ending the compose surface was missing, and it says nothing to the API
+        server: it rides the same wire the announcement did.
+
+        ``reason`` is the synthetic result's own text, so the row states the
+        failure in the harness's words rather than in a second vocabulary this
+        path would have to keep in step. It is bounded to one clipped line,
+        because it rides the live relay and the reconnect seed, both of which
+        budget text (``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``) — the whole
+        synthetic result is the mistake this avoids.
+
+        Only an ANNOUNCED call gets one: the compose surface exists solely for
+        a call whose dictation reached a viewer, and a frame for a call nobody
+        was shown would mount a row for something that was never on screen.
+        Every call reaching here has a name (``_assemble_tool_call`` copies the
+        latched one), and the announcement is minted on the first name
+        fragment, so a truthy name is exactly "this call was announced".
+        """
+        text = " ".join((reason or "").split()) or "Tool call not run"
+        if len(text) > NOT_RUN_REASON_MAX_CHARS:
+            text = text[: NOT_RUN_REASON_MAX_CHARS - 1].rstrip() + "…"
+        return ToolCallComposeEvent(
+            tool_call_id=call.id or "compose:0",
+            tool_name=call.name,
+            # The assembled argument payload, which is the same measurement the
+            # streaming frames reported: their byte count is the sum of the
+            # argument deltas, and those are what ``raw_arguments`` joined.
+            argument_bytes=len(call.raw_arguments or ""),
+            dictation_complete=True,
+            not_run_reason=text,
+        )
+
+    def _not_run_frames(self, calls: list[ToolCall], reason: str) -> list[ToolCallComposeEvent]:
+        """Terminal frames for a set of calls that will never START, one reason.
+
+        The steering skip's shape: every call it drops after the batch's first
+        slot shares one verdict, so they share one reason. The planning-failure
+        path above carries a per-call reason and calls
+        :meth:`_not_run_compose_frame` directly for that reason.
+        """
+        return [self._not_run_compose_frame(call, reason) for call in calls if call.name]
+
     async def _execute_tool_calls(
         self,
         calls: list[ToolCall],
@@ -2060,6 +2165,23 @@ class AgentLoop:
                 continue
             seen_ids.add(call.id)
             plan.append(await self._plan_call(call, context, config))
+        # Announce the batch's never-run verdicts BEFORE anything executes.
+        #
+        # A call with a `failure` here has been judged and will never start:
+        # the tool is unknown, the arguments did not validate, or a duplicate id
+        # lost to its twin (which parks up front in `_execute_batch`, after the
+        # group runs). The verdict exists NOW, and the row it belongs to is
+        # already on screen claiming the model is still writing the call — so
+        # the compose surface is told now rather than at turn end, when the
+        # retirement pass would settle it under the word `interrupted` for a
+        # call that was never interrupted.
+        #
+        # Emitted before the group runs, and that order is deliberate: these
+        # calls take no part in the execution that follows, so a viewer should
+        # be able to stop waiting for them at the moment the harness decided.
+        for failure in plan:
+            if failure.failure is not None:
+                yield self._not_run_compose_frame(failure.call, failure.failure.text)
         index = 0
         first_slot = True
         while index < len(plan):
@@ -2085,6 +2207,27 @@ class AgentLoop:
                             details={FAULT_KEY: FAULT_SKIPPED},
                         )
                     )
+                # ...and the SAME ending the batch's other never-run calls get,
+                # for the same reason and at the same instant: this site
+                # bypasses `_execute_batch` entirely (it is outside the
+                # per-call loop, and below it the remaining calls are never
+                # even scheduled), so without this their rows would sit
+                # `composing…` until the turn died and the user would have to
+                # infer the skip from the steering notice.
+                #
+                # After the loop rather than inside it: these frames describe
+                # the batch's whole remaining tail, and emitting one set per
+                # member would hand a viewer the same verdict twice per call.
+                #
+                # Only the calls that had NOT already failed planning: those
+                # were settled with their own verdict before the batch ran, and
+                # a second terminal frame would relabel a `Tool not found` row
+                # as a steering skip.
+                for frame in self._not_run_frames(
+                    [item.call for item in plan[index:] if item.failure is None],
+                    SKIPPED_RESULT_TEXT,
+                ):
+                    yield frame
                 break
 
             if not _batches_shared(plan[index]):
