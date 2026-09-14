@@ -52,11 +52,17 @@ INBOX_NAME = "inbox.jsonl"
 #: ``peer_send._spool_quiet_note`` for a cold session). They led with the
 #: mechanism verb ("spooled …") in both, which told the sender about our
 #: plumbing before telling them what they had bought; the effect leads now and
-#: the parenthetical that distinguishes the pair — a wake WILL be run by the
-#: next runtime, a quiet note is only read — is the part they can act on
-#: (design round 1, D4).
-SPOOL_RECEIPT_WAKE = "held for the next runtime to open the session — it runs it"
-SPOOL_RECEIPT_NOTE = "held for the next runtime to open the session — read when it next opens"
+#: the clause after the dash — a wake WILL be run by the next runtime, a quiet
+#: note is only read — is the part they can act on (design round 1, D4).
+#:
+#: KEPT SHORT ON PURPOSE, and this is the constraint a future edit must respect:
+#: design round 1 measured the receipts they replace at 54 and 50 characters and
+#: verified each still fits ONE line at both 60 and 100 columns. The rewrite
+#: above is 38 and 51 — inside that measured budget — because a longer receipt
+#: buys precision the sender does not need at the cost of the one property that
+#: was checked. A frame is not the place to discover a wrap.
+SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
+SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 
 #: Non-blocking lock retries, and the pause between them. Deliberately small:
 #: the critical section is one ``write()`` of a few hundred bytes, so a
