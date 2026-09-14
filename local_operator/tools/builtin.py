@@ -7504,18 +7504,19 @@ BROWSER_ACTIONS = (
     "click",
     "type",
     "close",
-    # scroll and logs are served ONLY by the extension bridge; the cmux backend
-    # degrades with a typed "use the extension" error rather than faking them
-    # (see execute_browser). They are actions so they ride the same schema,
-    # approval tier and dispatch as everything else.
+    # scroll and logs are served by BOTH non-cmux hosts (the paired Local
+    # Operator browser extension and the desktop app's browser host); the cmux
+    # backend degrades with a typed "use a non-cmux host" error rather than
+    # faking them (see execute_browser). They are actions so they ride the same
+    # schema, approval tier and dispatch as everything else.
     "scroll",
     "logs",
-    # tabs lists every live extension-owned tab (all sessions', read-only
+    # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
-    # handle to close. Bridge-only like scroll/logs: cmux keeps no multi-surface
-    # registry, so it degrades with the same typed "use the extension" error.
+    # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
+    # multi-surface registry, so it degrades with the same typed error.
     "tabs",
-    # The async site-approval flow, extension-only like scroll/logs. open/goto
+    # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
     # the popup prompt — expired unseen and read as "bridge unreachable".
@@ -7534,14 +7535,24 @@ BROWSER_ACTIONS = (
 #: capability no agent should exercise, so this asymmetry between METHODS and
 #: BROWSER_ACTIONS is intentional rather than an oversight to be "fixed".
 
-#: Actions that only the Local Operator browser extension can serve. cmux has no
-#: console-log tap and no background-tab scroll primitive, so rather than fake a
-#: partial result these degrade with a clear, actionable error naming the
-#: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
-#: advertised action list can never drift apart.
-BRIDGE_ONLY_BROWSER_ACTIONS = frozenset(
+#: Actions that cmux cannot serve. It is NOT "the extension's actions any more:
+#: the desktop app's browser host serves every one of them, so the only host this
+#: set still describes is cmux (no console-log tap, no background-tab scroll
+#: primitive, no multi-surface registry, no permission model). The name used to be
+#: `BRIDGE_ONLY_BROWSER_ACTIONS`, which on a three-host machine asserted that the
+#: EXTENSION was the only alternative — false, and the source of copy that sent
+#: users of the desktop app into `lop browser install`. Kept as a set beside
+#: BROWSER_ACTIONS so the degrade check and the advertised action list can never
+#: drift apart.
+CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
 )
+
+#: The actions whose whole handler lives in the ownership lane (see
+#: `execute_browser`), and which therefore have NO meaning on a host that owns no
+#: surfaces. Every one of them used to fall through to the screenshot tail when
+#: the lane was skipped — a silent wrong action rather than a refusal.
+OWNERSHIP_BROWSER_ACTIONS = frozenset({"recover", "retain", "release"})
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -7627,11 +7638,11 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL; on the extension backend a "
-        "fresh open creates a NEW tab — your session then owns it and reuses it) "
+        description="open (start a surface at a URL; a fresh open creates a NEW tab "
+        "— your session then owns it and reuses it) "
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
-        "(console + errors) | tabs (list all extension-driven tabs, other "
+        "(console + errors) | tabs (list all agent-driven tabs, other "
         "sessions' included) | request_access (raise the site-approval prompt "
         "for a not-yet-allowed origin; returns pending/allowed/denied immediately) "
         "| await_access (wait for the user's decision on that prompt) | "
@@ -7775,22 +7786,33 @@ def _browser_update_note(state: BrowserSurfaceProtocol, result: ToolResult) -> T
     predicate there (``BridgeState.extension_update_available``), so the answer
     is the same one ``/health`` would give without the round-trip.
 
+    Read from the SESSION'S OWN host. The advisory is an extension fact, and on a
+    session driving the desktop app's browser tab it must not be sourced from the
+    bridge daemon's file: with an old extension paired alongside a healthy app, a
+    bridge read would nag about a browser this session is not using. The UI
+    host's record carries no such field (there is nothing in it to compare
+    against — the app updates itself), so the honest answer there is no note at
+    all, and `getattr` is what makes that a fact about the record rather than a
+    crash. When the app does publish an update predicate, this is the one place
+    it gets rendered.
+
     Skipped on an ERROR result: "nothing is blocked" printed beside a failure
     reads as a contradiction, and the failure copy is already the thing the
     agent needs to act on.
     """
     if getattr(state, "extension_update_notified", False) or result.is_error:
         return result
-    from local_operator.browser_bridge import state as state_store
     from local_operator.browser_bridge.protocol import extension_update_note
 
-    try:
+    if _host_of_surface(str(getattr(state, "surface_id", ""))) == HOST_UI_PREFIX:
+        current: Any = _ui_state().read()
+    else:
+        from local_operator.browser_bridge import state as state_store
+
         current = state_store.read()
-    except Exception:  # noqa: BLE001 - an advisory may never break a tool result
+    if current is None or not getattr(current, "extension_update_available", False):
         return result
-    if current is None or not current.extension_update_available:
-        return result
-    note = extension_update_note(current.extension_version)
+    note = extension_update_note(str(getattr(current, "extension_version", "")))
     try:
         state.extension_update_notified = True  # type: ignore[attr-defined]
     except AttributeError:  # pragma: no cover - a holder with __slots__
@@ -8562,6 +8584,58 @@ def _bridge_liveness() -> tuple[Any, Any]:
         return None, None
 
 
+# ---------------------------------------------------------------------------
+# The desktop app's browser host: the same four availability answers the bridge
+# supplies, because `_execute_browser` branches on all of them for every host.
+# A host that answered three of them and guessed the fourth would make the
+# decision and the diagnostic disagree — the failure the daemon-side "classify
+# ONCE per action" rule exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def ui_browser_available() -> bool:
+    """Cheap file-only discovery of the desktop app's browser host."""
+    from local_operator.ui_browser.backend import ui_browser_available as available
+
+    return available()
+
+
+def ui_browser_advertisable() -> bool:
+    """Tool-GATING discovery: cheap, file-only, honest about a stale host.
+
+    The same weaker-commitment rule the bridge's gate uses: `createIf` asks
+    whether the agent may ASK, and `_execute_browser` still spends a probe
+    before it commits to the host.
+    """
+    from local_operator.ui_browser.backend import (
+        ui_browser_advertisable as advertisable,
+    )
+
+    return advertisable()
+
+
+async def ui_browser_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+    """Browser-path availability for the desktop app's browser host.
+
+    Mirrors :func:`bridge_browser_reachable` step for step, including the
+    short-circuit: the file probe runs first and answers `True` for free, and
+    only a STALE-but-alive record spends the one bounded `/health` dial that can
+    acquit it.
+    """
+    if ui_browser_available():
+        return True
+    from local_operator.ui_browser.backend import ui_browser_reachable as reachable
+
+    return await reachable(classified=classified)
+
+
+def _ui_liveness() -> tuple[Any, Any]:
+    """Classify the desktop app's host from the file, never raising."""
+    from local_operator.ui_browser.backend import ui_liveness
+
+    return ui_liveness()
+
+
 def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
     """The demotion diagnostic for a bridge that is UP with no browser attached.
 
@@ -8952,10 +9026,212 @@ def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> 
     return identity
 
 
-def _bridge_failure_result(tool_call_id: str, exc: BaseException, *, action: str) -> ToolResult:
-    """Render one bridge failure so every site answers with the same voice.
+#: The non-cmux hosts' surface-handle grammar, as ONE alternation.
+#: `bridge:<tab>:<nonce>` is the extension's; `ui:<tab>:<nonce>` is the desktop
+#: app's. Both are validated by the same expression because the SHAPE is what is
+#: being checked here (a prefix naming a transport, a numeric tab id, an opaque
+#: capability), and the two hosts must not drift into two grammars: a second
+#: regex per host is how one of them ends up accepting `--help` as a handle.
+NON_CMUX_SURFACE_HANDLE_RE = re.compile(r"^(?:bridge|ui):\d+:[A-Za-z0-9_-]+$")
 
-    `str(exc)` on a `BridgeError` is the RAW daemon message. For a recovery
+#: The handle-prefix spelling of each host. "ui" is the same word in the record,
+#: the handle and the copy; the bridge's handle says "bridge" while the prose says
+#: "the extension". `_host_label` is the ONE place that difference is applied.
+HOST_UI_PREFIX = "ui"
+HOST_BRIDGE_PREFIX = "bridge"
+
+
+def _host_of_surface(surface_id: str) -> str:
+    """Which non-cmux host owns a handle, or "" for cmux/unknown."""
+    if surface_id.startswith(f"{HOST_UI_PREFIX}:"):
+        return HOST_UI_PREFIX
+    if surface_id.startswith(f"{HOST_BRIDGE_PREFIX}:"):
+        return HOST_BRIDGE_PREFIX
+    return ""
+
+
+def _host_label(host: str) -> str:
+    """A short prose name for a host, for the few sentences that need one."""
+    if host == HOST_UI_PREFIX:
+        return "the Local Operator desktop app's browser host"
+    return "the browser extension"
+
+
+def _client_for(host: str) -> Any:
+    """A client for a surface's host name; "" and cmux resolve to the bridge.
+
+    Lazy imports, like the rest of this module's browser imports: the bridge
+    backend pulls in `httpx`, and this module is imported on the CLI path for
+    every session whether or not a browser exists.
+    """
+    if host == HOST_UI_PREFIX:
+        from local_operator.ui_browser.backend import UiHostClient
+
+        return UiHostClient()
+    from local_operator.browser_bridge.backend import BridgeClient
+
+    return BridgeClient()
+
+
+def _surface_host_or_first(pinned: str, *, ui: bool) -> str:
+    """The host to serve a surface-free action from (or a pinned surface's).
+
+    A pinned handle wins — the surface's transport is already decided — and with
+    no handle the order is the fresh-`open` precedence: the app's browser tab,
+    then the extension. Callers only reach this when at least one host is
+    available, so the fallback needs no third case.
+    """
+    if pinned:
+        return pinned
+    return HOST_UI_PREFIX if ui else HOST_BRIDGE_PREFIX
+
+
+def _non_cmux_host_hint(*, ui: bool, bridge: bool) -> str:
+    """Which non-cmux host to use, and how to reach it — ONE spelling.
+
+    Four degrade sites need this sentence, and the reason it is shared is that
+    the defect it fixes was four independently-worded claims that the EXTENSION
+    was the only alternative. On a host with the desktop app running, that advice
+    sent the user to install a bridge they did not need; on a host with neither,
+    it named one possibility out of two.
+    """
+    if ui and not bridge:
+        return (
+            "use the Local Operator desktop app's browser tab: open a browser tab there "
+            "and retry."
+        )
+    if bridge and not ui:
+        return (
+            "use the paired Local Operator browser extension (run 'lop browser status' to "
+            "see it, or 'lop browser install' to set it up)."
+        )
+    if ui and bridge:
+        return (
+            "use either the Local Operator desktop app's browser tab or the paired Local "
+            "Operator browser extension ('lop browser status' shows the latter)."
+        )
+    return (
+        "start the Local Operator desktop app and open a browser tab in it, or set up the "
+        "Local Operator browser extension with 'lop browser install'; 'lop browser status' "
+        "shows which is reachable."
+    )
+
+
+def _copy_host(host: str) -> str:
+    """The COPY spelling of a host name given in any of this codebase's spellings.
+
+    One host has three names by necessity: ``extension`` in prose, ``bridge`` in
+    the surface handle and in the resource record, and ``ui`` for the desktop app
+    everywhere. This function is the single translation between them, so no
+    branch can compare a handle prefix to a copy name by accident — and, more to
+    the point, so a failure raised by the UI host cannot be rendered in the
+    extension's voice (or the reverse) by a caller that passed the other
+    spelling.
+    """
+    from local_operator.browser_bridge.backend import HOST_EXTENSION, HOST_UI
+
+    return HOST_UI if host == HOST_UI_PREFIX else HOST_EXTENSION
+
+
+async def _ownership_lane_host(state: BrowserSurfaceProtocol) -> str:
+    """Which host can own a surface for this session, or "" when none can.
+
+    The ownership lane asks this BEFORE anything else, because everything it
+    does — `initialize`, `recover`, `allocate`, `retain`, `release`, and the
+    record write that lets an interrupted session be reclaimed — goes to one
+    host's transport. Asking "is the bridge reachable" was the defect (§10.5):
+    it made the lane conditional on a host the session may not be using.
+
+    Ordering mirrors the fresh-`open` precedence (UI, then bridge) so the lane
+    and the open cannot pick different hosts for the same session, and a pinned
+    handle overrides both: that surface's transport is already decided, and the
+    lane must speak to the host that owns it even when that host is
+    unreachable — otherwise the ownership contract silently lapses exactly when
+    the user most needs to be told what happened to their tab.
+    """
+    pinned = _host_of_surface(state.surface_id)
+    if pinned:
+        return pinned
+    if await ui_browser_reachable():
+        return HOST_UI_PREFIX
+    if await bridge_browser_reachable():
+        return HOST_BRIDGE_PREFIX
+    return ""
+
+
+def _ui_state() -> Any:
+    """This package's state module, imported lazily like every browser import."""
+    from local_operator.ui_browser import state as ui_state
+
+    return ui_state
+
+
+def _ui_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
+    """The desktop app's sibling of :func:`_bridge_demotion_hint`.
+
+    The same shape and the same purpose: when this action was forced off a host
+    the session could have used, say so — name the app, the measured fact and the
+    one-line repair — instead of quietly serving cmux. A user who sees an agent
+    driving a cmux panel with no explanation has no way to learn that the app's
+    host was up but its heartbeat had lapsed.
+    """
+    classification = _ui_liveness() if classified is None else classified
+    status, current = classification
+    if current is None or status is not _ui_state().Liveness.STALE:
+        return ""
+    age = _ui_state().heartbeat_age(current)
+    return (
+        f" NOTE: this action was DEMOTED to cmux — the Local Operator desktop app "
+        f"(pid {current.pid}) is running but its browser-host heartbeat is {age:.0f}s "
+        "stale, so it advertised itself as unavailable. Re-open a browser tab in the "
+        "app (or restart it) to re-establish that host, then retry."
+    )
+
+
+#: The session-side error code for an ownership action that has no ownership
+#: host. Deliberately NOT a `protocol.ErrorCode`: the wire never emits this — it
+#: is this process refusing before any host is dialled — and adding a code the
+#: peer could emit would need a `PROTO_VERSION` bump that closes every released
+#: store build. It lives in `details["error_code"]` beside the wire codes so a
+#: caller branching on that key still sees a typed answer.
+ERROR_CODE_OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
+
+
+def _ownership_unavailable_result(tool_call_id: str, action: str, *, surface: str) -> ToolResult:
+    """The typed refusal for `recover`/`retain`/`release` with no ownership host.
+
+    Reaching this means the ownership lane did not run: the session has no host
+    that owns surfaces, or its surface is cmux's (cmux keeps no registry, so the
+    lane never serves it). Before this, the action fell through the dispatcher to
+    its last branch — a SCREENSHOT — and reported "Screenshot of … saved to …"
+    for a request to hold a tab open: a silent wrong action with a real side
+    effect (a PNG written) and no way for the model to notice.
+    """
+    why = (
+        f"this session's surface is {surface}, which cmux owns and which therefore has no "
+        "ownership verbs"
+        if surface.startswith("surface:")
+        else "no ownership host is reachable and no tab has been opened"
+    )
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"'{action}' controls whether an agent-owned browser tab is recovered, held open "
+        f"past your turn, or released, and that lifecycle is served only by a non-cmux "
+        f"host (the Local Operator desktop app's browser tab, or the paired Local Operator "
+        f"browser extension). Nothing was changed: {why}. Open a tab on a non-cmux host "
+        "first (action='open'), then retry.",
+    )
+    problem.details = {"error_code": ERROR_CODE_OWNERSHIP_UNAVAILABLE}
+    return problem
+
+
+def _bridge_failure_result(
+    tool_call_id: str, exc: BaseException, *, action: str, host: str = ""
+) -> ToolResult:
+    """Render one host failure so every site answers with the same voice.
+
+    `str(exc)` on a `BridgeError` is the RAW host message. For a recovery
     timeout that is literally `owner_recover timed out`: an internal verb, no
     remedy, and no typed code for the agent to branch on — while the identical
     wedge in a session that had already recovered got `format_error`'s full copy
@@ -8966,16 +9242,38 @@ def _bridge_failure_result(tool_call_id: str, exc: BaseException, *, action: str
     `BridgeUnreachable` and `BrowserOwnershipError` already carry complete
     human sentences written for exactly this audience, so they keep `str(exc)`;
     only the typed wire error is re-rendered.
+
+    ``host`` names the host the exception came from, in ANY of its spellings
+    (""/"bridge"/"extension"/"ui"): the ownership lane passes the resource's
+    own record spelling, and `_copy_host` translates. Passing it matters on a
+    UI-only host, where the extension's remedy (reload the extension, restart
+    the daemon) names processes the user does not have.
     """
     from local_operator.browser_bridge.backend import BridgeError, format_error
 
     if isinstance(exc, BridgeError):
-        problem = _error(tool_call_id, "browser", format_error(exc, action=action))
+        problem = _error(
+            tool_call_id, "browser", format_error(exc, action=action, host=_copy_host(host))
+        )
         # The same typed code `_bridge_call` carries, so callers can branch on
         # `extension_unresponsive` rather than substring-matching prose.
         problem.details = {"error_code": exc.code.value}
         return problem
     return _error(tool_call_id, "browser", str(exc))
+
+
+def _host_of_client(client: Any) -> str:
+    """The handle-prefix host of a client: `client=None` is the bridge.
+
+    Reads the client's own `host` (`extension`/`ui`) and maps it to the handle
+    spelling (`bridge`/`ui`). One function, so the copy spelling and the handle
+    spelling are never compared directly by a branch.
+    """
+    if client is None:
+        return HOST_BRIDGE_PREFIX
+    if str(getattr(client, "host", "")) == HOST_UI_PREFIX:
+        return HOST_UI_PREFIX
+    return HOST_BRIDGE_PREFIX
 
 
 async def _bridge_call(
@@ -8984,21 +9282,32 @@ async def _bridge_call(
     params: dict[str, Any],
     *,
     surface: str = "",
+    client: Any = None,
 ) -> tuple[dict[str, Any] | None, ToolResult | None]:
+    """One call against the surface's host, rendered in THAT host's voice.
+
+    ``client`` defaults to the extension bridge's, so every existing call site
+    keeps its meaning unchanged. The host used for the copy is read off the
+    client rather than passed separately, so the transport and the prose can
+    never disagree about which process the reader is being sent to look at.
+    """
     from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
         BridgeClient,
         BridgeError,
         BridgeUnreachable,
         format_error,
     )
 
+    selected = client if client is not None else BridgeClient()
+    host = str(getattr(selected, "host", HOST_EXTENSION) or HOST_EXTENSION)
     try:
-        return await BridgeClient().call(action, params), None
+        return await selected.call(action, params), None
     except BridgeError as exc:
         problem = _error(
             tool_call_id,
             "browser",
-            format_error(exc, action=action, surface=surface),
+            format_error(exc, action=action, surface=surface, host=host),
         )
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
@@ -9018,21 +9327,35 @@ async def _bridge_open(
     state: BrowserSurfaceProtocol,
     raw_url: str,
     context: ToolContext | None = None,
+    *,
+    client: Any = None,
 ) -> ToolResult:
+    """Open (or resume) a tab on a NON-CMUX host: `client` selects which.
+
+    `client=None` is the extension bridge, so every pre-existing call site keeps
+    its meaning. The host also decides the HANDLE GRAMMAR this function accepts
+    back from the wire (`bridge:` vs `ui:`), which is why the host is derived from
+    the client rather than passed as a second argument that could disagree with
+    it.
+    """
+    host = _host_of_client(client)
+    prefix = HOST_UI_PREFIX if host == HOST_UI_PREFIX else HOST_BRIDGE_PREFIX
     # The session's pinned handle decides the mode. With one, `open` RESUMES
-    # that tab (extension-side it navigates exactly that surface); without one
-    # the extension creates a brand-new tab. The extension never falls back to
-    # reusing some other live surface — that reuse is how one session used to
-    # hijack another's tab mid-task when agents ran in parallel.
+    # that tab (host-side it navigates exactly that surface); without one the
+    # host creates a brand-new tab. Neither host ever falls back to reusing some
+    # other live surface — that reuse is how one session used to hijack another's
+    # tab mid-task when agents ran in parallel.
     params: dict[str, Any] = {
         "url": raw_url.strip(),
         **_browser_identity_params(context, tool_call_id),
     }
-    resuming = state.surface_id.startswith("bridge:")
+    resuming = _host_of_surface(state.surface_id) == prefix
     created_new = not resuming
     if resuming:
         params["tab"] = state.surface_id
-    result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
+    result, problem = await _bridge_call(
+        tool_call_id, "open", params, surface=state.surface_id, client=client
+    )
     if (
         problem is not None
         and resuming
@@ -9047,17 +9370,20 @@ async def _bridge_open(
             tool_call_id,
             "open",
             {"url": raw_url.strip(), **_browser_identity_params(context, tool_call_id)},
+            client=client,
         )
     if problem is not None:
         pending = (problem.details or {}).pop("cleanup_surface", "")
-        if isinstance(pending, str) and re.fullmatch(r"bridge:\d+:[A-Za-z0-9_-]+", pending):
+        if isinstance(pending, str) and NON_CMUX_SURFACE_HANDLE_RE.fullmatch(pending):
             state.surface_id = pending
         return problem
     assert result is not None
     surface = str(result.get("tab", ""))
-    if not re.match(r"^bridge:\d+:[A-Za-z0-9_-]+$", surface):
+    if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(surface):
         return _error(
-            tool_call_id, "browser", "browser extension opened a tab but returned no valid handle"
+            tool_call_id,
+            "browser",
+            f"{_host_label(prefix)} opened a tab but returned no valid handle",
         )
     state.surface_id = surface
     href = str(result.get("url", ""))
@@ -9089,10 +9415,24 @@ _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
 def _access_result_text(
-    state: str, origin: str, *, position: int | None = None, pending_count: int | None = None
+    state: str,
+    origin: str,
+    *,
+    position: int | None = None,
+    pending_count: int | None = None,
+    host: str = "",
 ) -> str:
     """One agent-facing line per access state, including the next step — the
-    agent discovers this flow through error/result text, not documentation."""
+    agent discovers this flow through error/result text, not documentation.
+
+    ``host`` selects the sentence that tells the model WHERE the human answers.
+    That sentence is the load-bearing one in this whole flow (an un-notified
+    prompt sits unseen until its TTL), so it names the actual surface: the
+    extension's popup and badge, or the desktop app's browser tab. Telling the
+    user of the app to look in a browser toolbar sends them hunting for a window
+    that is not there.
+    """
+    extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
         return f"{origin} is allowed. 'open' or 'goto' the URL now."
     if state == "denied":
@@ -9101,28 +9441,37 @@ def _access_result_text(
             "origin; ask the user directly if it is essential."
         )
     if state == "pending":
-        # NOTIFY-FIRST is load-bearing: Chrome's own notification banner is
+        # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
         # best-effort (macOS suppresses it without Notification Center
         # authorization), so if the agent does not message the user the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
+        where = (
+            "in the Local Operator extension popup (toolbar icon, numbered badge showing "
+            "the pending count) — the badge alone is not reliably seen"
+            if extension_host
+            else "in the Local Operator desktop app's browser tab — the prompt alone is not "
+            "reliably seen"
+        )
         return (
             f"approval for {origin} is pending"
             + (f" ({position} of {pending_count})" if position and pending_count else "")
             + ". FIRST notify the user (via the ask "
-            "tool or a message) to approve it in the Local Operator extension popup "
-            "(toolbar icon, numbered badge showing the pending count) — the badge alone "
-            "is not reliably seen — THEN "
+            f"tool or a message) to approve it {where} — THEN "
             "call action='await_access' with the same url to wait for the decision."
         )
     if state == "superseded":
-        # A DIFFERENT session's request replaced this one's prompt slot (the
-        # popup shows one origin at a time). The agent must know it was
-        # displaced — reading this as expiry would send it into a
-        # request/notify loop that keeps stealing the prompt back and forth
-        # between sessions (round-1 B1b).
+        # A DIFFERENT session's request replaced this one's prompt slot (one
+        # origin is shown at a time). The agent must know it was displaced —
+        # reading this as expiry would send it into a request/notify loop that
+        # keeps stealing the prompt back and forth between sessions (round-1 B1b).
+        shower = (
+            "the extension shows one prompt at a time"
+            if extension_host
+            else "the desktop app shows one prompt at a time"
+        )
         return (
             f"the approval prompt for {origin} was superseded by another session's "
-            "request — the extension shows one prompt at a time. Wait for the other "
+            f"request — {shower}. Wait for the other "
             "session's prompt to resolve, then call action='request_access' again "
             "if this origin is still needed."
         )
@@ -9141,15 +9490,23 @@ async def _bridge_access(
     action: str,
     params: BrowserParams,
     context: ToolContext | None,
+    *,
+    client: Any = None,
 ) -> ToolResult:
     """request_access / await_access / cancel_access — surface-free by design: they exist for
     the moment when 'open' has just FAILED, so requiring an open surface here
-    would deadlock the recovery path."""
+    would deadlock the recovery path.
+
+    ``client`` selects the host; the access flow itself is host-neutral (both
+    hosts answer the same three methods with the same states), and only the
+    "where does the human answer" sentence differs.
+    """
+    host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
     if action == "request_access":
         result, problem = await _bridge_call(
-            tool_call_id, "request_access", {"url": url, **identity}
+            tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
             return problem
@@ -9164,6 +9521,7 @@ async def _bridge_access(
                 origin,
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
+                host=host,
             ),
             details={
                 "origin": origin,
@@ -9177,7 +9535,7 @@ async def _bridge_access(
         )
     if action == "cancel_access":
         result, problem = await _bridge_call(
-            tool_call_id, "cancel_access", {"url": url, **identity}
+            tool_call_id, "cancel_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
             return problem
@@ -9187,7 +9545,7 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin),
+            _access_result_text(state_value, origin, host=host),
             details={
                 "origin": origin,
                 "state": state_value,
@@ -9204,11 +9562,16 @@ async def _bridge_access(
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
+            check = (
+                "the Local Operator extension popup"
+                if host != HOST_UI_PREFIX
+                else "the Local Operator desktop app's browser tab"
+            )
             return _text(
                 tool_call_id,
                 "browser",
                 f"still pending after {total_s:.0f}s: the user has not decided on {url} "
-                "yet. Remind them to check the Local Operator extension popup, then call "
+                f"yet. Remind them to check {check}, then call "
                 "await_access again.",
                 details={"origin": url, "state": "pending"},
             )
@@ -9217,7 +9580,7 @@ async def _bridge_access(
             "timeout_ms": min(remaining_ms, _BRIDGE_AWAIT_SLICE_MS),
             **identity,
         }
-        result, problem = await _bridge_call(tool_call_id, "await_access", wire)
+        result, problem = await _bridge_call(tool_call_id, "await_access", wire, client=client)
         if problem is not None:
             return problem
         assert result is not None
@@ -9232,6 +9595,7 @@ async def _bridge_access(
                     origin,
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
+                    host=host,
                 ),
                 details={
                     "origin": origin,
@@ -9334,15 +9698,24 @@ def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
     return f"{token}{mine}: {title} — {url}{when}"
 
 
-async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
-    """List every live extension-driven tab (all sessions').
+async def _bridge_tabs(
+    tool_call_id: str, state: BrowserSurfaceProtocol, *, client: Any = None
+) -> ToolResult:
+    """List every live agent-driven tab (all sessions').
 
     Discovery deliberately needs no open surface of our own: its main use is a
     session deciding whether to resume, or being told the surface cap is hit
-    and needing to see what is already open. The extension prunes dead tabs as
-    part of answering, so the list is live by construction.
+    and needing to see what is already open. The host prunes dead tabs as part
+    of answering, so the list is live by construction.
+
+    The copy says "agent-driven", not "extension-driven": the desktop app's
+    browser host answers this method too, and copy that names one host is how
+    this action came to be documented as extension-only.
     """
-    result, problem = await _bridge_call(tool_call_id, "tabs", {}, surface=state.surface_id)
+    host = _host_of_client(client)
+    result, problem = await _bridge_call(
+        tool_call_id, "tabs", {}, surface=state.surface_id, client=client
+    )
     if problem is not None:
         return problem
     assert result is not None
@@ -9351,7 +9724,7 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
         return _text(
             tool_call_id,
             "browser",
-            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.\n\n"
+            "No agent-driven browser tabs are open. Use 'open' with a URL to start one.\n\n"
             f"{_BROWSER_TABS_CLEANUP_FOOTER}",
             details={"tab_count": 0},
         )
@@ -9359,12 +9732,12 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
     return _text(
         tool_call_id,
         "browser",
-        f"{len(entries)} extension-driven tab{'s' if len(entries) != 1 else ''} "
+        f"{len(entries)} agent-driven tab{'s' if len(entries) != 1 else ''} "
         "(most recently used first; handles are redacted — the listing is "
         "awareness-only and cannot drive or close a tab. Your own tab is "
         "marked '(yours)'; drive it with the handle your session already "
         "holds):\n\n" + "\n".join(lines) + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
-        details={"tab_count": len(entries), "surface_id": state.surface_id},
+        details={"tab_count": len(entries), "surface_id": state.surface_id, "host": host},
     )
 
 
@@ -9374,7 +9747,17 @@ async def _bridge_action(
     action: str,
     params: BrowserParams,
     context: ToolContext | None,
+    *,
+    client: Any = None,
 ) -> ToolResult:
+    """Every non-cmux verb except `open`: one wire call plus its rendering.
+
+    ``client`` selects the host. The verb bodies are host-neutral by
+    construction — both hosts answer the same methods with the same result keys
+    — so this function is shared rather than forked, and only the handful of
+    sentences that name a PROCESS use the host.
+    """
+    host = _host_of_client(client)
     surface = state.surface_id
     wire: dict[str, Any] = {
         "tab": surface,
@@ -9408,7 +9791,7 @@ async def _bridge_action(
         wire["level"] = params.level.strip().lower() or "all"
         if params.limit is not None:
             wire["limit"] = params.limit
-    result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface)
+    result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface, client=client)
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
         # retaining it would make even the recovery verb target stale state.
@@ -9507,12 +9890,14 @@ async def _bridge_action(
     try:
         payload = base64.b64decode(str(result.get("data", "")), validate=True)
     except ValueError:
-        return _error(tool_call_id, "browser", "browser extension returned invalid screenshot data")
+        return _error(
+            tool_call_id, "browser", f"{_host_label(host)} returned invalid screenshot data"
+        )
     if not payload.startswith(PNG_MAGIC):
         return _error(
             tool_call_id,
             "browser",
-            f"browser extension capture is not a PNG ({len(payload)} bytes)",
+            f"{_host_label(host)} capture is not a PNG ({len(payload)} bytes)",
         )
     try:
         Path(target).parent.mkdir(parents=True, exist_ok=True)
@@ -9543,7 +9928,10 @@ async def retitle_browser_surface(state: BrowserSurfaceProtocol, context: ToolCo
 
     Entirely best-effort and never raised: grouping is presentation, and a
     rename must not cost the title, the turn, or a browse. Cmux surfaces have no
-    group chrome to rename, so they are skipped rather than errored.
+    group chrome to rename, so they are skipped rather than errored — and so is
+    the desktop app's browser host, which has no tab GROUPS at all: its tab label
+    is the page title, which is strictly more informative than a session title.
+    The early return below therefore covers both.
     """
     surface = state.surface_id
     if not surface.startswith("bridge:"):
@@ -9589,16 +9977,21 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
     surface = state.surface_id
     if not surface:
         return ""
-    if surface.startswith("bridge:"):
+    host = _host_of_surface(surface)
+    if host:
         resource = getattr(state, "resource", None)
         identity = resource.params() if resource is not None and resource.generation else {}
         _result, problem = await _bridge_call(
-            "teardown", "close", {"tab": surface, **identity}, surface=surface
+            "teardown",
+            "close",
+            {"tab": surface, **identity},
+            surface=surface,
+            client=_client_for(host),
         )
         if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
             return ""
-        return "browser extension could not close the tab; ownership retained for retry"
+        return f"{_host_label(host)} could not close the tab; ownership retained for retry"
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
@@ -9634,10 +10027,29 @@ async def execute_browser(
         return _browser_update_note(
             state, await _execute_browser(tool_call_id, args, signal, on_update, context)
         )
-    if not resource.generation and not await bridge_browser_reachable():
-        return _browser_update_note(
-            state, await _execute_browser(tool_call_id, args, signal, on_update, context)
-        )
+    if not resource.generation:
+        # THE GATE, and it is host-based on purpose. It used to read
+        # `not await bridge_browser_reachable()`, which made the lane's own
+        # `initialize()` — the only thing that ever sets `resource.generation` —
+        # both the effect and the precondition: on a host with no reachable
+        # bridge the lane was skipped on the first action and therefore on EVERY
+        # action, so `initialize`, `recover`, `allocate`, `remember`, `retain`
+        # and `release` never ran, a `ui:` surface was never recorded, and the
+        # ownership verbs fell through to the dispatcher's screenshot tail.
+        #
+        # The question the gate means to ask is "can any host own a surface for
+        # this session", so it now asks exactly that, of every non-cmux host.
+        lane_host = await _ownership_lane_host(state)
+        if not lane_host:
+            return _browser_update_note(
+                state, await _execute_browser(tool_call_id, args, signal, on_update, context)
+            )
+        resource.select_host(lane_host)
+    # With a generation, the resource already knows its lane and must keep it:
+    # `initialize()` loaded the record (whose `host` is the surface's host) and
+    # the pinned prefix agrees with it, so re-deciding here would let a probe that
+    # answered differently between two actions move an established session to a
+    # host that does not own its tab.
     try:
         validated = BrowserParams(**args)
     except ValidationError as exc:
@@ -9669,7 +10081,9 @@ async def execute_browser(
             # session got `format_error`'s full, actionable copy. Two qualities
             # of answer for one fault, on the command whose whole job is
             # recovery (design D2-1, mechanism added by review R2-2).
-            return _bridge_failure_result(tool_call_id, exc, action="the browser tab recovery")
+            return _bridge_failure_result(
+                tool_call_id, exc, action="the browser tab recovery", host=resource.host
+            )
         action = str(args.get("action", "")).strip().lower()
         try:
             if action == "recover":
@@ -9681,8 +10095,6 @@ async def execute_browser(
                     _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
                 )
             if action in ("retain", "release"):
-                from local_operator.browser_bridge.backend import BridgeClient
-
                 reason = str(args.get("text", "")).strip()
                 if action == "retain" and not reason:
                     # Caught HERE because `text` defaults to "", so omitting it
@@ -9743,12 +10155,12 @@ async def execute_browser(
                             "enforce retention."
                         ),
                     )
-                result = await BridgeClient().call(
+                result = await resource.client().call(
                     f"owner_{action}", {**resource.params(), "reason": reason}
                 )
                 resource.record["retention"] = reason if action == "retain" else ""
                 if action == "release" and resource.record.get("terminal"):
-                    result = await BridgeClient().call(
+                    result = await resource.client().call(
                         "owner_finish",
                         {**resource.params(), "outcome": resource.record["terminal"]},
                     )
@@ -9776,6 +10188,7 @@ async def execute_browser(
                 tool_call_id,
                 exc,
                 action="the browser tab recovery" if action == "recover" else action,
+                host=resource.host,
             )
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
@@ -9790,9 +10203,7 @@ async def execute_browser(
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
                 elif access_state and resource.record.get("retention") == "pending site approval":
-                    from local_operator.browser_bridge.backend import BridgeClient
-
-                    await BridgeClient().call("owner_release", resource.params())
+                    await resource.client().call("owner_release", resource.params())
                     resource.record["retention"] = ""
             return _browser_update_note(state, result)
         finally:
@@ -9810,6 +10221,7 @@ async def execute_browser(
                 resource.remember(
                     state.surface_id,
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
+                    host=_host_of_surface(state.surface_id),
                 )
             except (BrowserOwnershipError, OSError, ValueError):
                 logger.warning("browser ownership record not updated", exc_info=True)
@@ -9824,7 +10236,8 @@ async def _execute_browser(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Drive cmux when present, else the paired Local Operator extension."""
+    """Drive cmux when present, else a non-cmux host (the desktop app's browser
+    tab, preferring it, or the paired Local Operator extension)."""
     try:
         params = BrowserParams(**args)
     except ValidationError as exc:
@@ -9837,15 +10250,21 @@ async def _execute_browser(
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
     cmux_available = cmux_browser_available()
-    # Classify the daemon ONCE per action and reuse that answer for both the
+    # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe
     # different readings of a file that may change between two reads.
     bridge_liveness = _bridge_liveness()
-    # The socket-confirming probe, not the bare file check: a healthy daemon
+    ui_liveness = _ui_liveness()
+    # The socket-confirming probes, not the bare file checks: a healthy host
     # whose heartbeat writer stopped must not silently demote this session to
-    # cmux. It costs a round-trip only in the stale-but-alive case.
+    # cmux. Each costs a round-trip only in its stale-but-alive case.
     bridge_available = await bridge_browser_reachable(classified=bridge_liveness)
-    if not cmux_available and not bridge_available:
+    ui_available = await ui_browser_reachable(classified=ui_liveness)
+    # Both hosts can be the one this action was forced off, so both hints are
+    # computed from the SAME readings as the decision above (empty when nothing
+    # was demoted).
+    demotion = _bridge_demotion_hint(bridge_liveness) + _ui_demotion_hint(ui_liveness)
+    if not cmux_available and not bridge_available and not ui_available:
         # A bridge daemon that is UP but has no browser attached is not an
         # unconfigured host: "run 'lop browser status' and 'lop browser install'
         # to set up the bridge" sends a user with an installed, paired bridge to
@@ -9862,10 +10281,12 @@ async def _execute_browser(
         return _error(
             tool_call_id,
             "browser",
-            "browser not available: neither cmux nor a connected Local Operator browser extension "
-            "is reachable. Run 'lop browser status' and 'lop browser install' to set "
-            "up the bridge. Do not install or script one instead; a separate browser engine "
-            "cannot preserve the user's real logins.",
+            "browser not available: none of cmux, the Local Operator desktop app's browser "
+            "tab, or a connected Local Operator browser extension is reachable. Open a "
+            "browser tab in the desktop app, or set up the extension with 'lop browser "
+            "install' ('lop browser status' shows which is reachable). Do not install or "
+            "script one instead; a separate browser engine cannot preserve the user's real "
+            "logins.",
         )
     # Before the state lookup and before every subprocess, including the
     # liveness probe below: see _validate_browser_args.
@@ -9874,45 +10295,78 @@ async def _execute_browser(
         return _error(tool_call_id, "browser", problem)
     state = _browser_state(context)
 
+    if action in OWNERSHIP_BROWSER_ACTIONS:
+        # Reachable ONLY when the ownership lane in `execute_browser` did not run,
+        # which means no host here can own a surface: either this session has no
+        # ownership host at all, or its surface is cmux's (cmux keeps no tab
+        # registry, so the lane never serves that surface even when another host
+        # is reachable). Refuse with a typed code instead of falling through —
+        # the tail of this function is a SCREENSHOT, so before this the model
+        # asked to hold a tab open and got "Screenshot of … saved to …" with a
+        # PNG on disk and no signal that its request was ignored.
+        return _ownership_unavailable_result(tool_call_id, action, surface=state.surface_id)
+
     # The access actions are dispatched BEFORE any surface logic: they exist
     # for the moment 'open' just failed with origin_not_allowed, so there is
     # usually no surface to key on, and gating them behind "no browser surface
-    # open — use 'open' first" would send the agent in a circle. They need the
-    # bridge (cmux has no permission model), so a cmux-pinned surface or a
-    # bridge-less host degrades with the same typed error as scroll/logs.
+    # open — use 'open' first" would send the agent in a circle. cmux has no
+    # permission model at all, so it degrades with the same typed error as
+    # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
-        if state.surface_id.startswith("surface:") or not bridge_available:
+        pinned = _host_of_surface(state.surface_id)
+        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
                 "browser",
                 f"'{action}' is not supported on the cmux backend — cmux has no "
-                "site-permission prompts; navigation works directly. This action only "
-                "exists for the Local Operator browser extension ('lop browser status' / "
-                "'lop browser install')." + _bridge_demotion_hint(bridge_liveness),
+                "site-permission prompts; navigation works directly. "
+                + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+                + demotion,
             )
-        return await _bridge_access(tool_call_id, action, params, context)
+        return await _bridge_access(
+            tool_call_id,
+            action,
+            params,
+            context,
+            client=_client_for(_surface_host_or_first(pinned, ui=ui_available)),
+        )
 
     # Backend is selected only for an empty surface. A prefixed handle pins the
     # transport, so a browser opening or closing mid-session cannot silently
     # move the agent to a different surface.
     if action == "open":
-        # Backend precedence on a FRESH open: prefer the paired Local Operator
-        # browser extension over cmux when both are reachable. The extension
-        # drives a real Chromium profile with the user's own logins and — by
-        # construction (nav.ts creates its tab with ``active: false`` and never
-        # activates it, raises a window, or calls captureVisibleTab) — never
-        # steals focus, so a background agent can browse while the user works in
-        # another window. cmux remains a first-class FALLBACK: it is used when no
-        # extension is connected, and an already-open cmux surface stays on cmux.
+        # Backend precedence on a FRESH open: the desktop app's browser tab
+        # first, then the paired Local Operator browser extension, then cmux.
+        #
+        # UI first is the recommendation of the design, and its justification is
+        # that the app's jar is now PERSISTENT AND SHARED: "log in once, stay
+        # logged in" makes the app's tab the right default rather than a
+        # trade-off. The extension remains the right answer for one specific
+        # case — device trust, hardware keys and enterprise conditional access,
+        # where the session exists only in the user's real profile — and it is
+        # reachable by the explicit `backend` hint when the operator takes it.
+        #
+        # Both non-cmux hosts drive a real Chromium profile and — by construction
+        # (the extension's nav.ts creates its tab with ``active: false`` and never
+        # activates it, raises a window, or calls captureVisibleTab; the app's
+        # host is specified to the same contract) — never steal focus, so a
+        # background agent can browse while the user works in another window.
+        # cmux remains a first-class FALLBACK: it is used when no non-cmux host is
+        # reachable, and an already-open cmux surface stays on cmux.
         #
         # A prefixed handle still pins the transport for the life of the surface,
-        # so this only decides where a brand-new surface lands; a browser opening
-        # or closing mid-session can never silently move the agent between
-        # backends.
-        if state.surface_id.startswith("bridge:"):
-            return await _bridge_open(tool_call_id, state, params.url, context)
+        # so this only decides where a brand-new surface lands.
+        pinned = _host_of_surface(state.surface_id)
+        if pinned:
+            return await _bridge_open(
+                tool_call_id, state, params.url, context, client=_client_for(pinned)
+            )
         if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
+        if ui_available:
+            return await _bridge_open(
+                tool_call_id, state, params.url, context, client=_client_for(HOST_UI_PREFIX)
+            )
         if bridge_available:
             return await _bridge_open(tool_call_id, state, params.url, context)
         return await _browser_open(tool_call_id, state, params.url)
@@ -9920,35 +10374,38 @@ async def _execute_browser(
         return await _browser_close(tool_call_id, state)
     if action == "tabs":
         # Discovery works without an owned surface (its point is finding out
-        # what is open), but it is extension-only: cmux keeps no multi-surface
-        # registry, so a cmux-pinned session degrades exactly like scroll/logs.
-        if state.surface_id.startswith("surface:") or not bridge_available:
+        # what is open), but cmux keeps no multi-surface registry, so a
+        # cmux-pinned session degrades exactly like scroll/logs.
+        pinned = _host_of_surface(state.surface_id)
+        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
                 "browser",
-                "'tabs' is not supported on the cmux backend — use the Local Operator "
-                "browser extension (run 'lop browser status' / 'lop browser install' to "
-                "set it up). cmux has no multi-tab surface registry, so this action only "
-                "works through the extension bridge." + _bridge_demotion_hint(bridge_liveness),
+                "'tabs' is not supported on the cmux backend — cmux has no multi-tab "
+                "surface registry, so this action needs a non-cmux host. "
+                + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+                + demotion,
             )
-        return await _bridge_tabs(tool_call_id, state)
+        return await _bridge_tabs(
+            tool_call_id, state, client=_client_for(_surface_host_or_first(pinned, ui=ui_available))
+        )
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
-    if state.surface_id.startswith("bridge:"):
-        return await _bridge_action(tool_call_id, state, action, params, context)
-    # A cmux-backed surface cannot serve the extension-only actions. Degrade with
-    # a clear, actionable error naming the extension rather than faking a partial
-    # scroll or an empty log list — the operator asked for these to work on the
-    # bridge and to fail honestly on cmux.
-    if action in BRIDGE_ONLY_BROWSER_ACTIONS:
+    host = _host_of_surface(state.surface_id)
+    if host:
+        return await _bridge_action(
+            tool_call_id, state, action, params, context, client=_client_for(host)
+        )
+    # A cmux-backed surface cannot serve the actions cmux has no primitive for.
+    # Degrade with a clear, actionable error naming both non-cmux hosts rather
+    # than faking a partial scroll or an empty log list.
+    if action in CMUX_UNSUPPORTED_BROWSER_ACTIONS:
         return _error(
             tool_call_id,
             "browser",
-            f"'{action}' is not supported on the cmux backend — use the Local Operator "
-            "browser extension (run 'lop browser status' / 'lop browser install' to set it "
-            "up). cmux has no console-log tap or background-tab scroll primitive, so this "
-            "action only works through the extension bridge."
-            + _bridge_demotion_hint(bridge_liveness),
+            f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
+            "background-tab scroll primitive, multi-surface registry or site-permission "
+            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -10117,7 +10574,7 @@ def _parse_surface_id(out: str) -> str:
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
-    """Advertise the browser tool when cmux or the extension bridge is reachable.
+    """Advertise the browser tool when any browsable host is reachable.
 
     Mirrors the wake builder: an environment-specific capability that returns
     None (excluded from the inventory) when the host cannot support it.
@@ -10126,9 +10583,9 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     engine — playwright belongs to the pre-rewrite codebase and appears in no
     dependency group — and pulling one into the default install would add a
     ~150 MB browser download to a dependency set that is kept small on
-    purpose. A host without cmux therefore has no browser tool at all, which
-    is honest, and the agent still reaches static pages through `bash` and
-    curl.
+    purpose. A host without any browsable surface therefore has no browser tool
+    at all, which is honest, and the agent still reaches static pages through
+    `bash` and curl.
 
     The DESCRIPTION says what the surface is, not just which verbs it takes,
     because a verb list gave the model no reason to prefer it. Measured: a
@@ -10141,31 +10598,33 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     between sessions and the user can sign in by hand when asked, which is
     exactly what a freshly downloaded headless Chromium can never do.
 
-    Backend precedence (see ``execute_browser``): when both a cmux panel and a
-    paired Local Operator browser extension are reachable, a fresh open prefers
-    the EXTENSION. It drives a real Chromium profile with the user's own logins
-    and never steals focus — its tab is created inactive and no action raises a
-    window — so a background agent can browse while the user works elsewhere.
-    cmux and (outside this tool) playwright are fallbacks for hosts without the
-    extension. The full setup/permissions playbook lives in ``guide://browser``.
+    Backend precedence (see ``execute_browser``): a fresh open prefers the
+    desktop app's browser tab, then the paired Local Operator browser extension,
+    then cmux. Both non-cmux hosts drive a real Chromium profile the user can
+    sign into and never steal focus, so a background agent can browse while the
+    user works elsewhere; cmux is a first-class fallback for hosts without
+    either. The full setup/permissions playbook lives in ``guide://browser``.
     """
     # Gating deliberately uses the WEAKER `advertisable` test, not the
-    # backend-selection one: a stale-but-alive daemon must still put the tool
-    # in the inventory so `execute_browser`'s bounded socket probe can acquit
-    # it (or produce the typed demotion diagnostic). With the strict check
-    # here, an extension-only host whose heartbeat writer had died offered no
-    # browser tool at all for the whole session — no fallback and no way to
-    # discover the healthy daemon. Still file-only and still synchronous: this
-    # runs while constructing every session and opens no socket.
-    if not cmux_browser_available() and not bridge_browser_advertisable():
+    # backend-selection one: a stale-but-alive host must still put the tool in
+    # the inventory so `execute_browser`'s bounded socket probe can acquit it
+    # (or produce the typed demotion diagnostic). With the strict check here, a
+    # host whose heartbeat writer had died offered no browser tool at all for
+    # the whole session — no fallback and no way to discover the healthy host.
+    # Still file-only and still synchronous: this runs while constructing every
+    # session and opens no socket. Three checks on ONE `createIf` entry, rather
+    # than a second gating convention beside it (AGENTS.md, tool-surface
+    # ladder).
+    if not (cmux_browser_available() or bridge_browser_advertisable() or ui_browser_advertisable()):
         return None
     return AgentTool(
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
-            "Drive the user's REAL browser (a cmux browser panel or their paired "
-            "Local Operator browser extension): open/goto a URL, read page text, snapshot the "
+            "Drive the user's REAL browser (the Local Operator desktop app's browser "
+            "tab, their paired Local Operator browser extension, or a cmux browser "
+            "panel): open/goto a URL, read page text, snapshot the "
             "accessibility tree for click refs, click, type, scroll, read console "
             "logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
@@ -10178,16 +10637,17 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "tab owned by this session; reuse it because later opens navigate it. "
             "Before your final response, call 'close' unless the user explicitly "
             "needs it left open for a pending or immediately continuing interaction. "
-            "'tabs' lists every extension-driven tab including other sessions' "
+            "'tabs' lists every agent-driven tab including other sessions' "
             "(handles are redacted: the listing is awareness-only and cannot "
             "drive or close anything), and 'close' ends only your own tab. "
             "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
             "your turn with 'retain' (reason in text) and end that hold with 'release'. "
             "'scroll', 'logs' and "
-            "'tabs' need the extension backend (cmux says so). On the extension, "
+            "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup, "
+            "user (ask tool or message) to approve the prompt where the host shows it "
+            "— the extension's popup, or the app's browser tab — "
             "and 'await_access' to wait for their decision before navigating again. "
             "Use it for every "
             "screenshot and page interaction; never install or script a browser "

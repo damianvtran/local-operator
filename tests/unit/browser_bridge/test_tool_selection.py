@@ -114,7 +114,11 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     assert "scroll" in builtin.BROWSER_ACTIONS
     assert "logs" in builtin.BROWSER_ACTIONS
     assert "tabs" in builtin.BROWSER_ACTIONS
-    assert builtin.BRIDGE_ONLY_BROWSER_ACTIONS == frozenset(
+    # Named for the host that CANNOT serve them. It used to be
+    # `BRIDGE_ONLY_BROWSER_ACTIONS`, which on a three-host machine claimed the
+    # extension was the only alternative to cmux — false now that the desktop
+    # app's browser host serves every one of them.
+    assert builtin.CMUX_UNSUPPORTED_BROWSER_ACTIONS == frozenset(
         {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
     )
 
@@ -155,7 +159,7 @@ async def test_scroll_wire_params_only_set_fields(monkeypatch) -> None:
     # arrive as "" and pre-empt an x/y scroll.
     captured: dict[str, Any] = {}
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         captured["action"] = action
         captured["params"] = params
         return {"scrollX": 0, "scrollY": 400, "moreBelow": True, "moreRight": False}, None
@@ -187,7 +191,7 @@ async def test_scroll_wire_params_only_set_fields(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_scroll_reports_end_of_page(monkeypatch) -> None:
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return {"scrollX": 0, "scrollY": 999, "moreBelow": False, "moreRight": False}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
@@ -203,7 +207,7 @@ async def test_scroll_reports_end_of_page(monkeypatch) -> None:
 async def test_logs_wire_and_rendering(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         captured["params"] = params
         return {
             "entries": [
@@ -243,7 +247,7 @@ async def test_logs_wire_and_rendering(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_logs_empty(monkeypatch) -> None:
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return {"entries": []}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
@@ -268,7 +272,7 @@ async def test_scroll_and_logs_degrade_on_cmux(monkeypatch) -> None:
     for action in ("scroll", "logs", "tabs"):
         result = await builtin.execute_browser("t", {"action": action}, None, None, context)
         assert "not supported on the cmux backend" in result.text
-        assert "Local Operator browser extension" in result.text
+        assert "desktop app" in result.text and "browser extension" in result.text
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +284,7 @@ async def test_scroll_and_logs_degrade_on_cmux(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_tabs_lists_surfaces_and_marks_own(monkeypatch) -> None:
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         assert action == "tabs"
         assert params == {}
         # The extension REDACTS listed handles (finding M1): truncated nonce
@@ -339,7 +343,7 @@ def test_redacted_ownership_prefix_matching() -> None:
 async def test_tabs_works_without_an_owned_surface(monkeypatch) -> None:
     # Discovery must not require 'open' first: its main use is deciding
     # whether to resume an existing tab or seeing what fills the cap.
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return {"tabs": []}, None
 
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
@@ -348,7 +352,7 @@ async def test_tabs_works_without_an_owned_surface(monkeypatch) -> None:
     context = ToolContext(browser=BrowserSurface())
     result = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
     assert not result.is_error
-    assert "No extension-driven browser tabs" in result.text
+    assert "No agent-driven browser tabs" in result.text
     assert builtin._BROWSER_TABS_CLEANUP_FOOTER in result.text
 
 
@@ -356,7 +360,7 @@ async def test_tabs_works_without_an_owned_surface(monkeypatch) -> None:
 async def test_bridge_open_reminds_only_when_it_creates_a_new_tab(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append(params)
         return {
             "tab": params.get("tab", "bridge:33:fresh"),
@@ -382,7 +386,7 @@ async def test_bridge_open_recovers_from_a_dead_pinned_tab(monkeypatch) -> None:
     # creating a fresh tab instead of surfacing the error.
     calls: list[dict[str, Any]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append(params)
         if "tab" in params:
             # Recovery keys on the TYPED wire code carried in details, not on
@@ -416,7 +420,7 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         assert action == "request_access"
         # The tool binds the approval to an identity (session when the host
         # provides one, else the tool call id — never anonymous).
@@ -443,7 +447,7 @@ async def test_request_access_reports_already_allowed(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return {"origin": "https://example.com", "state": "allowed"}, None
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
@@ -462,7 +466,7 @@ async def test_cancel_access_uses_the_callers_stable_identity(monkeypatch) -> No
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         assert action == "cancel_access"
         assert params == {
             "url": "https://example.com",
@@ -489,7 +493,7 @@ async def test_await_access_returns_decision_and_denied_warns_off_retry(monkeypa
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         assert action == "await_access"
         # The tool slices the wait: each wire call carries a bounded budget.
         assert params["timeout_ms"] <= builtin._BRIDGE_AWAIT_SLICE_MS
@@ -547,7 +551,7 @@ async def test_session_identity_is_stable_across_the_whole_flow(monkeypatch) -> 
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     seen: list[tuple[str, str]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         seen.append((action, str(params.get("requester", "<missing>"))))
         if action == "request_access":
             return {"origin": "https://example.com", "state": "pending"}, None
@@ -580,7 +584,7 @@ async def test_browser_session_label_is_sanitized_and_host_derived(monkeypatch) 
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     seen: list[dict[str, Any]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         seen.append(dict(params))
         return {"tab": "bridge:5:n0nce", "url": "https://example.com/", "title": "x"}, None
 
@@ -628,7 +632,7 @@ async def test_rename_changes_label_without_changing_requester(monkeypatch) -> N
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     seen: list[tuple[str, str]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         seen.append((str(params["requester"]), str(params["session_label"])))
         return {"origin": "https://example.com", "state": "pending"}, None
 
@@ -653,7 +657,7 @@ async def test_parallel_contexts_present_distinct_identities(monkeypatch) -> Non
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     seen: list[str] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         seen.append(str(params.get("requester", "<missing>")))
         return {"origin": "https://example.com", "state": "pending"}, None
 
@@ -675,7 +679,7 @@ async def test_goto_carries_the_session_identity(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
     captured: dict[str, Any] = {}
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         captured["action"] = action
         captured["requester"] = params.get("requester")
         return {"url": "https://example.com/", "title": "x"}, None
@@ -756,7 +760,7 @@ async def test_retitle_pushes_the_late_title_with_trusted_identity(monkeypatch) 
     # open-time label forever. The session pushes it explicitly instead.
     seen: list[tuple[str, dict[str, Any]]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         seen.append((action, dict(params)))
         return {"title": "LO · Named later"}, None
 
@@ -782,7 +786,7 @@ async def test_retitle_is_skipped_without_a_bridge_surface(monkeypatch) -> None:
     # the wire at all, so a non-browsing session pays nothing for this.
     calls: list[str] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append(action)
         return {}, None
 
@@ -798,7 +802,7 @@ async def test_retitle_is_skipped_without_a_bridge_surface(monkeypatch) -> None:
 async def test_retitle_swallows_a_bridge_failure(monkeypatch) -> None:
     # Renaming tab chrome must never raise into the caller: this runs off a
     # title landing, and a title must not be able to cost a turn.
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         return None, builtin._error(tool_call_id, "browser", "extension not connected")
 
     monkeypatch.setattr(builtin, "_bridge_call", fake_call)
@@ -890,7 +894,11 @@ async def test_retitle_against_an_old_extension_is_swallowed_end_to_end(monkeypa
             extension_connected=True,
             paired=True,
         )
-        monkeypatch.setattr(state_store, "read", lambda root=None: live)
+        # The store's `read` is addressed by namespace now (the primitives were
+        # generalised so the desktop app's browser host could share them), so the
+        # stub takes the keywords rather than pinning a signature that no longer
+        # exists — it still answers every read the client makes.
+        monkeypatch.setattr(state_store, "read", lambda root=None, **_kwargs: live)
 
         surface = BrowserSurface()
         surface.surface_id = "bridge:5:n0nce"
@@ -957,7 +965,7 @@ async def test_retitle_declines_rather_than_sending_a_constant_identity(monkeypa
     """
     calls: list[str] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append(str(params.get("requester", "")))
         return {}, None
 
@@ -1181,3 +1189,192 @@ def test_a_peer_message_from_a_child_is_not_signed_with_its_parents_name() -> No
         builtin._peer_sender_conversation_name(long_parent)
         == "Fix Slack-reported UI zoom and overlap bugs › zoom-scroll-fix"
     )
+
+
+# ---------------------------------------------------------------------------
+# Three-way host selection, over all eight availability combinations.
+#
+# The set is small enough to enumerate exhaustively, which is the point: a
+# three-way branch's failure mode is a combination nobody tried, and the two
+# hosts share one dispatch path precisely so that a combination cannot be handled
+# correctly for one and wrongly for the other.
+# ---------------------------------------------------------------------------
+
+
+def _availability(monkeypatch, *, cmux: bool, bridge: bool, ui: bool) -> None:
+    """Pin all THREE hosts' answers, and both liveness readings.
+
+    The liveness readings are pinned too (to "no record") so the demotion hints
+    and the bridge-absent rescue cannot depend on whatever discovery files exist
+    on the machine running the suite — a test whose answer changes with the
+    operator's live daemon is not a test.
+    """
+
+    async def bridge_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+        return bridge
+
+    async def ui_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+        return ui
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: cmux)
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", bridge_reachable)
+    monkeypatch.setattr(builtin, "ui_browser_reachable", ui_reachable)
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: ui)
+    monkeypatch.setattr(builtin, "_bridge_liveness", lambda: (None, None))
+    monkeypatch.setattr(builtin, "_ui_liveness", lambda: (None, None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cmux", "bridge", "ui", "expected"),
+    [
+        (True, True, True, "ui"),
+        (True, True, False, "bridge"),
+        (True, False, True, "ui"),
+        (False, True, True, "ui"),
+        (True, False, False, "cmux"),
+        (False, True, False, "bridge"),
+        (False, False, True, "ui"),
+        (False, False, False, None),
+    ],
+    ids=[
+        "all-three",
+        "no-ui",
+        "no-bridge",
+        "no-cmux",
+        "cmux-only",
+        "bridge-only",
+        "ui-only",
+        "none",
+    ],
+)
+async def test_fresh_open_precedence_matrix(
+    monkeypatch, cmux: bool, bridge: bool, ui: bool, expected: str | None
+) -> None:
+    _availability(monkeypatch, cmux=cmux, bridge=bridge, ui=ui)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "non-cmux")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    if expected is None:
+        assert chosen == [], "a host was used with none reachable"
+        assert result.is_error and "browser not available" in result.text
+        # The no-host copy is three-way: it names the desktop app, the extension
+        # AND cmux, and it does not send an app user to `lop browser install`.
+        assert "desktop app" in result.text and "browser extension" in result.text
+        assert "cmux" in result.text
+    else:
+        assert chosen == [expected], result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "expected"),
+    [
+        ("ui:4:aaaaaaaabbbbccccddddeeeeffff0000", "ui"),
+        ("bridge:4:aaaaaaaabbbbccccddddeeeeffff0000", "bridge"),
+        ("surface:4", "cmux"),
+    ],
+)
+async def test_a_pinned_handle_overrides_the_precedence(
+    monkeypatch, surface: str, expected: str
+) -> None:
+    """A prefixed handle pins the transport for the surface's whole life.
+
+    Checked with ALL THREE hosts reachable, so the pin is doing the work rather
+    than the precedence happening to agree with it.
+    """
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "non-cmux")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    holder = BrowserSurface()
+    holder.surface_id = surface
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com"},
+        None,
+        None,
+        ToolContext(browser=holder),
+    )
+    assert chosen == [expected], result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bridge", "ui", "named"),
+    [
+        (False, False, ("desktop app", "browser extension")),
+        (True, False, ("browser extension",)),
+        (False, True, ("desktop app",)),
+        (True, True, ("desktop app", "browser extension")),
+    ],
+    ids=["neither", "bridge-only", "ui-only", "both"],
+)
+async def test_the_cmux_degrade_names_the_hosts_that_can_serve_it(
+    monkeypatch, bridge: bool, ui: bool, named: tuple[str, ...]
+) -> None:
+    """`scroll`/`logs`/`tabs` on a cmux surface, with each non-cmux shape.
+
+    The old copy asserted the EXTENSION was the only alternative, which on a host
+    with the desktop app running sent the user to install a bridge they did not
+    need.
+    """
+    _availability(monkeypatch, cmux=True, bridge=bridge, ui=ui)
+    holder = BrowserSurface()
+    holder.surface_id = "surface:3"
+    for action in ("scroll", "logs", "tabs"):
+        result = await builtin.execute_browser(
+            "t", {"action": action}, None, None, ToolContext(browser=holder)
+        )
+        assert result.is_error and "not supported on the cmux backend" in result.text
+        for fragment in named:
+            assert fragment in result.text, result.text
+        # The one thing the copy must never do again: name a host that cannot
+        # serve this and imply it is the only one.
+        assert "only exists for the Local Operator browser extension" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_non_cmux_surface_routes_to_its_own_host(monkeypatch) -> None:
+    """A pinned `ui:` handle must reach the UI client, not the bridge's."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    seen: list[tuple[str, str]] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        seen.append((action, builtin._host_of_client(client)))
+        return {"url": "https://example.com/", "title": "Example"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    holder = BrowserSurface()
+    holder.surface_id = "ui:9:aaaaaaaabbbbccccddddeeeeffff0000"
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "goto", "url": "https://example.com"},
+        None,
+        None,
+        ToolContext(browser=holder),
+    )
+    assert result.is_error is False, result.text
+    assert seen == [("goto", "ui")]

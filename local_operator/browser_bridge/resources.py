@@ -12,9 +12,10 @@ import json
 import os
 import secrets
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.backend import BridgeClient, BridgeError
@@ -25,6 +26,104 @@ from local_operator.browser_bridge.protocol import (
 )
 
 RESOURCE_NAME = ".browser-resource.json"
+
+#: The record's spelling of each ownership host. ``HOST_BRIDGE`` names the
+#: EXTENSION host — the same word its surface tokens use (``bridge:<tab>:<nonce>``),
+#: because the record and the prefix have to agree or a resumed session would
+#: select the wrong lane. The model-facing COPY calls that host "the extension"
+#: (see ``browser_bridge.backend.HOST_EXTENSION``), which is a naming difference
+#: between the wire and the prose, not a second host.
+HOST_BRIDGE = "bridge"
+HOST_UI = "ui"
+
+
+class OwnershipDiscovery(Protocol):
+    """The one discovery question the ownership layer asks, per host.
+
+    It is NOT a state read: what the ownership mode needs is the peer's
+    (version, protocol) pair, and the two hosts answer it from different fields
+    — the extension from ``extension_version``/``extension_proto`` plus a proven
+    connection, the UI host from its ``app_version`` and ``proto`` (it has no
+    second process to be disconnected from). ``None`` means "cannot tell", and
+    every caller must read it that way.
+    """
+
+    def peer_identity(self) -> tuple[str, int] | None: ...
+
+
+@dataclass(frozen=True)
+class OwnershipHost:
+    """One host's ownership lane: its transport, plus its discovery record.
+
+    Selected by the record's ``host`` field so a session resumed on a UI surface
+    does not send ``owner_*`` to a daemon it was never talking to.
+    """
+
+    name: str
+    #: A FACTORY, not a client: constructing one up front would open no socket
+    #: but would bind the module-level class at import time, which is exactly
+    #: what keeps a monkeypatched `BridgeClient` (how the whole browser test
+    #: suite fakes the wire) from being used.
+    client: Callable[[], Any]
+    discovery: OwnershipDiscovery
+
+
+class _BridgeDiscovery:
+    """The extension's peer facts, from the daemon's own published link state."""
+
+    def peer_identity(self) -> tuple[str, int] | None:
+        try:
+            current = state_store.read()
+        except Exception:  # noqa: BLE001 - discovery must never raise at a call site
+            return None
+        if current is None or not current.extension_connected:
+            return None
+        return (current.extension_version, current.extension_proto)
+
+
+class _UiDiscovery:
+    """The UI host's peer facts: its app version and its bridge protocol.
+
+    No connection flag is required — the file only exists while the app is
+    running, and its views are its own children — so any readable record is a
+    real peer. That is what gives ``ownership_mode()`` a meaningful answer on
+    this host instead of ``None``, which elsewhere means "must ask".
+    """
+
+    def peer_identity(self) -> tuple[str, int] | None:
+        try:
+            from local_operator.ui_browser import state as ui_state
+
+            current = ui_state.read()
+        except Exception:  # noqa: BLE001 - discovery must never raise at a call site
+            return None
+        if current is None:
+            return None
+        return (current.app_version, current.proto)
+
+
+def _bridge_client() -> Any:
+    # Resolved through the module global at CALL time, not captured: the browser
+    # test suite monkeypatches ``resources.BridgeClient`` to fake the wire.
+    return BridgeClient()
+
+
+def _ui_client() -> Any:
+    from local_operator.ui_browser.backend import UiHostClient
+
+    return UiHostClient()
+
+
+def ownership_host(name: str) -> OwnershipHost:
+    """The lane for one host name; the bridge is the fallback for an empty one.
+
+    Defaulting to the bridge is the fail-safe the record's own compatibility rule
+    needs: a record written before the ``host`` field existed names no host, and
+    every such record belongs to a session that was talking to the daemon.
+    """
+    if name == HOST_UI:
+        return OwnershipHost(HOST_UI, _ui_client, _UiDiscovery())
+    return OwnershipHost(HOST_BRIDGE, _bridge_client, _BridgeDiscovery())
 
 
 class BrowserOwnershipError(RuntimeError):
@@ -54,6 +153,40 @@ _EXTENSION_STOPPED_ANSWERING_MESSAGE = (
     "in chrome://extensions (pairing is preserved), then retry."
 )
 
+#: The same two refusals, per host. They cannot be one sentence with a noun
+#: swapped in: both name a PROCESS to go and fix, and naming the extension to the
+#: user of the desktop app (or the reverse) sends them somewhere that cannot help.
+_UI_REQUIRES_UPDATE_MESSAGE = (
+    "Browser tab ownership recovery requires an updated Local Operator desktop app. "
+    "Update the app, then retry; no new tab was allocated."
+)
+_UI_STOPPED_ANSWERING_MESSAGE = (
+    "the Local Operator desktop app's browser host stopped answering while this "
+    "session's tab ownership was being recovered. Ask the user to restart the desktop "
+    "app (tab handles and pending site decisions are lost with it), then retry."
+)
+
+
+def _ownership_requires_update_message(host: str) -> str:
+    if host == HOST_UI:
+        return _UI_REQUIRES_UPDATE_MESSAGE
+    return _OWNERSHIP_REQUIRES_UPDATE_MESSAGE
+
+
+def _peer_stopped_answering_message(host: str) -> str:
+    if host == HOST_UI:
+        return _UI_STOPPED_ANSWERING_MESSAGE
+    return _EXTENSION_STOPPED_ANSWERING_MESSAGE
+
+
+def _host_noun(host: str) -> str:
+    """The subject of a refusal that names who must reconcile: a PROCESS name.
+
+    Kept separate from the two whole-sentence builders above because this one is
+    spliced into a sentence that is otherwise host-neutral.
+    """
+    return "browser extension" if host != HOST_UI else "the Local Operator desktop app"
+
 
 @dataclass(frozen=True)
 class BrowserCleanupResult:
@@ -62,7 +195,7 @@ class BrowserCleanupResult:
 
 
 class BrowserResource:
-    def __init__(self, directory: Path, session_id: str) -> None:
+    def __init__(self, directory: Path, session_id: str, *, host: str = "") -> None:
         self.directory = directory
         self.session_id = session_id
         self.path = directory / RESOURCE_NAME
@@ -71,6 +204,16 @@ class BrowserResource:
         self.generation = ""
         self.previous_generation = ""
         self.recovered = False
+        #: WHICH host owns this session's surface: "" (not learned yet), "ui" or
+        #: "bridge". Written into the record on the first successful `open`, so a
+        #: resumed session selects the lane it opened on. Everything the lane
+        #: touches — the `owner_*` transport and the discovery read that feeds
+        #: `ownership_mode` — is selected from it.
+        #:
+        #: "" deliberately means the BRIDGE: a record written before this field
+        #: existed belongs to a session that was talking to the daemon, so an old
+        #: record behaves exactly as it did before (fail-safe, not fail-open).
+        self.host = host
         # Whether the attached extension can reconcile ownership at all.
         #
         #   * None  = not learned yet (or the peer changed since it was).
@@ -109,6 +252,31 @@ class BrowserResource:
             return str(self._load().get("generation", ""))
         except (BrowserOwnershipError, OSError, ValueError):
             return ""
+
+    def _lane(self) -> OwnershipHost:
+        """The ownership lane for this session: transport + discovery, per host."""
+        return ownership_host(self.host or str(self.record.get("host", "")))
+
+    def select_host(self, host: str) -> None:
+        """Bind this session's surface to a host, once it is known.
+
+        Called by the tool before the lane runs, from the pinned surface prefix
+        when there is one and from the availability probe when there is not. An
+        already-known host wins over the argument: a surface's transport is
+        pinned for its whole life, so a later action cannot silently move an
+        established session to a different lane.
+        """
+        if not self.host and host:
+            self.host = host
+
+    def client(self) -> Any:
+        """A client for this session's host, built fresh per call (as before).
+
+        Public because the ownership lane lives in the tool (`builtin.py`) and
+        must drive the SAME transport the resource's own finalizer does: two
+        selections would be two answers to "which host owns this tab".
+        """
+        return self._lane().client()
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -290,22 +458,23 @@ class BrowserResource:
         return any(self.record.get(field) for field in self.OBLIGATION_FIELDS)
 
     def _peer_identity(self) -> tuple[str, int] | None:
-        """The attached extension's (version, proto), or None when unknown.
+        """The peer's (version, proto), or None when it cannot be told.
 
-        Read from the DISCOVERY FILE rather than a socket: the daemon publishes
-        these from the same live link state `/health` serves, and this is
-        consulted on the `finish`/`retain`/`release` paths too, which must stay
-        cheap and must not depend on a dial. `None` — no daemon, nothing
-        attached, or an unreadable file — means "cannot tell", and every caller
-        must treat it that way: unknown is never "old".
+        Read from the DISCOVERY FILE rather than a socket: the host publishes
+        these from the same live state `/health` serves, and this is consulted on
+        the `finish`/`retain`/`release` paths too, which must stay cheap and must
+        not depend on a dial. `None` — no host, nothing attached, or an
+        unreadable file — means "cannot tell", and every caller must treat it
+        that way: unknown is never "old".
+
+        WHICH file depends on the lane: the extension answers from
+        ``extension_version``/``extension_proto`` and requires a proven link, the
+        UI host from its ``app_version`` and ``proto``. Reading the daemon's file
+        for a UI surface returned ``None`` forever, which is the reason the UI
+        host could never be classified and its capability-only path stayed
+        unreachable.
         """
-        try:
-            current = state_store.read()
-        except Exception:  # noqa: BLE001 - discovery must never raise at a call site
-            return None
-        if current is None or not current.extension_connected:
-            return None
-        return (current.extension_version, current.extension_proto)
+        return self._lane().discovery.peer_identity()
 
     def ownership_mode(self) -> bool | None:
         """The cached ownership verdict, invalidated when the PEER changed.
@@ -338,6 +507,13 @@ class BrowserResource:
         peer = self._ownership_peer
         if peer is None:
             return False
+        if self._lane().name == HOST_UI:
+            # The ownership floor is an EXTENSION version and the UI host reports
+            # an APP version, so comparing them is a category error — and in the
+            # wrong direction: an app at 0.1.x would be read as a pre-ownership
+            # extension. A UI host that answers the wire at all ships the whole
+            # method set, so it can never be read as old.
+            return False
         version, _proto = peer
         return extension_older(version, OWNERSHIP_MIN_EXTENSION_VERSION)
 
@@ -349,7 +525,7 @@ class BrowserResource:
         if self.ownership_mode() is False:
             return self._degraded_recover()
         try:
-            result = await BridgeClient().call("owner_recover", self.params())
+            result = await self.client().call("owner_recover", self.params())
         except BridgeError as exc:
             # An ownership-AWARE extension refuses with the typed OWNER_REFUSED;
             # anything else from an `owner_*` method means the extension does
@@ -414,7 +590,9 @@ class BrowserResource:
                 # `MIN_SUPPORTED_PROTO..PROTO_VERSION`. Unchanged copy — here
                 # updating really is the remedy, and the popup's `#incompatible`
                 # card is the user-facing half of the same verdict.
-                raise BrowserOwnershipError(_OWNERSHIP_REQUIRES_UPDATE_MESSAGE) from exc
+                raise BrowserOwnershipError(
+                    _ownership_requires_update_message(self._lane().name)
+                ) from exc
             if exc.code is ErrorCode.INTERNAL and (
                 "timeout_s" not in exc.data and not exc.data.get("stalled")
             ):
@@ -423,7 +601,9 @@ class BrowserResource:
                     # not be read as old) that cannot answer a verb it ships
                     # means its worker has stopped answering. The remedy is the
                     # toggle, never an update the store may not be able to serve.
-                    raise BrowserOwnershipError(_EXTENSION_STOPPED_ANSWERING_MESSAGE) from exc
+                    raise BrowserOwnershipError(
+                        _peer_stopped_answering_message(self._lane().name)
+                    ) from exc
                 if not self.has_durable_obligation():
                     # Nothing to reconcile, so the extension's missing
                     # lifecycle costs this session nothing: keep working in
@@ -434,7 +614,9 @@ class BrowserResource:
                 # A durable obligation exists and only `owner_*` can reconcile
                 # it, so the honest failure stands — a silent downgrade here
                 # would leave a tab stranded.
-                raise BrowserOwnershipError(_OWNERSHIP_REQUIRES_UPDATE_MESSAGE) from exc
+                raise BrowserOwnershipError(
+                    _ownership_requires_update_message(self._lane().name)
+                ) from exc
             raise
         if result.get("ownership_version") != 1:
             # The peer answers `owner_recover` but describes a lifecycle this
@@ -442,12 +624,13 @@ class BrowserResource:
             # at all), so no degradation is safe: the two sides would disagree
             # about what an obligation is.
             raise BrowserOwnershipError(
-                "browser extension needs ownership-recovery support; update it first"
+                f"{_host_noun(self._lane().name)} needs ownership-recovery support; update it "
+                "first"
             )
         self.ownership = True
         self.assert_current()
         if self.record.get("release_pause") and result.get("state") != "unresolved":
-            await BridgeClient().call("owner_release", self.params())
+            await self.client().call("owner_release", self.params())
             self.assert_current()
             self.record.pop("release_pause", None)
             self.record["retention"] = ""
@@ -502,8 +685,22 @@ class BrowserResource:
         self._save()
         return {"state": self.record["state"], "tab": surface, "ownership_version": 0}
 
-    def remember(self, surface_id: str, *, state: str | None = None) -> None:
+    def remember(
+        self, surface_id: str, *, state: str | None = None, host: str | None = None
+    ) -> None:
+        """Record the surface AND, on the first successful open, its host.
+
+        The host is written here rather than at open time so the record cannot
+        name a host for a surface that never materialised: `remember` is the one
+        call that follows a real open. It is only ever SET, never cleared, so a
+        later `close` (which remembers an empty surface) cannot erase the lane a
+        resumed session still needs to reach its record's owner.
+        """
         self.assert_current()
+        if host:
+            self.select_host(host)
+        if self.host:
+            self.record["host"] = self.host
         self.record["surface_id"] = surface_id
         self.record["state"] = (
             "cleanup_pending"
@@ -557,10 +754,10 @@ class BrowserResource:
                         "browser ownership could not be proven after restart; no tab adopted",
                     )
                 if self.record.get("retention"):
-                    await BridgeClient().call(
+                    await self.client().call(
                         "owner_retain", {**self.params(), "reason": self.record["retention"]}
                     )
-                result = await BridgeClient().call(
+                result = await self.client().call(
                     "owner_finish", {**self.params(), "outcome": outcome}
                 )
                 self.assert_current()
@@ -618,7 +815,7 @@ class BrowserResource:
                 # `{"tab": …, **identity}` matches the shape `builtin.py`'s own
                 # bridge `close` already sends, so there is one spelling of an
                 # owner-bearing close in the codebase rather than two.
-                await BridgeClient().call("close", {"tab": surface, **self.params()})
+                await self.client().call("close", {"tab": surface, **self.params()})
             except BridgeError as exc:
                 # A failed close is a result here for the same reason it is in
                 # `finish`: the tab is genuinely still out there and the record
