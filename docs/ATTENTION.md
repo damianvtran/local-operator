@@ -79,7 +79,10 @@ contains:
 
 The canonical frontend and mobile projection carry additive `attention` state.
 Runtime capability `completion-ack-v1` enables `acknowledge_attention` with
-`completion_token`. Mobile `POST /api/sessions/{id}/seen` takes the same token in
+`completion_token`. Its successful operation ack frame retains the legacy string
+`detail` and adds the owner's resulting `attention` state; followers must apply
+that answer before returning rather than waiting for a later projection push.
+A refused operation carries no replacement attention state. Mobile `POST /api/sessions/{id}/seen` takes the same token in
 a JSON object: missing legacy bodies return422, unknown/foreign tokens409,
 superseded tokens409 carrying `code: superseded_completion_token`, unknown
 sessions404, and unauthenticated callers401. Reads and subscriptions do not

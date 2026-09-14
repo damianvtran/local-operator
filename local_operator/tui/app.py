@@ -7872,6 +7872,10 @@ class OperatorApp(App[None]):
 
     def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
         message.stop()
+        # The click saw this catalogue token, not whatever finishes during the
+        # asynchronous switch. Carry that exact intent through the later bind.
+        candidate = getattr(self, "_attention_input_catalogue", {}).get(message.session_id)
+        self._attention_navigation_receipt = (message.session_id, *candidate) if candidate else None
         if self._session is not None and self._session.session_id == message.session_id:
             if self._interaction.display_only:
                 self._start_sidebar_connection(self._interaction)
@@ -9008,6 +9012,16 @@ class OperatorApp(App[None]):
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        attention = getattr(state, "attention", None)
+        if isinstance(attention, dict) and attention.get("completion_token"):
+            # A new canonical result may paint before the one-second receipt
+            # poll. Let its first real input witness B rather than stale A;
+            # on_event still checks committed geometry before granting evidence.
+            self._attention_rendered_receipt = (
+                self._session,
+                str(attention["completion_token"]),
+                str(attention.get("anchor_id") or ""),
+            )
         cost = getattr(state, "cumulative_cost", None)
         knowledge = getattr(
             getattr(
@@ -9784,6 +9798,14 @@ class OperatorApp(App[None]):
         conversation, and ``id(session)`` cannot outlive a parked facade.
         """
         self._session = session
+        self._attention_input_receipt = None
+        self._attention_rendered_receipt = None
+        intent = getattr(self, "_attention_navigation_receipt", None)
+        if session is not None and intent and intent[0] == session.session_id:
+            self._attention_input_receipt = (session, intent[1], intent[2])
+            self._attention_input_at = intent[3]
+        self._attention_navigation_receipt = None
+        self._attention_input_catalogue = {}
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
@@ -22237,21 +22259,22 @@ class OperatorApp(App[None]):
         self._attention_focus_probe_at = now
         return True
 
-    def _attention_focus_evidenced(self) -> bool:
-        """Whether this app holds POSITIVE evidence of a terminal in front of the user.
+    def _attention_focus_evidenced(self, session: Any, token: str, anchor: str) -> bool:
+        """A real focus report or unexpired input for this exact observed token.
 
-        The question the receipt gate and every re-check after an ``await`` have
-        to ask, which is why it is one function rather than a stored flag: an
-        input edge is evidence of the same fact a focus report carries, but it
-        has a shelf life (:data:`ATTENTION_INPUT_EVIDENCE_S`), so the answer
-        changes as time passes while ``_attention_focus_observed`` — set by a
-        reported focus or a MEASURED probe — does not.
+        Freshness alone says nothing about a later result. Navigation may carry
+        a catalogue token while its transcript loads; neither that intent nor a
+        key bypasses the current visibility and measurable-host gates.
         """
         if getattr(self, "_attention_focus_observed", False):
             return True
         from local_operator.tui.attention import input_evidence_is_fresh
 
-        return input_evidence_is_fresh(getattr(self, "_attention_input_at", 0.0))
+        return getattr(self, "_attention_input_receipt", None) == (
+            session,
+            token,
+            anchor,
+        ) and input_evidence_is_fresh(getattr(self, "_attention_input_at", 0.0))
 
     @staticmethod
     def _acknowledgement_raced_a_newer_completion(settled: Any, token: str) -> bool:
@@ -22270,24 +22293,36 @@ class OperatorApp(App[None]):
         return settled.get("unseen") is not False and isinstance(named, str) and named != token
 
     async def on_event(self, event: events.Event) -> None:
-        """Note input as focus evidence, then hand the event to Textual.
+        """Witness result/catalogue identity before Textual dispatches real input.
 
-        A `Key` or `MouseDown` this app RECEIVES can only have been produced
-        while this terminal held OS focus: a backgrounded terminal delivers
-        neither. That makes it the portable form of the proof `on_app_focus`
-        carries for a host that reports focus and the host probe MEASURES on
-        macOS cmux. Textual draws the same conclusion in this very method
-        (`app_focus = True` for exactly these two types when it believes the app
-        is blurred), but only in the blurred case — an app that starts focused,
-        which is the reported defect's case (a terminal already focused when
-        focus reporting was enabled), sees the reactive stay `True`, posts no
-        event, calls no watcher, and so leaves no trace at all that input ever
-        arrived. Stamping EVERY input edge is what makes the evidence exist for
-        those terminals; `_attention_focus_evidenced` bounds its shelf life.
+        Key/MouseDown arrive here from the driver; wheel, hover and forwarded
+        events are not evidence. A timestamp is only an expiry for the witnessed
+        token, never permission to receipt later work after the reader leaves.
         """
         if isinstance(event, events.InputEvent) and not event.is_forwarded:
             if isinstance(event, (events.Key, events.MouseDown)):
                 self._attention_input_at = time.monotonic()
+                # Snapshot only evidence already observed BEFORE dispatch. A key
+                # cannot authorize a future token, even inside the expiry window.
+                # Only what is ALREADY observed: the poll's rendered receipt or
+                # the canonical state's painted token. Deliberately no store read
+                # here -- this runs before dispatch for every keystroke in the
+                # app, and a sqlite hop on that path is latency the reader feels
+                # on every character typed, for a token the 1 s poll and
+                # `_apply_frontend_state` have already supplied.
+                candidate = getattr(self, "_attention_rendered_receipt", None)
+                self._attention_input_receipt = (
+                    candidate
+                    if candidate
+                    and candidate[0] is self._session
+                    and self._completion_anchor_visible(candidate[2])
+                    else None
+                )
+                self._attention_input_catalogue = {
+                    entry.id: (entry.completion_token, entry.anchor_id, self._attention_input_at)
+                    for entry in self._session_sidebar.visible_entries
+                    if entry.unseen and entry.completion_token and entry.anchor_id
+                }
         await super().on_event(event)
 
     async def _poll_completion_attention(self) -> None:
@@ -22366,6 +22401,10 @@ class OperatorApp(App[None]):
                 or not self._completion_anchor_visible(anchor)
             ):
                 return
+            # Input may witness only this already-rendered result. Retain the
+            # exact identity before the focus gate so the next real input can
+            # acknowledge it without licensing a later completion.
+            self._attention_rendered_receipt = (session, token, anchor)
             # FOCUS EVIDENCE. Three cases, stated rather than implied, because
             # the receipt behaves differently in each:
             #
@@ -22376,7 +22415,8 @@ class OperatorApp(App[None]):
             #  * a terminal whose focus cannot be measured, WITH input observed:
             #    a key or mouse-down this app receives could only have been
             #    delivered to a focused terminal, so the input edge proves the
-            #    same thing portably (`on_event` stamps it, on a shelf life);
+            #    current token portably (`on_event` binds identity plus expiry),
+            #    never a new result that arrives after that input;
             #  * a terminal whose focus cannot be measured and which has shown
             #    nothing at all: no evidence, so the receipt waits. Textual's
             #    initial `app_focus=True` describes startup, not the present, and
@@ -22387,7 +22427,7 @@ class OperatorApp(App[None]):
             # receipt waited forever for a report that could not come, and the
             # sidebar's check mark never cleared.
             measurable = focus_is_measurable()
-            evidenced = self._attention_focus_evidenced() or (
+            evidenced = self._attention_focus_evidenced(session, token, anchor) or (
                 measurable and self._attention_focus_refresh_due()
             )
             if not evidenced:
@@ -22406,7 +22446,7 @@ class OperatorApp(App[None]):
             if (
                 focused
                 and self._session is session
-                and self._attention_focus_evidenced()
+                and self._attention_focus_evidenced(session, token, anchor)
                 and not getattr(session, "is_streaming", False)
                 and self._completion_anchor_visible(anchor)
             ):
@@ -22414,7 +22454,7 @@ class OperatorApp(App[None]):
                 if (
                     self._session is session
                     and current.get("completion_token") == token
-                    and self._attention_focus_evidenced()
+                    and self._attention_focus_evidenced(session, token, anchor)
                     and not getattr(session, "is_streaming", False)
                     and self._completion_anchor_visible(anchor)
                 ):
@@ -22486,6 +22526,11 @@ class OperatorApp(App[None]):
     def on_app_blur(self, event: AppBlur) -> None:
         """The terminal lost OS focus \u2014 notify, and slow every animation."""
         self._attention_focus_observed = False
+        self._attention_input_receipt = None
+        self._attention_rendered_receipt = None
+        self._attention_navigation_receipt = None
+        self._attention_input_catalogue = {}
+        self._attention_input_at = 0.0
         self._set_animation_focused(False)
         if self._notifier is None:
             return
