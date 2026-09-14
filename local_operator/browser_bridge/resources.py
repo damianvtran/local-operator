@@ -269,6 +269,55 @@ class BrowserResource:
         if not self.host and host:
             self.host = host
 
+    def pinned_host(self) -> str:
+        """The host this session's durable state pins it to, or "" for none.
+
+        The RECORD is the durable form of the pin `select_host` documents, and
+        on a RESUMED session it is the only one there is: the surface prefix in
+        `state.surface_id` is empty until the lane adopts it from this same
+        record, which happens well after the gate has to decide. Reading only
+        the availability probes there does not merely guess — `_lane()` prefers
+        `self.host` over `self.record["host"]`, so a probe-selected host
+        OVERRIDES the record and silently moves a resumed session onto whichever
+        host happened to be up, including off the host that owns its tab.
+
+        Two spellings of one fact, and the order matters:
+
+        * `record["host"]` is written by `remember()` on the first successful
+          `open`. It survives a `close` (a `remember("")` cannot erase the lane
+          a resumed session still needs), so it pins a settled session too.
+        * The HANDLE covers the other direction: a record written before the
+          `host` field existed names its host only in `surface_id`. Defaulting
+          that to the bridge is the same fail-safe `ownership_host("")`
+          applies, and it is right for the same reason — every record that
+          predates the field belongs to a session that was talking to the
+          daemon. A record with NEITHER (no host, no surface) pins nothing: it
+          is a session that has not opened a tab yet, and it must stay free to
+          open one on whichever host answers.
+
+        Read from `self.record` when the lane has run and from the file
+        otherwise, because the tool's gate asks this BEFORE `initialize()` —
+        the only thing that populates `record`. An absent file, a foreign one
+        (`_load` raises) and a malformed one all answer "": the typed refusal
+        for a record that cannot be read belongs to `initialize()`, which
+        renders it as the actionable failure it is, not to a selection helper
+        that would otherwise raise it from inside the gate.
+        """
+        record = self.record
+        if not record:
+            try:
+                record = self._load()
+            except (BrowserOwnershipError, OSError, ValueError):
+                return ""
+        host = str(record.get("host", ""))
+        if host:
+            return host
+        surface = str(record.get("surface_id", ""))
+        for name in (HOST_UI, HOST_BRIDGE):
+            if surface.startswith(f"{name}:"):
+                return name
+        return ""
+
     def client(self) -> Any:
         """A client for this session's host, built fresh per call (as before).
 

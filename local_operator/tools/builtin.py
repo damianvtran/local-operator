@@ -7799,17 +7799,27 @@ def _browser_update_note(state: BrowserSurfaceProtocol, result: ToolResult) -> T
     Skipped on an ERROR result: "nothing is blocked" printed beside a failure
     reads as a contradiction, and the failure copy is already the thing the
     agent needs to act on.
+
+    The readers are called under a blanket guard, and it is not redundant: the
+    two state modules swallow `(OSError, ValueError, TypeError)` themselves, so
+    the guard is the second line of defence — but it also covers the LAZY
+    IMPORTS on this path (the UI state module is imported here, on a tool result
+    the caller has already produced). An advisory is never worth costing the
+    result it rides on, so nothing on this path is allowed to raise.
     """
     if getattr(state, "extension_update_notified", False) or result.is_error:
         return result
     from local_operator.browser_bridge.protocol import extension_update_note
 
-    if _host_of_surface(str(getattr(state, "surface_id", ""))) == HOST_UI_PREFIX:
-        current: Any = _ui_state().read()
-    else:
-        from local_operator.browser_bridge import state as state_store
+    try:
+        if _host_of_surface(str(getattr(state, "surface_id", ""))) == HOST_UI_PREFIX:
+            current: Any = _ui_state().read()
+        else:
+            from local_operator.browser_bridge import state as state_store
 
-        current = state_store.read()
+            current = state_store.read()
+    except Exception:  # noqa: BLE001 - an advisory may never break a tool result
+        return result
     if current is None or not getattr(current, "extension_update_available", False):
         return result
     note = extension_update_note(str(getattr(current, "extension_version", "")))
@@ -9133,7 +9143,7 @@ def _copy_host(host: str) -> str:
     return HOST_UI if host == HOST_UI_PREFIX else HOST_EXTENSION
 
 
-async def _ownership_lane_host(state: BrowserSurfaceProtocol) -> str:
+async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> str:
     """Which host can own a surface for this session, or "" when none can.
 
     The ownership lane asks this BEFORE anything else, because everything it
@@ -9148,8 +9158,22 @@ async def _ownership_lane_host(state: BrowserSurfaceProtocol) -> str:
     lane must speak to the host that owns it even when that host is
     unreachable — otherwise the ownership contract silently lapses exactly when
     the user most needs to be told what happened to their tab.
+
+    THE DURABLE PIN OUTRANKS THE PROBES, and it is a separate question from the
+    handle, not a second copy of it. A resumed session arrives with an empty
+    `state.surface_id` — the lane adopts it from the record later — so the only
+    thing that knows which host owns its tab is the record itself
+    (`resource.pinned_host()`). Consulting availability first there would hand
+    the lane to whichever host happened to be up, and since `select_host` sets
+    `self.host`, which `_lane()` prefers over `record["host"]`, the record would
+    then LOSE: a `bridge` record would move to the app as soon as the app was
+    up, and a `ui` record would move to the daemon as soon as the app was down.
+    That is §10.5's consequence 2 in mirror image, and it contradicts the same
+    section's fail-safe clause ("an old record behaves exactly as it does
+    today"). The probes therefore answer only the question the record cannot:
+    which host may a session that has no durable pin open its FIRST surface on.
     """
-    pinned = _host_of_surface(state.surface_id)
+    pinned = _host_of_surface(state.surface_id) or resource.pinned_host()
     if pinned:
         return pinned
     if await ui_browser_reachable():
@@ -10038,8 +10062,10 @@ async def execute_browser(
         # ownership verbs fell through to the dispatcher's screenshot tail.
         #
         # The question the gate means to ask is "can any host own a surface for
-        # this session", so it now asks exactly that, of every non-cmux host.
-        lane_host = await _ownership_lane_host(state)
+        # this session", so it now asks exactly that, of every non-cmux host —
+        # and of the session's own RECORD first, which is the one answer a
+        # resumed session has (see `_ownership_lane_host`).
+        lane_host = await _ownership_lane_host(state, resource)
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
