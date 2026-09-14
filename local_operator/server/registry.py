@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -242,15 +243,23 @@ class ServeRecord:
     #: ``update.install_kind()``: ``uv-tool`` / ``pipx`` / ``pip`` / ``editable``
     #: / ``unknown``. Tells the updater both how to update and whether it may.
     install_kind: str
-    #: Is the desktop plane live right now, i.e. was
-    #: ``LOCAL_OPERATOR_DESKTOP_TOKEN`` set for this process. A daemon started
-    #: by the app is not the same animal as one a person started from a shell,
-    #: and the difference is not otherwise visible from outside the process.
+    #: Is the desktop plane already governed when this record was written, i.e.
+    #: did the desktop app start this daemon and hand it
+    #: ``LOCAL_OPERATOR_DESKTOP_TOKEN``. A daemon started by the app is not the
+    #: same animal as one a person started from a shell, and the difference is
+    #: not otherwise visible from outside the process. It is evaluated once, at
+    #: publish time, from ``server/desktop.py``'s posture — so a daemon that
+    #: LATER accepts a claim keeps reporting the posture it booted with, and a
+    #: reader that needs the live answer asks the daemon, not this file.
     desktop: bool
-    #: Reserved for the claim handshake (a later PR mints it; ``""`` means no
-    #: claim governs this daemon). Present now, before anything writes it, so
-    #: that PR does not have to change this schema and every reader written
-    #: against this one already drops it correctly.
+    #: Reserved for the claim handshake: minted by :func:`build_record` at
+    #: startup and published in this record, ``""`` when the desktop app itself
+    #: started the daemon (an env token already governs the plane) or when the
+    #: reader is looking at a record from a build that predates the handshake.
+    #: Its ONLY lawful channel is this file: a reader that has the record can
+    #: already attach to the user's sessions, so publishing it here hands that
+    #: principal no new class of secret, while a page in a browser — which can
+    #: read no files — can neither see it nor guess it.
     claim_key: str = ""
     #: When this record was first written, and when its owner last proved it
     #: was alive. ``heartbeat_at`` is stamped by every write (the shared
@@ -295,18 +304,33 @@ def build_record(
     not pay for ``importlib.metadata`` and ``urllib``.
 
     ``desktop_token_set`` is a test seam — the desktop plane's own predicate is
-    the environment, and a test must be able to pin the answer without
-    mutating the process's environment for every other test in the worker.
+    :func:`~local_operator.server.desktop.desktop_posture`, which a test cannot
+    pin without mutating the process's environment for every other test in the
+    worker.
+
+    **The claim key is minted HERE, and only when the plane is nobody else's**
+    (``desktop_posture().enabled`` false). Two reasons for the placement: the
+    key is the daemon's, not the HTTP app's — a record is written by the serve
+    process and read by a stranger, and the key must exist from the instant the
+    record is published or a UI that discovers the daemon in the same
+    millisecond could find a record with nothing to claim; and the condition is
+    the desktop plane's own, asked of the desktop module rather than restated,
+    so a daemon the desktop app started (env capability present) publishes
+    ``""`` and can never be claimed out from under it.
+
+    ``secrets.token_urlsafe(32)`` is 256 bits from the OS CSPRNG, the same
+    primitive ``session/runtime/types.py`` mints ``control_key`` with. It is
+    published ONLY through the record — never logged, never returned by a
+    route, never written to a second file — because the record's
+    ``0600``-under-``0700`` permissions ARE the authorization story (see
+    ``server/desktop.py``'s module docstring).
     """
+    from local_operator.server.desktop import desktop_posture
     from local_operator.update import install_kind, installed_build
 
     host, port = announced
     build = installed_build()
-    desktop = (
-        bool(os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"))
-        if desktop_token_set is None
-        else desktop_token_set
-    )
+    governed = desktop_posture().enabled if desktop_token_set is None else desktop_token_set
     return ServeRecord(
         pid=os.getpid(),
         host=_dialable_host(host),
@@ -316,7 +340,10 @@ def build_record(
         source_ref=build.source_ref,
         prefix=sys.prefix,
         install_kind=install_kind().value,
-        desktop=desktop,
+        desktop=governed,
+        # ``""``, never a regenerated key: an env-governed daemon has no claim
+        # to publish, and a reader must be able to tell that from a key.
+        claim_key="" if governed else secrets.token_urlsafe(32),
     )
 
 
