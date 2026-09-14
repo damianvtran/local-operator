@@ -2574,6 +2574,21 @@ def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
 
 
+def _fits_output_budget(body: str) -> bool:
+    """Whether a rendered ``read`` body escapes the per-result clamp.
+
+    One definition of the threshold, because two callers must agree on it to
+    the character: :func:`_clamp_file_body` reads it to decide whether a
+    footer is appended, and the streamed ranged read reads it to decide
+    whether the file's exact line total is needed at all — the footer is the
+    ONLY consumer of that total (see :func:`_read_ranged_snapshot`). Two
+    restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
+    future edit to one of them stop the scan early on a body that then gets
+    clamped, which is precisely the ``None`` leak the footer must never see.
+    """
+    return len(body) <= READ_OUTPUT_LIMIT_CHARS
+
+
 def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     """Hold one ``read`` result inside the char budget.
 
@@ -2587,7 +2602,7 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     "carry on from where this stopped"; splicing in a tail would break the
     contiguity that makes a numbered listing readable.
     """
-    if len(body) <= READ_OUTPUT_LIMIT_CHARS:
+    if _fits_output_budget(body):
         return body
     clipped = body[:READ_OUTPUT_LIMIT_CHARS]
     cut = clipped.rfind("\n")
@@ -3328,19 +3343,23 @@ class _RangedRead(NamedTuple):
     the head carried a NUL byte, so there is no text window at all. ``lines``
     is the window head actually kept — at most :data:`_RANGED_KEEP_CHARS`
     worth of it — while ``window_lines`` is how many lines the window really
-    holds, which is what sizes the numbering column.
+    holds, which is what sizes the numbering column. ``total_lines`` is the
+    file's exact line count, or ``None`` when the scan stopped as soon as the
+    window was complete and so never learned the total; that ``None`` is only
+    ever reachable for a window the output clamp never touches, and the caller
+    re-counts before it can.
     """
 
     info: ImageInfo | None
     binary: bool
     lines: list[str]
     window_lines: int
-    total_lines: int
+    total_lines: int | None
 
 
 def _stream_text_window(
-    handle: BinaryIO, start: int, end: int | None
-) -> tuple[bool, list[str], int, int]:
+    handle: BinaryIO, start: int, end: int | None, *, count_only: bool = False
+) -> tuple[bool, list[str], int, int | None]:
     """Scan a byte stream for a 1-based inclusive line window.
 
     Returns ``(binary, kept, window_lines, total_lines)``. Peak memory is the
@@ -3351,6 +3370,21 @@ def _stream_text_window(
     below, instead of retyping the whole-file path's ``text.splitlines()``. A
     ``\n``-only splitter would have been a behaviour change, not an
     implementation detail.
+
+    A BOUNDED window (``end is not None``) stops the scan the moment the break
+    that closes line ``end`` is seen: every later line is outside the window,
+    so the only thing a longer pass could add is the file's exact total — and
+    that total is consumed solely by the clamp footer, which exists only when
+    the rendered head overflows the budget. ``total_lines`` is then ``None``
+    ("the scan stopped; the exact total is not known") and the caller decides
+    whether it must be recovered (:func:`_read_ranged_snapshot`). An
+    open-ended window (``end is None``) has no such bound and still scans to
+    EOF, because its window is the whole tail.
+
+    ``count_only`` is that recovery pass, not a second splitter: the same
+    scanner with retention off and the early exit disabled, so the count it
+    reports is accounted for by exactly the state machine that produced the
+    window. It returns an exact total and therefore never ``None``.
     """
     # ``errors="replace"`` throughout, deliberately: the whole-file path's
     # strict-then-replace pair exists only so the common valid case skips a
@@ -3374,12 +3408,23 @@ def _stream_text_window(
     # "\n" of the same break. That is why the pairing lives in scanner state:
     # a chunk boundary must never turn one break into two lines.
     pending_cr = False
+    # Set once the break closing line ``end`` has been scanned: the window is
+    # then complete and nothing left in the file can enter it, so the scan may
+    # stop. Never set in ``count_only``, which exists to reach EOF.
+    window_done = False
 
-    def finish_line() -> None:
-        """Close the scanned line the way ``splitlines`` does at a break."""
+    def finish_line(*, at_eof: bool = False) -> None:
+        """Close the scanned line the way ``splitlines`` does at a break.
+
+        ``at_eof`` marks the trailing call for a last line with no break
+        behind it. The window-complete check is suppressed there: we already
+        reached the end of the file, so the scan has the exact total anyway
+        and recording a stop would throw it away for nothing.
+        """
         nonlocal window_lines, total_lines, line_no, keeping, kept_chars, partial, line_open
+        nonlocal window_done
         total_lines += 1
-        if keeping:
+        if keeping and not count_only:
             window_lines += 1
             if kept_chars <= _RANGED_KEEP_CHARS:
                 kept.append(partial)
@@ -3394,6 +3439,12 @@ def _stream_text_window(
         keeping = start <= line_no and (end is None or line_no <= end)
         partial = ""
         line_open = False
+        if not at_eof and not count_only and end is not None and line_no > end:
+            # The window is complete. Every later line is outside it, so the
+            # only thing left in the file is the exact total — needed only
+            # when the rendered head is clamped. Stopping here is what keeps
+            # ``range="1-5"`` off a full O(file) pass.
+            window_done = True
 
     def keep(segment: str) -> None:
         """Extend the current line body, inside the retention budget.
@@ -3402,7 +3453,7 @@ def _stream_text_window(
         window cannot grow the buffer past the budget either.
         """
         nonlocal partial
-        if keeping and segment:
+        if not count_only and keeping and segment:
             room = _RANGED_KEEP_CHARS + 1 - kept_chars - len(partial)
             if room > 0:
                 partial += segment[:room]
@@ -3436,28 +3487,36 @@ def _stream_text_window(
             else:
                 cursor = match.end()
             finish_line()
+            if window_done:
+                # The loop that opened this line is the only place a stop is
+                # legitimate: everything after it is outside the window.
+                return
         if cursor < len(text):
             line_open = True
             keep(text[cursor:])
 
     first = True
-    while True:
+    while not window_done:
         raw = handle.read(_RANGED_READ_CHUNK_BYTES)
         if not raw:
             break
-        if first and b"\x00" in raw[:_BINARY_PEEK_BYTES]:
+        if first and not count_only and b"\x00" in raw[:_BINARY_PEEK_BYTES]:
             # The same classification the whole-file path applies to the head
             # of the bytes it holds; the scan stops here rather than reading a
-            # binary file to the end just to report that it is one.
+            # binary file to the end just to report that it is one. Not applied
+            # in ``count_only``: that pass runs only on bytes already
+            # classified as text by the window pass, and a ``0`` here would be
+            # a silent, wrong total.
             return True, [], 0, 0
         first = False
         consume(decoder.decode(raw))
-    consume(decoder.decode(b"", final=True))
-    if line_open:
-        # A file that ends without a break still has a last line; a file that
-        # ends WITH one gets no trailing empty line. That is ``splitlines``.
-        finish_line()
-    return False, kept, window_lines, total_lines
+    if not window_done:
+        consume(decoder.decode(b"", final=True))
+        if line_open:
+            # A file that ends without a break still has a last line; a file that
+            # ends WITH one gets no trailing empty line. That is ``splitlines``.
+            finish_line(at_eof=True)
+    return False, kept, window_lines, (None if window_done else total_lines)
 
 
 def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRead:
@@ -3469,6 +3528,15 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
     classification and the bytes served. The whole-file cap is deliberately
     not consulted: the caller named a bounded window, and that is precisely the
     case the cap must not refuse.
+
+    The window pass stops as soon as a bounded window is complete, so
+    ``total_lines`` comes back ``None`` whenever the file was not scanned to
+    EOF. Resolving it is this function's job, not the caller's, because the
+    re-scan must read the SAME bytes: the exact total is only ever rendered by
+    the clamp footer, and the rendered head is what tells us whether there is
+    one. Rendering it here to decide — with the very primitives the caller
+    renders with — keeps the two decisions on one threshold
+    (:func:`_fits_output_budget`) and the whole read in one transaction.
     """
     with _file_transaction(path):
         info = sniff_image_file(str(path))
@@ -3479,6 +3547,13 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
             return _RangedRead(info, False, [], 0, 0)
         with path.open("rb") as handle:
             binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
+            body = _number_lines(lines, start, span=window_lines)
+            if total_lines is None and not _fits_output_budget(body):
+                # The head would be clamped and the footer needs the exact
+                # count, so recover it: the same scanner with retention off,
+                # over the same bytes, never a second divergent splitter.
+                handle.seek(0)
+                _, _, _, total_lines = _stream_text_window(handle, start, end, count_only=True)
         return _RangedRead(None, binary, lines, window_lines, total_lines)
 
 
@@ -3644,7 +3719,13 @@ async def execute_read(
         if ranged.info is None:
             if ranged.binary:
                 return _binary_read_error(tool_call_id, path)
-            if not ranged.lines:
+            if ranged.window_lines == 0:
+                # Explicitly "the window holds no line", which is also what
+                # ``not ranged.lines`` tested by accident: an in-window empty
+                # line IS retained as "" (``finish_line`` appends the partial
+                # body unconditionally), so the list is truthy for ``"\n\n\n"``
+                # and this branch must not be reached. Reading the count says
+                # that rather than relying on it.
                 return _text(
                     tool_call_id,
                     "read",
@@ -3652,18 +3733,28 @@ async def execute_read(
                     useless=True,
                     details={"path": str(path), "useless": True},
                 )
+            # ``window_lines`` sizes the number column: a streamed read may
+            # keep fewer lines than the window holds, and the width must
+            # still be the one the full window renders with.
+            body = _number_lines(ranged.lines, start, span=ranged.window_lines)
+            if _fits_output_budget(body):
+                # No footer, so the file's exact total was never needed and
+                # the scan was allowed to stop as soon as the window was
+                # complete (see _stream_text_window): this is the common
+                # shape — read(path, range="1-5") on a large file — and it
+                # must not pay a forward pass over the whole file.
+                rendered = body
+            else:
+                total = ranged.total_lines
+                # Not None by construction: _read_ranged_snapshot recovers the
+                # exact total with a count-only pass over the same bytes
+                # whenever the rendered head does not fit this budget.
+                assert total is not None
+                rendered = _clamp_file_body(body, path, start, total)
             return _text(
                 tool_call_id,
                 "read",
-                # ``window_lines`` sizes the number column: a streamed read may
-                # keep fewer lines than the window holds, and the width must
-                # still be the one the full window renders with.
-                _clamp_file_body(
-                    _number_lines(ranged.lines, start, span=ranged.window_lines),
-                    path,
-                    start,
-                    ranged.total_lines,
-                ),
+                rendered,
                 # The range rides in details: compaction's supersede key must
                 # distinguish ranged reads of the same file, or a read of lines
                 # 900-1000 blanks an unrelated 1-100 read as "superseded".
