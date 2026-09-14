@@ -1,4 +1,20 @@
-# Retiring the `serve` daemon onto a new build
+# Historical evidence: unsafe daemon retirement (superseded)
+
+> **Not the current behavior or a rollout runbook.** This directory records
+> the pre-release #1102 experiment, whose automatic daemon exit was unsafe:
+> lifespan shutdown cancels scheduler-owned tasks, and no successor is proven
+> ready. Its scripts/transcripts below describe that historical path, not a
+> production capability. Do not run `run.sh` as current validation (it also
+> predates full inherited-environment and record-secret scrubbing).
+>
+> Production now only announces changed builds, keeps serving, and reconciles
+> withdrawal/retargeting. `retiring_from`/`retiring_to` do NOT tell the UI to drop
+> SSE/watch leases. Drain/latch behavior survives only as an explicitly injected
+> internal test callback. Current real-process regression evidence is generated
+> by `tests/e2e/test_serve_build_announcement.py`, including actual scheduler task
+> ownership and lifespan cancellation on the unsafe baseline.
+
+## Historical experiment
 
 Raw-process evidence for the daemon's build watch: an install replaced on disk
 under a running `lop serve`, and the daemon's answer to it — **announce the
