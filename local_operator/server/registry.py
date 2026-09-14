@@ -64,6 +64,17 @@ ANNOUNCED_STATE_ATTR = "serve_announced_address"
 #: the variable from publishing its ancestor's listener as its own.
 SERVE_ANNOUNCE_ENV = "LOCAL_OPERATOR_SERVE_ANNOUNCE"
 
+#: ``app.state`` flag: this process's address arrived through
+#: :data:`SERVE_ANNOUNCE_ENV`, i.e. uvicorn's ``--reload`` supervisor spawned us.
+#:
+#: Set by :func:`advertised_address` at the one moment the answer is knowable —
+#: the announcement is read-and-CLEARED there, so "where did my address come
+#: from" cannot be asked again afterwards. It is what lets ``server/app.py``
+#: keep a DEV-MODE supervisor out of the build watch: see
+#: :func:`is_reload_child` for why that is a correctness rule and not a
+#: convenience.
+RELOAD_CHILD_STATE_ATTR = "serve_reload_child"
+
 #: Port ``0`` in a record means "not announced", i.e. undialable. Nothing in
 #: this module writes one any more — a boot that was not announced publishes no
 #: record at all — but a record written by another build still has to parse, and
@@ -177,7 +188,9 @@ def advertised_address(app: Any = None) -> tuple[str, int] | None:
        ``--reload`` holds the app it hands uvicorn, and ``app.state`` is shared
        with the lifespan;
     2. the ``--reload`` child's environment, read-and-cleared, honoured only
-       when the announcing pid is our own spawner.
+       when the announcing pid is our own spawner. A hit there also raises
+       :data:`RELOAD_CHILD_STATE_ATTR` on the app, because that is the one
+       moment the channel is knowable (:func:`is_reload_child`).
 
     ``None`` when nothing announced one, and it is load-bearing rather than a
     ``("", 0)`` placeholder: a record exists so another process can DIAL a
@@ -190,7 +203,36 @@ def advertised_address(app: Any = None) -> tuple[str, int] | None:
         announced = getattr(app.state, ANNOUNCED_STATE_ATTR, None)
         if announced is not None:
             return announced
-    return _take_reload_announcement()
+    taken = _take_reload_announcement()
+    if taken is not None and app is not None:
+        # Remember WHICH channel answered, because the value above is gone now.
+        # Not a side effect for its own sake: `--reload` is the one boot that
+        # must not run the build watch (:func:`is_reload_child`), and this is the
+        # only point at which that boot is distinguishable.
+        setattr(app.state, RELOAD_CHILD_STATE_ATTR, True)
+    return taken
+
+
+def is_reload_child(app: Any) -> bool:
+    """Was this app booted by uvicorn's ``--reload`` supervisor's child?
+
+    True for the child process ``lop serve --reload`` gets: ``serve_command``
+    hands the address to it through :data:`SERVE_ANNOUNCE_ENV` rather than to an
+    app object, and that is the same event.
+
+    WHY THE LIFESPAN ASKS, and why the answer must be kept out of the build
+    watch: under ``--reload`` the PORT belongs to the supervisor, not to us.
+    uvicorn's reloader holds the listening socket and runs a child that serves
+    through it, so a child that retired would remove its record, ask its own
+    process to stop — and leave the parent alive, still accepting connections on
+    that socket with nothing behind them. A reader then sees a daemon with no
+    record and a ``/health`` that times out, which is a state the record cannot
+    describe and no client can act on (QA round 1, Q3). A dev-mode supervisor is
+    also not a production daemon: it has no successor to hand a socket to, and
+    the operator is watching its console.
+    """
+    state: Any = getattr(app, "state", None)
+    return bool(getattr(state, RELOAD_CHILD_STATE_ATTR, False))
 
 
 @dataclass
@@ -272,6 +314,26 @@ class ServeRecord:
     #: pid's record ``wedged`` rather than ``live``.
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
+    #: Set only while this daemon is LEAVING, to the build it loaded
+    #: (``retiring_from``) and the build now on disk that it is making room for
+    #: (``retiring_to``); both ``""`` for the whole of a normal life. See
+    #: :mod:`local_operator.server.retire`.
+    #:
+    #: WHY THE DAEMON ANNOUNCES RATHER THAN JUST DISAPPEARING. A reader that
+    #: finds no record cannot tell a retire from a crash, a ``kill -9``, or a
+    #: machine that is coming back — so a daemon that vanished on an update
+    #: would look broken exactly when it is working correctly. These make the
+    #: handover legible: the record is still there, still heartbeating, and it
+    #: says which build is coming. Nothing else about the record changes, so
+    #: ``live`` stays the truthful classification until the clean exit removes
+    #: the file (see the lifespan's ``finally``).
+    #:
+    #: Additive, like every field here: a reader built before them drops the
+    #: keys and sees the daemon it always saw, and this changes no protocol
+    #: version (see ``session/runtime/types.py``'s record section — the daemon
+    #: record is not the attach protocol).
+    retiring_from: str = ""
+    retiring_to: str = ""
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for
