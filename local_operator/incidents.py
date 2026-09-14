@@ -269,15 +269,21 @@ _HINTS: dict[str, str] = {
     "rate-limit": "Back off and retry later; if it persists, tell the user which "
     "provider hit the limit — they may need to switch model or top up quota.",
     # Two honest readings of the same category, because the hint is a static
-    # string and the RETRY's existence is per-model: on a model with no
-    # thinking-off rung -- which includes the live aggregator routes to these
-    # weights -- the loop never re-asks, so a hint claiming a retry "did not
-    # clear" it describes a call that was never made.
+    # string and WHICH recovery ran is per-model: on a model with no thinking-off
+    # rung -- which includes the live aggregator routes to these weights -- the
+    # loop never re-asks with thinking disabled, so a hint claiming that retry
+    # "did not clear" it would describe a call that was never made. Both
+    # recoveries are therefore named with their own precondition stated rather
+    # than asserted: the echo fill is spent only when the spec was not already
+    # carrying an echo, and the thinking-off retreat only when the model has the
+    # rung.
     "reasoning-echo": "The provider refused the request because the conversation's "
     "reasoning was not carried back, and the harness could not clear it by "
-    "retrying with thinking disabled (or this model has no such rung to retry "
-    "at). Do not resend the same request unchanged: tell the user the model's "
-    "thinking mode cannot continue this conversation and suggest switching model.",
+    "re-sending with that echo filled (spent wherever the request was not "
+    "already carrying one) or by retrying with thinking disabled (or this model "
+    "has no such rung to retry at). Do not resend the same request unchanged: "
+    "tell the user the model's thinking mode cannot continue this conversation "
+    "and suggest switching model.",
     "auth": "Credentials were rejected: tell the user which provider and suggest "
     "`local-operator login <provider>`. Do not retry the identical request.",
     "billing": "The provider account cannot pay for this request: report it and "

@@ -4544,6 +4544,34 @@ def _echo_model(effort: str = "high") -> ModelSpec:
     )
 
 
+def _unrecognised_thinking_route() -> ModelSpec:
+    """A thinking-mode route the family table has not learned yet.
+
+    The reachable shape for the echo-fill recovery: ``_DEEPSEEK_THINKING_MODELS``
+    covers ``deepseek-(flash|v4)``, so the NEXT generation id -- and any
+    rebranded or relayed endpoint serving these weights under another name --
+    derives ``requires_reasoning_echo`` False while running the same validator.
+    That is what the capability's own docstring calls a prediction, and a
+    prediction that is wrong must not turn a recoverable refusal into a dead
+    turn. (The other way in is a spec that STATES the flag off, which is what
+    the probe does; this one is what production can still do by accident.)
+
+    The ladder is set explicitly because that table has not learned this id
+    either, and the first test needs a retreat to be AVAILABLE while proving the
+    fill is chosen instead. The guard is not decoration: if the family rule ever
+    learns this id the helper stops representing what it says it does, and a
+    silent pass would hide that the recovery had stopped being exercised.
+    """
+    model = ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-v5-flash",
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort="high",
+    )
+    assert model.requires_reasoning_echo is False, "the family rule learned this id"
+    return model
+
+
 @pytest.mark.asyncio
 async def test_reasoning_echo_refusal_retries_once_with_thinking_disabled():
     """The refusal is recoverable: retry the turn with thinking off, and say so.
@@ -4633,7 +4661,15 @@ async def test_reasoning_echo_recovery_never_replays_output_the_user_read():
 @pytest.mark.parametrize(
     "model",
     [
-        _laddered_model(),
+        # The echo is already in force, so the FILL has nothing to add and the
+        # only remaining lever is the retreat -- which this ladder lacks.
+        ModelSpec(
+            provider="test",
+            model_id="m",
+            reasoning_efforts=("low", "medium", "high"),
+            reasoning_effort="high",
+            requires_reasoning_echo=True,
+        ),
         _echo_model("none"),  # already off: the retry could not change the body
     ],
 )
@@ -4642,6 +4678,11 @@ async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
 
     The rung is the precondition, not the capability: a model that cannot turn
     thinking off would spend a call to be told the same thing.
+
+    Both cases pin the RETREAT's precondition on a spec whose echo is already
+    in force, which is what isolates it from the fill above: an echo-less spec
+    would spend its fill retry first (that ordering is pinned by its own test),
+    and the no-rung case would then never be reached.
     """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
     context = LoopContext()
@@ -4659,33 +4700,131 @@ async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
 
 
 @pytest.mark.asyncio
-async def test_the_refusals_own_words_recover_a_derived_route_the_capability_missed():
-    """A route whose spec lacks the capability is still recovered.
+async def test_an_echo_less_spec_fills_the_echo_before_giving_anything_up():
+    """The benign recovery is spent FIRST, and at the SAME effort.
+
+    A spec reaching the wire without the echo is what the provider refuses, and
+    the fill is the one recovery that costs the user nothing: same route, same
+    effort, same thinking mode, one short placeholder per blank assistant turn.
+    The retreat below costs the model its reasoning for the rest of the run, so
+    it must not be the first thing tried when a cheaper, measured answer exists.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.requires_reasoning_echo is False, "what was refused"
+    assert stream.requests[1].model.requires_reasoning_echo is True, "the fill"
+    assert stream.requests[1].model.reasoning_effort == "high", "same effort, not a retreat"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_fill_and_the_retreat_are_each_spent_once_and_then_it_surfaces():
+    """Two separate budgets, bounded, and the provider's own error is the end.
+
+    They are separate on purpose: the fill answers exactly one failure mode (a
+    request that went out without its echo) and the retreat answers the one that
+    is left (a route that refuses even with the echo, or refuses for a second
+    reason). Sharing one counter would spend the only retreat on the fill, and a
+    fresh budget per turn would re-buy the same diagnosis every turn.
+
+    Three calls and no fourth: the scripted stream has no fourth turn, so a
+    recovery that looped would raise rather than pass.
+    """
+    model = _unrecognised_thinking_route()
+    refusal = [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]
+    stream = ScriptedStream([list(refusal), list(refusal), list(refusal)])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 3
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == "high"
+    assert stream.requests[2].model.reasoning_effort == "none"
+    notices = [n.text for n in events if isinstance(n, NoticeEvent)]
+    assert any("echo" in text for text in notices)
+    assert any("thinking disabled" in text for text in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_the_echo_fill_is_not_spent_once_the_user_has_read_something():
+    """A turn the user has already seen may not be replayed, however cheap it is.
+
+    A 400 arrives before the first byte, so a refusal never reaches this state
+    in practice; the gate is what keeps the recovery from ever rewriting a turn
+    whose output is on screen.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="half an answer"),
+                StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "echo" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is not None
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_own_words_fill_the_echo_on_a_route_the_capability_missed():
+    """A route whose spec lacks the capability is recovered by FILLING the echo.
 
     The capability is a prediction about which routes run DeepSeek's
     thinking-mode validator, and it CAN be wrong: an aggregator load-balances
     one model across many endpoints, only one of which runs that validator, so
-    the refusal can arrive on a spec that never got the bit. The provider's own
-    wording is the direct evidence that this request lost the echo; treating
-    the prediction as authoritative over it is what turned a recoverable
-    refusal into a dead turn recorded as an unclassified
+    the refusal can arrive on a spec that never got the bit -- and a spec built
+    outside the derivation used to lose the bit outright. The provider's own
+    wording is the direct evidence that this request lost the echo; treating the
+    prediction as authoritative over it is what turned a recoverable refusal
+    into a dead turn recorded as an unclassified
     ``unknown: invalid request (HTTP 400)`` incident.
 
-    The spec is DERIVED, deliberately, and the route is chosen for what it can
-    prove. This recovery has a SECOND precondition -- a ``none`` rung to retreat
-    to -- and the DeepSeek aggregator route the change was written for does not
-    have one (``('low','high','max')``, so the turn still ends after one request
-    on it; pinned by the test below). A hand-built spec carrying both the missed
-    bit AND a ``none`` rung, as this test used to be, therefore passed on a
-    configuration production never builds. Deriving the spec leaves the two
-    tests together stating the whole truth: the wording recovers a route that
-    CAN retreat, and the aggregator route cannot.
+    What this buys over the retreat that used to be the only answer here: the
+    request goes back out at the SAME effort with the same thinking mode. The
+    user loses nothing but the extra call, where the retreat below costs the
+    model its reasoning for the rest of the run.
+
+    The spec is DERIVED, deliberately, so the test states the configuration
+    production actually builds rather than a hand-made one.
     """
     from local_operator.model.configure import build_model_spec
 
     missed_route = build_model_spec("openrouter", "openai/gpt-5.2")
     assert missed_route.requires_reasoning_echo is False, "the missed bit this covers"
-    assert "none" in missed_route.reasoning_efforts, "the rung this recovery needs"
     stream = ScriptedStream(
         [
             [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
@@ -4700,9 +4839,12 @@ async def test_the_refusals_own_words_recover_a_derived_route_the_capability_mis
         events.append(event)
 
     assert len(stream.requests) == 2
-    assert stream.requests[1].model.reasoning_effort == "none"
+    # The fill, and ONLY the fill: the effort did not move.
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == missed_route.reasoning_effort
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("thinking disabled" in n.text for n in notices)
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and end.error is None
 
