@@ -63,11 +63,41 @@ class McpStartupOutcome:
     #: manager fires ``on_startup_settled`` with a settled (``settling=False``)
     #: outcome. False when nothing was deferred — the gate snapshot was final.
     settling: bool = False
+    #: The SUBSET of ``failures`` whose cause was the transport rather than the
+    #: server or the config. Carried as its own field rather than folded into
+    #: the failure text so a front end can group on the FACT instead of parsing
+    #: prose: when every failure is connectivity, the toast says ``network:``
+    #: once instead of naming nine servers, which is the operator-requested
+    #: distinction between "your link is down" and "nine MCP servers are
+    #: broken". Empty on every manager that does not report it, which renders
+    #: exactly the pre-change copy.
+    network_failures: frozenset[str] = frozenset()
 
     @property
     def failed(self) -> bool:
         """True when at least one configured server did not come up."""
         return bool(self.failures)
+
+    @property
+    def all_failures_are_network(self) -> bool:
+        """True when EVERY reported failure was a transport failure.
+
+        The question the toast's footer asks before it replaces its list of
+        bare server names with ``network:``: when the failures are all
+        connectivity, naming them adds nothing the head line's count does not
+        already say, while the fact that they share one cause is the only part
+        the user can act on (tether, wait, change network). False for an empty
+        failure map — there is nothing to group — so a clean boot is never
+        labelled.
+
+        ``network_failures`` is a subset of ``failures``' keys by construction
+        (the manager writes both through one recording method), so the superset
+        test is the whole check. The ``discovery`` key is never counted a
+        network failure: it means the CONFIG layer failed, which no host
+        explains, and calling that connectivity would send the user to
+        diagnose a link that is fine.
+        """
+        return bool(self.failures) and self.network_failures.issuperset(self.failures)
 
     @property
     def reportable(self) -> bool:

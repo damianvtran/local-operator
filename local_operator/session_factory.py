@@ -2344,6 +2344,21 @@ async def wire_mcp_into_session(
     except Exception:  # noqa: BLE001 — a missing accessor must not break wiring
         logger.debug("MCP startup_settling() unavailable", exc_info=True)
 
+    # Which of ``failures`` were the NETWORK, read beside the settling flag and
+    # NOT through the manager's public map: this wiring is exercised with
+    # reduced manager doubles, and an accessor a double does not implement must
+    # degrade to "nothing was recorded as connectivity" — which renders exactly
+    # the pre-change copy — rather than take the whole MCP startup wiring down
+    # with an AttributeError. Taken as a frozenset here so the outcome's field
+    # type is the same on both the gate snapshot and the settle re-report.
+    network_failures: frozenset[str] = frozenset()
+    try:
+        network_failures = frozenset(
+            name for name in manager.startup_network_failures() if name in failures
+        )
+    except Exception:  # noqa: BLE001 — a missing accessor must not break wiring
+        logger.debug("MCP startup_network_failures() unavailable", exc_info=True)
+
     # Headless callers are one-shot and do not stay alive for the settle
     # re-report, so they print what the gate knows. But a PROVISIONAL failure
     # (a server still connecting past the gate) must not be announced as a hard
@@ -2362,6 +2377,7 @@ async def wire_mcp_into_session(
         failures=failures,
         tool_count=len(mcp_tools),
         settling=settling,
+        network_failures=network_failures,
     )
     # The gate snapshot above is also the moment the wiring's MANAGER first
     # exists. On the deferred boot path the TUI adopted the session before
@@ -2393,12 +2409,30 @@ async def wire_mcp_into_session(
             settled_failures = _collapse_sdk_missing_failures(
                 manager.startup_failures(), MCP_DISCOVERY_KEY, MCP_SDK_MISSING_ERROR
             )
+            # Guarded exactly like the gate snapshot's read: a reduced manager
+            # double (or a host whose manager predates the accessor) must lose
+            # the grouping, not the settled re-report that is the ONLY surface
+            # a network failure reaches when it misses the startup gate.
+            settled_network: frozenset[str] = frozenset()
+            try:
+                settled_network = frozenset(manager.startup_network_failures())
+            except Exception:  # noqa: BLE001 — a missing accessor must not break wiring
+                logger.debug("MCP startup_network_failures() unavailable", exc_info=True)
+            # ``_collapse_sdk_missing_failures`` may fold the failure map down to
+            # the single ``discovery`` key, and a name it dropped must not
+            # survive in the network set as a phantom: the toast asks "are ALL
+            # the reported failures network ones", so a stale name beside an
+            # SDK-less single entry is still not a network story.
+            settled_network = frozenset(
+                name for name in settled_network if name in settled_failures
+            )
             outcome = McpStartupOutcome(
                 configured=tuple(manager.get_all_server_names()),
                 connected=tuple(manager.get_connected_servers()),
                 failures=settled_failures,
                 tool_count=len(manager.get_tools()),
                 settling=False,
+                network_failures=settled_network,
             )
         except Exception:  # noqa: BLE001 — a settle rebuild must never break the manager
             logger.debug("MCP settled outcome rebuild failed", exc_info=True)
