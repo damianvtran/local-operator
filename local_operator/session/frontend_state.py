@@ -1186,6 +1186,27 @@ def _freeze_row(row: Any) -> Any:
     return _freeze_value(row)
 
 
+def _retained_row(event: Any) -> Any | None:
+    """``event`` as a retained row, or ``None`` when it is not one.
+
+    THE one definition of what a retained row IS, and the reason it is a function
+    rather than a test written twice: a job's ``trajectory`` may be any iterable,
+    and canonical state may only ever hold rows that came back through this
+    predicate. ``JobState.from_job`` skips everything else, so a second copy of the
+    rule in the retained-window memo could drift -- and the drift is not a style
+    problem. A window holding anything else is frozen straight into canonical
+    state, where ``FrontendUpdate(job_trajectory_appends=...)`` rejects it with a
+    ``ValidationError`` that escapes ``refresh_jobs`` and, on the roster path, the
+    pump's bare ``call_later`` callback (measured: three loop-handler exceptions
+    for a mapping, a string and a tuple of strings, against zero before the memo).
+    """
+    if hasattr(event, "model_dump"):
+        return event.model_dump(mode="json")
+    if isinstance(event, dict):
+        return copy.deepcopy(event)
+    return None
+
+
 def _freeze_rows(rows: Iterable[Any]) -> _FrozenSequence:
     return _FrozenSequence(_freeze_row(row) for row in rows)
 
@@ -1625,10 +1646,9 @@ class JobState(BaseModel):
         trajectory = []
         if window is None:
             for event in list(getattr(job, "trajectory", None) or []):
-                if hasattr(event, "model_dump"):
-                    trajectory.append(event.model_dump(mode="json"))
-                elif isinstance(event, dict):
-                    trajectory.append(copy.deepcopy(event))
+                row = _retained_row(event)
+                if row is not None:
+                    trajectory.append(row)
         details = getattr(job, "latest_details", None)
         if isinstance(details, dict):
             details = copy.deepcopy(details)
@@ -3317,8 +3337,11 @@ class _TrajectoryWindows:
 
     A sequence that is not a ``list`` is never memoised: with no list identity to
     hold and no comparable tail, nothing about it can be proved next tick, so it
-    takes the full freeze ``JobState.from_job`` always did. Emptied is the one
-    answer it must never get -- that is a job whose rows are silently gone.
+    takes the full freeze ``JobState.from_job`` always did -- through the same row
+    predicate ``from_job`` uses (:func:`_retained_row`), so a sequence holding
+    something other than rows gets the same answer it always got. Emptied is the
+    one answer the rows of a real sequence must never get -- that is a job whose
+    rows are silently gone.
     """
 
     __slots__ = ("_by_job", "_epoch")
@@ -3396,13 +3419,23 @@ class _TrajectoryWindows:
             return _EMPTY_WINDOW
         if not isinstance(rows, list):
             # A sequence this memo cannot fingerprint: it has no stable list
-            # identity to hold and no tail the next tick could compare against,
-            # so nothing here can be PROVED. ``JobState.from_job`` materialises any
-            # iterable, and an empty window would silently drop that iterable's
-            # rows -- so the honest answer is the full freeze the pre-change code
-            # always did, with no entry kept.
+            # identity to hold and no tail the next tick could compare against, so
+            # nothing about it can be PROVED -- but what cannot be proved must
+            # still be materialised, never emptied, because ``from_job`` accepts
+            # any iterable and dropping its rows silently loses them (round 1, F1).
+            # It is frozen through ``_retained_row`` -- the SAME predicate
+            # ``from_job`` uses -- rather than item by item: a mapping, a string or
+            # a tuple of non-rows holds no rows, so the pre-change answer for that
+            # shape is an empty window, and freezing its items instead would put
+            # non-rows into canonical state for the appends writer to reject
+            # (round 2, F6/Q5).
             self._by_job.pop(job_id, None)
-            return _freeze_rows(rows)
+            kept: list[Any] = []
+            for event in rows:
+                row = _retained_row(event)
+                if row is not None:
+                    kept.append(row)
+            return _freeze_rows(kept)
         count = len(rows)
         first_seq = _trajectory_row_seq(rows[0])
         last_seq = _trajectory_row_seq(rows[-1])
