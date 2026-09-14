@@ -61,11 +61,23 @@ def test_scan_marks_a_stale_heartbeat_wedged(tmp_path: Path) -> None:
 
 
 def test_scan_reaps_dead_pid_records(tmp_path: Path) -> None:
+    """A proven-dead record leaves discovery, and does NOT leave the machine.
+
+    ``lop sessions`` must stop showing the session — but the record is also the
+    only artifact that says which runtime died, so it is moved to the sidecar
+    instead of unlinked. Both halves are asserted here because either alone is
+    a bug: a discovery loop that keeps listing a dead pid, or a reap that
+    destroys the answer to "why did this die".
+    """
     dead = make_record(pid=2**22 - 3)  # a pid that does not exist
     path = registry.publish(dead, root=tmp_path)
     results = registry.scan(root=tmp_path)
     assert [(r.pid, s) for r, s in results] == [(dead.pid, "stale")]
-    assert not path.exists()  # reaped
+    assert not path.exists()  # gone from discovery
+    sidecar = tmp_path / "run" / "mobile" / registry.REAPED_DIRNAME / f"{dead.pid}.json"
+    assert sidecar.exists(), "the reap must move the record, not delete it"
+    # And it is evidence only: a second sweep must not resurrect it as a session.
+    assert registry.scan(root=tmp_path) == []
 
 
 def test_scan_tolerates_torn_records(tmp_path: Path) -> None:
@@ -327,3 +339,76 @@ def test_a_record_with_unknown_future_keys_still_parses() -> None:
     payload = make_record().to_json()
     payload["a_field_from_the_future"] = {"nested": True}
     assert SessionRecord.from_json(payload).pid == make_record().pid
+
+
+def test_the_reaped_sidecar_is_bounded_by_count_and_age(tmp_path: Path) -> None:
+    """Evidence with an expiry, so the sidecar is not a second unbounded store.
+
+    Retention is by AGE first (a burst cannot evict today's death in favour of
+    yesterday's) and by COUNT after, keeping the newest ``REAPED_MAX_FILES``.
+    Without this the directory grows one file per session death forever, on a
+    host whose whole point is that it stays up for months.
+    """
+    sidecar = registry.reaped_dir(tmp_path)
+    old = time.time() - registry.REAPED_MAX_AGE_S - 3600
+    stale = sidecar / "1.json"
+    stale.write_text("{}")
+    os.utime(stale, (old, old))
+    # Distinct mtimes, oldest first, so "the newest survive" is decided by AGE
+    # and not by whatever order the filesystem hands the glob back.
+    base = time.time() - 3600
+    for pid in range(2, registry.REAPED_MAX_FILES + 12):
+        path = sidecar / f"{pid}.json"
+        path.write_text("{}")
+        os.utime(path, (base + pid, base + pid))
+
+    registry._prune_reaped(sidecar)
+
+    survivors = {int(p.stem) for p in sidecar.glob("*.json")}
+    assert not stale.exists(), "an entry past the age bound is dropped"
+    assert len(survivors) == registry.REAPED_MAX_FILES
+    # The 10 OLDEST (the smallest pids here) are the ones spent, and the age
+    # bound is applied before the count bound so a burst cannot evict today's
+    # evidence in favour of yesterday's.
+    assert 2 not in survivors
+    assert registry.REAPED_MAX_FILES + 11 in survivors
+
+
+def test_the_stop_marker_round_trips_0600_beside_the_transcript(tmp_path: Path) -> None:
+    """The durable stop marker: readable, private, and where the reader looks.
+
+    0600 like every artifact that can name a process, staged-write so a reader
+    never sees half a marker, and read back through the same directory the
+    classifier starts from — the two sides disagreeing is how a deliberate stop
+    would silently go back to reading as an unexplained death.
+    """
+    conversation = tmp_path / "sessions" / "sid"
+    conversation.mkdir(parents=True)
+    payload = {"session_id": "sid", "pid": 4242, "rung": "sigkill", "deliberate": True}
+    path = registry.write_stop_marker(conversation, payload)
+
+    assert path == registry.stop_marker_path(conversation)
+    assert path.name == registry.STOP_MARKER_NAME
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert registry.read_stop_marker(conversation) == payload
+    # No marker, a torn marker, or a JSON scalar all mean "no usable evidence".
+    assert registry.read_stop_marker(tmp_path / "sessions" / "elsewhere") is None
+    path.write_text("{torn")
+    assert registry.read_stop_marker(conversation) is None
+    path.write_text("3")
+    assert registry.read_stop_marker(conversation) is None
+
+
+def test_a_missing_conversation_directory_is_not_conjured_by_the_marker(
+    tmp_path: Path,
+) -> None:
+    """A failed marker write must not create a phantom session.
+
+    Every session listing walks ``<root>/sessions``, so a writer that invented
+    the conversation directory would make an empty session appear in the
+    picker. The caller swallows the failure; this pins the absence.
+    """
+    conversation = tmp_path / "sessions" / "never-existed"
+    with pytest.raises(OSError):
+        registry.write_stop_marker(conversation, {"session_id": "never-existed"})
+    assert not conversation.exists()

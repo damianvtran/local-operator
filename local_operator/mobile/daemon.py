@@ -545,10 +545,15 @@ def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = No
     retired has already republished, so this classifies nothing and the
     successor's own outcome stands.
 
-    ``reaped_owner`` is the dead record ``registry.scan`` reported AND deleted,
-    handed on to the classification because the deletion is the whole reason the
-    caller cannot re-read it. Without it the daemon's own sweep is what erases
-    the evidence for the death it just discovered (review round 2, MINOR-1).
+    ``reaped_owner`` is the dead record ``registry.scan`` reported, handed on to
+    the classification so a caller that classified after its own sweep still
+    carries the record — ``scan`` MOVES a dead record into the run namespace's
+    ``reaped/`` sidecar rather than deleting it (and the classifier reads that
+    sidecar too), so this is now belt-and-braces rather than the only road to
+    an answer. Without it a caller whose sweep was what proved the pid dead
+    has nothing left to hand over, and a future ``scan`` that moved a record
+    somewhere this reader does not look would erase the evidence for the very
+    death it just discovered (review round 2, MINOR-1).
     """
     from local_operator.session.attention import bootstrap_transcript
     from local_operator.session.transcript import Transcript
