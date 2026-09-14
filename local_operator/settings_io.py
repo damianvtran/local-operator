@@ -494,12 +494,6 @@ SECTIONS: tuple[Section, ...] = (
         "Server endpoints and exact-model metadata. Use /login to connect; "
         "reselect with /model saved to apply model changes.",
     ),
-    Section(
-        "retired",
-        "Retired",
-        Scope.NEW_LAUNCH,
-        "Keys that are read but no longer do anything.",
-    ),
     # LIVE: the click handler is a FRESH PROCESS every time it runs
     # (``lop resume-click`` is spawned by the notification), so it reads config
     # at click time and an edit lands on the very next click. Nothing is
@@ -510,6 +504,12 @@ SECTIONS: tuple[Section, ...] = (
         "Desktop app",
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
+    ),
+    Section(
+        "retired",
+        "Retired",
+        Scope.NEW_LAUNCH,
+        "Keys that are read but no longer do anything.",
     ),
 )
 

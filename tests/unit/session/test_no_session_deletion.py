@@ -172,6 +172,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # The desktop delivery lease. Every path here is `delivery_path()`, which
+    # is a FIXED filename under `<config_dir>/run/desktop/` -- one of the two
+    # run directories this project already owns, beside `run/viewers/`, and
+    # created 0700 rather than derived from anything a caller passes. It cannot
+    # name a session directory: the name is a literal, the parent is the config
+    # root, and an app that never paired leaves the file absent.
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "os.replace",
+        "Atomic replacement of the single delivery.json FILE in run/desktop/, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "<path>.unlink",
+        "Withdraws run/desktop/delivery.json when the last claim leaves, or the "
+        "tmp FILE of a failed write",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "os.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
+        "<path>.unlink",
+        "Shutdown withdraws the same fixed delivery.json FILE, so a stopping "
+        "server does not leave a lease behind",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
