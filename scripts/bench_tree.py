@@ -90,6 +90,13 @@ def describe(declared: str = "") -> dict[str, Any]:
     if resolved is None:
         raise MeasuredTreeError(f"--measured-tree names a commit git cannot resolve: {rev!r}")
 
+    # A tracked diff cannot see an untracked module left by a copied before
+    # arm. Such a file can still import, so it invalidates the named source too.
+    untracked = _git("ls-files", "--others", "--exclude-standard", "--", SUBTREE)
+    if untracked is None or untracked:
+        raise MeasuredTreeError(
+            f"cannot verify {SUBTREE}/ with untracked source files: {untracked!r}"
+        )
     diff = _git("diff", resolved, "--", SUBTREE)
     if diff is None:
         raise MeasuredTreeError(
