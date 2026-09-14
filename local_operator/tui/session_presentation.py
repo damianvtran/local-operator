@@ -111,26 +111,36 @@ def live_projection_call_ids(session: Any) -> set[str]:
     return live
 
 
-def live_tool_start_epochs(session: Any) -> dict[str, float]:
-    """The session's own start epoch per live tool call, or ``{}`` when absent.
+def live_tool_start_epochs(session: Any) -> dict[str, float | None] | None:
+    """The session's own start epoch per live tool call.
 
-    Probed rather than called directly for the reason the sibling above is: a
-    reduced facade — a test double, an embedding host — need not implement the
-    accessor, and "no epochs" is the correct answer for one. It reduces to
-    "withhold the clock", which is what every consumer does with a missing id,
-    so a facade without the accessor keeps today's behaviour instead of
-    raising.
+    ``None`` when the session cannot answer AT ALL, and that is a third answer
+    rather than a detail: the accessor is probed rather than called directly, so
+    a reduced facade — a test double, an embedding host — may not implement it
+    at all, and a caller that read its absence as an empty map would be reading
+    "no call has started" into an answer the session never gave. That reading is
+    load-bearing now: a call absent from the map is one with no start, which a
+    replay paints ``queued`` rather than ``running``. So the two shapes are
+    kept apart here — ``None`` is "cannot say, keep today's behaviour (paint the
+    call live and withhold its clock)" and ``{}`` is "says so, and nothing has
+    started".
 
-    The same shape is answered by BOTH session kinds, and it is the SAME fact
-    either way: the epochs a producer stamped on its ``tool_execution_start``
-    events, folded per call. That is what lets a live row and the switched-to
-    row for one call share an anchor instead of differing by when each was
-    painted.
+    The same shape is answered by BOTH real session kinds, and it is the SAME
+    fact either way: the epochs a producer stamped on its
+    ``tool_execution_start`` events, folded per call. That is what lets a live
+    row and the switched-to row for one call share an anchor instead of
+    differing by when each was painted.
+
+    Two answers ride in one map and the callers of this helper need both: a
+    MISSING ID is a call that never started (so a replayed row for it must not
+    be painted running), while a present id whose value is ``None`` started
+    under a producer that stamped no epoch (so the row keeps the blank clock it
+    already had).
     """
     accessor = getattr(session, "live_tool_start_epochs", None)
     if not callable(accessor):
-        return {}
-    return dict(cast("dict[str, float]", accessor()))
+        return None
+    return dict(cast("dict[str, float | None]", accessor()))
 
 
 def activity_phase_clock(session: Any) -> tuple[str, float | None]:

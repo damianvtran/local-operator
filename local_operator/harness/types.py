@@ -1421,6 +1421,26 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     Additive on purpose. An older runtime never sets it and every consumer
     keeps today's behaviour; an older viewer receiving it ignores it, because
     ``AgentEvent`` allows extra fields.
+
+    ``dictation_complete`` marks the LAST frame of a call's dictation — the one
+    the producer cannot send again, because the step's stream has ended. It
+    exists because a composing row is a PREDICTION that a call exists, and the
+    producer used to announce the prediction's beginning and then only one of
+    its three endings (the call starts; it is queued behind a sibling's
+    execution group and starts much later; it never runs at all). A call
+    composed in a batch that ends with ``wait(wait_ms=1800000)`` ahead of an
+    ``exclusive`` sibling therefore kept a row saying ``composing…`` — with a
+    ticking clock — for the sibling's whole half-hour, which is exactly how it
+    was reported. The frame carries the final ``argument_bytes`` (not merely the
+    last reported one) so the row it settles keeps the size it really reached.
+
+    ``not_run_reason`` is the never-run ending, bounded to one clipped line (the
+    wire and the seed both budget text, and this rides both), and set only on a
+    call parked at planning or skipped by steering. Those calls deliberately
+    have no ``tool_execution_start``/``_end`` — the API server matches tool
+    records by id, and a synthetic start would claim the tool ran — so the
+    compose surface is the only one that announced them and the only one that
+    can honestly settle them.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
@@ -1429,6 +1449,8 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     argument_bytes: int = 0
     intent: str | None = None
     supersedes_tool_call_id: str | None = None
+    dictation_complete: bool = False
+    not_run_reason: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):

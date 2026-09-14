@@ -893,13 +893,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
-        """Wall-clock start instant per call executing RIGHT NOW, keyed by id.
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        """Start instant per call executing RIGHT NOW, keyed by call id.
 
         The timestamped sibling of :meth:`executing_display_tool_ids`, and the
         one thing that makes a live row's elapsed clock survive a change of
         viewer. Both surfaces answer it off the SAME folded fact — the
-        ``tool_execution_start`` epochs the producer stamped (see
+        ``tool_execution_start`` events the producer emitted (see
         ``ToolExecutionStartEvent.started_at_epoch``) — so a sidebar switch
         seeds the replayed row and the band's phase from one anchor rather
         than from whenever each of them was painted.
@@ -907,12 +907,24 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Declared here beside the id accessors it accompanies, and implemented
         by BOTH session shapes: a local owner answers from its own fold (it is
         the producer, so the instants are its own), and an attached viewer
-        answers from the same fold applied to the events it received. A call
-        whose start carried no epoch — a legacy producer, an older runtime —
-        is deliberately ABSENT from the map rather than present with a
-        guessed value, so consumers withhold the clock instead of printing an
-        age nobody measured. An empty map is therefore a valid, supported
-        answer and not an error.
+        answers from the same fold applied to the events it received.
+
+        Read membership and value as two different answers, because a replay
+        has to ask both:
+
+        * MEMBERSHIP — has this call started? A call that has no entry at all
+          is one the tail scan merely cannot pair with a result yet: queued
+          behind a sibling's execution group, or never run. Its row must not be
+          painted as executing. Membership is what distinguishes that from the
+          far more common case below, and the distinction is why the map is not
+          simply a list of epochs.
+        * VALUE — when it started, or ``None`` when the start carried no epoch
+          (a legacy producer, an older runtime). An epoch-less start is present
+          with ``None`` rather than absent: the event DOES say the call began,
+          and the value is withheld instead of guessed, so consumers keep the
+          clock blank rather than printing an age nobody measured.
+
+        An empty map is therefore a valid, supported answer and not an error.
         """
         ...
 

@@ -62,6 +62,7 @@ from local_operator.tui.widgets.tool_card import (
     LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
     OUTPUT_INDENT,
+    QUEUED_NOTICE,
     REASON_MAX_CELLS,
     REASON_MAX_ROWS,
     ROW_INDENT,
@@ -69,6 +70,7 @@ from local_operator.tui.widgets.tool_card import (
     RUNNING_NOTICE,
     START_UNKNOWN,
     TERSE_NO_OUTPUT_NOTICE,
+    TERSE_QUEUED_NOTICE,
     ToolCard,
     _category_element,
     compact_path,
@@ -1421,7 +1423,7 @@ def test_the_notice_wears_the_apps_bracket_idiom() -> None:
     colour at all it is just ``a no output``. This slot is the direct remedy
     for "nothing happens when I click", so it has to be the least ambiguous
     thing on the row — and the app already owns a bracket for chrome."""
-    for notice in (NO_OUTPUT_NOTICE, RUNNING_NOTICE):
+    for notice in (NO_OUTPUT_NOTICE, RUNNING_NOTICE, QUEUED_NOTICE):
         assert notice.startswith("⟨") and notice.endswith("⟩"), notice
     # Same idiom as the affordance they stand in for, so the slot reads as
     # one slot rather than as two unrelated things sharing a cell range.
@@ -1481,6 +1483,46 @@ def test_the_answer_outranks_the_summary_and_the_offer_does_not() -> None:
     # Paid for out of the summary, which is unchanged, still on screen, and
     # the least interesting thing on a row that produced no output.
     assert "plan" in row
+
+
+def test_the_queued_notice_does_not_repeat_the_state_word() -> None:
+    """The slot answers "why did nothing expand?"; the row already says which
+    wait it is in.
+
+    ``⟨queued⟩`` landed two cells from the status column's own ``queued``, so an
+    activation printed the same word twice — which reads as a repaint fault, not
+    as an answer (the same class the working line's docstring cites for
+    ``· compacting context…`` sitting above ``· compacting context``). The
+    family's word for this wait is the sibling of ``still running``: ``waiting``.
+    """
+    for width in WIDTHS:
+        card = ToolCard("q", "wake", {"text": "30m"})
+        card.set_composing(14, "wake")
+        card.mark_queued()
+        card.activate()
+        row = card._build_row(width).plain
+        # The state word is on the row once (or not at all, narrower than the
+        # status column can be drawn) — never twice. `⟨queued⟩` printed it
+        # twice on the rows wide enough to hold both runs.
+        assert row.count("queued") <= 1, (width, row)
+
+    # Where the slot has room for an answer at all, it IS the wait...
+    for width in (40, 80, 200):
+        card = ToolCard("q", "wake", {"text": "30m"})
+        card.set_composing(14, "wake")
+        card.mark_queued()
+        card.activate()
+        row = card._build_row(width).plain
+        assert QUEUED_NOTICE in row or TERSE_QUEUED_NOTICE in row, (width, row)
+
+    # ...and at the width the frames are read at, the answer and the state word
+    # are two different words: the wait, and the state.
+    card = ToolCard("q", "wake", {"text": "30m"})
+    card.set_composing(14, "wake")
+    card.mark_queued()
+    card.activate()
+    row = card._build_row(110).plain
+    assert QUEUED_NOTICE in row and "queued" in row, row
 
 
 def test_every_rung_of_the_notice_ladder_still_fits_the_card() -> None:

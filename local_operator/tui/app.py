@@ -122,6 +122,7 @@ from local_operator.providers.catalogue import picker_rows
 from local_operator.session import naming
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
+    ACTIVITY_PHASE_QUEUED,
     ACTIVITY_PHASE_RESPONDING,
     ACTIVITY_PHASE_RUNNING,
 )
@@ -5595,7 +5596,16 @@ class OperatorApp(App[None]):
             # promotes this dict to `self._tool_cards` when the switch commits,
             # which is the moment these cards become the app's to retire.
             prepared_live_cards: dict[str, ToolCard] = {}
-            self._mark_pending_tool_rows(replay.blocks, session, prepared_live_cards)
+            # The announcement registry for the same presentation, and it must
+            # travel WITH it: a queued row registered here is one the commit
+            # adopts as the app's `_composing_cards` (see
+            # `_apply_sidebar_presentation`), so the start that eventually
+            # arrives adopts the row this painter made instead of mounting a
+            # second one beside it.
+            prepared_queued_cards: dict[str, ToolCard] = {}
+            self._mark_pending_tool_rows(
+                replay.blocks, session, prepared_live_cards, prepared_queued_cards
+            )
             # The replay SKIPPED the still-executing calls (see the `prepare`
             # seed above) precisely so the live row would own them; where no
             # live relay painted one (a local resume), paint the ONE row here
@@ -5610,6 +5620,7 @@ class OperatorApp(App[None]):
                 replay._projection_skipped_live,
                 collect=replay.blocks,
                 session=session,
+                queued_cards=prepared_queued_cards,
             )
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
@@ -5680,6 +5691,7 @@ class OperatorApp(App[None]):
                 history_size=session.history_message_count,
                 working_fallback=DEFAULT_ACTIVITY,
                 tool_cards=prepared_live_cards,
+                composing_cards=prepared_queued_cards,
                 welcome=welcome,
                 welcome_visible=welcome is not None,
             )
@@ -6959,7 +6971,9 @@ class OperatorApp(App[None]):
             # now (`_apply_sidebar_presentation` swapped it above), so this is
             # the same registry the prepare path seeded — repainting after the
             # commit tops it up rather than filling a second one.
-            self._mark_pending_tool_rows(incoming.replay.view.blocks(), session, self._tool_cards)
+            self._mark_pending_tool_rows(
+                incoming.replay.view.blocks(), session, self._tool_cards, self._composing_cards
+            )
             history = session.display_history_window()
             total = session.history_message_count
             if total > incoming.history_size:
@@ -10392,7 +10406,10 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _mark_pending_tool_rows(
-        blocks: list[Any], session: Any, live_cards: dict[str, ToolCard] | None = None
+        blocks: list[Any],
+        session: Any,
+        live_cards: dict[str, ToolCard] | None = None,
+        queued_cards: dict[str, ToolCard] | None = None,
     ) -> None:
         """Repaint replayed rows whose calls have NOT finished.
 
@@ -10404,7 +10421,29 @@ class OperatorApp(App[None]):
         than by weakening that default:
 
         * ``waiting`` — a gate is parked in front of the call;
-        * ``running`` — the tool is EXECUTING right now.
+        * ``running`` — the tool is EXECUTING right now;
+        * ``queued`` — the call was announced and its dictation is over, and
+          NOTHING has started: it is waiting behind a sibling's execution group
+          (the reported frame, a `wake` behind a `wait(1800000)`) or waiting for
+          a group the turn never reached.
+
+        The third arm is the one the session could not previously express. The
+        scan behind it (``executing_display_tool_ids``) is a MESSAGE-TAIL test —
+        "unanswered in the latest group" — which cannot tell a call that has not
+        started from one that is executing, and this method used to answer the
+        second for both: a replayed row for a queued call was painted
+        ``running``, with no clock, beside a band that said the turn was running
+        it. ``live_tool_start_epochs`` carries the missing half — MEMBERSHIP is
+        "a start was announced", the value is its instant — so a call absent
+        from that map is one nothing has started, and it is painted as what it
+        is. It stays LIVE (it registers below, and `queued` is a live state:
+        the call may still execute), it just stops claiming to execute.
+
+        The map is consulted only when the session HAS one: a reduced facade
+        that does not implement the accessor returns ``None`` from
+        ``live_tool_start_epochs``, and "cannot say" must not be spent as "no
+        call has started" — those rows keep the reading they have always had
+        (live, clock withheld).
 
         The second is why this method exists in this shape. A long tool
         (``wait``, a background ``bash``, a ``task``) parks the turn inside
@@ -10415,7 +10454,7 @@ class OperatorApp(App[None]):
         from the session's own tail scan, so a call that really did stop keeps
         its ``⊘``.
 
-        **``live_cards`` is what OWNS the row's terminal state, and passing it
+        ``live_cards`` is what OWNS the row's terminal state, and passing it
         is not optional for the ``running`` arm.** The rows here were mounted by
         REPLAY, so they are in neither ``_tool_cards`` nor ``_composing_cards``
         — and every turn-death path in this app settles cards by iterating
@@ -10438,6 +10477,19 @@ class OperatorApp(App[None]):
         ``_current_activity`` reads that dictionary for the band. Each caller
         hands in the dictionary that travels with the transcript it is
         painting.
+
+        ``queued_cards`` is that same rule for the third state, and it is a
+        SEPARATE registry on purpose: ``live_cards`` is "calls executing now" —
+        the band's running arm, the batch phrase and every reader that treats a
+        member as work in progress all read it that way — so a queued row
+        registered there would put the ledger's right-hand column and the band
+        above it back to claiming execution for a call nothing has run. It
+        belongs in the announcement registry (``_composing_cards``), which is
+        where a live queued row already lives: that is the dictionary
+        ``_adopt_composing_card`` adopts the real start from and
+        ``_retire_live_tool_cards`` settles on turn death, so a queued row
+        registered here is proposed to the same two paths as one that never left
+        the live surface.
 
         A caller that passes nothing still gets the repaint (the state is
         honest at the moment it is painted) but keeps the old exposure, which is
@@ -10471,30 +10523,52 @@ class OperatorApp(App[None]):
             live_ids = cast(set[str], executing()) - call_ids
             # The session's own start instants for those calls, read ONCE
             # rather than per row: it is a copy of a small map, and the loop
-            # below may touch several rows of one batch.
+            # below may touch several rows of one batch. MEMBERSHIP of this map
+            # is the other half of the answer (see the docstring): a call the
+            # map does not hold has had no start announced at all, which is the
+            # only thing separating "queued behind a sibling" from "executing
+            # right now".
+            # `None` (a facade with no accessor) is NOT an empty map: see
+            # `live_tool_start_epochs`. A session that cannot answer keeps the
+            # reading this method has always given it — the row is live and its
+            # clock is withheld — because "cannot say" must not be spent as "no
+            # call has started", which is what `queued` means below.
             epochs = live_tool_start_epochs(session)
             for block in blocks:
-                if isinstance(block, ToolCard) and block.tool_call_id in live_ids:
-                    # `restore`, not `mark_running`: the row was mounted by
-                    # replay, so its `_started` is when this view painted it,
-                    # not when the tool began. `restore(state="running")`
-                    # clears that stamp, which is what keeps the card live
-                    # while refusing to invent an elapsed time it cannot know
-                    # — the same reason `subagent_view` restores a child's
-                    # in-flight row this way.
-                    #
-                    # `started_at` is what makes that refusal precise rather
-                    # than total. The producer stamped when the call began and
-                    # the session folded it, so for a call owned by a live
-                    # runtime the age IS knowable and the row resumes it
-                    # instead of counting from this switch. A call the map does
-                    # not have — an older runtime, a genuinely unknown start —
-                    # passes `None` and keeps the clockless rendering.
-                    block.restore(state="running", started_at=epochs.get(block.tool_call_id))
-                    if live_cards is not None:
-                        # See the docstring: this is the row's ONLY settle path
-                        # when the turn dies instead of returning a result.
-                        live_cards[block.tool_call_id] = block
+                if not isinstance(block, ToolCard) or block.tool_call_id not in live_ids:
+                    continue
+                has_start = epochs is None or block.tool_call_id in epochs
+                if not has_start:
+                    # Announced, unanswered, ungated — and nothing has started
+                    # it. `restore(state="queued")` rather than `mark_queued`:
+                    # this row was mounted by replay and carries no dictation
+                    # clock, so there is nothing to stop and no byte count to
+                    # keep; `restore` is also the arm that clears a settled
+                    # row's outcome styling and refuses `settled_rows()`.
+                    block.restore(state="queued")
+                    if queued_cards is not None:
+                        queued_cards[block.tool_call_id] = block
+                    continue
+                # `restore`, not `mark_running`: the row was mounted by
+                # replay, so its `_started` is when this view painted it,
+                # not when the tool began. `restore(state="running")`
+                # clears that stamp, which is what keeps the card live
+                # while refusing to invent an elapsed time it cannot know
+                # — the same reason `subagent_view` restores a child's
+                # in-flight row this way.
+                #
+                # `started_at` is what makes that refusal precise rather
+                # than total. The producer stamped when the call began and
+                # the session folded it, so for a call owned by a live
+                # runtime the age IS knowable and the row resumes it
+                # instead of counting from this switch. A call the map does
+                # not have — an older runtime, a genuinely unknown start —
+                # passes `None` and keeps the clockless rendering.
+                block.restore(state="running", started_at=(epochs or {}).get(block.tool_call_id))
+                if live_cards is not None:
+                    # See the docstring: this is the row's ONLY settle path
+                    # when the turn dies instead of returning a result.
+                    live_cards[block.tool_call_id] = block
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
@@ -10581,13 +10655,17 @@ class OperatorApp(App[None]):
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
             self._mark_pending_tool_rows(
-                self._transcript_view().blocks(), self._session, self._tool_cards
+                self._transcript_view().blocks(),
+                self._session,
+                self._tool_cards,
+                self._composing_cards,
             )
             painted = self._paint_skipped_live_tool_rows(
                 self._transcript_view(),
                 self._tool_cards,
                 self._projection_skipped_live,
                 session=self._session,
+                queued_cards=self._composing_cards,
             )
             if painted and self._controller is not None:
                 # The adopt path's settle seam. The skipped call's
@@ -10615,8 +10693,9 @@ class OperatorApp(App[None]):
         *,
         collect: list[Any] | None = None,
         session: Any = None,
+        queued_cards: dict[str, ToolCard] | None = None,
     ) -> list[str]:
-        """Paint the ONE row for a still-executing call the replay skipped.
+        """Paint the ONE row for a still-live call the replay skipped.
 
         Returns the ids it actually painted, so the caller can hand them to
         the settle seam: the visible path registers them with the event
@@ -10632,6 +10711,21 @@ class OperatorApp(App[None]):
         visible row per call": the check against the already-painted cards is
         what makes this a no-op when a live row DOES exist (the reconnect gap,
         where the relay painted it before the disconnect).
+
+        The row's STATE comes from the same scan the caller used to decide the
+        call is live, read one question further. `live_call_ids` is
+        "unanswered in the latest group", which a call queued behind a long
+        sibling answers identically to one executing: both have no result yet.
+        Membership of ``live_tool_start_epochs`` is what separates them, and a
+        call with no start is painted ``queued`` instead of ``running`` — the
+        reported defect was exactly this row, a `wake` waiting out a
+        `wait(1800000)` and shown as executing. A session that cannot answer the
+        question at all (no accessor: a reduced facade) keeps the old reading,
+        because absence of the MAP is not absence of the CALL's start.
+        `queued_cards` therefore receives what `live_cards` must not:
+        `live_cards` is the running registry every reader treats as work in
+        progress (the band's running arm, the batch phrase), and a queued member
+        there would put the lie back into the header instead of the row.
 
         The registry is passed rather than read off ``self`` because the
         prepare caller is painting a presentation that is not yet the app's:
@@ -10655,6 +10749,12 @@ class OperatorApp(App[None]):
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
                 continue
+            if queued_cards is not None and call_id in queued_cards:
+                # The panel this row would be painted into already owns it —
+                # the prepare and commit legs of one switch both run this
+                # painter, and a second row for one call is the duplicate this
+                # whole path exists to prevent.
+                continue
             haystack = collect if collect is not None else view.blocks()
             if any(
                 isinstance(block, ToolCard) and block.tool_call_id == call_id for block in haystack
@@ -10675,15 +10775,42 @@ class OperatorApp(App[None]):
                 getattr(call, "name", "") or "",
                 getattr(call, "arguments", None) or {},
             )
-            card.restore(state="running", started_at=epochs.get(call_id))
+            # See `_mark_pending_tool_rows`: `None` is "this session cannot
+            # answer", which keeps today's reading (live, clock withheld), while
+            # an empty map says nothing has started — the queued arm below.
+            queued_by_absence = epochs is not None and call_id not in epochs
+            if queued_by_absence:
+                # No start has been announced for this call at all, and that is
+                # a different fact from "its start carried no epoch": the call
+                # is queued behind a sibling's execution group, or waiting for a
+                # group the turn never reached. `queued` says so, in the row and
+                # in the band (see `ToolCard.mark_queued`).
+                card.restore(state="queued")
+            else:
+                # `restore(state="running")`, not the constructor's default: the
+                # true start is when the tool began, not when this view painted
+                # the row, so the card must not invent an elapsed time it cannot
+                # know. `started_at` supplies that true start when the session has
+                # one — the producer's own stamp, folded per call, so the row
+                # painted here and the row the live path would have painted for
+                # the same call agree on one age. `None` for a call whose start
+                # carried no epoch, and the clock stays withheld.
+                card.restore(state="running", started_at=(epochs or {}).get(call_id))
             if collect is not None:
                 collect.append(card)
             else:
                 view.append_block(card)
-            # Registered as live so the turn-death paths and the working line
-            # count it, and so `_retire_live_tool_cards` settles it if the
-            # owner dies rather than returning a result.
-            live_cards[call_id] = card
+            if queued_by_absence:
+                # The announcement registry, where a live queued row lives: the
+                # same two paths (`_adopt_composing_card`,
+                # `_retire_live_tool_cards`) must be able to reach this one.
+                if queued_cards is not None:
+                    queued_cards[call_id] = card
+            else:
+                # Registered as live so the turn-death paths and the working line
+                # count it, and so `_retire_live_tool_cards` settles it if the
+                # owner dies rather than returning a result.
+                live_cards[call_id] = card
             painted.append(call_id)
         return painted
 
@@ -37877,10 +38004,12 @@ class OperatorApp(App[None]):
         row contradict the receipt two lines above it.
 
         Read in priority order, most specific first. Running work outranks a
-        call still being dictated, which outranks prose, which outranks the
-        whole-turn fallback; a turn with no tools at all therefore never leaves
-        the last two, and a turn between two tool batches falls back to
-        "thinking", which is the honest description of a model call in flight.
+        call still being dictated, which outranks a call whose dictation is
+        over and which nothing has started, which outranks prose, which
+        outranks the whole-turn fallback; a turn with no tools at all therefore
+        never leaves the last two, and a turn between two tool batches falls
+        back to "thinking", which is the honest description of a model call in
+        flight.
         """
         if self._ask_pending is not None and not self._ask_pending.done():
             # FIRST, above the approval prompt: the picker is a modal drawn over
@@ -37922,14 +38051,48 @@ class OperatorApp(App[None]):
             # `wr` then `write` — and the ledger row above follows those because
             # its name column is an identifier field; a status sentence is not,
             # and `composing wr` reads as a typo rather than as a state.
+            #
+            # SPLIT by the cards' own state, because this one registry holds two
+            # different facts. A card is `composing` while the model is still
+            # writing its call and `queued` once the producer says the dictation
+            # is over and the call has not started. Only the first is "composing
+            # a call": saying it under a row whose model stopped writing minutes
+            # ago is the header agreeing with the stuck row the operator
+            # reported, and a queued call left behind a long sibling is exactly
+            # when the band was wrong for longest.
+            composing = [
+                card for card in self._composing_cards.values() if card.state == "composing"
+            ]
+            if composing:
+                count = len(composing)
+                noun = "a call" if count == 1 else f"{count} calls"
+                return (
+                    f"composing {noun}",
+                    ACTIVITY_PHASE_COMPOSING,
+                    True,
+                    None,
+                    self._folded_phase_epoch(ACTIVITY_PHASE_COMPOSING),
+                )
+            # Everything left is announced, dictated to completion, and started
+            # by nothing. `waiting to run` is the same family as the two
+            # approval arms above and says the true thing: the work is queued,
+            # the harness is not doing it yet.
+            #
+            # No clock, on purpose. The dictation clock these rows carried has
+            # ENDED, and there is no other zero to count from — the call has no
+            # start, and the phase edge this arm would use is the moment the
+            # label changed, which is the invented age the phase arms exist to
+            # avoid. `False` is the "this number would not be true" half of the
+            # contract (see the docstring), so the band draws no number at all
+            # rather than an understatement.
             count = len(self._composing_cards)
             noun = "a call" if count == 1 else f"{count} calls"
             return (
-                f"composing {noun}",
-                ACTIVITY_PHASE_COMPOSING,
-                True,
+                f"waiting to run {noun}",
+                ACTIVITY_PHASE_QUEUED,
+                False,
                 None,
-                self._folded_phase_epoch(ACTIVITY_PHASE_COMPOSING),
+                None,
             )
         if self._streaming_block is not None:
             return (
@@ -38613,9 +38776,61 @@ class OperatorApp(App[None]):
                 self._composing_cards[event.tool_call_id] = promoted
         card = self._composing_cards.get(event.tool_call_id)
         if card is None:
-            card = ToolCard(event.tool_call_id, event.tool_name)
+            # ADOPT rather than mount blind. The row for this call may already
+            # exist, in one of two places, and mounting a second one is not a
+            # cosmetic duplicate: `on_tool_started` registers ITS adoption in
+            # `_tool_cards`, so whichever row loses that race is left in
+            # neither dictionary — unreachable by `on_tool_ended` and by
+            # `_retire_live_tool_cards`, and therefore stranded at whatever it
+            # last claimed, for the life of the process.
+            #
+            # (a) The RUNNING registry. A call whose `tool_execution_start`
+            # already arrived — a reveal that replayed the seed's later frames
+            # first, a switch back onto a live turn — has a row that has
+            # outgrown this announcement. The frame is history; the row is the
+            # present. Touching nothing is the whole handler for it, and it is
+            # what keeps "one card per call id" true.
+            if event.tool_call_id in self._tool_cards:
+                return
+            # (b) The REPLAYED-ROW registry: a row painted from the durable
+            # transcript. The reveal path registers the ones it makes live
+            # (`_mark_pending_tool_rows` / `_paint_skipped_live_tool_rows`),
+            # which case (a) or the lookup above has already caught; this scan
+            # is for a row that is mounted but in neither registry — one the
+            # session reported as NOT in flight while the owner's live seed
+            # says otherwise. Adopting it here means the announcement and the
+            # transcript agree on ONE row, and a later start revives that row
+            # through `_painted_tool_card` instead of beside it.
+            card = self._painted_tool_card(event.tool_call_id)
+            if card is None:
+                card = ToolCard(event.tool_call_id, event.tool_name)
+                self._append_block(card)
             self._composing_cards[event.tool_call_id] = card
-            self._append_block(card)
+        # The never-run ending, and it comes FIRST: `mark_not_run` settles the
+        # row, so nothing below it may run for a call that will not.
+        #
+        # Read with `getattr` for the reason `supersedes_tool_call_id` above
+        # documents at length: dispatch keys off `event.type` alone, so a frame
+        # relayed from an owner whose build predates these fields reaches here
+        # as a bare `AgentEvent`. An absent field is an ordinary frame, which is
+        # exactly the older-producer behaviour.
+        not_run = getattr(event, "not_run_reason", None)
+        if not_run:
+            self._composing_cards.pop(event.tool_call_id, None)
+            card.intent = clean_intent(getattr(event, "intent", None)) or card.intent
+            # The frame's own final size, passed THROUGH rather than left to be
+            # inherited: `mark_not_run` settles the row's record from
+            # `_compose_bytes`, and this frame is often the only one a surface
+            # ever sees (the live relay keeps one compose frame per call
+            # in place, and the reconnect seed keeps one entry), so a row built
+            # from it has never been through `set_composing` and would otherwise
+            # claim the model composed nothing over a frame carrying the size.
+            card.mark_not_run(
+                str(not_run),
+                argument_bytes=int(getattr(event, "argument_bytes", 0) or 0),
+            )
+            self._refresh_working_activity()
+            return
         card.set_composing(event.argument_bytes, event.tool_name)
         # The intent arrives from the STREAM, as soon as the model has closed
         # its `i` string — many seconds, for a large `write` minutes, before the
@@ -38624,6 +38839,14 @@ class OperatorApp(App[None]):
         # assignment: a later frame reporting none must not erase one already
         # shown, which would blank the line mid-dictation.
         card.intent = clean_intent(getattr(event, "intent", None)) or card.intent
+        # The dictation is over. The row STAYS in `_composing_cards` and stops
+        # saying the model is still writing: the call has been announced, its
+        # arguments are complete, and it may wait a long while behind a sibling's
+        # execution group before it starts — or never start, in which case the
+        # turn-death path retires it from this same registry. See
+        # `ToolCard.mark_queued`.
+        if getattr(event, "dictation_complete", False):
+            card.mark_queued()
         self._refresh_working_activity()
 
     def on_tool_started(self, message: ToolStarted) -> None:
@@ -38637,7 +38860,11 @@ class OperatorApp(App[None]):
         # The map is the fallback for a producer that sent no stamp.
         started_at = getattr(event, "started_at_epoch", None)
         if started_at is None:
-            started_at = live_tool_start_epochs(self._session).get(event.tool_call_id)
+            # `None` here means the session has no such accessor at all (see
+            # `live_tool_start_epochs`), and the honest answer for it is the one
+            # this line has always given: no stamp to seed from.
+            epochs = live_tool_start_epochs(self._session)
+            started_at = None if epochs is None else epochs.get(event.tool_call_id)
         # Adopt the row that announced this call rather than mounting a second
         # one: the composing card already sits in the right place in the ledger,
         # and swapping it out would flicker a row away and an identical row back
@@ -38712,6 +38939,17 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        if card is None:
+            # An END can reach a card that is still in the ANNOUNCEMENT
+            # registry: a queued row now legitimately sits in
+            # `_composing_cards` for a sibling's whole execution group (the
+            # reported half-hour), so the window for an end to arrive ahead of
+            # its start is no longer confined to the dictation. Falling
+            # straight through would settle a row this registry still owns, and
+            # `_retire_live_tool_cards` is deliberately UNCONDITIONAL — it
+            # would relabel that row `⊘ interrupted` at turn death over an
+            # outcome that really happened.
+            card = self._composing_cards.pop(event.tool_call_id, None)
         if card is None:
             card = self._painted_tool_card(event.tool_call_id)
         # Before the early return below: a batch that just lost one of three

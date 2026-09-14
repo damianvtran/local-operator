@@ -3322,7 +3322,7 @@ class AttachedSession:
             return set()
         return self._unanswered_tail_call_ids()
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         """The instant each in-flight call began, keyed by call id.
 
         Answered from the folded state this viewer already keeps, which is the
@@ -3335,8 +3335,11 @@ class AttachedSession:
         producer stamps them rather than this side guessing: an attached
         viewer has no access to the executor's clock, and a value it invented
         from its own arrival would be the fabricated age the row's blank
-        column exists to refuse. A call absent from the map has no known
-        start; callers withhold the clock for it.
+        column exists to refuse. A start whose event carried no epoch is
+        present with ``None`` — the call DID begin, the instant is just
+        unknown — and a call absent from the map has not started at all;
+        callers that paint a replayed row need the second fact, and callers
+        that date one need the first.
 
         Empty rather than raising while the store is unsynchronized: a facade
         before its first sync has no live calls to date, and the reader probes

@@ -664,7 +664,7 @@ class _Epochs(FakeSession):
     construction time.
     """
 
-    epochs: dict[str, float] = {}
+    epochs: dict[str, float | None] = {}
     #: The calls the owner reports as still executing, and which of them is
     #: parked at a gate — the pair the projection asks before it skips a replay
     #: row, forwarded so this fake drives the real decision instead of a
@@ -672,7 +672,7 @@ class _Epochs(FakeSession):
     executing: set[str] = set()
     pending: set[str] = set()
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         return dict(self.epochs)
 
     def executing_display_tool_ids(self) -> set[str]:
@@ -682,41 +682,93 @@ class _Epochs(FakeSession):
         return set(self.pending)
 
 
-def _paint_one(app: OperatorApp, call_id: str, session: Any = None) -> ToolCard:
-    """Paint a skipped live call through the app's OWN painter and return its row."""
+def _paint_one(
+    app: OperatorApp,
+    call_id: str,
+    session: Any = None,
+    queued: dict[str, ToolCard] | None = None,
+) -> ToolCard:
+    """Paint a skipped live call through the app's OWN painter and return its row.
+
+    ``queued`` names the announcement registry and is what the caller expects
+    the painter to file the row in when the session reported NO start for the
+    call: a started call belongs in ``_tool_cards`` (the running registry) and
+    an announced-only one in the registry the compose/adoption paths use, and
+    the helper reads back from whichever the fact under test implies.
+    """
     view = app._transcript_view()
     OperatorApp._paint_skipped_live_tool_rows(
-        view, app._tool_cards, [_call(call_id)], session=session
+        view,
+        app._tool_cards,
+        [_call(call_id)],
+        session=session,
+        queued_cards=queued,
     )
-    return app._tool_cards[call_id]
+    return (queued or app._tool_cards)[call_id]
 
 
 @pytest.mark.asyncio
-async def test_a_replayed_running_row_without_a_start_epoch_never_starts_its_clock() -> None:
-    """No known start ⇒ no number, rather than a number about the VIEWER.
+async def test_a_replayed_row_for_a_call_with_no_start_is_painted_queued() -> None:
+    """The tail scan says "unanswered", which is NOT the same as "executing".
 
-    A call whose start nobody recorded — a legacy producer, a child row inside
-    `subagent_view` — reaches the painter with nothing to seed from, and its
-    ``_started`` would otherwise be the instant this view painted the row. A
-    clock started from the wrong zero is worse than no clock, so the column
-    stays blank. Driven through the app's own view so the mount is real.
+    ``live_call_ids`` is the latest group's unanswered calls, and a call queued
+    behind a sibling's execution group answers it exactly as one running does.
+    The session's folded start map is what separates them, and a call absent
+    from it has had no start announced: the row is ``queued`` — live, waiting,
+    executing nothing — rather than the ``running`` it used to be painted, which
+    is the operator's frame (a `wake` shown as executing for the whole of a
+    `wait(1800000)`).
     """
     app = OperatorApp(lambda: _factory(_Epochs()))
     async with app.run_test(size=(100, 30)) as pilot:
         await wait_for_adoption(app, pilot)
         await pilot.pause()
 
-        card = _paint_one(app, "call-clock", _Epochs())
-        assert card._state == "running"
+        queued: dict[str, ToolCard] = {}
+        card = _paint_one(app, "call-clock", _Epochs(), queued)
+        assert card._state == "queued"
         assert card._started is None
         assert card._elapsed() is None
+        assert app._tool_cards == {}, "a queued call is not live running work"
+        assert queued == {"call-clock": card}
         # One row per call: painting the same skipped call again is a no-op.
         view = app._transcript_view()
         OperatorApp._paint_skipped_live_tool_rows(
-            view, app._tool_cards, [_call("call-clock")], session=_Epochs()
+            view,
+            app._tool_cards,
+            [_call("call-clock")],
+            session=_Epochs(),
+            queued_cards=queued,
         )
-        assert len(app._tool_cards) == 1
+        assert len(queued) == 1
         assert len([b for b in view.blocks() if isinstance(b, ToolCard)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_row_from_a_legacy_producer_never_starts_its_clock() -> None:
+    """A start with NO epoch is still a start, and its row is still ``running``.
+
+    ``None`` is the value for a producer too old to stamp the instant — the
+    event says the call began and the instant is unknown — and it must not be
+    read as "never started". Getting that wrong would relabel every live row of
+    an older runtime as queued, which is why the painter reads membership and
+    value as two answers. The refusal to invent a zero is unchanged: the row
+    keeps a blank column.
+    """
+
+    class _Legacy(_Epochs):
+        epochs = {"call-clock": None}
+
+    app = OperatorApp(lambda: _factory(_Legacy()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        card = _paint_one(app, "call-clock", _Legacy())
+        assert card._state == "running"
+        assert card._started is None
+        assert card._elapsed() is None
+        assert app._tool_cards == {"call-clock": card}
 
 
 @pytest.mark.asyncio
