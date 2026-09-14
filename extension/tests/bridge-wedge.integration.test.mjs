@@ -15,8 +15,10 @@
  * rests on — the chain DRAINED and the next command answered — never a
  * duration (AGENTS.md, "Timing, flakes, and how to assert that something is
  * fast"). Deadlines are shortened through a fixture alias so a bounded failure
- * arrives in tens of milliseconds; the real values live in `src/settle.ts` and
- * are pinned there as one table.
+ * arrives in tens of milliseconds; the real values live in
+ * `src/driver/deadline.ts` and are pinned there as one table. (`REAL_SETTLE`
+ * stays `src/settle.ts`: that file re-exports `deadline` for this fixture's
+ * alias, and keeps the `chrome.webNavigation`-bound `settle()`.)
  */
 import assert from "node:assert/strict";
 import test from "node:test";
