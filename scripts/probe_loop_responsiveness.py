@@ -23,11 +23,16 @@ This harness stands the real parts up in one process:
 Run the same file against both trees (this is the A/B; the first line names the
 tree that actually ran):
 
-  cd /tmp && env -u CMUX_WORKSPACE_ID -u CMUX_SESSION_ID -u CMUX_SURFACE_ID \
-    -u LOP_MOBILE_CHILD_PROVIDER -u LOP_RUNTIME_ADOPT_SESSION \
-    PYTHONPATH=~/local-operator-worktrees/<tree> \
-    ~/local-operator-worktrees/frame-cost-loop-starvation/.venv/bin/python \
-    docs/evidence/frame-cost-loop-starvation/loop_responsiveness_demo.py
+  cd /tmp && PYTHONPATH=~/local-operator-worktrees/<tree> \
+    ~/local-operator-worktrees/<any-tree-with-a-venv>/.venv/bin/python \
+    ~/local-operator-worktrees/<tree-with-this-script>/scripts/probe_loop_responsiveness.py
+
+The script ISOLATES ITSELF rather than trusting the invocation: it strips every
+inherited ``CMUX_*``/``LOP_*`` name (a parent session's prefixes are read by the
+child product, which is how an "isolated" cell silently inherits a provider, a
+model or a cmux workspace id) and points ``HOME`` at a fresh temp dir, because a
+redirected ``LOCAL_OPERATOR_CONFIG_DIR`` does not redirect the cache. Set
+``DEMO_HOME`` to keep a specific home directory instead.
 
 Nothing of the operator's is touched: an isolated ``LOCAL_OPERATOR_CONFIG_DIR``,
 a synthetic session id, no TUI, no fork, no signal to any live process.
@@ -39,10 +44,17 @@ import asyncio
 import json
 import os
 import socket
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+# See the module docstring: isolate our own process, because the caller's exported
+# names are read by the product under test.
+for _inherited in [name for name in os.environ if name.startswith(("CMUX_", "LOP_"))]:
+    os.environ.pop(_inherited, None)
+os.environ["HOME"] = os.environ.get("DEMO_HOME") or tempfile.mkdtemp(prefix="frame-cost-home-")
 
 CFG = Path(os.environ.get("DEMO_CONFIG_DIR", "/tmp/frame-cost-demo-cfg"))
 os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(CFG)
@@ -292,7 +304,7 @@ async def main() -> None:
             reg.publish(record, root=CFG)
 
     print(
-        f"pid={os.getpid()} port={port} cfg={CFG}\n"
+        f"pid={os.getpid()} port={port} cfg={CFG} home={os.environ['HOME']}\n"
         f"tree: {fs.__file__}\n"
         f"pump: {JOBS} jobs x {ROWS} rows x {ROW_TEXT_BYTES} B, tick every "
         f"{TICK_S * 1000:.0f} ms, stream={'on' if STREAM else 'off'}\n"

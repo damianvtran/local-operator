@@ -5,19 +5,17 @@ wall cost, the GC collections, and how many retained rows were frozen. Both
 halves of the A/B run this one file, so the comparison is the same inputs on the
 same host through the same interpreter:
 
-  # baseline (pre-change tree)
-  cd /tmp && PYTHONPATH=~/local-operator-worktrees/<pre-change-tree> \
-    ~/local-operator-worktrees/frame-cost-loop-starvation/.venv/bin/python \
-    docs/evidence/frame-cost-loop-starvation/frame_cost_harness.py all
+  # one tree to measure at a time, same file, same interpreter:
+  cd /tmp && PYTHONPATH=~/local-operator-worktrees/<tree> \
+    ~/local-operator-worktrees/<any-tree-with-a-venv>/.venv/bin/python \
+    ~/local-operator-worktrees/<tree-with-this-script>/scripts/bench_roster_tick.py all
 
-  # after (the tree under test)
-  cd /tmp && PYTHONPATH=~/local-operator-worktrees/frame-cost-loop-starvation \
-    <same interpreter> docs/evidence/frame-cost-loop-starvation/frame_cost_harness.py all
-
-Run it from OUTSIDE either tree: ``sys.path[0]`` is the script's directory, so
-``PYTHONPATH`` is what decides which tree's ``local_operator`` is imported. The
-first line of output names the tree that actually ran -- check it, because a
-wrong tree silently produces baseline numbers for both halves.
+Run it from OUTSIDE any tree, and do NOT add the scripts/ self-correction some
+siblings carry: ``sys.path[0]`` is the script's directory, so ``PYTHONPATH`` is
+what decides which tree's ``local_operator`` is imported, and selecting the tree
+under test is the whole point of an A/B. The first line of output names the tree
+that actually ran -- check it, because a wrong tree silently produces baseline
+numbers for both halves.
 
 The row shape and the workloads are the architect's (arch-resume-wedge, §1/B1-B2):
 5 subagents x 500 retained rows x 8 KiB, and a 22-job roster for the sync frame

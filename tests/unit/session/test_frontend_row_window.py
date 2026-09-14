@@ -6,7 +6,7 @@ tick used to rebuild every job's whole retained window: ``JobState.from_job``
 copied every row, ``_freeze_job`` rebuilt every row's frozen containers, and
 ``_jobs_equal`` then deep-compared them -- ~50-57 ms per tick with ~87 GC
 collections on a 5-child roster at the 500-row cap, re-measured at 88 ms/tick on
-this host (``docs/evidence/frame-cost-loop-starvation/``). That is more than one
+this host (``scripts/bench_roster_tick.py``). That is more than one
 core demanded at 20 Hz, on the loop that also drives the record's heartbeat, which
 is why a busy session read as wedged everywhere.
 
@@ -85,7 +85,7 @@ def _trajectory(job: AsyncJob) -> list[dict[str, Any]]:
     return rows
 
 
-def _store(jobs: list[AsyncJob]) -> FrontendStateStore:
+def _store(jobs: list[Any]) -> FrontendStateStore:
     """A store seeded the way a session seeds it: from the same live rows."""
     return FrontendStateStore(
         FrontendSessionState(
@@ -96,7 +96,7 @@ def _store(jobs: list[AsyncJob]) -> FrontendStateStore:
     )
 
 
-def _session(jobs: list[AsyncJob]) -> Any:
+def _session(jobs: list[Any]) -> Any:
     """The minimum a roster refresh reads: a job manager and nothing else."""
     return SimpleNamespace(
         jobs=SimpleNamespace(
@@ -391,6 +391,111 @@ def test_a_rewritten_front_row_is_not_matched_to_the_previous_window(
 
     assert work.freezes == 4, "a rewritten front was reused rather than frozen"
     assert list(store._state.jobs[0].trajectory) == jobs[0].trajectory
+
+
+def test_a_non_list_trajectory_is_frozen_rather_than_emptied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sequence the memo cannot fingerprint takes the FULL freeze, never an empty window.
+
+    ``JobState.from_job`` has always materialised any iterable -- an iterable
+    trajectory is exactly the host- or extension-provided row its defensive loop
+    exists for -- so a tuple must ship its rows as the pre-change tree shipped
+    them. The guard that read "rows I cannot fingerprint" as "no rows" emptied a
+    job that must not be emptied; being unprovable may cost the memo, never a row.
+    """
+    rows = (_row(0), _row(1))
+    job = SimpleNamespace(id="child-0", type="task", status="running", trajectory=rows, prompt="p")
+    session = _session([job])
+    store = _store([])
+    work = _RowWork(monkeypatch)
+
+    store.refresh_jobs(session)
+    assert list(store._state.jobs[0].trajectory) == list(rows)
+    assert store._state.jobs[0].trajectory_length == 2
+    assert work.freezes == 2
+
+    # And nothing about it is memoised, so the next tick freezes it again rather
+    # than handing back a window no identity could ever prove.
+    work.reset()
+    store.refresh_jobs(session)
+    assert work.freezes == 2
+    assert "child-0" not in store._retained_windows()._by_job
+
+
+def test_rebind_drops_the_previous_lineages_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The epoch is part of what a window is valid for.
+
+    Pinned against the memo rather than through the store on purpose: every public
+    path that moves the store's epoch also clears the memo outright
+    (``replace()``, ``refresh_from_session(initial=True)``), so a store-level test
+    would stay green with this guard deleted -- which is what round 1 found.
+    """
+    jobs = [_job("child-0")]
+    session = _session(jobs)
+    store = _store(jobs)
+    work = _warm(store, session, monkeypatch)
+    windows = store._retained_windows()
+    assert "child-0" in windows._by_job, "the fixture is supposed to have a memo"
+
+    windows.rebind("e2")
+
+    assert windows._by_job == {}, "a lineage move kept the previous epoch's window"
+    work.reset()
+    windows.window("child-0", getattr(jobs[0], "trajectory", None))
+    assert work.freezes == ROWS, "the first read of a new lineage reused the old window"
+
+
+class _JobThatFailsLate:
+    """A job whose row builds once and then fails the way a malformed row does.
+
+    The failure has to land AFTER the memo has answered, or the memo's own
+    ``pop`` is what releases the entry and the ordering under test is masked: an
+    unchanged trajectory is a memo HIT, so nothing in ``window`` touches the entry.
+    """
+
+    def __init__(self, job_id: str, rows: list[dict[str, Any]]) -> None:
+        self.id = job_id
+        self.type = "task"
+        self.status = "running"
+        self.prompt = "p"
+        self.healthy = True
+        self._rows = rows
+
+    @property
+    def trajectory(self) -> list[dict[str, Any]]:
+        return self._rows
+
+    @property
+    def latest_details(self) -> dict[str, Any]:
+        if not self.healthy:
+            raise RuntimeError("a malformed extension row")
+        return {"progress": "thinking"}
+
+
+def test_a_row_that_fails_to_build_does_not_keep_its_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A skipped row must not pin the raw row list its memo entry holds by reference.
+
+    ``_jobs`` deliberately skips one malformed extension row rather than erasing
+    the whole roster, and ``retain`` bounds the memo to the live roster precisely
+    so an entry cannot outlive the job it describes. A job that is skipped is not
+    live, so it must not be handed to ``retain`` as seen.
+    """
+    job_a = _JobThatFailsLate("child-0", _rows(4))
+    job_b = _JobThatFailsLate("child-1", _rows(4))
+    session = _session([job_a, job_b])
+    store = _store([])
+    work = _warm(store, session, monkeypatch)
+    assert {"child-0", "child-1"} <= set(store._retained_windows()._by_job)
+
+    job_b.healthy = False
+    work.reset()
+    store.refresh_jobs(session)
+
+    assert work.freezes == 0, "the fixture was supposed to be a memo HIT, not a freeze"
+    assert "child-1" not in store._retained_windows()._by_job, "a skipped row kept its memo entry"
+    assert "child-0" in store._retained_windows()._by_job
+    assert [job.id for job in store._state.jobs] == ["child-0"]
 
 
 def test_a_job_that_left_the_roster_stops_being_held(monkeypatch: pytest.MonkeyPatch) -> None:
