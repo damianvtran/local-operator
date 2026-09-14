@@ -32,7 +32,7 @@ they are exercised at the memo's own boundary, which is where the guard lives.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 
@@ -186,7 +186,20 @@ def _validated_job_rows(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
     return seen
 
 
-def _follower(wire: _Wire) -> FrontendStateStore:
+class _Producer(Protocol):
+    """What a follower needs from a wire: the two states and the writer.
+
+    Both fixtures satisfy this — `_Wire` grows its window past the cap, `_CappedWire`
+    rotates it at the cap — so the follower tests can be written once against the
+    shape rather than duplicated per producer.
+    """
+
+    start: FrontendSessionState
+    state: FrontendSessionState
+    owner: FrontendStateStore
+
+
+def _follower(wire: _Producer) -> FrontendStateStore:
     """A viewer seeded the way a viewer is: from the same starting state."""
     return FrontendStateStore(wire.start)
 
