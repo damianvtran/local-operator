@@ -1,3 +1,13 @@
+/* The shipped popup under synthetic Chrome storage and health. Proves paint
+ * ORDER and IPC shape (reads, bytes, mutations) — never geometry, which
+ * popup-performance-server.mjs renders from the real markup instead.
+ *
+ * LOCAL_OPERATOR_TEST_POPUP_SOURCE is a REVIEW-ONLY hook: it points the module
+ * and markup under test at another tree (the pinned base, for a before/after
+ * comparison) and is read by nothing in src/ or the build, so it cannot become a
+ * production seam. It is deliberately named outside the `CMUX_*`/`LOP_*`
+ * families the isolation wrappers scrub — a base-comparison run that inherited
+ * that scrub would silently test the checked-out tree and read as a pass. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
@@ -6,12 +16,50 @@ import { resolve } from "node:path";
 import { installPopupDom } from "./fixtures/popup-dom.mjs";
 import { installPopupPerformance } from "./fixtures/popup-performance.mjs";
 
-const source = resolve(process.env.POPUP_SOURCE || "src");
+const source = resolve(process.env.LOCAL_OPERATOR_TEST_POPUP_SOURCE || "src");
 const html = await readFile(resolve(source, "popup/popup.html"), "utf8");
 const { outputFiles } = await build({ entryPoints: [resolve(source, "popup/popup.ts")], bundle: true, format: "esm", platform: "node", write: false });
 let sequence = 0;
+// A BOUND, not the fixture's exact byte total: the point of the assertion is
+// that the projection is narrow (the base's is 2,875,834 bytes on the large
+// fixture, and its first read alone carries `refs` and the grant map), and a
+// fixture edit that changes the payload should not fail this row opaquely. The
+// measured figure for the healthy row is 125 bytes — 35 from the local read
+// ({"port":4099,"allowAllSites":false}) plus 90 from the session read's own
+// projection — and it is recorded as evidence in the PR, not asserted here.
+const POPUP_STATE_BYTES_MAX = 500;
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const barrier = () => { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; };
+
+/* The #disconnected card is the one card reached by TWO different failures, and
+ * it carries a copy channel per failure (popup.html). These read it the way the
+ * popup writes it. Both ids are looked up by name, so a tree without the second
+ * copy channel fails HERE rather than on a string comparison somewhere else. */
+const copyShown = (f, id) => {
+  const node = f.nodes.get(id);
+  assert.ok(node, `popup.html must carry #${id}`);
+  return !node.classList.contains("hidden");
+};
+const assertUncheckedCopy = (f) => {
+  assert.ok(copyShown(f, "disconnected-title-unchecked"), "the unchecked title must be the one shown");
+  assert.ok(copyShown(f, "disconnected-sub-unchecked"), "the unchecked sentence must be the one shown");
+  assert.ok(!copyShown(f, "disconnected-title-measured"), "a failed state read must not assert the diagnosis");
+  assert.ok(!copyShown(f, "disconnected-sub-measured"), "a failed state read must not assert the diagnosis");
+};
+const assertMeasuredCopy = (f) => {
+  assert.ok(copyShown(f, "disconnected-title-measured"), "a probe that answered nothing may diagnose");
+  assert.ok(copyShown(f, "disconnected-sub-measured"));
+  assert.ok(!copyShown(f, "disconnected-title-unchecked"), "the not-measured title must not survive the next render");
+  assert.ok(!copyShown(f, "disconnected-sub-unchecked"));
+};
+
+/** The paragraph's rendered text, read out of the shipped markup. */
+function copyText(id) {
+  const at = html.indexOf(`id="${id}"`);
+  assert.ok(at > -1, `popup.html must carry #${id}`);
+  const end = html.indexOf("</p>", at);
+  return html.slice(at, end).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
 async function load(options = {}) {
   let host;
   const fixture = installPopupPerformance(options);
@@ -37,7 +85,8 @@ test("first render reads only the two projections concurrently; health does not 
   assert.deepEqual(visibleWhileBlocked, ["pending"]);
   assert.deepEqual(f.visible(), ["connected"]);
   assert.equal(f.metrics.reads.length, 2);
-  assert.equal(f.metrics.reads.reduce((n, r) => n + r.bytes, 0), 125);
+  const total = f.metrics.reads.reduce((n, r) => n + r.bytes, 0);
+  assert.ok(total < POPUP_STATE_BYTES_MAX, `expected the two-read projection, read ${total} bytes`);
   assert.equal(f.metrics.messages.length, 0);
   assert.equal(f.metrics.writes.length, 0);
 });
@@ -79,6 +128,7 @@ for (const area of ["session", "local"]) {
     assert.deepEqual(f.visible(), ["pending"]);
     t.mock.timers.tick(5000); await flush();
     assert.deepEqual(f.visible(), ["disconnected"]);
+    assertUncheckedCopy(f);
     stall = false;
     f.nodes.get("retry").click(); await flush();
     assert.deepEqual(f.visible(), ["connected"]);
@@ -94,6 +144,58 @@ test("read rejection never discards unknown consent state to show connected", as
   const f = await load({ state: "consent", gate: read => { if (read.area === "session") throw new Error("synthetic storage failure"); } });
   await flush();
   assert.deepEqual(f.visible(), ["disconnected"]);
+  assertUncheckedCopy(f);
+});
+
+test("a probe that answered nothing keeps the measured diagnosis after a failed read did not", async t => {
+  // The swap must not be one-way, and this is the sequence that would expose it:
+  // a failed read paints the not-measured copy, the read recovers, and the card
+  // is now the MEASURED one. A fix that only ever wrote the honest sentence
+  // would replace a false diagnosis with a false "can't tell" on the most common
+  // real state (no daemon answering) — so the diagnosis has to come back.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const blocked = barrier();
+  let stall = true;
+  const f = await load({ state: "unreachable", gate: read => stall && read.area === "session" ? blocked.promise : undefined });
+  await flush();
+  t.mock.timers.tick(5000); await flush();
+  assert.deepEqual(f.visible(), ["disconnected"]);
+  assertUncheckedCopy(f);
+  stall = false;
+  f.nodes.get("retry").click(); await flush();
+  assert.deepEqual(f.visible(), ["disconnected"], "the retried read succeeded and the probe answered nothing");
+  assertMeasuredCopy(f);
+  blocked.release(); await flush();
+  t.mock.timers.reset();
+});
+
+for (const id of ["disconnected-title-unchecked", "disconnected-sub-unchecked"]) {
+  test(`#${id} states what failed without diagnosing the daemon`, () => {
+    const copy = copyText(id);
+    assert.doesNotMatch(copy, /isn'?t reachable|make sure it'?s running|not reachable/i,
+      "a render that failed to gather its own state never measured reachability");
+    assert.match(copy, /couldn'?t (check|complete)/i, "it must say what did not happen");
+    if (id.endsWith("sub-unchecked")) {
+      assert.match(copy, /lop browser status/, "the CLI affordance must survive the swap");
+      assert.match(copy, /retry/i, "and so must the instruction to use the button below");
+    }
+  });
+}
+
+test("the diagnostic copy is still shipped for the measured path", () => {
+  const measured = copyText("disconnected-sub-measured");
+  assert.match(measured, /lop browser status/, "#996's affordance is not what D1 removed");
+  assert.match(measured, /reachable/i);
+});
+
+test("the healthy card shows the driven URL the daemon reports", async () => {
+  // The popup reads `health.current_url`; a fixture carrying some other key
+  // renders the empty-trough variant and hides the URL-populated card from every
+  // capture (design D2). Pinned to the fixture's own payload, not to a literal.
+  const f = await load();
+  await flush();
+  assert.deepEqual(f.visible(), ["connected"]);
+  assert.equal(f.nodes.get("connected-detail").textContent, f.health.current_url);
 });
 
 for (const area of ["session", "local"]) {
