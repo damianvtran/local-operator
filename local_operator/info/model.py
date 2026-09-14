@@ -326,6 +326,15 @@ class EnvInfo:
     mcp_settling: bool = False
     mcp_failures: tuple[tuple[str, str], ...] = ()
     approval_mode: str = ""
+    #: The TERMINAL theme name (the `tui.theme` scope) — an APP fact, not a host
+    #: probe: `collect_live` takes it as a parameter and the TUI supplies
+    #: `theme.current_theme()`. `docs/DESKTOP_API.md` keeps that scope distinct
+    #: from the desktop's own theme, so a read with no TUI behind it (the desktop
+    #: `/info` host view) has nothing to measure here and ships the default.
+    #: `""` is therefore this field's documented UNKNOWN spelling rather than a
+    #: value a reading could take — the name of a registered theme is never
+    #: empty, since `set_theme` raises on an unknown one — which is why the
+    #: desktop route does not null it the way it nulls `approval_mode`.
     theme: str = ""
     terminal_size: tuple[int, int] | None = None
     term: str = ""
