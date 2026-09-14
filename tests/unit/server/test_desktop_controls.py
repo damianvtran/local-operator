@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -10,6 +11,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 
 from local_operator import settings_io
@@ -181,6 +183,84 @@ def test_managed_gate_covers_every_legacy_route() -> None:
     assert all(reason.strip() for reason in _LEGACY_GATE_EXCEPTIONS.values())
 
 
+def _apiroutes(routes: Iterable[Any]) -> Iterator[APIRoute]:
+    """Every :class:`APIRoute` the app publishes, nested routers included.
+
+    The same descent as ``app._iter_routes``, but yielding the route OBJECT:
+    the question here is what dependencies a route carries, which the
+    ``(path, methods)`` pair cannot answer.
+    """
+    for route in routes:
+        nested = getattr(route, "routes", None)
+        if nested is None:
+            original = getattr(route, "original_router", None)
+            nested = getattr(original, "routes", None) if original is not None else None
+        if nested:
+            yield from _apiroutes(nested)
+        if isinstance(route, APIRoute):
+            yield route
+
+
+def _dependency_names(route: APIRoute) -> set[str]:
+    """The ``__qualname__`` of every ``Depends`` a route resolves, however nested.
+
+    Router-level dependencies (``APIRouter(dependencies=[...])``) are not copied
+    onto ``route.dependencies``; they land in ``route.dependant``. The whole
+    tree is walked so the assertion does not depend on which of the two
+    spellings a router happened to use.
+    """
+    found: set[str] = set()
+    stack = list(getattr(route.dependant, "dependencies", []) or [])
+    while stack:
+        dependency = stack.pop()
+        call = getattr(dependency, "call", None)
+        if call is not None:
+            found.add(getattr(call, "__qualname__", repr(call)))
+        stack.extend(getattr(dependency, "dependencies", []) or [])
+    return found
+
+
+def test_managed_gate_covers_every_desktop_route() -> None:
+    """Every ``/v1/desktop/*`` route carries ``require_desktop``, but one.
+
+    The desktop plane's analogue of ``test_managed_gate_covers_every_legacy_route``
+    above, and it exists for the same reason: ``/v1/desktop/claim`` is the
+    first desktop route NOT behind ``require_desktop``, so the plane's "a route
+    is gated the moment it exists" property now rests on the routing table
+    rather than on nobody forgetting. A future ``/v1/desktop/x`` added without
+    the dependency is reachable while the plane is unclaimed — the exact bug
+    class this PR's thesis exists to prevent.
+
+    ``/v1/desktop/claim`` is the named exception, and gating it would be a
+    deadlock rather than a hardening: an app that cannot claim an unclaimed
+    daemon cannot attach to it at all. Its admission rules live in
+    ``test_desktop_claim.py`` (the key, plus the page-cannot-claim rule).
+
+    The count assertion guards the walker itself: a descent that stopped at the
+    ``_IncludedRouter`` wrappers would yield nothing and pass vacuously.
+    """
+    from local_operator.server.app import app
+
+    seen = 0
+    ungated: list[str] = []
+    for route in _apiroutes(app.routes):
+        if not route.path.startswith("/v1/desktop/"):
+            continue
+        seen += 1
+        if route.path == "/v1/desktop/claim":
+            continue
+        if "require_desktop" not in _dependency_names(route):
+            ungated.append(f"{sorted(route.methods or ())} {route.path}")
+
+    assert seen >= 40, f"the route walk found only {seen} desktop routes; it is not descending"
+    assert ungated == [], (
+        "these desktop routes answer without `require_desktop`:\n  "
+        + "\n  ".join(ungated)
+        + "\nAdd the dependency, or add the route to this test's exception "
+        "(the claim) with a reason."
+    )
+
+
 async def test_the_five_routes_round_two_found_are_gated(desktop, monkeypatch):
     """The exact requests review round 2 reproduced against a live backend.
 
@@ -325,12 +405,17 @@ async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Pa
     ``fetch()`` while the desktop app holds the backend on a known loopback
     port. Missing auth was only half of QA's Q2; this is the half that made it
     browser-exploitable rather than curl-only.
+
+    Three states, because the rule is scoped to the POSTURE and the middle one
+    is the regression: unmanaged keeps the historical wildcard; governed
+    without a list admits nothing browser-shaped; governed with a list admits
+    exactly that list.
     """
     from fastapi.middleware.cors import CORSMiddleware
 
+    from local_operator.server import desktop as desktop_module
     from local_operator.server.app import desktop_origin_cors
 
-    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     app = FastAPI()
 
     @app.get("/health")
@@ -350,16 +435,33 @@ async def test_arbitrary_origins_are_not_echoed_into_the_cors_grant(tmp_path: Pa
     app.middleware("http")(desktop_origin_cors)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
-        # No allowlist configured: a standalone server keeps its historical
-        # wildcard CORS, so existing embedders are untouched.
+        # NO token, no claim: a standalone server keeps its historical wildcard
+        # CORS, so existing embedders are untouched. The latch is cleared
+        # explicitly because it is module-global and a claim made by another
+        # test in this worker would otherwise leave this daemon governed.
+        monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN", raising=False)
+        monkeypatch.setattr(desktop_module, "_CLAIMED", None)
         hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
         assert hostile.headers.get("access-control-allow-origin") == "http://evil.example"
 
-        monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+        # A token WITHOUT a list: the plane IS governed, so an empty allowlist
+        # means "no browser origin is admitted" -- the answer
+        # ``require_desktop`` already gives on the gated families, and the
+        # reason a native (Origin-less) claim can close this surface too. Reads
+        # this as "tightening is off" was the bug: the daemon the app started
+        # itself was the only one still echoing, which is backwards.
+        monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
         hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
         assert hostile.status_code == 200
         assert "access-control-allow-origin" not in hostile.headers
         # Credentials must go with the grant, or the pair reads as a wildcard one.
+        assert "access-control-allow-credentials" not in hostile.headers
+
+        # A configured list still admits exactly its own origin, and nothing else.
+        monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "http://localhost:5187")
+        hostile = await client.get("/health", headers={"Origin": "http://evil.example"})
+        assert hostile.status_code == 200
+        assert "access-control-allow-origin" not in hostile.headers
         assert "access-control-allow-credentials" not in hostile.headers
 
         allowed = await client.get("/health", headers={"Origin": "http://localhost:5187"})

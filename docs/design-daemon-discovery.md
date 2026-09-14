@@ -216,14 +216,28 @@ principal. (b) *What a sandboxed renderer can reach*: nothing new — it never
 learns the key, and privileged calls already ride `window.api.desktop.request`
 (`shared/api/local-operator/desktop-api.ts:37-51`), so only the token's *source*
 changes. (c) *What a local page script can forge*: it cannot read the record, so
-it cannot produce the bearer, and it cannot set `Sec-Fetch-Site` (forbidden
-header) — the existing defence at `desktop.py:41-56`. Once the claim installs an
-allowlist, an Origin-less browser-originated request is refused and a foreign
-Origin is refused; guessing 256 bits is not a threat. Residual risk, named: the
+it cannot produce the bearer, and it cannot set or remove `Sec-Fetch-Site`
+(forbidden header) — the existing defence at `desktop.py:41-56`. **A page
+therefore cannot claim at all, even holding the key**: a claim request carrying
+`Sec-Fetch-Site` is refused unconditionally, and the intended caller (the app's
+main process) sends none. Defence in depth rather than a capability boundary —
+the request that installs an Origin puts its SENDER on the allowlist, so a
+leaked key must not be spendable by page script. The claim's own `Origin` rule
+still differs from `require_desktop`'s about the *value being installed*: an
+unknown origin may be installed by a caller that proved the key, and a NATIVE
+caller (no Origin header) may declare the origins its renderer needs in the
+claim body (`desktop.parse_claim_origins`) — a packaged renderer loads from
+`file://`, whose origin is the literal `null` this plane never admits, so
+without a declaration there is no way to admit the origin the renderer is
+served from. Guessing 256 bits is not a threat. Residual risk, named: the
 claim flips the daemon into managed mode, which **tightens** the legacy control
 surface (`app.py:326`) and therefore gates `/v1/agents`, `/v1/jobs`,
 `/v1/schedules`, `/v1/config`, `/v1/credentials`, `/v1/models` for every other
-local caller — open question 1.
+local caller — open question 1. The CORS half of that tightening is scoped to
+the POSTURE, never to a configured allowlist: a governed daemon with an EMPTY
+allowlist admits no browser origin, so a native (Origin-less) claim closes the
+wildcard echo too. Reading "no allowlist" as "no tightening in force" left the
+drive-by surface open for precisely the caller this feature exists for.
 
 ## 5. "Down" semantics and the state machine
 
