@@ -2488,3 +2488,71 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
         assert source.controller is not None
         assert source.controller.parked, "a speculative lease must not paint deltas"
         assert handlers, "a parked source must stay subscribed or its owner's stream buffers"
+
+
+@pytest.mark.asyncio
+async def test_a_sidebar_row_names_the_rung_when_the_ladder_had_to_escalate():
+    """Design round 1, D1 on the sidebar: the tooltip is where the budget is.
+
+    The row's own description cell carries the deliberate WORD (``⊘`` and
+    ``Unseen interruption``), and the sentence lives in the tooltip — which WRAPS,
+    measured: error rows already render 36×5 and 36×6. So a rung-3 kill and a
+    rung-1 request were byte-identical here for no reason of space, and the
+    operator could not tell "my /stop worked" from "my /stop needed a SIGKILL"
+    anywhere they look. Only the escalated rung appends, and a plain request
+    keeps the exact words it had before this change.
+
+    Read from the RENDERED row as well as from ``status``, following the pair
+    above: the glyph and the words are one surface, and the point of the fix is
+    what a user sees, not what the property returns.
+    """
+    from textual.geometry import Region
+
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    def stop(rung: str, command: str) -> str:
+        return render_cut_off_reason(
+            DELIBERATE_CUT_OFF_CAUSE,
+            detail=render_stop_attribution(rung=rung, command=command, killer_pid=40609),
+        )
+
+    now = time.time()
+    cases = [
+        ("sigkill", "/stop --all", "Unseen interruption — killed by /stop --all"),
+        ("sigterm", "/stop", "Unseen interruption — stopped with a signal by /stop"),
+        # Rung 1 is the plain request: the word already says it, so nothing is
+        # appended and the row is byte-identical to before this change.
+        ("socket", "/stop", "Unseen interruption"),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        _quiesce_sidebar_refresh(app)
+        sidebar = app._session_sidebar
+        for rung, command, words in cases:
+            entry = CatalogEntry(
+                SessionRow("r" * 12, now, f"stopped {rung}", live_state="idle"),
+                unseen=True,
+                completion_kind="interrupted",
+                completion_reason=stop(rung, command),
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            row = next(line for line in painted if f"stopped {rung}" in line)
+            assert "⊘" in row, (rung, row)
+            assert "✗" not in row, (rung, row)
+            assert entry.status == words, (rung, entry.status)

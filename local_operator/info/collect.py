@@ -399,6 +399,8 @@ def collect_sessions(
     if include_stored and root is not None:
         lines.extend(_stored_lines(root, {line.session_id for line in lines}, stored_limit))
 
+    lines = _with_stored_outcomes(lines, root)
+
     # The roll-up counters describe the RUNNING fleet, so they count only the
     # rows the registry published. A ``stored`` row (``include_stored``) names a
     # session that is not running; counting it under ``total``/``live`` would
@@ -446,6 +448,76 @@ def collect_sessions(
         fleet_session_trajectories=session_trajectories,
         fleet_trajectories=session_trajectories + fleet_running,
     )
+
+
+def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[SessionLine]:
+    """Each session's last stored outcome (kind and reason) attached to its row.
+
+    ONE READ FOR THE WHOLE LISTING rather than a lookup per row: ``state_many``
+    chunks its SQL parameters over one connection, so a fleet of forty sessions
+    costs what one costs. The read is also why the fields come from the store
+    and not from the record — see :attr:`SessionLine.completion_kind` for why
+    the OUTCOME is what answers "why did this die".
+
+    THE STORE IS KEYED BY CONVERSATION IDENTITY, not by session id: a row's
+    completion lives under ``session/<id>`` or ``agent/<id>``, and which one it
+    is is a property of the conversation's DIRECTORY (``conversation_identity``
+    reads the parent's name), not of the discovery record — a record in one run
+    namespace can name either kind of conversation. Both spellings are therefore
+    asked for in the same chunked read and ``session/`` wins a tie, which cannot
+    normally happen: ids are uuid4. A row whose identity is in neither is simply
+    a row with no recorded outcome.
+
+    REBUILT RATHER THAN MUTATED, because ``SessionLine`` is ``frozen=True`` and
+    that is a tested redaction invariant, not a habit (see the model's own
+    note): the row is the shape that must never grow a field a dump can reach,
+    so a second field-carrying constructor call is the cheap and legal way to
+    enrich it.
+
+    TOLERANT, like every other read on this path and for the same reason an
+    older runtime's record is: ``lop sessions`` is what a host mid-upgrade is
+    inspected WITH, so an unreadable or missing store leaves the two fields
+    empty and the listing otherwise intact. The store's own reader already
+    degrades to "no completion" states for a database that predates the
+    ``reason``/``cause`` columns, so no version handling is repeated here.
+
+    NO AMBIENT FALLBACK WHEN ``root`` IS NONE, deliberately: unlike
+    ``AttentionStore()``'s own default, a listing built for a caller that named
+    no root must not acquire the outcome of whatever store happens to be on the
+    operator's machine. A caller that wants the read passes the root it read
+    the rows from — the CLI and ``/info`` both do.
+    """
+    from dataclasses import replace
+
+    from local_operator.session.attention import AttentionStore
+
+    if root is None:
+        return lines
+    ids = [line.session_id for line in lines if line.session_id]
+    if not ids:
+        return lines
+    # The store is opened against the SAME root the rows came from.
+    store = AttentionStore(root / "attention.db")
+    try:
+        states = store.state_many(
+            [f"{namespace}/{sid}" for sid in ids for namespace in ("session", "agent")]
+        )
+    except Exception:  # noqa: BLE001 — a listing must survive an unreadable store
+        logger.debug("attention store unavailable for the sessions listing", exc_info=True)
+        return lines
+    enriched: list[SessionLine] = []
+    for line in lines:
+        state = states.get(f"session/{line.session_id}") or {}
+        if not state.get("kind"):
+            state = states.get(f"agent/{line.session_id}") or {}
+        enriched.append(
+            replace(
+                line,
+                completion_kind=str(state.get("kind") or ""),
+                completion_reason=str(state.get("reason") or ""),
+            )
+        )
+    return enriched
 
 
 #: How many stored sessions ``lop sessions --all`` lists when no ``--limit`` is
@@ -567,6 +639,18 @@ def session_rows(
             # ``heartbeat_age_s`` instead. Last in the dict so the pinned order
             # above is untouched.
             "last_activity_s": line.last_activity_s,
+            # THE LAST OUTCOME, and the one key that answers "why did this die"
+            # without a log hunt: the attention store's kind and the reason the
+            # harness recorded (``the runtime disappeared without exiting
+            # cleanly…``, or the deliberate stop's sentence with the rung and
+            # the killer). Appended at the END for the same reason
+            # ``last_activity_s`` is — the established key order is a published
+            # contract, and this EXTENDS it rather than re-flowing it. Empty
+            # string, never ``None``: the store's own readers use "" for "no
+            # reason was recorded" so no consumer has to branch on key
+            # existence per row.
+            "completion_kind": line.completion_kind,
+            "completion_reason": line.completion_reason,
         }
         for line in info.lines
     ]

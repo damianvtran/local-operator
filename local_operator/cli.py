@@ -3184,12 +3184,34 @@ def sessions_command(args: argparse.Namespace) -> int:
     # unconditionally would re-flow the live-only listing every existing
     # consumer parses, so it is appended only when the flag brought stored rows.
     show_stored = any(row["state"] == "stored" for row in rows)
+    # WHY is the column THIS change adds, and it follows LAST_ACTIVE's precedent
+    # for the same reason: it is appended only when some row has something to
+    # say, so a healthy listing parses exactly as it did before. It is also the
+    # answer to the one question the 2026-09-13 kill wave left the operator
+    # unable to ask from a shell — "why did this session die, and did I ask for
+    # it?" — because a killed runtime publishes nothing and its reason survives
+    # only in the attention store (``completion_reason``).
+    from local_operator.incidents import outcome_summary
+
+    why = {
+        row["session_id"]: (
+            outcome_summary(str(row.get("completion_reason") or ""))
+            # A ``complete`` row has no why: its reason is a success sentence,
+            # and a column that explains every healthy session says nothing.
+            if row.get("completion_kind") not in ("", "complete")
+            else ""
+        )
+        for row in rows
+    }
+    show_why = any(why.values())
     header = (
         f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
         f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+    if show_why:
+        header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3210,6 +3232,8 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+        if show_why:
+            line += f" {(why.get(row['session_id']) or '')[:WHY_COLUMN_WIDTH]:<{WHY_COLUMN_WIDTH}}"
         print(line)
     return 0
 
@@ -4012,6 +4036,16 @@ def _elide_id(session_id: str, width: int) -> str:
     if len(session_id) <= width:
         return session_id
     return session_id[: max(width - 1, 1)] + "…"
+
+
+#: Width of `lop sessions`' trailing WHY column, in characters.
+#:
+#: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
+#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: is 96 cells — and an unbounded column re-flows the whole table on a normal
+#: terminal. The full text is one flag away in ``--json``'s
+#: ``completion_reason`` and is what a script should read.
+WHY_COLUMN_WIDTH = 48
 
 
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").

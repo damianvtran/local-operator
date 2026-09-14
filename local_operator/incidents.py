@@ -339,7 +339,16 @@ CUT_OFF_CAUSES: dict[str, str] = {
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     "runtime-killed": (
-        "the runtime disappeared without exiting cleanly while this turn was running"
+        # The trailing clause is the POST-MARKER meaning of this token, and it
+        # is decidable now in a way it was not before the durable marker
+        # existed: "disappeared without exiting cleanly" describes what the
+        # PROCESS did, and a reader one row under a deliberate stop needs the
+        # other half — that nothing recorded anyone asking for it. Without the
+        # clause the two rows differ only in the word above them, and "asked
+        # for" versus "never asked" is exactly the distinction this taxonomy
+        # was extended to draw (design round 1, D4).
+        "the runtime disappeared without exiting cleanly while this turn was running, "
+        "and nothing recorded a stop"
     ),
     "install-mid-update": (
         "a local-operator install was being replaced on disk while this turn was running"
@@ -396,17 +405,58 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
 
 #: How one rung of the stop ladder reads inside a deliberate stop's detail.
 #:
-#: Named, not passed through raw, because the record's token is the WRITER's
-#: spelling (``socket`` is the graceful control op, not a socket anyone
-#: signalled) while the sentence is the operator's — and what they need from it
-#: is how hard the stop had to push: the same word "stopped" covers a runtime
-#: that exited on request and one carrying orphaned state because SIGKILL was
-#: the only answer left.
+#: IN THE RECEIPT'S NOUNS, not the kernel's, and in ONE register. The operator
+#: reads the stop receipt — ``killed "X"`` / ``stopped "X" (sigterm)`` /
+#: ``stopped "X"`` (``control._stopped_line``) — seconds before this sentence
+#: lands in the list beside it, so a durable row saying ``SIGKILL`` while the
+#: receipt that caused it said ``killed`` splits one act into two vocabularies
+#: on two surfaces a reader compares directly. This repo has already ruled on
+#: that class twice (``catalog.py``'s sidebar-word D5, the phone's button-word
+#: D7: the receipt's word is the established one, so the durable sentence
+#: follows it).
+#:
+#: The signal name that survives is ``sigterm``'s, and it survives as the
+#: receipt's own parenthetical — ``stopped with a signal`` is the phrase, and
+#: the rung token is one keystroke away in the artifact. What the operator
+#: needs from the phrase is how hard the stop had to push: the same word
+#: "stopped" covers a runtime that exited on request and one carrying orphaned
+#: state because nothing else was left.
 STOP_RUNG_LABELS: dict[str, str] = {
-    "socket": "the control socket",
-    "sigterm": "SIGTERM",
-    "sigkill": "SIGKILL",
+    "socket": "stopped on request",
+    "sigterm": "stopped with a signal",
+    "sigkill": "killed",
 }
+
+#: What an rung this build does NOT know renders as.
+#:
+#: The token itself must never reach the operator: before this, the fallback
+#: was ``STOP_RUNG_LABELS.get(rung, rung)``, so the day a fourth rung is coined
+#: the sidebar reads ``(future-rung by /stop, pid 1234)`` — the writer's
+#: spelling leaking onto a surface that has no way to explain it. What IS true
+#: of any deliberate stop of an unknown rung is that the session was stopped on
+#: request, so that is what an unknown rung says.
+STOP_RUNG_UNKNOWN = "stopped"
+
+#: The rungs that mean the ladder had to push PAST the plain request.
+#:
+#: Load-bearing for copy, not for control flow: the surfaces that already show
+#: the deliberate WORD (the sidebar's ``Interrupted``, the returned-to-turn
+#: notice) have already said "the user stopped it", so spending the attribution
+#: on rung 1 adds nothing they do not know — it is exactly what ``/stop`` does.
+#: An escalation is the fact worth the cells: the runtime did not exit on
+#: request and had to be signalled. This is also the whole of design round 1's
+#: D1 complaint (a rung-3 kill and a rung-1 request were byte-identical).
+ESCALATED_STOP_RUNGS: frozenset[str] = frozenset({"sigterm", "sigkill"})
+
+#: How the killer's pid is LABELLED in the durable sentence.
+#:
+#: A bare ``pid 40609`` is the SAME TOKEN with the OPPOSITE referent one row up:
+#: an error row's parenthetical (``attention._record_detail``) names the runtime
+#: that DIED, and this one names the process that killed it. A reader comparing
+#: the two rows concludes the same relationship about both. Labelling is one
+#: word and removes the ambiguity without spending the pid, which is the
+#: forensic fact 2026-09-13 lacked (design round 1, D2).
+KILLER_PID_LABEL = "killer pid"
 
 
 def render_stop_attribution(*, rung: str = "", command: str = "", killer_pid: object = None) -> str:
@@ -415,18 +465,20 @@ def render_stop_attribution(*, rung: str = "", command: str = "", killer_pid: ob
     SCALARS RATHER THAN THE MARKER DICT, deliberately: the marker's schema
     belongs to its one writer (``control._stop_marker_payload``) and this module
     only renders text, so a field renamed on one side cannot silently empty the
-    sentence on the other. The rung answers "how hard", the command and pid
-    answer "who" — and "who" is not trivia here: the 2026-09-13 investigation
-    could reproduce every consequence of the kill wave and still not name a
-    single process that sent a signal, because nothing recorded it.
+    sentence on the other. The rung answers "how hard" (in
+    :data:`STOP_RUNG_LABELS`'s operator nouns, never as a raw signal name), the
+    command and pid answer "who" — and "who" is not trivia here: the
+    2026-09-13 investigation could reproduce every consequence of the kill wave
+    and still not name a single process that sent a signal, because nothing
+    recorded it.
 
     Returns ``""`` rather than a bare ``" ()"`` when there is nothing to name,
     so an older or partial marker degrades to exactly the shared sentence.
     """
-    label = STOP_RUNG_LABELS.get(rung, rung) if rung else ""
+    label = (STOP_RUNG_LABELS.get(rung) or STOP_RUNG_UNKNOWN) if rung else ""
     who = command or ""
     if killer_pid is not None and str(killer_pid).strip():
-        who = f"{who}, pid {killer_pid}".lstrip(", ")
+        who = f"{who}, {KILLER_PID_LABEL} {killer_pid}".lstrip(", ")
     if label and who:
         return f" ({label} by {who})"
     if label:
@@ -434,6 +486,77 @@ def render_stop_attribution(*, rung: str = "", command: str = "", killer_pid: ob
     if who:
         return f" (by {who})"
     return ""
+
+
+def _stop_detail_from_reason(reason: str) -> str:
+    """The parenthetical :func:`render_stop_attribution` wrote, or ``""``.
+
+    The INVERSE of the renderer, and the same shape ``cause_from_reason``
+    already uses to read a sentence back: the surfaces that print a completion
+    reason are handed the STORED string and nothing else (``AttentionStore``
+    keeps kind/cause/reason, and ``rows.completion_notice`` / the banner body
+    take the reason as an argument), so a surface that wants the rung has to
+    recover it from the sentence this module wrote. It is exact rather than
+    clever: the shared deliberate sentence, one trailing parenthetical, nothing
+    else. Anything else — an involuntary cause, a pre-attribution marker, a
+    provider's prose — returns ``""`` and the surface prints what it printed
+    before.
+    """
+    sentence = CUT_OFF_CAUSES.get(DELIBERATE_CUT_OFF_CAUSE, "")
+    if not sentence or not reason.startswith(sentence):
+        return ""
+    rest = reason[len(sentence) :].strip()
+    if not (rest.startswith("(") and rest.endswith(")")):
+        return ""
+    return rest[1:-1]
+
+
+def stop_rung_phrase(reason: str) -> str:
+    """The attribution a ROW-sized surface can print, or ``""``.
+
+    For the surfaces whose row already carries the deliberate word (the
+    sidebar's ``Interrupted``, the returned-to-turn notice, the background
+    banner): the phrase is spent only when the ladder ESCALATED
+    (:data:`ESCALATED_STOP_RUNGS`), because that is the fact the word does not
+    already carry. So a rung-3 stop reads ``Interrupted — killed by /stop --all``
+    and a rung-1 request stays exactly ``Interrupted``.
+
+    The killer's pid is deliberately NOT in the phrase. A tooltip and a banner
+    body are read at a glance on a surface that also lists the pid of the
+    runtime that DIED (design round 1, D2), and the pid is one read away in
+    ``lop sessions --json``'s reason and in the artifact itself — where the
+    question "which process sent the signal" is actually being asked.
+    """
+    detail = _stop_detail_from_reason(reason)
+    if not detail:
+        return ""
+    for rung, label in STOP_RUNG_LABELS.items():
+        if rung not in ESCALATED_STOP_RUNGS or not detail.startswith(f"{label} "):
+            continue
+        # Drop the labelled pid clause, keeping the rung and the actor: the
+        # separator is the one :func:`render_stop_attribution` writes.
+        return detail.split(f", {KILLER_PID_LABEL} ", 1)[0]
+    return ""
+
+
+def outcome_summary(reason: str) -> str:
+    """One line explaining how a session's last turn ended, for a LIST column.
+
+    Distinct from :func:`stop_rung_phrase` in exactly one way: a list column
+    has no deliberate word of its own (``lop sessions`` prints state, not
+    ``Interrupted``), so a stop on the plain request rung must still say what
+    happened rather than render an empty cell. Order of preference is the
+    escalation phrase when there is one — the rung and the actor are the facts
+    a reader cannot get anywhere else on that surface — and the sentence's own
+    first clause otherwise (dropping the parenthetical, which for an
+    involuntary cause is build/pid/started-at detail the JSON row carries in
+    full).
+    """
+    phrase = stop_rung_phrase(reason)
+    if phrase:
+        return phrase
+    sentence = reason.split(" (", 1)[0].strip()
+    return sentence
 
 
 def cause_from_reason(reason: str) -> str:

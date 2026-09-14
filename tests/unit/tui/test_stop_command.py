@@ -159,6 +159,7 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
     the shared module's receipt line verbatim."""
     target = _record(77777, "other agent")
     resolved: list[dict[str, Any]] = []
+    commands: list[Any] = []
 
     def fake_resolve(**kwargs: Any):
         resolved.append(kwargs)
@@ -167,6 +168,12 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
     async def fake_stop(
         record, *, timeout_s=10.0, _root=None, _command=None
     ):  # noqa: ANN001, ANN202
+        # The front end is RECORDED, not merely accepted: this token is what the
+        # durable stop marker names the killer by, and the TUI is a real front
+        # end (review round 2, NIT-2 — the stubs took the parameter and asserted
+        # nothing about it, so the one place the TUI's spelling could drift was
+        # unpinned).
+        commands.append(_command)
         return control.StopOutcome(
             record.pid, record.session_id, "other agent", "socket", 'stopped "other agent"'
         )
@@ -184,6 +191,7 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
                 break
         assert resolved and resolved[0]["target"] == "other"
         assert 'stopped "other agent"' in _notices(app)
+        assert commands == ["/stop"]
         # This session is untouched: a target stop never ends the caller.
         assert app._session is session
 
@@ -216,6 +224,7 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     inside the window runs the shared ``stop_all`` and reports grouped."""
     targets = [_record(101, "alpha"), _record(102, "beta")]
     calls: list[str] = []
+    commands: list[Any] = []
 
     def fake_targets(root, own_pid=None):  # noqa: ANN001, ANN202
         return targets
@@ -224,6 +233,7 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
         *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
     ):  # noqa: ANN001, ANN202
         calls.append("all")
+        commands.append(_command)
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
         assert own_pid == os.getpid()
@@ -259,6 +269,10 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
             if app._session is None:
                 break
         assert calls == ["all"]
+        # A sweep names itself, not a single stop (review round 2, NIT-2): the
+        # token every target's durable marker carries has to say "the whole
+        # machine" rather than "one session".
+        assert commands == ["/stop --all"]
         # Own session last, ended in-process, and the grouped report says so.
         assert app._session is None
         assert session.disposed

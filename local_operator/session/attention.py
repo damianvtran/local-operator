@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from local_operator.paths import config_dir
 
@@ -363,7 +363,13 @@ def _durable_stop_marker(directory: Path) -> dict[str, Any] | None:
     return registry.read_stop_marker(directory)
 
 
-def _stop_marker_covers_run(marker: dict[str, Any], directory: Path, dead: Any | None) -> bool:
+def _stop_marker_covers_run(
+    marker: dict[str, Any],
+    directory: Path,
+    dead: Any | None,
+    *,
+    run_started_at: float | None = None,
+) -> bool:
     """Whether ``marker`` attests to the RUN this classification is about.
 
     A marker is keyed to a RUN — ``(session_id, pid, started_at)`` — not to a
@@ -372,21 +378,74 @@ def _stop_marker_covers_run(marker: dict[str, Any], directory: Path, dead: Any |
     involuntarily; without this check the SURVIVING marker would narrate the
     later, unexplained death as the user's own act, which is the one misreading
     a durable marker can introduce. So: the session id must be this
-    conversation's, and when a dead record survives to compare against, its pid
-    (and start time) must be the marker's. A marker for an older run therefore
-    goes quiet and the dead-record rung answers instead — the death is still
-    reported, just not as something it was not.
+    conversation's, and the marker has to be shown to describe THIS run by
+    whichever run key is available.
+
+    THE RUN KEY HAS TWO SOURCES, and neither may be skipped.
+
+    * A dead RECORD, when one survived: pid and start time must be the
+      marker's, which is the strongest form of the check.
+    * The run's own START, when there is no record at all — and there is no
+      record in the NORMAL rung-3 shape, because the ladder that wrote the
+      marker is the same ladder that unpublished the record
+      (``control._recover_record``), and because a sweep can move it to the
+      ``reaped/`` sidecar's retention bound. Skipping the check there (this
+      function used to ``return True``) let a marker from an EARLIER deliberate
+      stop of the same session narrate a LATER involuntary death as
+      ``interrupted``/``user-stop`` — naming the earlier run's killer — once the
+      sidecar's own bound evicted the record. That is a wrong-verdict hole in
+      the direction that HIDES a crash, reported as QA round 1's Q-1.
+
+    WHY ``at`` IS THE BOUND AND ``started_at`` IS NOT: ``started_at`` is the
+    TARGET PROCESS's start, which for any runtime that was already resident
+    when its turn began — the ordinary case — is EARLIER than the run, so
+    bounding on it would refuse legitimate markers. ``at`` is the moment the
+    killer staged the file, and a stop of THIS run necessarily happens after
+    this run started. A marker with no usable ``at`` keeps the old permissive
+    answer rather than inventing a refusal: no bound is no evidence, and
+    refusing on no evidence would delete the attribution rung 3 exists for.
     """
     if str(marker.get("session_id") or "") != directory.name:
         return False
     if dead is None:
-        return True
+        return _marker_postdates_run(marker, run_started_at)
     if int(marker.get("pid") or -1) != int(getattr(dead, "pid", -2) or -2):
         return False
     started = marker.get("started_at")
-    if isinstance(started, (int, float)) and not isinstance(started, bool) and started:
-        return abs(float(started) - float(getattr(dead, "started_at", 0.0) or 0.0)) < 1.0
+    if _is_stamp(started):
+        return abs(float(started) - float(getattr(dead, "started_at", 0.0) or 0.0)) < (
+            _RUN_KEY_TOLERANCE_S
+        )
     return True
+
+
+#: How far two readings of the SAME run key may differ, in seconds. The key is
+#: written by two processes (the killer stamps the marker, the target stamped
+#: its record) from the same clock, so this only absorbs rounding.
+_RUN_KEY_TOLERANCE_S = 1.0
+
+
+def _is_stamp(value: object) -> TypeGuard[float | int]:
+    """Whether ``value`` is a usable epoch stamp (``bool`` is an ``int``).
+
+    A ``TypeGuard`` rather than a plain ``bool`` so a caller that has already
+    asked can read the stamp without re-narrowing it: a ``dict.get`` returns
+    ``Any | None``, and ``float()`` of that is a type error the guard makes go
+    away instead of an inline ``isinstance`` chain repeated at each use.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0
+
+
+def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) -> bool:
+    """Whether a marker with NO record to compare against still fits this run.
+
+    See :func:`_stop_marker_covers_run` for why the bound is the marker's own
+    stamp and not the target's start time, and why an absent or unusable stamp
+    is permissive.
+    """
+    if run_started_at is None or not _is_stamp(marker.get("at")):
+        return True
+    return float(marker["at"]) >= float(run_started_at) - _RUN_KEY_TOLERANCE_S
 
 
 def _record_detail(record: Any) -> str:
@@ -421,7 +480,7 @@ def _record_detail(record: Any) -> str:
 
 
 def _classify_orphaned_run(
-    directory: Path, *, reaped_owner: Any | None = None
+    directory: Path, *, reaped_owner: Any | None = None, run_started_at: float | None = None
 ) -> tuple[str, str, str]:
     """``(kind, cause, reason)`` for a started run whose owner is gone.
 
@@ -464,6 +523,17 @@ def _classify_orphaned_run(
     already run, so a successor that published while the record was being reaped
     still wins.
 
+    ``run_started_at`` IS THE MARKER RUNG'S SECOND RUN KEY. The marker is keyed
+    to a run, and when no record survives to compare pid and start time against,
+    the run's own start — the in-flight ``attention_started`` entry's timestamp,
+    passed by the caller that already read it — is what keeps a marker from an
+    EARLIER stop of the same session from narrating a later involuntary death as
+    the user's own act (QA round 1, Q-1; see :func:`_stop_marker_covers_run` for
+    why the bound is the marker's own stamp and not the target's ``started_at``).
+    ``None`` — no entry, or a caller that has no transcript — keeps the
+    marker-only answer, because refusing on no evidence would delete the
+    attribution the rung-3 shape exists for.
+
     THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
     the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
     parenthetical bolted on, and every surface that prints the reason made that
@@ -494,7 +564,7 @@ def _classify_orphaned_run(
     if (
         marker is not None
         and marker.get("deliberate")
-        and _stop_marker_covers_run(marker, directory, dead)
+        and _stop_marker_covers_run(marker, directory, dead, run_started_at=run_started_at)
     ):
         raw_killer = marker.get("killer")
         killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
@@ -568,7 +638,14 @@ def _import_transcript_outcome(
     from local_operator.incidents import is_cut_off_cause, is_deliberate_cause
 
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
-    started = transcript.latest_custom("attention_started")
+    # The ENTRY rather than only its details, because the run's own START is the
+    # bound the stop marker is checked against when the record is gone
+    # (``_stop_marker_covers_run``): the entry's timestamp is this turn's start,
+    # and it is the only run key left once the ladder unpublishes the record or
+    # the reaped sidecar's retention bound evicts it.
+    started_entry = transcript.latest_custom_entry("attention_started")
+    started = dict(started_entry.payload.get("details", {})) if started_entry is not None else None
+    run_started_at = float(started_entry.ts) if started_entry is not None else None
     if (
         isinstance(started, dict)
         and started.get("conversation_id") == identity
@@ -613,7 +690,7 @@ def _import_transcript_outcome(
             )
             return kind, cause, reason, str(token)
         kind, cause, reason = _classify_orphaned_run(
-            transcript.directory, reaped_owner=reaped_owner
+            transcript.directory, reaped_owner=reaped_owner, run_started_at=run_started_at
         )
         store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
         return kind, cause, reason, str(token)

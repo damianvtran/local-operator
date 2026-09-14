@@ -1771,3 +1771,83 @@ async def test_the_privacy_opt_out_covers_every_completion_kind(
         assert bodies["Complete"] == BODY_BACKGROUND
         assert all(call[0] == APP_NAME for call in spawned), spawned
         assert "migration" not in " ".join(" ".join(call) for call in spawned).lower()
+
+
+def _stop_reason(rung: str, *, command: str) -> str:
+    """The durable sentence a deliberate stop of ``rung`` carries, from the code."""
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    return render_cut_off_reason(
+        DELIBERATE_CUT_OFF_CAUSE,
+        detail=render_stop_attribution(rung=rung, command=command, killer_pid=40609),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_escalated_stop_names_its_rung_on_the_banner(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """Design round 1, D1 on the lock screen: the banner said only "stopped early".
+
+    The fixed body was kind-gated, so the banner for a rung-3 kill and the banner
+    for a rung-1 request were the same ten words — on the surface the operator
+    reads while looking at something else entirely. Only the ESCALATED rung
+    appends the attributed phrase, because ``Interrupted`` already means the user
+    stopped it and the interesting fact is that the ladder had to signal.
+    """
+    from local_operator.tui.notify import BODY_INTERRUPTED
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Halted midway")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(
+        conversation_identity(background),
+        str(uuid.uuid4()),
+        "fresh",
+        "interrupted",
+        reason=_stop_reason("sigkill", command="/stop --all"),
+        cause="user-stop",
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        assert spawned[0][1] == f"{BODY_INTERRUPTED} — killed by /stop --all", spawned[0]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_request_keeps_the_banners_established_sentence(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The other half of D1's fix: rung 1 must render byte-identically to today.
+
+    A stop that exited on request is what the sentence already describes, so
+    appending its own attribution would spend the banner's one content line
+    saying ``Stopped before finishing — stopped on request by /stop``.
+    """
+    from local_operator.tui.notify import BODY_INTERRUPTED
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Halted midway")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(
+        conversation_identity(background),
+        str(uuid.uuid4()),
+        "fresh",
+        "interrupted",
+        reason=_stop_reason("socket", command="/stop"),
+        cause="user-stop",
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        assert spawned[0][1] == BODY_INTERRUPTED, spawned[0]
