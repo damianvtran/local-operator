@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import copy
 import hmac
 import inspect
@@ -671,6 +672,16 @@ _GRACEFUL_DROP_REASONS = frozenset(
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
+#: How long a thread-mode serve loop waits between close-latch re-checks.
+#: ``_request_close`` wakes the loop directly (``_wake_close_wait``), so this is
+#: a BACKSTOP rather than the mechanism: work is signalled, not polled — the
+#: same choice ``analytics/recorder.py`` makes when it wakes its writer with a
+#: queue sentinel instead of sleeping on a flag. A signal can still be missed (a
+#: close that lands before the loop published its event, or a loop that has
+#: already stopped), and a serve loop that parks forever would hang the join in
+#: ``close()`` and leave the listener bound, so the wait keeps a timeout.
+_CLOSE_WAIT_BACKSTOP_S = 0.2
+
 _PAYLOAD_OPS = {
     "slash_result",
     "cancel_subagents",
@@ -1148,6 +1159,14 @@ class RuntimeServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
+        #: Loop-side wake for ``_closed``. Created ON the runtime loop by
+        #: ``_closed_wait``, awaited there and set by ``_request_close`` from
+        #: whatever thread latches the close, via ``call_soon_threadsafe`` — an
+        #: ``asyncio.Event`` may not be touched from a foreign thread directly.
+        #: ``None`` outside thread mode (nothing parks, so nothing to wake) and
+        #: until ``_closed_wait`` publishes it; a close that lands first finds
+        #: the latch already set and never parks at all.
+        self._close_event: asyncio.Event | None = None
         self._push_scheduled = False
         # One warning per contiguous run of oversized frames, not one per
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
@@ -1434,6 +1453,7 @@ class RuntimeServer:
         if self._closed.is_set():
             return
         self._closed.set()
+        self._wake_close_wait()
         if self._unsubscribe is not None:
             try:
                 self._unsubscribe()
@@ -1446,6 +1466,25 @@ class RuntimeServer:
             except Exception:  # noqa: BLE001 — shutdown must not raise
                 logger.debug("runtime event unsubscribe failed", exc_info=True)
             self._unsubscribe_events = None
+
+    def _wake_close_wait(self) -> None:
+        """Wake the thread-mode serve loop parked on its close event.
+
+        Safe from any thread, like every other caller of ``_request_close``:
+        ``call_soon_threadsafe`` is the only thread-safe way to touch another
+        loop's objects, and on the loop's own thread it merely schedules for the
+        next iteration. Both guards are load-bearing rather than defensive —
+        ``_close_event`` is None outside thread mode and until ``_closed_wait``
+        publishes it, and a loop that has already stopped raises ``RuntimeError``
+        from ``call_soon_threadsafe``. The 2.0 s join in ``close()`` covers both,
+        so this must never raise into a close.
+        """
+        event = self._close_event
+        loop = self._loop
+        if event is None or loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(event.set)
 
     def _on_runtime_loop(self) -> bool:
         try:
@@ -1500,8 +1539,22 @@ class RuntimeServer:
             await self._shutdown_on_loop()
 
     async def _closed_wait(self) -> None:
+        """Park until the close latch flips, woken by :meth:`_request_close`.
+
+        This used to re-check the latch on a 200 ms ``sleep``, so ``close()`` —
+        which joins this thread — inherited the remainder of whatever interval
+        it landed in as pure latency, on every close. The event is created HERE,
+        on the loop that awaits it, and published to the cross-thread writer
+        immediately before parking; a close that beat the publication has
+        already set ``_closed``, so the loop condition below is false and it
+        never parks. The timeout is the backstop, not the read path; see
+        ``_CLOSE_WAIT_BACKSTOP_S``.
+        """
+        event = asyncio.Event()
+        self._close_event = event
         while not self._closed.is_set():
-            await asyncio.sleep(0.2)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(event.wait(), timeout=_CLOSE_WAIT_BACKSTOP_S)
 
     def _ensure_shutdown_task(self) -> asyncio.Task[None]:
         """Create the one teardown task; called only on the runtime loop."""
