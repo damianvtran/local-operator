@@ -7,15 +7,16 @@ a roster tick costs, never what canonical state holds. The one deliberate
 exception is printed last and labelled: a row revised IN PLACE, which the writer
 never does and no fingerprint can see.
 
-  cd /tmp && PYTHONPATH=~/local-operator-worktrees/<pre-change-tree> \
-    ~/local-operator-worktrees/frame-cost-loop-starvation/.venv/bin/python \
-    docs/evidence/frame-cost-loop-starvation/canonical_state_equivalence.py
+  cd /tmp && PYTHONPATH=~/local-operator-worktrees/<tree> \
+    ~/local-operator-worktrees/<any-tree-with-a-venv>/.venv/bin/python \
+    ~/local-operator-worktrees/<tree-with-this-script>/scripts/bench_roster_tick_equivalence.py
 
-Run it from OUTSIDE either tree, so ``PYTHONPATH`` picks which one is imported.
-The scenario covers every shape a retained window takes: idle ticks, one-row
-appends, a fill to the cap, cap rotation, a burst, a front-only trim, an
-unstamped row, a status move, rows dropped, the row LIST replaced by a new
-attempt, an epoch move, a job leaving and joining the roster, and both
+Run it from OUTSIDE any tree, so ``PYTHONPATH`` picks which one is imported (see
+``scripts/bench_roster_tick.py`` for why these harnesses do not self-correct
+``sys.path``). The scenario covers every shape a retained window takes: idle
+ticks, one-row appends, a fill to the cap, cap rotation, a burst, a front-only
+trim, an unstamped row, a status move, rows dropped, the row LIST replaced by a
+new attempt, an epoch move, a job leaving and joining the roster, and both
 ``refresh_from_session`` modes.
 """
 

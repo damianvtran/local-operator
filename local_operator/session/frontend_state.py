@@ -2144,7 +2144,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     retained tool results to ship a 16.7 KiB payload, because thawing a row walks
     its whole tool result — measured at 108 ms per frame on a 22-job roster on
     the machine this was fixed on, and 460-491 ms on the reference host under
-    heavier load (see ``docs/evidence/frame-cost-loop-starvation/``). The strip
+    heavier load (see ``scripts/bench_roster_tick.py``). The strip
     below stays as the boundary's own guarantee — no retained rows leave this
     function whatever the dump was told — and costs nothing now that the field
     arrives empty.
@@ -3267,7 +3267,7 @@ class _TrajectoryWindows:
     then deep-compared them -- measured at ~50-57 ms per tick on a 5-child roster
     at the 500-row cap, with ~87 GC collections per tick, on the loop that also
     drives the record's heartbeat (see
-    ``docs/evidence/frame-cost-loop-starvation/``). The retained window is the one
+    ``scripts/bench_roster_tick.py``). The retained window is the one
     part of that work that does not change tick to tick, so it is frozen once and
     reused, and only the appended tail is paid for.
 
@@ -3301,7 +3301,11 @@ class _TrajectoryWindows:
       fixture) -- there is no identity to match on, so no entry is kept;
     * a rebuild: a replaced or refilled row list, or a stamp range that did not
       move forward (:meth:`window` falls back to a full freeze);
-    * the state lineage moving, i.e. an epoch change (:meth:`rebind`);
+    * the state lineage moving, i.e. an epoch change (:meth:`rebind`). Pinned by
+      a test against this class rather than through the store, because every
+      public path that moves the store's epoch also clears the memo outright --
+      so the guard is defence in depth today, and a store-level test would stay
+      green with it deleted;
     * ``replace()`` and ``refresh_from_session(initial=True)`` -- the two paths
       that re-seat canonical state from a PAYLOAD rather than by rebuilding it
       from the session, where rows may be rebuilt instead of appended;
@@ -3310,6 +3314,11 @@ class _TrajectoryWindows:
     Each of those has a test in ``tests/unit/session/test_frontend_row_window.py``,
     as does the WRITER invariant itself -- the one thing no check here can catch
     is a retained row revised in place, which the single writer does not do.
+
+    A sequence that is not a ``list`` is never memoised: with no list identity to
+    hold and no comparable tail, nothing about it can be proved next tick, so it
+    takes the full freeze ``JobState.from_job`` always did. Emptied is the one
+    answer it must never get -- that is a job whose rows are silently gone.
     """
 
     __slots__ = ("_by_job", "_epoch")
@@ -3379,11 +3388,21 @@ class _TrajectoryWindows:
         re-validating, which is both what makes the reuse cheap and what lets
         ``_jobs_equal`` recognise an unchanged tick by identity.
         """
-        if not isinstance(rows, list) or not rows:
-            # Nothing retained: there is no window to reuse, and keeping an entry
-            # for a window that no longer exists is only a way to be wrong later.
+        if not rows:
+            # Nothing retained (``None`` included): there is no window to reuse,
+            # and keeping an entry for a window that no longer exists is only a
+            # way to be wrong later.
             self._by_job.pop(job_id, None)
             return _EMPTY_WINDOW
+        if not isinstance(rows, list):
+            # A sequence this memo cannot fingerprint: it has no stable list
+            # identity to hold and no tail the next tick could compare against,
+            # so nothing here can be PROVED. ``JobState.from_job`` materialises any
+            # iterable, and an empty window would silently drop that iterable's
+            # rows -- so the honest answer is the full freeze the pre-change code
+            # always did, with no entry kept.
+            self._by_job.pop(job_id, None)
+            return _freeze_rows(rows)
         count = len(rows)
         first_seq = _trajectory_row_seq(rows[0])
         last_seq = _trajectory_row_seq(rows[-1])
@@ -4936,7 +4955,6 @@ class FrontendStateStore:
         for job in rows:
             try:
                 job_id = str(getattr(job, "id", "") or "")
-                seen.add(job_id)
                 value = JobState.from_job(
                     job,
                     window=(
@@ -4945,6 +4963,11 @@ class FrontendStateStore:
                         else windows.window(job_id, getattr(job, "trajectory", None))
                     ),
                 )
+                # Marked SEEN only once the row is built: a job whose row raises is
+                # skipped from ``values``, so keeping it in ``seen`` would keep its
+                # memo entry -- and that entry pins the job's raw row list, which
+                # is exactly what ``retain`` exists to release.
+                seen.add(job_id)
                 values.append(_with_lineage(value, comms) if comms is not None else value)
             except Exception:
                 # One malformed extension row cannot erase unrelated jobs.

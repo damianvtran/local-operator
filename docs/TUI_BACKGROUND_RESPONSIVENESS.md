@@ -32,7 +32,7 @@ can rotate at constant length, and nested usage/todos can change independently.
 ## The runtime-side retained-window memo
 
 The writer side of the same value is held to a stricter bar, because there the cost
-was measured (`docs/evidence/frame-cost-loop-starvation/`): a roster refresh
+was measured (`scripts/bench_roster_tick.py`): a roster refresh
 re-froze every retained row of every job on a 50 ms coalescer and demanded more
 than one core to publish nothing. `FrontendStateStore` therefore keeps a per-job
 memo of the frozen retained window (`_TrajectoryWindows`,
