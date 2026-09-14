@@ -1468,6 +1468,25 @@ class AttachClient:
         """
         return await self._request_payload("credential", action=action, key=key, value=value)
 
+    async def variables(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> Any:
+        """Run one code-memory verb on the OWNER's live eval kernel.
+
+        A payload op like ``credential``, and for the same reason: the answer is
+        the data itself (a variable list, a refusal with its own code) rather
+        than a receipt line, and the ``busy``/``unsupported`` states must reach
+        the panel as states — a receipt-shaped reply would have to encode them in
+        prose the front end then parses.
+
+        The session is not named on the wire: the owner answers for the session
+        it IS, so naming it here could only ever address a DIFFERENT namespace
+        than the one this viewer is attached to.
+        """
+        return await self._request_payload(
+            "variables", action=action, key=key, value=value, type=value_type
+        )
+
     async def register_secret_redaction(self, value: str) -> None:
         """Ask the owner to register ONE §6 value with its own redactor.
 

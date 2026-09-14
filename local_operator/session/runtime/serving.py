@@ -2679,6 +2679,41 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the credential is already stored
             logger.warning("could not announce credential change", exc_info=True)
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb against this runtime's session eval kernel.
+
+        The runtime's half of a capability the base protocol declares for every
+        session. The eval kernel is spawned by the session's own tool loop, so it
+        lives in THIS process: a front end holding its own copy would render
+        variables no cell here ever wrote, and its writes would be invisible to
+        the next cell.
+
+        The verb table itself is shared with the in-process shape
+        (:func:`local_operator.session.variable_ops.run_variable_verb`) so a verb
+        added for one shape is a verb added for both, and the session id is taken
+        from the session rather than from any frame field — a viewer must not be
+        able to address another session's namespace by naming it.
+
+        The assembled values pass the session's ``VariableStore.redact`` (session
+        credentials plus registered redactions) before the answer leaves this
+        process. The eval worker already scrubbed what its own ``secrets`` alias
+        disclosed; this second pass is what covers credentials that never entered
+        the kernel at all.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        store = getattr(self._session, "variables", None)
+        return await run_variable_verb(
+            self._session.session_id,
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(store, "redact", None),
+        )
+
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent and return the REAL count.
 

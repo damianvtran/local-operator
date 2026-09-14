@@ -60,9 +60,24 @@ import subprocess
 import sys
 import threading
 import traceback
+import types
 import uuid
 from collections.abc import Callable
 from typing import Any
+
+# The ONE type/key/response vocabulary, shared with the parent and the desktop
+# route. Imported at module level, before ``_enable_cwd_imports``, so it resolves
+# to the installed distribution exactly like every other harness import here.
+from local_operator.session.variable_ops import (
+    MAX_VALUE_CHARS,
+    TOTAL_BUDGET_CHARS,
+    VARIABLE_TYPES,
+    coerce_variable_value,
+    is_reserved_name,
+    name_is_addressable,
+    name_refusal,
+    refusal_for,
+)
 
 #: Worker-side protocol caps. Parent-side spill_truncate is intentionally
 #: later; these caps prevent a giant print/display/repr from allocating and
@@ -421,6 +436,28 @@ _REPR.maxtuple = 100
 _REPR.maxdict = 100
 
 
+def _looser_repr(base: reprlib.Repr) -> reprlib.Repr:
+    """``base`` with every numeric cap one notch looser, for detecting a cut.
+
+    Derived by walking ``base``'s own attributes rather than from a list of
+    caps somebody has to remember: a cap that arrived with a newer ``reprlib``
+    (``maxdeque``, ``maxarray``, …) would otherwise leave the truncation flag
+    blind to exactly the value shape it was added for. Every cap stays A CAP,
+    so one detector render is bounded by cap+1 characters/items/levels and can
+    never expand a huge value.
+    """
+    looser = reprlib.Repr()
+    for attribute in dir(base):
+        limit = getattr(base, attribute, None)
+        if attribute.startswith("max") and isinstance(limit, int) and not isinstance(limit, bool):
+            setattr(looser, attribute, limit + 1)
+    return looser
+
+
+#: The truncation detector for the code-memory walk (see ``_render_value``).
+_REPR_DETECTOR = _looser_repr(_REPR)
+
+
 class _CappedTextIO(io.TextIOBase):
     """Text sink retaining at most ``limit`` chars while reporting all writes
     successful, so user code cannot distinguish it from StringIO."""
@@ -548,7 +585,7 @@ def _scrub_secrets(text: str) -> str:
     )
 
 
-def _safe_repr(value: Any) -> str:
+def _safe_repr(value: Any, *, renderer: reprlib.Repr | None = None) -> str:
     """``repr(value)`` that cannot raise, with retrieved secrets scrubbed.
 
     A user-defined ``__repr__`` is arbitrary code; one that raises would turn
@@ -561,9 +598,14 @@ SecretValue`'s own ``__repr__`` cannot: a secret nested inside a container,
     ``list.__repr__``, which calls ``repr`` on the element — that one is
     covered — but ``"".join`` or an f-string inside a user ``__repr__`` is
     not). Scrubbing the finished string catches every route at one point.
+
+    ``renderer`` exists for the code-memory walk's truncation detector, which
+    renders the SAME value a second time with looser caps and compares: it has
+    to go through this function (rather than calling ``repr`` itself) or the
+    scrub would make an unscrubbed detector render look like a shortening.
     """
     try:
-        rendered = _REPR.repr(value)
+        rendered = (renderer or _REPR).repr(value)
     except BaseException as exc:  # noqa: BLE001 — user code, any failure is data
         rendered = f"<unrepresentable result: {type(exc).__name__}: {exc}>"
     return _scrub_secrets(rendered)
@@ -681,6 +723,14 @@ class _StreamingTextIO(_CappedTextIO):
 
 def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     """Execute one request and build its response mapping."""
+    if request.get("op") == "variables":
+        # Dispatched BEFORE the display/tool rebinding, the argv-ledger record and
+        # the ``_ACTIVE_BRIDGE`` assignment below, and it must stay that way:
+        # this verb runs no user code, so it must not leave a rebound namespace
+        # (``display``/``tool`` are per-request and a namespace mutation here
+        # would be visible to the NEXT cell) and must not leave a live bridge
+        # behind that a background thread could call ``tool()`` through.
+        return _variables_response(namespace, request)
     display_sink = _DisplaySink(DISPLAY_CHAR_LIMIT)
     # Rebound per request (see _make_display).
     namespace["display"] = _make_display(display_sink)
@@ -747,6 +797,236 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         "result": _scrub_secrets(result) if result is not None else None,
         "display": [_scrub_secrets(item) for item in display_sink.finish()],
     }
+
+
+#: Sentinel for "this key is absent", so an identity comparison never mistakes a
+#: stored ``None`` for a missing entry.
+_MISSING = object()
+
+
+def _refuse(request_id: Any, code: str, message: str = "") -> dict[str, Any]:
+    """One refusal in the worker protocol's shape (``id`` plus code/message)."""
+    answer = refusal_for(code)
+    if message:
+        answer["message"] = message
+    return {"id": request_id, **answer}
+
+
+def _variable_entry(name: str, item: Any, rendered: str, truncated: bool) -> dict[str, Any]:
+    """One listed/echoed variable, in the shape the desktop route renders.
+
+    ``editable`` comes from the SAME table the write path coerces with, so "the
+    panel offers an edit" and "the write path accepts it" cannot drift. Both
+    sides read ``VARIABLE_TYPES`` and neither re-derives it from the value's
+    type name.
+    """
+    type_name = type(item).__name__
+    return {
+        "key": name,
+        "type": type_name,
+        "value": rendered,
+        # Editable means the panel can offer Edit/Delete AND the write path will
+        # accept the result, so it needs BOTH halves: a type the coercion table
+        # knows, and a name a URL path segment can carry. A cell can create a
+        # key containing ``/`` (``globals()['a/b'] = 1``); it is listed because
+        # hiding the user's own binding would be a lie, but the row must not
+        # offer a control that can only 404.
+        "editable": type_name in VARIABLE_TYPES and name_is_addressable(name),
+        "truncated": truncated,
+    }
+
+
+def _render_value(item: Any) -> tuple[str, bool]:
+    """``(rendered, truncated)`` for one value, through the shared repr sink.
+
+    ``_safe_repr`` is the SAME renderer a cell's trailing expression uses, which
+    is what makes the secret policy one policy rather than two: it applies
+    ``_REPR``'s caps and then ``_scrub_secrets``, so a value retrieved through
+    ``secrets["NAME"]`` is already scrubbed by the time it returns. The extra
+    4096-char cap here is the wire contract the parent validates against — a
+    longer value is reported as truncated rather than silently shortened.
+
+    ``truncated`` means THE RENDER LOST SOMETHING, which is not the same as
+    "longer than the hard cap": ``reprlib``'s own caps fire at or before it
+    (``maxstring`` is the same 4096, ``maxlist``/``maxdict`` are 100 items), so
+    a 4096-character string the write path ACCEPTED used to read back cut, with
+    an embedded ``...`` and the flag clear — the panel could not tell a whole
+    value from a shortened one, which is the one thing this flag is for. The
+    detector render runs only when the fill value is present at all (ints, most
+    strings and every uncut container never pay for it) and is capped one notch
+    looser, so the comparison is exact rather than a guess about which shapes
+    ``reprlib`` shortens.
+    """
+    rendered = _safe_repr(item)
+    if len(rendered) > MAX_VALUE_CHARS:
+        return rendered[:MAX_VALUE_CHARS], True
+    if _REPR.fillvalue in rendered and rendered != _safe_repr(item, renderer=_REPR_DETECTOR):
+        return rendered, True
+    return rendered, False
+
+
+def _listable(name: Any, item: Any) -> bool:
+    """Whether ``name``/``item`` is user memory rather than kernel furniture.
+
+    Non-``str`` keys are unreachable through the protocol but ARE reachable
+    through a cell (``globals()[42] = x``), and they must not be listed: the
+    route addresses a variable by a path segment, so an entry it cannot address
+    would be an entry the user can never edit or delete.
+
+    A module is excluded because an ``import`` is not memory the user made — a
+    session that imported twenty packages would otherwise open the panel onto
+    twenty rows of ``<module …>``. Everything else is INCLUDED, functions and
+    classes and DataFrames alike: a session full of helpers is exactly the code
+    memory the panel exists to show, and hiding it would read "Nothing stored
+    yet" over a namespace full of the user's own work.
+    """
+    return (
+        isinstance(name, str)
+        and not is_reserved_name(name)
+        and not isinstance(item, types.ModuleType)
+    )
+
+
+def _namespace_changed(namespace: dict[str, Any], snapshot: list[tuple[Any, Any]]) -> bool:
+    """Whether ``namespace`` was mutated while it was being walked.
+
+    A namespace mutated mid-walk is reported as retryable rather than answered: a
+    background thread the cell started (or a ``__repr__`` that writes to its own
+    globals) can change entries between two ``repr`` calls, and a half-old,
+    half-new listing is a snapshot that never existed. Identity comparison per
+    key catches a rebinding; the length check catches an insertion or removal.
+    In-place mutation of a container the same key still refers to is NOT caught by
+    either, which is the honest limit of a walk over a live dict.
+    """
+    try:
+        if len(namespace) != len(snapshot):
+            return True
+        return any(namespace.get(name, _MISSING) is not item for name, item in snapshot)
+    except RuntimeError:
+        return True
+
+
+def _variables_response(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    """Answer one ``variables`` request: list, set, update or delete.
+
+    The three write verbs are separate ACTIONS rather than one ``set`` with a
+    mode field because the worker is the only side that can see the namespace:
+    "create over an existing key" and "update a missing key" are refusals the
+    route must answer (409 ``already_exists`` / 404 ``not_found``), and deciding
+    them in the parent would mean a second round trip that also loses the race
+    against a cell still running.
+    """
+    request_id = request.get("id", "")
+    action = str(request.get("action", ""))
+    key = request.get("key", "")
+    if not isinstance(key, str):
+        return _refuse(request_id, "invalid_value", "A variable name must be text.")
+    if action == "list":
+        return _variables_list(request_id, namespace)
+    if action in ("set", "update"):
+        return _variables_store(request_id, namespace, action, key, request)
+    if action == "delete":
+        return _variables_delete(request_id, namespace, key)
+    return _refuse(request_id, "invalid_value", "Unknown code-memory action.")
+
+
+def _variables_list(request_id: Any, namespace: dict[str, Any]) -> dict[str, Any]:
+    """The namespace's user memory, sorted and bounded."""
+    changed = "The namespace changed while it was being read; try again."
+    try:
+        snapshot = list(namespace.items())
+        candidates = sorted(
+            ((name, item) for name, item in snapshot if _listable(name, item)),
+            key=lambda pair: pair[0],
+        )
+    except RuntimeError:
+        return _refuse(request_id, "changed_under_read", changed)
+    variables: list[dict[str, Any]] = []
+    used = 0
+    truncated = False
+    try:
+        for name, item in candidates:
+            rendered, entry_truncated = _render_value(item)
+            entry = _variable_entry(name, item, rendered, entry_truncated)
+            # Charged in the SERIALIZED form, because that is what the binding
+            # limit measures. The control socket refuses a line over 1 MiB
+            # (``runtime/server.py::_MAX_LINE_BYTES``), and the VALUE's rendered
+            # characters are only part of that line: JSON escaping expands a
+            # value several-fold, and every entry also carries its key, its type
+            # name and the envelope. Charging rendered characters alone left a
+            # 20,000-entry namespace reporting 88,890 of 262,144 used while the
+            # frame serialized to 1,808,952 bytes — the socket refused it, the
+            # viewer saw a 503, and a panel that cannot READ a namespace cannot
+            # delete out of one either, so it had no way back. This budget is a
+            # quarter of the line cap, so the frame cannot approach it.
+            cost = len(json.dumps(entry)) + 1
+            if used + cost > TOTAL_BUDGET_CHARS:
+                truncated = True
+                break
+            used += cost
+            variables.append(entry)
+    except RuntimeError:
+        return _refuse(request_id, "changed_under_read", changed)
+    if _namespace_changed(namespace, snapshot):
+        return _refuse(request_id, "changed_under_read", changed)
+    return {"id": request_id, "ok": True, "variables": variables, "truncated": truncated}
+
+
+def _variables_store(
+    request_id: Any,
+    namespace: dict[str, Any],
+    action: str,
+    key: str,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Create or replace one variable, refusing what the route must report."""
+    rejected = name_refusal(key)
+    if rejected is not None:
+        # The sentence comes from the shared table, which is where the parent's
+        # pre-validation reads it too — the worker's own hand-written wording
+        # here was unreachable through both session shapes, and a second copy
+        # that cannot be reached is a second copy nobody corrects.
+        return {"id": request_id, **rejected}
+    value = request.get("value", "")
+    if not isinstance(value, str):
+        return _refuse(request_id, "invalid_value", "A variable value must be text.")
+    if len(value) > MAX_VALUE_CHARS:
+        return _refuse(request_id, "too_large")
+    existing = key in namespace
+    if action == "set" and existing:
+        return _refuse(request_id, "already_exists")
+    if action == "update" and not existing:
+        return _refuse(request_id, "not_found")
+    value_type = str(request.get("type", ""))
+    if value_type not in VARIABLE_TYPES:
+        return _refuse(request_id, "invalid_value", "Unknown variable type.")
+    try:
+        item = coerce_variable_value(value, value_type)
+    except ValueError as exc:
+        # The shared table's messages name the TARGET TYPE only and never quote
+        # the submitted value, which may be a credential the user is storing for
+        # a cell to read — so they are safe to return verbatim.
+        return _refuse(request_id, "invalid_value", str(exc))
+    # Assignment into the very dict ``exec`` uses as globals, so the next cell
+    # sees the variable immediately with no rebinding step in between.
+    namespace[key] = item
+    rendered, entry_truncated = _render_value(item)
+    return {
+        "id": request_id,
+        "ok": True,
+        "variable": _variable_entry(key, item, rendered, entry_truncated),
+    }
+
+
+def _variables_delete(request_id: Any, namespace: dict[str, Any], key: str) -> dict[str, Any]:
+    """Remove one variable; a missing key is ``not_found``, never a silent success."""
+    rejected = name_refusal(key)
+    if rejected is not None:
+        return {"id": request_id, **rejected}
+    if key not in namespace:
+        return _refuse(request_id, "not_found")
+    del namespace[key]
+    return {"id": request_id, "ok": True}
 
 
 def _enable_cwd_imports() -> None:

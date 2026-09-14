@@ -494,6 +494,28 @@ def _remember(key: str, kernel: _Kernel) -> None:
         _record_reset(_key, "kernel evicted to make room for other active sessions")
 
 
+def _restore(key: str, kernel: _Kernel, position: int) -> None:
+    """Put a READ's kernel back exactly where it was: no promotion, no eviction.
+
+    ``_remember`` is the WRITE path's helper, and for a read it is wrong twice
+    over: it moves the entry to the MRU end (so reading chat A's panel decides
+    that chat B is shed next under ``MAX_KERNELS``) and it runs the capacity pass
+    with it. Measured before this existed, with four resident kernels and one of
+    them out on loan: reading the LRU entry evicted a THIRD session and recorded
+    its ``_LOST_KERNELS`` receipt, so the next cell in that chat started on a
+    fresh interpreter because somebody looked at another chat's panel.
+
+    ``position`` is the index the entry held before the verb popped it. The
+    registry holds at most ``MAX_KERNELS`` idle kernels, so rebuilding the order
+    is a handful of entries — and it is the only way to restore an index, since
+    an ``OrderedDict`` assignment always appends.
+    """
+    items = list(_KERNELS.items())
+    items.insert(min(position, len(items)), (key, kernel))
+    _KERNELS.clear()
+    _KERNELS.update(items)
+
+
 async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
@@ -1281,6 +1303,179 @@ def _build_render_result(
         details=spill_details,
         is_error=True,
     )
+
+
+#: How long one code-memory verb waits for its worker. Short on purpose: the verb
+#: runs no user code beyond a value's ``repr``, so a worker silent for this long
+#: is wedged behind someone else's work — and "busy" is the honest answer, while
+#: killing the interpreter to free it would destroy the namespace being read.
+_SESSION_VARIABLES_TIMEOUT_S = 5.0
+
+
+def _variables_refusal(code: str) -> dict[str, Any]:
+    """The refusal envelope, from the ONE table that also words it.
+
+    Imported here rather than at module scope so ``tools/eval.py`` gains no
+    import edge to ``session``: the verb table imports this module lazily
+    ("one table, two shapes"), and a module-level edge back would make the two
+    packages mutually dependent depending on which one is imported first.
+    """
+    from local_operator.session.variable_ops import refusal_for
+
+    return refusal_for(code)
+
+
+async def complete_session_variables(
+    session_id: str,
+    action: str,
+    key: str = "",
+    value: str = "",
+    value_type: str = "",
+) -> dict[str, Any]:
+    """Run one code-memory verb against ``session_id``'s LIVE eval kernel.
+
+    The desktop canvas's "Code memory" panel renders this: there is no stored
+    form of a session's variables, only whatever the interpreter in
+    ``_KERNELS`` currently holds. The session key is the canonical 12-hex
+    session id (``ToolContext.session_id`` ← ``Session._session_id`` ← the
+    transcript directory name), which is what the desktop route addresses —
+    the legacy ``/v1/agents/{id}/execution-variables`` route is keyed by
+    agent-directory UUIDs and could never resolve one.
+
+    Owns the kernel for the duration exactly as ``execute_eval`` does, and the
+    rules are load-bearing rather than incidental:
+
+    * a cell in flight means the interpreter is BUSY — never write a second
+      request into a pipe another exchange is reading;
+    * no kernel means ABSENT and this function NEVER SPAWNS: ``_spawn`` needs a
+      turn's ``ToolContext``, and reviving a namespace ``_LOST_KERNELS`` has
+      already reported lost would answer with a fresh empty interpreter that the
+      panel would render as this chat's memory;
+    * ``last_used`` moves only for a write, and so does the registry
+      POSITION — a READ must not extend the interpreter's lease or promote it,
+      or looking at the panel would keep an idle kernel alive indefinitely and
+      would decide which OTHER session's interpreter is shed next;
+    * a timeout answers BUSY and LEAVES THE KERNEL RESIDENT. Retiring it here
+      would silently destroy user state to satisfy a five-second deadline, and
+      ``_exchange`` skips responses whose id does not match, so a late answer is
+      harmless. The corollary is worth knowing before trusting a refusal: a
+      WRITE that timed out may still have been applied by the worker, so the
+      refusal means "not confirmed", and the next read is the authority;
+    * ``_LOST_KERNELS`` is deliberately not consumed: this verb reports what the
+      interpreter holds, and the first *cell* after a reset is where that reset
+      must be reported.
+
+    Returns the frozen envelope: ``{ok, state: observed|busy, kernel, variables,
+    truncated}`` for a read, ``{ok, state: "ok", variable?}`` for a write, and
+    ``{ok: False, code, message}`` for a refusal.
+    """
+    writing = action != "list"
+    if session_id in _ACTIVE_KERNELS:
+        return _variables_refusal("kernel_busy") if writing else {"ok": True, "state": "busy"}
+    # Captured BEFORE the pop, because popping and re-inserting is what would
+    # otherwise move the entry to the MRU end (see ``_restore``).
+    order = list(_KERNELS)
+    position = order.index(session_id) if session_id in order else len(order)
+    kernel = _KERNELS.pop(session_id, None)
+    if kernel is None:
+        if writing:
+            return _variables_refusal("no_kernel")
+        return {
+            "ok": True,
+            "state": "observed",
+            "kernel": "absent",
+            "variables": [],
+            "truncated": False,
+        }
+    # Taking ownership is what makes a concurrent dispose safe: it marks the key
+    # in ``_CLOSE_ON_RETURN`` instead of killing a kernel mid-exchange.
+    _ACTIVE_KERNELS.add(session_id)
+    request_id = uuid.uuid4().hex
+    exchange = asyncio.create_task(
+        _exchange(
+            kernel,
+            {
+                "id": request_id,
+                "op": "variables",
+                "action": action,
+                "key": key,
+                "value": value,
+                "type": value_type,
+            },
+            request_id,
+        )
+    )
+    response: dict[str, Any] | None = None
+    crash: _WorkerCrash | None = None
+    timed_out = False
+    try:
+        done, _pending = await asyncio.wait({exchange}, timeout=_SESSION_VARIABLES_TIMEOUT_S)
+        if exchange in done:
+            try:
+                response = exchange.result()
+            except _WorkerCrash as exc:
+                crash = exc
+            except Exception as exc:  # noqa: BLE001 - protocol failures retire state
+                crash = _WorkerCrash(f"eval protocol exchange failed: {type(exc).__name__}: {exc}")
+        else:
+            timed_out = True
+    finally:
+        if response is None:
+            exchange.cancel()
+            with contextlib.suppress(BaseException):
+                await exchange
+        # No await between releasing ownership and settling the kernel, so a
+        # concurrent disposal cannot miss it in the transition gap.
+        dispose_requested = session_id in _CLOSE_ON_RETURN
+        _CLOSE_ON_RETURN.discard(session_id)
+        _ACTIVE_KERNELS.discard(session_id)
+        if crash is not None or dispose_requested:
+            _retire(kernel)
+        elif writing:
+            # A write extends the lease and is the only verb that may promote
+            # the entry: it is work, and ``_remember`` also runs the capacity
+            # pass that a genuinely used interpreter has earned.
+            _remember(session_id, kernel)
+        else:
+            # A read is not work: it keeps its position and evicts nothing, and
+            # a timeout keeps the kernel too (it is only a verb that was slow).
+            _restore(session_id, kernel, position)
+    if crash is not None:
+        # The interpreter is gone with its namespace, which is what "absent"
+        # means to the panel; a write has nothing to write into.
+        if writing:
+            return _variables_refusal("no_kernel")
+        return {
+            "ok": True,
+            "state": "observed",
+            "kernel": "absent",
+            "variables": [],
+            "truncated": False,
+        }
+    if timed_out:
+        return _variables_refusal("kernel_busy") if writing else {"ok": True, "state": "busy"}
+    if response is None or not response.get("ok"):
+        answer = response or {}
+        return {
+            "ok": False,
+            "code": str(answer.get("code") or "invalid_value"),
+            "message": str(answer.get("message") or ""),
+        }
+    if writing:
+        # Only a write extends the lease (see the docstring): no await sits
+        # between this and ``_remember`` above, so no reap can interleave.
+        kernel.last_used = time.monotonic()
+    if action == "list":
+        return {
+            "ok": True,
+            "state": "observed",
+            "kernel": "resident",
+            "variables": list(response.get("variables") or []),
+            "truncated": bool(response.get("truncated")),
+        }
+    if action == "delete":
+        return {"ok": True, "state": "ok"}
+    return {"ok": True, "state": "ok", "variable": dict(response.get("variable") or {})}
 
 
 def _describe_eval_approval(args: dict[str, Any], cwd: str) -> str:
