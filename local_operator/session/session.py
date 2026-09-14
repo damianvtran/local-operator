@@ -4615,6 +4615,36 @@ class Session:
             self._variables, self.journal_credential_change, action, key, value
         )
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb against THIS session's eval kernel.
+
+        The in-process half of a capability the base protocol declares for every
+        session. The namespace being read is the eval kernel's — a module-global
+        registry keyed by this session's canonical id — and it only exists in the
+        process running the turn loop, which is this one. A session attached to a
+        runtime routes the same verb there instead; both shapes share ONE table
+        (:func:`local_operator.session.variable_ops.run_variable_verb`) so the
+        verbs cannot drift between them.
+
+        ``async`` for signature parity with the routed implementation, not because
+        the work awaits. The assembled values pass ``VariableStore.redact`` before
+        returning: the caller is a front end, and a session credential a cell
+        happened to read must not reach it unscrubbed (the eval worker already
+        scrubbed everything its own ``secrets`` alias disclosed).
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            self._session_id,
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(self._variables, "redact", None),
+        )
+
     @property
     def conversation_name(self) -> str:
         """The conversation's title ("" until one is set or generated)."""

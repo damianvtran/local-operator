@@ -507,6 +507,26 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    # --- code memory (execution variables) --------------------------------
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one session code-memory verb (list/set/update/delete).
+
+        A SESSION capability for the same reason ``credential_op`` is: the thing
+        being read or written is the LIVE eval-kernel namespace, which only
+        exists in the process running the session's turn loop. A session that
+        runs its tools in this process answers from its own kernel registry; a
+        session that is a window onto a runtime routes it there, because a
+        namespace held anywhere else would be a copy no cell ever mutates.
+
+        The answer is the frozen envelope (``{ok, state, kernel, variables,
+        truncated}`` for a read, ``{ok, state, variable?}`` for a write,
+        ``{ok: False, code, message}`` for a refusal) — see
+        :mod:`local_operator.session.variable_ops`.
+        """
+        ...
+
     # --- events -----------------------------------------------------------
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable."""
@@ -561,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 113 public members and a POSITIVE
+    than stylistic. This protocol carries 114 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -576,7 +596,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
     112 once the lease-warm retry needed ``recovering``, 113 once
-    ``restored_spend`` joined the shared surface a viewer inherits), so
+    ``restored_spend`` joined the shared surface a viewer inherits, 114 once
+    session code memory joined the session contract with ``variables_op``), so
     recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================

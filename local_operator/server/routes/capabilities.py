@@ -82,6 +82,18 @@ async def capabilities():
                 "notification_contract": 1,
                 "mcp": 1,
                 "radient": 1,
+                # Session code memory: GET/POST/PATCH/DELETE on
+                # `/v1/desktop/sessions/{id}/variables`, reading and writing a
+                # session's LIVE eval-kernel namespace by session id. Its OWN key
+                # rather than a bump of `session_catalogue`, by the same rule
+                # `session_search` states above: a renderer that does not see it
+                # is talking to a backend whose only variables surface is the
+                # legacy agent-id route (which cannot resolve a session id at
+                # all), and its panel says "update the backend" instead of
+                # retrying a call that can never succeed. Everything else in the
+                # renderer works against such a backend, so gating anything else
+                # on this would hide a working surface.
+                "session_variables": 1,
                 # Reading a SUBAGENT's own transcript through its parent's
                 # child route (design § 9.1) — the run sidebar's child reader.
                 # Its own key rather than a bump of `session_catalogue`,

@@ -216,6 +216,20 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("key must be a string")
         if not isinstance(frame.get("value", ""), str):
             raise ValueError("value must be a string")
+    elif op == "variables":
+        # Session code memory. Validated even though it carries no SECRET, for
+        # the converse reason ``credential`` is: this op WRITES into the owner's
+        # live interpreter namespace, so a coerced non-string would be stored as
+        # its repr and a non-string key would reach a dict lookup the addressing
+        # rules were written against. The action is checked against the four
+        # verbs here rather than being defaulted, because an unknown action
+        # silently resolving to a write is a wrong-semantics bug on the one op
+        # that mutates user state.
+        if frame.get("action") not in ("list", "set", "update", "delete"):
+            raise ValueError("action must be list, set, update or delete")
+        for name in ("key", "value", "type"):
+            if not isinstance(frame.get(name, ""), str):
+                raise ValueError(f"{name} must be a string")
     elif op == "register_secret_redaction":
         # The other op that carries a secret's value, and it carries ONLY that:
         # the value has one named home and one consumer (the owner's redactor).
@@ -317,6 +331,15 @@ ControlOp = Literal[
     # `stop` — an old runtime answers unknown-op, the viewer logs it, and the
     # residency drain reaps the runtime seconds later as it always did.
     "retire_if_pristine",  # {} — ack detail is "retired" or "kept: <why>"
+    # Session code memory (the desktop canvas's "Code memory" panel): the
+    # list/set/update/delete verbs over the owner's LIVE eval-kernel namespace.
+    # `update` is a sibling of `set` rather than a mode field because only the
+    # owner can see the namespace, and "create over an existing key" (409)
+    # versus "update a missing key" (404) are refusals it must be told apart.
+    # Additive like `peer_message`/`stop`: an OLD registrant answers `unknown
+    # op`, which the viewer reports to the panel as `unsupported` — its own
+    # sentence, distinct from "this chat has no code memory yet".
+    "variables",  # {action: list|set|update|delete, key, value, type}
 ]
 
 # Events the registrant streams to the daemon.

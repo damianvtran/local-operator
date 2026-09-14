@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, StrictBool, model_validator
@@ -21,6 +21,7 @@ from local_operator.server.routes.desktop_sessions import (
     receipts,
     reply,
 )
+from local_operator.session.variable_ops import RefusalCode, VariableType, refusal_for
 
 router = APIRouter(tags=["Desktop lifecycle"], dependencies=[Depends(require_desktop)])
 
@@ -80,6 +81,95 @@ class AsideInput(Input):
 class Adopt(Input):
     request_id: RequestID
     confirmed: StrictBool
+
+
+class VariableCreate(Input):
+    """A new code-memory variable. ``type`` comes from the ONE shared table.
+
+    ``key`` is a free string here rather than a validated path segment: the same
+    name has to be refused by the SAME two sentences (``reserved_name``,
+    ``invalid_value``) whether it arrives in a body or in a URL, and a pydantic
+    pattern would answer 422 for one surface and 409 with a code for the other.
+    The generous ``max_length`` above the table's own cap keeps both in one path.
+    """
+
+    key: str = Field(default="", max_length=4096)
+    # Deliberately NOT capped at the table's MAX_VALUE_CHARS: a value that is too
+    # long is a refusal the panel must toast with its own code (409 ``too_large``),
+    # and a pydantic cap would turn it into a 422 the renderer cannot map.
+    value: str = Field(default="", max_length=200_000)
+    type: VariableType
+
+
+class VariableUpdate(Input):
+    """The mutable half of a variable; the key is the path segment."""
+
+    value: str = Field(default="", max_length=200_000)
+    type: VariableType
+
+
+#: A session with no runtime has never had an interpreter, and one whose
+#: interpreter was released has none now; the panel's sentence is the same for
+#: both ("no code memory yet"), which is why the read answers this WITHOUT
+#: engaging anything. Never spawns a runtime: reading a panel must not start a
+#: process, and `_spawn` needs a turn's ``ToolContext`` anyway.
+_COLD_VARIABLES: dict[str, Any] = {
+    "state": "observed",
+    "runtime": "absent",
+    "kernel": "absent",
+    "variables": [],
+    "truncated": False,
+}
+
+
+def refuse_variables(code: str, message: str = "") -> None:
+    """Raise the refusal envelope the renderer's ``desktopResult`` lifts.
+
+    ``not_found`` is a 404 and every other code a 409: a missing variable is an
+    address that does not exist, while the rest are addresses that do exist and
+    cannot be acted on right now (no kernel, one busy, a reserved name, a value
+    the type cannot hold). The MESSAGE is taken from the shared table unless the
+    OWNER supplied one — the owner sees the namespace and can be more specific,
+    and the worker's sentences never quote the submitted value by construction
+    (see ``session/variable_ops.py``).
+    """
+    refusal = refusal_for(code)
+    if message and code in get_args(RefusalCode):
+        refusal = {**refusal, "message": message}
+    raise HTTPException(
+        404 if refusal["code"] == "not_found" else 409,
+        {"code": refusal["code"], "message": refusal["message"]},
+    )
+
+
+def read_variables(answer: dict[str, Any]) -> dict[str, Any]:
+    """Map an owner's read answer onto the frozen panel states.
+
+    ``busy`` and ``unsupported`` carry NO ``variables`` key, and that is the
+    point of the model: a consumer cannot render "Nothing stored yet" over a
+    namespace nobody read. ``variables: []`` means observed and empty, never
+    unknown — so any other refusal (``changed_under_read``, or ``no_kernel``
+    losing a race with a disposing kernel) is reported as the retryable state the
+    panel already has, not as emptiness.
+    """
+    state = answer.get("state")
+    if state in ("busy", "unsupported"):
+        return {"state": state}
+    if not answer.get("ok"):
+        if answer.get("code") == "no_kernel":
+            return {**_COLD_VARIABLES, "runtime": "running"}
+        return {"state": "busy"}
+    return {
+        "state": "observed",
+        "runtime": "running",
+        # The owner reports whether an interpreter is resident AT THE MOMENT it
+        # answered: a kernel reaped between the cold check and this verb is
+        # "absent" with the runtime still running, and that is the panel's other
+        # sentence ("the interpreter was released after sitting idle").
+        "kernel": "absent" if answer.get("kernel") == "absent" else "resident",
+        "variables": list(answer.get("variables") or []),
+        "truncated": bool(answer.get("truncated")),
+    }
 
 
 @dataclass
@@ -169,6 +259,78 @@ async def credential(session_id: str, body: Credential, request: Request):
         if not result.get("ok"):
             raise HTTPException(409, "The credential operation did not complete")
         return reply({"data": result})
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/variables",
+    response_model=CRUDResponse[Result],
+)
+async def variables(session_id: str, request: Request):
+    """A session's live code memory, addressed by SESSION id.
+
+    The legacy ``/v1/agents/{id}/execution-variables`` route is keyed by
+    agent-directory UUIDs and answered 404 for every canonical session id, which
+    is why this surface exists. This one reads the answer off the session's own
+    runtime — the only place the namespace exists — and a cold session is read
+    WITHOUT engaging one.
+    """
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        if bridge.remote.is_cold:
+            return reply({"data": dict(_COLD_VARIABLES)})
+        answer = await bridge.remote.variables_op("list")
+        return reply({"data": read_variables(answer)})
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/variables",
+    response_model=CRUDResponse[Result],
+)
+async def create_variable(session_id: str, body: VariableCreate, request: Request):
+    """Create a variable in the session's live interpreter namespace."""
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        if bridge.remote.is_cold:
+            # Mutations never spawn a runtime and never spawn a kernel: a panel
+            # editing "no code memory yet" would be starting a process to hold a
+            # value in a namespace no cell has ever run in.
+            refuse_variables("runtime_cold")
+        answer = await bridge.remote.variables_op("set", body.key, body.value, body.type)
+        if not answer.get("ok"):
+            refuse_variables(str(answer.get("code") or ""), str(answer.get("message") or ""))
+        return reply({"data": {"state": "ok", "variable": dict(answer.get("variable") or {})}})
+
+
+@router.patch(
+    "/v1/desktop/sessions/{session_id}/variables/{key}",
+    response_model=CRUDResponse[Result],
+)
+async def update_variable(session_id: str, key: str, body: VariableUpdate, request: Request):
+    """Replace an existing variable's value, refusing when no such key is stored."""
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        if bridge.remote.is_cold:
+            refuse_variables("runtime_cold")
+        answer = await bridge.remote.variables_op("update", key, body.value, body.type)
+        if not answer.get("ok"):
+            refuse_variables(str(answer.get("code") or ""), str(answer.get("message") or ""))
+        return reply({"data": {"state": "ok", "variable": dict(answer.get("variable") or {})}})
+
+
+@router.delete(
+    "/v1/desktop/sessions/{session_id}/variables/{key}",
+    response_model=CRUDResponse[Result],
+)
+async def delete_variable(session_id: str, key: str, request: Request):
+    """Remove one variable from the session's live interpreter namespace."""
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        if bridge.remote.is_cold:
+            refuse_variables("runtime_cold")
+        answer = await bridge.remote.variables_op("delete", key)
+        if not answer.get("ok"):
+            refuse_variables(str(answer.get("code") or ""), str(answer.get("message") or ""))
+        return reply({"data": {"state": "ok"}})
 
 
 @router.post("/v1/desktop/sessions/{session_id}/fork", response_model=CRUDResponse[Result])
