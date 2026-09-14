@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.session.runtime.viewers import (
+    DESKTOP_SURFACE,
     FOCUS_WINDOW_CAPABILITY,
     KNOWN_VIEWER_PROTOCOLS,
     VIEWER_ACK_GRACE_S,
@@ -197,7 +198,17 @@ def needs_switch(record: ViewerRecord, session_id: str) -> bool:
     OS activation, which is both the cheapest outcome and the least surprising:
     re-resuming a session already on screen would rebuild its view and discard
     the user's scroll position.
+
+    A VIEWER WITH NO WINDOW ALWAYS NEEDS A SWITCH, whatever its
+    ``current_session`` says. On macOS the app survives the last window's
+    closure in the dock, and its record legitimately still names the session it
+    was showing — but nothing is on screen, so a no-op here answers the click
+    with nothing at all. Sending the op instead is what makes the far side
+    recreate the window and then navigate (its own documented reading of
+    ``resume_session`` for a windowless record).
     """
+    if not record.has_window:
+        return True
     return record.current_session != session_id
 
 
@@ -217,11 +228,21 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     preference:
 
     1. **A viewer already displaying the target.** Switching it is a no-op, so
-       this is the cheapest and least disruptive outcome available.
+       this is the cheapest and least disruptive outcome available. A record
+       that reports NO WINDOW is excluded here even if its ``current_session``
+       names the target: the app's id is stale by a beat, and treating it as
+       "already displaying" would spend the click on a window that does not
+       exist instead of the one that does.
     2. **The most recently focused viewer that can switch.** The window the
        user was last in is the best available proxy for where they expect to
-       land. Ties (two viewers never focused) break on the lowest pid, so
-       repeated clicks are stable rather than alternating.
+       land.
+    3. **A DESKTOP viewer, as the TIEBREAK only** — ahead of another
+       equally-recent viewer, behind a more recently focused one. This is the
+       landing site, not the notification: the desktop is the preferred surface
+       for RAISING a banner (design Q3), but a click must not yank the user out
+       of the terminal they are sitting in, nor make them wait for a window to
+       be built, when the TUI that raised the banner can switch instantly.
+    4. **Lowest pid**, so repeated clicks are stable rather than alternating.
 
     THE ORDERING IS APPLIED HERE, not inherited from the caller. ``scan_viewers``
     happens to return records in this order already, and an earlier draft of
@@ -237,11 +258,14 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     """
     speakable = [rec for rec in records if rec.protocol in KNOWN_VIEWER_PROTOCOLS]
     for record in speakable:
-        if record.current_session == session_id:
+        if record.current_session == session_id and record.has_window:
             return record
     switchable = sorted(
         (rec for rec in speakable if rec.can_switch),
-        key=lambda rec: (-rec.focused_at, rec.pid),
+        # The desktop preference sits BETWEEN focus and pid, which is the whole
+        # point: it decides a tie (two viewers equally recently focused, or two
+        # never focused) and never overrides a window the user was just in.
+        key=lambda rec: (-rec.focused_at, rec.surface != DESKTOP_SURFACE, rec.pid),
     )
     return switchable[0] if switchable else None
 

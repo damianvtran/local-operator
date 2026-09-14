@@ -66,6 +66,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_MODE,
     )
     from local_operator.tools.builtin import BASH_SHELL_DEFAULT
+    from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
         DEFAULT_SIDEBAR_VISIBLE,
@@ -101,6 +102,11 @@ def _consumer_defaults() -> dict[str, object]:
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        # The registry restates this empty string rather than importing the
+        # reader (an import edge from the CLI's settings layer into the TUI for
+        # one empty string), so THIS is what stops the two drifting — the same
+        # guard `tui.theme` gets for the same reason.
+        "desktop.launch_command": DESKTOP_LAUNCH_COMMAND_DEFAULT,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,

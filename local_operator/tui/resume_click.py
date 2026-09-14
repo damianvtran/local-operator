@@ -24,9 +24,28 @@ So the premise is no longer assumed; it is **checked**. The ladder:
 
 1. **A live viewer can display it** — tell that process to switch and to bring
    its window forward. No new process, no second copy of the session.
-2. **Nothing suitable is running** — the original premise genuinely holds, and
+2. **A desktop app is installed but not running** — launch it WITH the session
+   id (`--open-session <id>`), so it opens straight into the conversation
+   rather than into the catalogue. This is the rung that makes a `nothing is
+   running` banner's click land in the app instead of spawning a terminal, which
+   is the surface the user actually wants for a conversation they are being
+   told finished.
+3. **Nothing suitable is running** — the original premise genuinely holds, and
    the spawn below is exactly what it always was. That path is why this module
    exists and it is deliberately unchanged.
+
+RUNG 2 IS ORDERED AFTER THE VIEWER RUNG and not before it, because a RUNNING
+app is a viewer and is reached by rung 1 — including the macOS case where it
+has no window, which its record reports and `needs_switch` honours. Rung 2 is
+strictly about a process that does not exist yet.
+
+**DISCOVERY HAS TO BE LOUD, which is why rung 2 does not use
+``spawn_detached``.** ``spawn_detached`` reports only whether a child was
+STARTED, and a launcher that is not installed starts fine and exits 1 — so a
+candidate that cannot work would look like success, no later candidate would be
+tried, and the click would land nowhere. Rung 2 therefore waits (bounded) for
+the exit status, which is the signal that distinguishes "launched" from "not
+here".
 
 The spawn still uses the fork machinery wholesale:
 :func:`local_operator.spawn.registry.active_backend` picks Ghostty / kitty /
@@ -71,6 +90,35 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+#: The ``desktop.launch_command`` default: empty means "discover the app".
+#:
+#: Stated as a module constant rather than inline so the settings registry's
+#: restated default can be guarded against THIS value by name
+#: (``tests/unit/test_settings_io.py::_consumer_defaults``) — the registry
+#: cannot import this module without adding an import edge from the CLI's
+#: settings layer into the TUI.
+DESKTOP_LAUNCH_COMMAND_DEFAULT = ""
+
+#: Where the session id is substituted in a configured ``desktop.launch_command``.
+LAUNCH_SESSION_PLACEHOLDER = "{session}"
+
+#: The desktop app's argv contract for "open this conversation". Shared with the
+#: app's own command-line parsing; the two halves are separate repositories, so
+#: the spelling is pinned here and asserted on the wire in the e2e suite.
+OPEN_SESSION_FLAG = "--open-session"
+
+#: The npm channel's bin name, resolved on PATH. The packaged macOS bundle is
+#: not on PATH, so it needs an identifier instead: the ``appId`` the Electron
+#: build is configured with.
+DESKTOP_BIN_NAME = "local-operator-ui"
+DESKTOP_BUNDLE_ID = "com.local-operator"
+
+#: How long rung 2 waits for a launcher's exit status. Generous against every
+#: real launcher (both shipped ones exit in well under a second) and small
+#: enough that a wedged one cannot eat the click: the module's whole budget is
+#: the ~8.5 s the viewer dial may already have spent.
+_LAUNCH_PROBE_TIMEOUT_S = 2.0
+
 
 def _session_cwd(session_id: str) -> str:
     """Where the session was working, best effort.
@@ -109,14 +157,125 @@ def _session_cwd(session_id: str) -> str:
 def open_session(session_id: str) -> bool:
     """Take the user to ``session_id``. True if anything was achieved.
 
-    Tries the in-place route first (a running viewer switches and comes
-    forward), and falls back to spawning a terminal when nothing suitable is
-    running. The fallback is the behaviour that shipped before viewers existed
-    and is deliberately byte-identical to it.
+    Three rungs, in the order the module docstring states them: a running viewer
+    switches in place, an installed-but-not-running desktop app is launched into
+    the conversation, and only then does anything spawn a terminal. The last
+    rung is the behaviour that shipped before viewers existed and is
+    deliberately byte-identical to it.
     """
     if _route_to_viewer(session_id):
         return True
+    if _launch_desktop(session_id):
+        return True
     return _spawn_terminal(session_id)
+
+
+def _configured_launch_command() -> list[str]:
+    """``desktop.launch_command`` as argv, or ``[]`` when unset.
+
+    Read through the settings layer at CLICK time. Every rung on this path is
+    best-effort, so a settings failure degrades to discovery rather than
+    killing the click — and the read is deliberately the same registry the
+    settings page writes, so an edit is visible here without a restart.
+    """
+    try:
+        from local_operator.tui.settings import settings_get
+
+        raw = settings_get("desktop.launch_command", "")
+    except Exception:  # noqa: BLE001 — discovery is the fallback, not a failure
+        logger.debug("could not read desktop.launch_command", exc_info=True)
+        return []
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    import shlex
+
+    try:
+        # `posix=False` on Windows: its command lines are not POSIX-quoted, and
+        # shlex would strip the backslashes out of every path there.
+        parts = shlex.split(raw, posix=sys.platform != "win32")
+    except ValueError:
+        logger.debug("desktop.launch_command is not a valid command line")
+        return []
+    return parts
+
+
+def _launch_desktop(session_id: str) -> bool:
+    """Rung 2: launch the desktop app with the session id.
+
+    DISCOVERY ORDER, and each step is cheaper than the one before it: a
+    configured command (the user's own answer, used verbatim), then the npm bin
+    on PATH (a real existence check via ``which``), then the packaged macOS
+    bundle by id. The ``pnpm dev`` case is deliberately absent — a repository
+    checkout is not reliably discoverable as an installed app, and inventing a
+    third launcher for it would be a second thing to keep in step for a
+    developer-only case. It falls through to the terminal, which is exactly
+    what it did before.
+
+    Every candidate is TRIED in order and abandoned only on a non-zero exit, so
+    an uninstalled bundle costs one failed ``open`` rather than a dead click.
+    """
+    import os
+    import shutil
+
+    attempts: list[list[str]] = []
+    configured = _configured_launch_command()
+    if configured:
+        attempts.append(
+            [part.replace(LAUNCH_SESSION_PLACEHOLDER, session_id) for part in configured]
+        )
+    else:
+        binary = shutil.which(DESKTOP_BIN_NAME)
+        if binary:
+            attempts.append([binary, OPEN_SESSION_FLAG, session_id])
+        if sys.platform == "darwin":
+            # `--args` because `open` forwards nothing to the app otherwise, and
+            # the bundle id rather than a path because the user may have moved
+            # the app anywhere LaunchServices can find it.
+            attempts.append(
+                ["open", "-b", DESKTOP_BUNDLE_ID, "--args", OPEN_SESSION_FLAG, session_id]
+            )
+    if not attempts:
+        return False
+    env = dict(os.environ)
+    for argv in attempts:
+        if _launch_once(argv, env):
+            logger.debug("click launched the desktop app: %s", argv[0])
+            return True
+    return False
+
+
+def _launch_once(argv: list[str], env: dict[str, str]) -> bool:
+    """Start ``argv`` detached and report whether it really launched.
+
+    A bounded wait for the EXIT STATUS, which is the only thing that separates
+    "the app started" from "this launcher is not installed": ``open -b`` exits
+    1 for an unknown bundle id and the npm bin exits 1 for a missing app
+    directory, and both of those start a process successfully. A TIMEOUT COUNTS
+    AS SUCCESS, because a launcher still alive after two seconds is one that is
+    running — never kill it; that would be the click launching the app and then
+    immediately shutting it down.
+
+    Detached from this process's session, because this process is a notification
+    handler that macOS will reap: a child that shared its process group would
+    take the app down with it on some platforms.
+    """
+    import subprocess
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 — argv is constructed here, never from input
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        logger.debug("launcher %r could not be started", argv[:1], exc_info=True)
+        return False
+    try:
+        return process.wait(timeout=_LAUNCH_PROBE_TIMEOUT_S) == 0
+    except subprocess.TimeoutExpired:
+        return True
 
 
 def _route_to_viewer(session_id: str) -> bool:
