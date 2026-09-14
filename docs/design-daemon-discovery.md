@@ -247,10 +247,12 @@ DIRECTLY as its "server offline" signal — suppressing the echo there removed
 ``Access-Control-Allow-Origin`` from a 200 and made the app report a healthy
 daemon as down. So the residual is named rather than closed: on an
 allowlist-less daemon the wildcard echo stays. What protects that state is the
-CONTROL half — ``require_desktop`` on ``/v1/chat``, ``/v1/credentials`` and the
-other credential/configuration families, plus the legacy boundary — which is
-unchanged, and the UI PR removes the last dependence on the echo by probing
-health/version from the main process.
+CONTROL half — ``require_desktop`` on ``/v1/credentials``, ``/v1/models``,
+``/v1/config`` and the ``/v1/agents``/``/v1/jobs``/``/v1/schedules`` families,
+plus the legacy boundary — which is unchanged, and the UI PR removes the last
+dependence on the echo by probing health/version from the main process.
+(`/v1/chat` is deliberately outside both gate families, so it is unauthenticated
+either way — see `DESKTOP_API.md`.)
 
 ## 5. "Down" semantics and the state machine
 
