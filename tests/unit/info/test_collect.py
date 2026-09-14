@@ -804,6 +804,67 @@ def test_a_registry_that_returns_zero_on_a_missing_root_is_still_degraded() -> N
     assert env.credential_keys == ()
 
 
+@pytest.mark.parametrize(
+    ("kind", "names_the_field"),
+    [
+        ("absent-store", False),
+        ("untraversable-directory", True),
+        ("symlink-loop", True),
+    ],
+)
+def test_the_credential_probe_names_a_root_it_could_not_look_at(
+    tmp_path: Path, kind: str, names_the_field: bool
+) -> None:
+    """Q1/Q2 at the collector: a "could not look" must reach ``degraded``.
+
+    ``read_key_names`` raising is a property of the class; the degraded ROW is a
+    property of this collector's ``_safe`` policy, and the row is what the panel
+    actually renders. Both unlookable roots below were served as
+    ``credential_keys: []`` with no row by the previous ``is_file()`` spelling —
+    the untraversable one on CPython 3.14, which swallows every ``OSError``, and
+    the looping one on 3.12, where ``ELOOP`` is in pathlib's ``_ignore_error``
+    tuple (QA round 1, Q1/Q2).
+
+    The absent case is asserted here too, in the other direction: the disclosure
+    must stay OFF for a host that simply has no store, so a future raise on
+    ``ENOENT`` would paint a degraded row on every healthy machine and this test
+    would catch it.
+    """
+    import os
+
+    import local_operator.paths as paths
+
+    if kind != "absent-store" and os.name != "posix":
+        pytest.skip("mode bits and symlink loops are POSIX-only")
+
+    root = tmp_path / "config"
+    root.mkdir()
+    if kind == "untraversable-directory":
+        (root / "credentials.env").write_text("DEEPSEEK_API_KEY=test_key\n")
+        root.chmod(0o000)
+    elif kind == "symlink-loop":
+        (root / "credentials.env").symlink_to("credentials.env")
+
+    def at_root() -> Path:
+        return root
+
+    original = paths.config_dir
+    paths.config_dir = at_root  # type: ignore[assignment]
+    try:
+        errors: list[tuple[str, str]] = []
+        env = collect_env(LiveState(), errors)
+    finally:
+        paths.config_dir = original  # type: ignore[assignment]
+        # Restore traversal so the tmp_path tree can still be cleaned up.
+        root.chmod(0o700)
+
+    named = {name for name, _ in errors}
+    assert ("env.credentials" in named) is names_the_field, errors
+    # The value is the dataclass default either way; it is the ROW that carries
+    # the distinction between "none set" and "could not look".
+    assert env.credential_keys == ()
+
+
 # -- the fleet tally ----------------------------------------------------------
 #
 # The operator's question is "how many agent trajectories are running on this
