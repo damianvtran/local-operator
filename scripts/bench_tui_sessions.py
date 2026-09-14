@@ -246,9 +246,7 @@ class ProducerRoster:
     exposed — ``jobs``, ``model``, ``_subagent_comms``.
     """
 
-    def __init__(
-        self, session_id: str, children: int, rows: int, *, capped: bool = True
-    ) -> None:
+    def __init__(self, session_id: str, children: int, rows: int, *, capped: bool = True) -> None:
         self.session_id = session_id
         self.capped = capped
         self.relayed = rows
@@ -275,7 +273,8 @@ class ProducerRoster:
                 trajectory=[
                     {**row, TRAJECTORY_SEQ_KEY: sequence}
                     for sequence, row in enumerate(_events(((rows + 4) // 5) * 5)[:rows])
-                ] or None,
+                ]
+                or None,
                 agent_role="coder",
                 prompt="Synthetic load only",
             )
@@ -692,9 +691,7 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
                     next_sequence[view] += 1
                     viewer._on_frontend_update(payload)
                     delivered[view] += 1
-                paint.message_queue_peak = max(
-                    paint.message_queue_peak, app._message_queue.qsize()
-                )
+                paint.message_queue_peak = max(paint.message_queue_peak, app._message_queue.qsize())
                 round_index += 1
             rounds_done[0] = round_index
             stream_finished[0] = time.perf_counter()
@@ -799,9 +796,25 @@ async def scenario(count: int, args: argparse.Namespace) -> dict[str, Any]:
     result = {
         "sessions": count,
         "workload": args.workload,
+        # WHAT THIS INSTRUMENT DOES NOT MODEL, carried with every cell so a
+        # reader cannot quote a number without its caveat. The delivery boundary
+        # below is the decoded callback, which sits AFTER the transport's own
+        # projection: `RuntimeServer._relay_frontend_to_on_loop` runs
+        # `filter_update_trajectories` against that connection's watched jobs, so
+        # a real parked connection never receives the trajectories this fixture
+        # hands over unconditionally. Measured separately on the wire, a parked
+        # capped rotation is ~3.8 KB/delta (constant) against ~207 KB for a
+        # connection watching all six children. This harness is therefore the
+        # WATCHED-ALL lane: right for the reducer and the render loop, and an
+        # overstatement of ordinary parked fan-in.
+        "transport": {
+            "lane": "watched_all_detail",
+            "ingest_boundary": "AttachedSession._on_frontend_update (decoded callback)",
+            "watched_job_filter_applied": False,
+            "parked_fan_in_modelled": False,
+        },
         "replacement_jobs_per_frame": (
-            [len(frame.get("job_trajectory_replacements", ())) for frame in pool[0]]
-            if pool else []
+            [len(frame.get("job_trajectory_replacements", ())) for frame in pool[0]] if pool else []
         ),
         "children": args.children,
         "retained_rows": args.rows,
@@ -870,7 +883,9 @@ async def main() -> None:
     )
     parser.add_argument("--children", type=int, default=6, help="running children per session")
     parser.add_argument(
-        "--workload", choices=("capped", "suffix"), default="capped",
+        "--workload",
+        choices=("capped", "suffix"),
+        default="capped",
         help="capped mirrors runtime eviction; suffix isolates uncapped append cost only",
     )
     parser.add_argument(
