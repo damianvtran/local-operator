@@ -19,14 +19,16 @@ from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
+    TRUNCATED_RESULT_TEXT,
     AgentLoop,
     LoopContext,
     _consume_claim,
     _get_before_timeout,
     validate_tool_arguments,
 )
-from local_operator.harness.rows import is_harness_chrome
+from local_operator.harness.rows import assistant_stop_notice, is_harness_chrome
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     AbortSignal,
     AgentEndEvent,
     AgentTool,
@@ -55,6 +57,7 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    turn_output_budget,
 )
 from local_operator.providers.failover import (
     ProviderError,
@@ -400,6 +403,17 @@ async def test_abort_pairs_dangling_tool_calls():
         # appeared.
         "tool_call_compose",
         "tool_call_compose",
+        # ...and so does each call's TERMINAL dictation frame, which is new: the
+        # old flush here was gated on the argument size having moved, so a call
+        # whose size stopped changing (every call in this script — name and
+        # arguments arrive in one delta) had no ending at all on the wire. An
+        # interrupted turn is exactly where that matters, because the rows left
+        # on screen are the ones the user reads afterwards. `dictation_complete`
+        # says the model is no longer writing; the ABORT itself is the turn's
+        # verdict and stays where the taxonomy puts it (turn-end retirement,
+        # design round 1 D2), not on this frame.
+        "tool_call_compose",
+        "tool_call_compose",
         "message_end",
         "turn_end",
         "agent_end",
@@ -442,6 +456,74 @@ async def test_length_pairs_but_does_not_execute():
     assert end.aborted is False
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert len(tool_messages) == 1 and tool_messages[0].is_error
+    # The model is told WHY the call did not run, not just that something ended.
+    # A bare "aborted" read as an unexplained failure and a model that had just
+    # emitted a large `write` declined to retry it, so the file was never written
+    # (QA round 1, Q2).
+    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+    # And the user is told the limit was hit, on the surface that renders the
+    # loop's own events.
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit mid tool call "
+        "— nothing was executed; re-asking it to "
+        "re-emit the call in smaller pieces"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_length_with_prose_and_a_call_takes_the_answer_arm():
+    """Design round 2 (D7): prose and a cut call is ONE event, one description.
+
+    This turn -- the model streamed a partial answer and was still dictating a
+    call when the limit hit -- used to be described two ways: the live loop
+    checked ``tool_calls`` first and said "mid tool call — nothing was
+    executed", while ``rows.assistant_stop_notice`` checked ``text`` first and
+    folded the same turn as "answer cut off at the output limit". Prose wins on
+    both sides now, and it is the honest reading: there IS an answer on this
+    turn and it IS incomplete.
+
+    The call half is not lost by that. It is still not executed (the
+    placeholder below keeps Q2's fix), and the model still learns why from
+    ``TRUNCATED_RESULT_TEXT`` -- which says "nothing ran" on the call's own row,
+    where a reader looks for that fact rather than in a notice about the answer.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="here is the file"),
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="length"),
+            ],
+            # The placeholder result goes back to the model; it stops cleanly.
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert executed == []
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    ]
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert len(tool_messages) == 1 and tool_messages[0].is_error
+    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+
+    # And the fold reads the same turn the same way: content, not "a call was
+    # cut". If this ever diverges, the live row and the replayed row disagree
+    # about one event -- which is what D7 caught.
+    assert assistant_stop_notice(
+        text="here is the file",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+    ) == ("answer cut off at the output limit", "warning")
 
 
 @pytest.mark.asyncio
@@ -1549,6 +1631,69 @@ class TestTheContextHintIsStampedPerRequestByTheLoop:
         await self._run(stream, get_context_tokens_hint=lambda: None)
 
         assert self._hints(stream) == [None, 160_000, 160_000]
+
+
+class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
+    """Every ``ChatRequest`` the loop builds carries a ``max_tokens``.
+
+    The loop is where the TUI's turns go out, so it is the interface that
+    shared the benchmark's defect: no request named a bound of its own, so the
+    wire carried the model's advertised CAPABILITY (943,718 tokens on a 1M
+    window) and one measured decision returned ``output_tokens=97189`` with
+    ``reasoning_tokens=95098``. The bound is filled by the request contract
+    (``harness/types.DEFAULT_TURN_OUTPUT_TOKENS``) rather than set at this call
+    site, so this asserts the loop's requests ARE bounded by it -- including a
+    tool loop, where the second call is built by the same code path as the
+    first.
+    """
+
+    @staticmethod
+    async def _run(stream: ScriptedStream, **kwargs: Any) -> None:
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool([])])
+        async for _ in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, **kwargs), None
+        ):
+            pass
+
+    @staticmethod
+    def _two_calls() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_no_cap_is_bounded_by_the_policy(self):
+        """The default ``ModelSpec`` advertises 8,192; the run must ask for
+        something, not nothing."""
+        stream = self._two_calls()
+
+        await self._run(stream)
+
+        assert [r.max_tokens for r in stream.requests] == [turn_output_budget(MODEL)] * 2
+        assert all(r.max_tokens and r.max_tokens > 0 for r in stream.requests)
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_a_huge_cap_is_capped_at_the_policy(self):
+        """The muse-spark shape: 1M window, 943,718 advertised -- which is 90%
+        of that window. Before the bound rode the contract, this is the request
+        that asked for the advertised capability on every call."""
+        spec = ModelSpec(
+            provider="openrouter",
+            model_id="meta/muse-spark-1.3",
+            context_window=1_048_576,
+            max_output_tokens=943_718,
+        )
+        stream = self._two_calls()
+
+        await self._run(stream, model=spec)
+
+        assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -2786,6 +2931,48 @@ async def test_empty_length_truncation_retries_at_lower_effort():
 
 
 @pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
+    """Review R2-n4, the behaviour half: whitespace is nothing, so a turn that
+    emitted only whitespace GETS the silent treatment — the same lower-rung retry
+    an empty turn gets.
+
+    This is the consequence of stripping on both sides, and it is stated rather
+    than discovered: ``not assistant.text`` read "   " as a spoken answer, so the
+    turn neither retried nor announced itself, and the reader was left holding an
+    answer the fold called "no answer". The retry exists precisely for a turn
+    with nothing visible on screen.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="   "),
+                StreamEndEvent(stop_reason="length"),
+            ],  # nothing a reader can see, then the limit
+            [StreamTextDelta(delta="here is the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[1].model.reasoning_effort == "medium"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("retrying at effort medium" in n.text for n in notices)
+    # And the whitespace turn does not ride into the retry's history, for the
+    # same reason the empty one does not.
+    assert all(
+        not (m.role == "assistant" and not m.text.strip() and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
     """Retries are bounded; when they are spent the turn ends, but the user
     sees WHY instead of minutes of thinking followed by silence."""
@@ -2815,9 +3002,15 @@ async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
 
 
 @pytest.mark.asyncio
-async def test_text_only_length_truncation_is_not_retried():
+async def test_text_only_length_truncation_is_announced_but_not_retried():
     """A truncation that DID produce visible text is an ordinary truncation:
-    the turn ends, no effort step, no retry."""
+    the turn ends, no effort step, no retry -- and it is ANNOUNCED.
+
+    The announcement is the half this test used to assert the absence of, and
+    that absence was the defect (agent review round 1, B1): the prose that
+    arrived reads as a complete short reply, so a cut answer was
+    indistinguishable from a finished one in the transcript and on the phone.
+    """
     stream = ScriptedStream(
         [
             [StreamTextDelta(delta="partial"), StreamEndEvent(stop_reason="length")],
@@ -2833,7 +3026,66 @@ async def test_text_only_length_truncation_is_not_retried():
         events.append(event)
 
     assert len(stream.requests) == 1
-    assert not [e for e in events if isinstance(e, NoticeEvent)]
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    assert "output limit" in notices[0].text
+    assert notices[0].kind == "warning"
+    # The copy is pinned here because it is the one row of the family the user
+    # can be left holding with no other move: a text truncation is NOT
+    # auto-continued below, and its sibling rows all name one, so this one must
+    # name a remedy too (design round 1, D4). It also uses the family's em dash,
+    # not the `--` it shipped with on the first pass (D2).
+    assert notices[0].text == (
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    )
+    # The partial answer is still delivered as the turn's text -- the notice is
+    # added beside it, not instead of it.
+    assert "partial" in "".join(
+        getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_is_silent_to_both_surfaces():
+    """Review R2-n4: the live notice and the folded receipt must agree that a
+    whitespace-only answer is NO answer.
+
+    The loop tested ``not assistant.text`` while ``assistant_stop_notice``
+    strips, so a ``length`` stop whose whole answer was ``"   "`` had the live
+    row claim an answer was cut off over a fold that said no answer existed --
+    two voices for one event, which is the failure this family exists to
+    prevent. Both sides strip now.
+    """
+    stream = ScriptedStream(
+        [
+            # Whitespace, then the limit: no visible answer at all. The model
+            # has no ladder, so there is no lower rung to retreat to and the
+            # turn ends on the notice rather than retrying.
+            [StreamTextDelta(delta="   "), StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    model = ModelSpec(provider="test", model_id="m")  # no ladder: no rung below
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    # The SILENT arm, not the partial-answer arm: nothing was said.
+    assert "no visible output" in notices[0].text
+    assert "answer" not in notices[0].text
+
+    # And the fold reads the same turn the same way -- if this ever diverges,
+    # the live row and the replayed row disagree about one event.
+    assert assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    ) == ("no answer: the model spent its whole output budget", "warning")
 
 
 @pytest.mark.asyncio
@@ -4292,6 +4544,34 @@ def _echo_model(effort: str = "high") -> ModelSpec:
     )
 
 
+def _unrecognised_thinking_route() -> ModelSpec:
+    """A thinking-mode route the family table has not learned yet.
+
+    The reachable shape for the echo-fill recovery: ``_DEEPSEEK_THINKING_MODELS``
+    covers ``deepseek-(flash|v4)``, so the NEXT generation id -- and any
+    rebranded or relayed endpoint serving these weights under another name --
+    derives ``requires_reasoning_echo`` False while running the same validator.
+    That is what the capability's own docstring calls a prediction, and a
+    prediction that is wrong must not turn a recoverable refusal into a dead
+    turn. (The other way in is a spec that STATES the flag off, which is what
+    the probe does; this one is what production can still do by accident.)
+
+    The ladder is set explicitly because that table has not learned this id
+    either, and the first test needs a retreat to be AVAILABLE while proving the
+    fill is chosen instead. The guard is not decoration: if the family rule ever
+    learns this id the helper stops representing what it says it does, and a
+    silent pass would hide that the recovery had stopped being exercised.
+    """
+    model = ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-v5-flash",
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort="high",
+    )
+    assert model.requires_reasoning_echo is False, "the family rule learned this id"
+    return model
+
+
 @pytest.mark.asyncio
 async def test_reasoning_echo_refusal_retries_once_with_thinking_disabled():
     """The refusal is recoverable: retry the turn with thinking off, and say so.
@@ -4381,7 +4661,15 @@ async def test_reasoning_echo_recovery_never_replays_output_the_user_read():
 @pytest.mark.parametrize(
     "model",
     [
-        _laddered_model(),
+        # The echo is already in force, so the FILL has nothing to add and the
+        # only remaining lever is the retreat -- which this ladder lacks.
+        ModelSpec(
+            provider="test",
+            model_id="m",
+            reasoning_efforts=("low", "medium", "high"),
+            reasoning_effort="high",
+            requires_reasoning_echo=True,
+        ),
         _echo_model("none"),  # already off: the retry could not change the body
     ],
 )
@@ -4390,6 +4678,11 @@ async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
 
     The rung is the precondition, not the capability: a model that cannot turn
     thinking off would spend a call to be told the same thing.
+
+    Both cases pin the RETREAT's precondition on a spec whose echo is already
+    in force, which is what isolates it from the fill above: an echo-less spec
+    would spend its fill retry first (that ordering is pinned by its own test),
+    and the no-rung case would then never be reached.
     """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
     context = LoopContext()
@@ -4407,33 +4700,131 @@ async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
 
 
 @pytest.mark.asyncio
-async def test_the_refusals_own_words_recover_a_derived_route_the_capability_missed():
-    """A route whose spec lacks the capability is still recovered.
+async def test_an_echo_less_spec_fills_the_echo_before_giving_anything_up():
+    """The benign recovery is spent FIRST, and at the SAME effort.
+
+    A spec reaching the wire without the echo is what the provider refuses, and
+    the fill is the one recovery that costs the user nothing: same route, same
+    effort, same thinking mode, one short placeholder per blank assistant turn.
+    The retreat below costs the model its reasoning for the rest of the run, so
+    it must not be the first thing tried when a cheaper, measured answer exists.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.requires_reasoning_echo is False, "what was refused"
+    assert stream.requests[1].model.requires_reasoning_echo is True, "the fill"
+    assert stream.requests[1].model.reasoning_effort == "high", "same effort, not a retreat"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_fill_and_the_retreat_are_each_spent_once_and_then_it_surfaces():
+    """Two separate budgets, bounded, and the provider's own error is the end.
+
+    They are separate on purpose: the fill answers exactly one failure mode (a
+    request that went out without its echo) and the retreat answers the one that
+    is left (a route that refuses even with the echo, or refuses for a second
+    reason). Sharing one counter would spend the only retreat on the fill, and a
+    fresh budget per turn would re-buy the same diagnosis every turn.
+
+    Three calls and no fourth: the scripted stream has no fourth turn, so a
+    recovery that looped would raise rather than pass.
+    """
+    model = _unrecognised_thinking_route()
+    refusal = [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]
+    stream = ScriptedStream([list(refusal), list(refusal), list(refusal)])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 3
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == "high"
+    assert stream.requests[2].model.reasoning_effort == "none"
+    notices = [n.text for n in events if isinstance(n, NoticeEvent)]
+    assert any("echo" in text for text in notices)
+    assert any("thinking disabled" in text for text in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_the_echo_fill_is_not_spent_once_the_user_has_read_something():
+    """A turn the user has already seen may not be replayed, however cheap it is.
+
+    A 400 arrives before the first byte, so a refusal never reaches this state
+    in practice; the gate is what keeps the recovery from ever rewriting a turn
+    whose output is on screen.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="half an answer"),
+                StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "echo" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is not None
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_own_words_fill_the_echo_on_a_route_the_capability_missed():
+    """A route whose spec lacks the capability is recovered by FILLING the echo.
 
     The capability is a prediction about which routes run DeepSeek's
     thinking-mode validator, and it CAN be wrong: an aggregator load-balances
     one model across many endpoints, only one of which runs that validator, so
-    the refusal can arrive on a spec that never got the bit. The provider's own
-    wording is the direct evidence that this request lost the echo; treating
-    the prediction as authoritative over it is what turned a recoverable
-    refusal into a dead turn recorded as an unclassified
+    the refusal can arrive on a spec that never got the bit -- and a spec built
+    outside the derivation used to lose the bit outright. The provider's own
+    wording is the direct evidence that this request lost the echo; treating the
+    prediction as authoritative over it is what turned a recoverable refusal
+    into a dead turn recorded as an unclassified
     ``unknown: invalid request (HTTP 400)`` incident.
 
-    The spec is DERIVED, deliberately, and the route is chosen for what it can
-    prove. This recovery has a SECOND precondition -- a ``none`` rung to retreat
-    to -- and the DeepSeek aggregator route the change was written for does not
-    have one (``('low','high','max')``, so the turn still ends after one request
-    on it; pinned by the test below). A hand-built spec carrying both the missed
-    bit AND a ``none`` rung, as this test used to be, therefore passed on a
-    configuration production never builds. Deriving the spec leaves the two
-    tests together stating the whole truth: the wording recovers a route that
-    CAN retreat, and the aggregator route cannot.
+    What this buys over the retreat that used to be the only answer here: the
+    request goes back out at the SAME effort with the same thinking mode. The
+    user loses nothing but the extra call, where the retreat below costs the
+    model its reasoning for the rest of the run.
+
+    The spec is DERIVED, deliberately, so the test states the configuration
+    production actually builds rather than a hand-made one.
     """
     from local_operator.model.configure import build_model_spec
 
     missed_route = build_model_spec("openrouter", "openai/gpt-5.2")
     assert missed_route.requires_reasoning_echo is False, "the missed bit this covers"
-    assert "none" in missed_route.reasoning_efforts, "the rung this recovery needs"
     stream = ScriptedStream(
         [
             [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
@@ -4448,9 +4839,12 @@ async def test_the_refusals_own_words_recover_a_derived_route_the_capability_mis
         events.append(event)
 
     assert len(stream.requests) == 2
-    assert stream.requests[1].model.reasoning_effort == "none"
+    # The fill, and ONLY the fill: the effort did not move.
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == missed_route.reasoning_effort
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert any("thinking disabled" in n.text for n in notices)
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and end.error is None
 

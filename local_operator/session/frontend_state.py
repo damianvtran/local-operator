@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -62,7 +62,24 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
+from local_operator.session.spend import (
+    SessionSpend,
+    serving_identity,
+    usage_prices_known,
+)
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    #: The duck-typed session members this store calls when a real session is
+    #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
+    #: signature rather than passing ``object`` around; the guard itself is the
+    #: runtime contract, and a reduced host simply has none of them. Declared
+    #: AFTER the imports, not in the typing block above, because flake8 resolves
+    #: a name used here against the module's import order.
+    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    SeedSpendFn = Callable[..., SessionSpend]
+    ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
+    IdentityFn = Callable[[Any], dict[str, str]]
 
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
@@ -74,12 +91,23 @@ FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 #: equality, so these have to be the same words the working line's own
 #: vocabulary uses rather than a private enum: `thinking` and `responding` are
 #: imported from ``harness/intent.py`` (the module that owns the label words)
-#: rather than restated here, and `composing`/`running` name the two states the
-#: tool ledger itself uses. A rename in either place must move together or the
-#: reader silently stops matching and every clock goes blank.
+#: rather than restated here, and `composing`/`queued`/`running` name the states
+#: the tool ledger itself uses. A rename in either place must move together or
+#: the reader silently stops matching and every clock goes blank.
+#:
+#: ``queued`` names the ledger's third live state — announced, dictation over,
+#: nothing started — and it is deliberately NOT folded here. The compose arm
+#: above folds `composing` off the announcements and keeps ONE zero for a
+#: batch's whole dictation, so a terminal frame leaves the folded phase where it
+#: was rather than opening an edge for this one. Nothing is lost by that: the
+#: working line's queued arm passes no clock at all
+#: (`OperatorApp._current_activity`), because there is no instant a "waiting to
+#: run" age could honestly count from — the call has not started, and the
+#: dictation clock that just ended measured the model writing, not the wait.
 ACTIVITY_PHASE_THINKING = ACTIVITY_THINKING
 ACTIVITY_PHASE_RESPONDING = ACTIVITY_RESPONDING
 ACTIVITY_PHASE_COMPOSING = "composing"
+ACTIVITY_PHASE_QUEUED = "queued"
 ACTIVITY_PHASE_RUNNING = "running"
 
 #: How many per-call billing receipts ``usage_components`` retains.
@@ -1752,11 +1780,21 @@ class FrontendSessionState(BaseModel):
     #: TRANSIENT by construction and bounded by the live batch: an entry is
     #: popped by the call's own end and the whole map is cleared at
     #: ``agent_start``/``agent_end``, so it neither grows with the conversation
-    #: nor outlives the turn. A call whose producer sent no epoch is
-    #: deliberately ABSENT rather than stamped with the fold instant — see
+    #: nor outlives the turn. A call whose producer sent no epoch is present
+    #: with ``None`` rather than stamped with the fold instant — see
     #: ``_fold_live_tool_starts``. It is stripped from the durable checkpoint
     #: for the same reason ``live_events`` is: there is nothing to restore.
-    live_tool_started_at: dict[str, float] = Field(default_factory=dict)
+    #:
+    #: ``float | None``, and the ``None`` is load-bearing rather than sloppy:
+    #: this map is asked TWO different questions — "when did this call start"
+    #: (a float, or nothing to count from) and "has this call started at all"
+    #: (membership). Answering the second by absence conflated a call queued
+    #: behind a sibling with one executing under a producer too old to stamp an
+    #: epoch, and a replayed row for the first was painted as though it were the
+    #: second — `running`, with no clock, on a call nothing had run. Membership
+    #: is now the start fact and the value its instant, which is what the replay
+    #: paths read.
+    live_tool_started_at: dict[str, float | None] = Field(default_factory=dict)
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
@@ -3119,6 +3157,27 @@ class FrontendStateStore:
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
         self._todo_sequences: dict[str, int] = {}
         self._todo_seed_floor = state.sequence
+        #: The accumulator for a host whose session exposes none (a reduced
+        #: facade, a test double). ONE arithmetic site still: this is the same
+        #: ``SessionSpend``, not a second sum computed here.
+        self._local_spend: SessionSpend | None = None
+        #: Call indices accrued in the turn currently being reconciled. A
+        #: per-call CORRECTION has to move ``current_turn_accrued_cost`` (review
+        #: R1-1), and the index is what says whether it belongs to this turn: a
+        #: correction that lands after its turn closed must NOT be charged to the
+        #: next turn's remainder, because the closed turn's aggregate was priced
+        #: over the same calls and the delta on top of it IS the right total.
+        self._turn_spend_calls: set[int] = set()
+        #: The last CLOSED turn's reconciliation, as integer micro-USD: what the
+        #: turn had accrued (paint prices plus any corrections mirrored while it
+        #: was open) and the aggregate price it was billed at. A correction that
+        #: outlives its turn is clamped against these so the total does not depend
+        #: on WHEN it landed (review R2-2): the turn-end remainder makes the
+        #: aggregate a FLOOR for the turn, so a re-price may only move the total
+        #: to the extent it lifts the turn above that floor. ``None`` before any
+        #: turn has closed, when the delta stands on its own.
+        self._closed_turn_accrued_micro: int | None = None
+        self._closed_turn_agg_micro: int | None = None
 
     @property
     def state(self) -> FrontendSessionState:
@@ -3157,7 +3216,7 @@ class FrontendStateStore:
             )
         return getattr(self._state, name)
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         """A COPY of the live-call start map, without cloning the whole state.
 
         The sibling of :meth:`read_field`, which cannot serve this one: that
@@ -3169,6 +3228,11 @@ class FrontendStateStore:
         component and trajectory row, which profiling one sidebar navigation
         measured at ~30 ms of a 135 ms frame. This is read once per tool start
         and once per switch, so the copy is a handful of floats.
+
+        Read BOTH halves of an entry: membership is "this call has STARTED"
+        (which a replay needs to tell a queued call from an executing one) and
+        the value is the instant to count from, ``None`` when the producer sent
+        no epoch and the row must therefore stay clockless.
         """
         return dict(self._state.live_tool_started_at)
 
@@ -3631,7 +3695,24 @@ class FrontendStateStore:
                 child_costs[job.id] = cost
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
-        if parent_cost is None and last_usage is not None:
+        # The record is the durable money and it is newer than the checkpoint's
+        # turn-end copy, so it wins when it exists at all. A pre-ledger session
+        # has no record, so its best legacy figure is SEEDED into the accumulator
+        # here and read back from it below -- which is what keeps the total
+        # continuous when the first live call lands (the per-call branch adds to
+        # the same number instead of replacing it).
+        self._seed_legacy_spend(session, last_usage if isinstance(last_usage, Usage) else None)
+        spend = self._spend_of(session)
+        if spend is not None and (spend.has_money or spend.unknown_money):
+            # The MONEY decides, not the call counts (QA round 2, Q3), and it is
+            # ``published_usd`` that says whether the record holds a figure we can
+            # state at all: ``None`` reaches the band as ``$—`` instead of the
+            # ``0.0`` this gate used to publish for an unpriceable sum, which the
+            # band's zero policy then dropped (Q1's in-process half). A record
+            # holding a turn-end remainder has ``calls == 0`` and real money.
+            parent_cost = spend.published_usd()
+            knowledge = spend.knowledge()
+        elif parent_cost is None and last_usage is not None:
             cost = turn_cost(_label(effective), last_usage)
             if cost is not None:
                 parent_cost = cost
@@ -3784,8 +3865,174 @@ class FrontendStateStore:
             self.mutate(**changes)
         return self.state
 
+    def _spend_of(self, session: Any) -> SessionSpend:
+        """The session's spend accumulator, or one owned by this store.
+
+        The fallback exists for hosts that expose no session accumulator (a
+        reduced facade or a test double). It is the SAME value object, so the
+        money still has exactly one arithmetic site; only its owner differs.
+        """
+        spend = getattr(session, "spend", None)
+        if isinstance(spend, SessionSpend):
+            return spend
+        if self._local_spend is None:
+            self._local_spend = SessionSpend()
+        return self._local_spend
+
+    def _accrue_call(self, session: Any, usage: Usage, paint_cost: float | None) -> SessionSpend:
+        """Count ONE provider call and hand its price off the loop.
+
+        Called from both per-call accrual sites (the event stream and detached
+        leaf calls) so a call is billed once whichever path saw it. The paint
+        cost is the optimistic figure the band paints this tick; the session's
+        off-loop pricer converges it to the full resolver's answer, which is the
+        only one that can price the models the paint resolver cannot (§2.4).
+        """
+        spend = self._spend_of(session)
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        # A store whose state already carries a cost (a restored checkpoint, or
+        # a host holding one outside the accumulator) must not lose it the
+        # moment the first live call lands: seed the accumulator from it first,
+        # so the addition below builds on that number rather than replacing it.
+        #
+        # ``usage=None`` deliberately: THIS call's receipt is not legacy state,
+        # and letting the seed price it would bill the call twice.
+        self._seed_legacy_spend(session, None)
+        micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
+        # ``cast`` rather than a bare call: these are duck-typed members on a
+        # session facade (a reduced host may not have them at all), so pyright
+        # sees ``object`` where the runtime contract is the call signature
+        # below. The ``callable`` guard IS the runtime contract.
+        accrue = getattr(session, "accrue_spend", None)
+        if callable(accrue):
+            index = int(cast("AccrueSpendFn", accrue)(micro, identity))
+        else:
+            index = spend.accrue(micro, identity)
+        schedule = getattr(session, "schedule_spend_price", None)
+        if callable(schedule) and not usage_prices_known(usage):
+            # A provider receipt is already the exact bill; nothing to converge.
+            self._turn_spend_calls.add(index)
+            cast("ScheduleSpendFn", schedule)(index, usage, identity)
+        return spend
+
+    def note_spend_correction(self, session: Any, index: int, delta_micro: int) -> None:
+        """Move the turn's already-accrued figure with a call's re-price.
+
+        The turn-end remainder is ``max(0, aggregate_price - accrued_this_turn)``
+        and ``accrued_this_turn`` is fed by the PAINT prices, so a correction
+        that moved the durable accumulator without moving that counter made the
+        remainder re-bill the whole correction: paint $1.00, corrected $2.00,
+        aggregate $2.00 persisted **$3.00** and published as EXACT (review
+        R1-1). The two numbers exist for different reasons — one is money, the
+        other is "what the turn's aggregate price has already been charged" — so
+        they are moved together rather than merged.
+
+        Scoped to the turn by ``index``. For a call the current turn did not
+        accrue (the correction outlived its turn), the delta is clamped against
+        the CLOSED turn's snapshot instead: the remainder made that turn's
+        aggregate a floor (``accrued + remainder == max(accrued, aggregate)``),
+        so the re-price may only move the total as far as it lifts the turn above
+        that floor. Without this the persisted total depended on WHEN the
+        correction landed — paint $2.00, re-priced $1.00, aggregate $2.00 gave
+        $2.00 mid-turn and $1.00 after the turn closed (review R2-2). Both
+        orderings now take the same branch of the same formula, and a correction
+        that raises the true cost above the aggregate still counts in full.
+        """
+        if not delta_micro:
+            return
+        if index in self._turn_spend_calls:
+            state = self._state
+            accrued_now = state.current_turn_accrued_cost + delta_micro / 1_000_000.0
+            self.mutate(current_turn_accrued_cost=accrued_now)
+            return
+        accrued = self._closed_turn_accrued_micro
+        aggregate = self._closed_turn_agg_micro
+        if accrued is None or aggregate is None:
+            # No turn has closed here, so there is no floor to clamp against and
+            # the authoritative re-price stands on its own.
+            return
+        applied = max(accrued + delta_micro, aggregate) - max(accrued, aggregate)
+        self._closed_turn_accrued_micro = accrued + delta_micro
+        # ``Session.correct_spend`` has already moved the accumulator by the full
+        # delta; this undoes the part the closed turn's floor absorbs. Negative
+        # adjustments are legal: the clamp can also hold a DOWNWARD re-price back.
+        if applied != delta_micro:
+            self._spend_remainder(session, (applied - delta_micro) / 1_000_000.0)
+
+    def _spend_remainder(self, session: Any, remainder: float) -> SessionSpend:
+        """Apply a turn-end remainder to the accumulator, if it is worth one."""
+        self._seed_legacy_spend(session, None)
+        spend = self._spend_of(session)
+        delta = int(round(remainder * 1_000_000))
+        adjust = getattr(session, "adjust_spend", None)
+        if callable(adjust):
+            adjust(delta)
+        else:
+            spend.adjust(delta)
+        return spend
+
+    def _seed_legacy_spend(self, session: Any, usage: Any) -> SessionSpend | None:
+        """Start a pre-record session's accumulator from its best legacy figure.
+
+        The best available source, in order: the store's own restored cost (a
+        checkpoint's whole accumulator, 7.7% of the real store), then the one
+        restored receipt priced on its own serving identity. Both are FACTS
+        about money this session spent; neither is this accumulator's own sum,
+        which is why the seed carries ``≥``.
+
+        Returns ``None`` for a host with no session accumulator (a reduced
+        facade), which then keeps the plain float path it always had.
+        """
+        spend = self._spend_of(session)
+        # "Already has state" is a NONZERO TOTAL as well as a call count: a
+        # turn-end remainder can put money in the accumulator with no per-call
+        # accrual (an AgentEndEvent whose calls were never seen individually),
+        # and seeding over it would bill the turn twice.
+        if spend.calls or spend.micro:
+            return spend
+        legacy = self._state.cumulative_parent_cost
+        knowledge = self._state.cost_knowledge
+        if not legacy and isinstance(usage, Usage):
+            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
+            if cost:
+                legacy = cost
+                knowledge = CostKnowledge.FLOOR
+        if not legacy:
+            return None
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        micro = int(round(float(legacy) * 1_000_000))
+        seed = getattr(session, "seed_spend_floor", None)
+        if callable(seed):
+            return cast("SeedSpendFn", seed)(
+                micro, identity, floor=knowledge is not CostKnowledge.EXACT
+            )
+        # No session accumulator at all (a reduced facade or a test double): the
+        # store's own accumulator still has to continue from the state it was
+        # handed, or the first live call would replace that money instead of
+        # adding to it. Same value object, one arithmetic site.
+        spend.accrue(micro, identity)
+        spend.floor = knowledge is not CostKnowledge.EXACT
+        return spend
+
     def refresh_restored_usage(self, session: Any) -> FrontendUpdate | None:
-        """Price the restored point-in-time reading without rescanning state."""
+        """Publish the restored point-in-time reading and the durable spend.
+
+        The spend comes from the RECORD — the accumulator the session recalled
+        in O(1) — and only falls back to a seated legacy figure when the session
+        has no accumulator to speak for it (a pre-ledger session). That fallback
+        is today's behaviour, kept exactly: a session with no record must not
+        silently lose its ``≥``, and it must not lose the money either.
+        """
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if not isinstance(usage, Usage):
@@ -3796,13 +4043,16 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens,
             "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
         }
-        if state.cumulative_parent_cost is None:
-            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
-            if cost is not None:
-                changes.update(
-                    cumulative_parent_cost=cost,
-                    cost_knowledge=CostKnowledge.FLOOR,
-                )
+        self._seed_legacy_spend(session, usage)
+        spend = self._spend_of(session)
+        if spend is not None:
+            # The RECORD speaks for the money, not its call counts (QA round 2,
+            # Q3): ``published_usd`` is the one derivation the cold seed, this
+            # path and the band all read, and it answers ``None`` for a record
+            # holding money we cannot state — which is what makes the band's
+            # ``$—`` branch reachable here instead of an unreachable zero.
+            changes["cumulative_parent_cost"] = spend.published_usd()
+            changes["cost_knowledge"] = spend.knowledge()
         return self.mutate(**changes)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
@@ -3814,20 +4064,15 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }
-        if cost is not None:
+        if cost is not None or usage.input_tokens or usage.output_tokens:
+            spend = self._accrue_call(session, usage, cost)
             changes.update(
-                cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + cost,
-                cost_knowledge=(
-                    CostKnowledge.EXACT
-                    if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                    else state.cost_knowledge
-                ),
+                cumulative_parent_cost=spend.usd,
+                cost_knowledge=spend.knowledge(),
                 usage_components=_capped_components(
                     list(state.usage_components) + list(usage.cost_components or [usage])
                 ),
             )
-        elif usage.input_tokens or usage.output_tokens:
-            changes["cost_knowledge"] = CostKnowledge.PARTIAL
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
@@ -3899,12 +4144,15 @@ class FrontendStateStore:
         Two deliberate omissions, both of which keep this from becoming an
         invention:
 
-        * a ``tool_execution_start`` carrying NO epoch contributes no entry.
-          The tempting default — the fold's own ``now`` — is precisely the
-          fabricated zero this whole path exists to refuse: for an attached
-          viewer it is its arrival instant dressed as the call's start, and it
-          would print a plausible wrong age where the widget's blank column
-          currently tells the truth.
+        * a ``tool_execution_start`` carrying NO epoch still contributes an
+          entry — with ``None``. The tempting default for its VALUE is the
+          fold's own ``now``, and that is precisely the fabricated zero this
+          whole path exists to refuse: for an attached viewer it is its arrival
+          instant dressed as the call's start, and it would print a plausible
+          wrong age where the widget's blank column currently tells the truth.
+          ``None`` records the fact the event does carry — the call STARTED —
+          without inventing the instant, so a replay can tell a clockless
+          running call from one that never started at all.
         * the map is cleared at BOTH ends of the turn (``agent_start`` and
           ``agent_end``) rather than left to the individual ends. A turn that
           dies without emitting every ``tool_execution_end`` is exactly the
@@ -3916,10 +4164,8 @@ class FrontendStateStore:
             return {"live_tool_started_at": {}} if state.live_tool_started_at else {}
         if isinstance(event, ToolExecutionStartEvent):
             epoch = getattr(event, "started_at_epoch", None)
-            if not isinstance(epoch, (int, float)):
-                return {}
             live = dict(state.live_tool_started_at)
-            live[event.tool_call_id] = float(epoch)
+            live[event.tool_call_id] = float(epoch) if isinstance(epoch, (int, float)) else None
             return {"live_tool_started_at": live}
         if isinstance(event, ToolExecutionEndEvent):
             if event.tool_call_id not in state.live_tool_started_at:
@@ -4036,6 +4282,11 @@ class FrontendStateStore:
             )
         elif isinstance(event, AgentEndEvent):
             duration = state.active_duration_s
+            # The turn is over, so no later correction may claim a place in its
+            # reconciliation (``note_spend_correction`` reads this set). Cleared
+            # here rather than at each reset site because both branches below
+            # end the same turn.
+            self._turn_spend_calls.clear()
             if state.activity_started_at is not None:
                 duration += max(0.0, now - state.activity_started_at)
             if event.error:
@@ -4065,23 +4316,32 @@ class FrontendStateStore:
                 total = turn_cost(_label(getattr(session, "effective_model", None)), aggregate)
                 if total is not None:
                     remainder = max(0.0, total - state.current_turn_accrued_cost)
-                    previous = state.cumulative_parent_cost or 0.0
+                    # Snapshot what this turn accrued and what it is being billed
+                    # at, BEFORE the remainder moves the accumulator: a correction
+                    # for one of these calls that lands after the turn closed must
+                    # be clamped against the same pair the open turn would have
+                    # used, or the persisted total depends on the race (R2-2).
+                    self._closed_turn_accrued_micro = int(
+                        round(state.current_turn_accrued_cost * 1_000_000)
+                    )
+                    self._closed_turn_agg_micro = int(round(total * 1_000_000))
+                    # The remainder is MONEY, not another provider call: it
+                    # reconciles the aggregate's price with the sum of its
+                    # calls' prices, so it moves the total without moving the
+                    # call count the knowledge state is derived from.
+                    spend = self._spend_remainder(session, remainder)
                     changes.update(
-                        cumulative_parent_cost=previous + remainder,
+                        cumulative_parent_cost=spend.usd,
                         current_turn_accrued_cost=0.0,
                         usage_components=_capped_components(
                             list(state.usage_components)
                             if state.current_turn_accrued_cost > 0
                             else list(state.usage_components) + list(aggregate.cost_components)
                         ),
-                        cost_knowledge=(
-                            CostKnowledge.EXACT
-                            if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                            else state.cost_knowledge
-                        ),
+                        cost_knowledge=spend.knowledge(),
                     )
                 elif any(u.input_tokens or u.output_tokens for u in usages):
-                    changes["cost_knowledge"] = CostKnowledge.PARTIAL
+                    changes["cost_knowledge"] = self._spend_of(session).knowledge()
                     changes["current_turn_accrued_cost"] = 0.0
                 # `messages` remain the billing authority even when a post-turn
                 # compaction invalidates their occupancy. The session stamps the
@@ -4105,27 +4365,26 @@ class FrontendStateStore:
                 return
             # Occupancy is a level. Cost accrues per call so arbitrary joins see
             # the same lifetime figure; AgentEnd adds only the final remainder.
+            # The ADDITION happens in the session's accumulator (one arithmetic
+            # site, design §5.1) and the per-turn sum stays here as turn state,
+            # which is what the remainder below is computed against.
             call_cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
             changes.update(
                 last_usage=usage.model_dump(mode="json"),
                 context_tokens=usage.context_tokens or usage.input_tokens or state.context_tokens,
                 context_is_estimate=False,
             )
-            if call_cost is not None:
-                changes.update(
-                    cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + call_cost,
-                    current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
-                    cost_knowledge=(
-                        CostKnowledge.EXACT
-                        if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                        else state.cost_knowledge
-                    ),
-                    usage_components=_capped_components(
-                        list(state.usage_components) + list(usage.cost_components or [usage])
-                    ),
-                )
-            elif usage.input_tokens or usage.output_tokens:
-                changes["cost_knowledge"] = CostKnowledge.PARTIAL
+            if call_cost is not None or usage.input_tokens or usage.output_tokens:
+                spend = self._accrue_call(session, usage, call_cost)
+                if call_cost is not None:
+                    changes.update(
+                        cumulative_parent_cost=spend.usd,
+                        current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
+                        usage_components=_capped_components(
+                            list(state.usage_components) + list(usage.cost_components or [usage])
+                        ),
+                    )
+                changes["cost_knowledge"] = spend.knowledge()
         elif isinstance(event, CompactionEndEvent) and event.success:
             changes.update(
                 context_tokens=event.tokens_after or None,
@@ -4357,6 +4616,45 @@ def format_window(window: int) -> str:
         scaled = window / 1_000
         return f"{scaled:.0f}k" if scaled == int(scaled) else f"{scaled:.1f}k"
     return str(window)
+
+
+def context_block_numbers(data: dict[str, int], total: int) -> dict[str, int]:
+    """The unformatted figures behind the ``/context`` block's rows.
+
+    The rows are PRE-FORMATTED strings (``~12.3k``), which is right for a
+    terminal and useless to a panel that wants to draw a proportion bar: a
+    client parsing them would move its chart whenever a formatter changed. So
+    the numbers the rows were built from ride beside them on the block's
+    ``data``.
+
+    ADDITIVE: nothing reads this today, and a client that does not find
+    ``numbers`` renders the rows with no bars — it MUST NOT recover the figures
+    by parsing ``items``.
+
+    Lives HERE, beside the formatters that consume the same dict, for the reason
+    ``format_context_tokens`` states: this block is built by BOTH hosts — the
+    detached runtime (``session/runtime/serving.py``) and the TUI owner
+    (``tui/app.py::_context_slash_result``) — so one definition is what stops the
+    two surfaces answering the same command with different numbers. ``.get``
+    mirrors the rows' own defensive read, so a breakdown missing a key costs
+    that one figure rather than failing the command, and ``total`` is passed in
+    from the caller's computation rather than re-summed here.
+    """
+    numbers = {
+        key: int(data.get(key, 0))
+        for key in (
+            "instructions",
+            "tool_inventory",
+            "tool_schemas",
+            "environment",
+            "knowledge_mcp_goal",
+            "messages",
+            "context_window",
+            "cache_read",
+        )
+    }
+    numbers["total"] = total
+    return numbers
 
 
 def _slash_capabilities() -> list[SlashCapability]:

@@ -143,6 +143,21 @@ UNCHANGED_FRAMES_NOTE = (
 # from a model reply.
 PROTOCOL_VERSION = "1.0"
 
+#: The output ceiling THIS BENCHMARK declares for one of its own decisions.
+#:
+#: 16,384 is the ceiling the OSWorld reference agent runs at, so it belongs here,
+#: on the arm it describes, rather than as a default the whole harness inherits:
+#: the same ceiling applied to every interface truncated ordinary sessions, of
+#: which 300 calls across 127 sessions had already emitted more than that (agent
+#: review round 1, B1). The arm's own measured defect is what justifies it -- one
+#: decision returned ``output_tokens=97189`` with ``reasoning_tokens=95098`` and
+#: ``stop=stop``, 35 of 410 calls exceeded 16K and the mean call took ~52 s -- and
+#: a decision here is a bounded action envelope plus a rationale, never prose a
+#: user reads. The harness's own bound (``DEFAULT_TURN_OUTPUT_TOKENS``) is far
+#: above this, deliberately: it exists to stop a capability-shaped ask, not to
+#: shape a benchmark's decisions.
+DECISION_MAX_OUTPUT_TOKENS = 16_384
+
 #: Function keys are collapsed to a range in the prompt rather than listed:
 #: F1-F24 is 24 of the vocabulary's 43 entries and the pattern is obvious.
 _FUNCTION_KEY = re.compile(r"F\d+")
@@ -1697,6 +1712,25 @@ class ProviderModelClient:
             # exact contradiction that produced the rejections.
             tool_choice="auto" if self._model_spec.supports_tools else "none",
             prompt_cache_key=self._prompt_cache_key,
+            # The figure the provider reported for the PREVIOUS request in this
+            # episode, passed exactly as ``AgentLoop`` passes its own last count
+            # (``loop.py``, the ``run_context_tokens`` argument). Both paths reach
+            # the wire through the same ``SessionStreamFn``, which reconciles a
+            # tracked turn against the conversation it owns -- so where that
+            # tracker has a counted baseline this scalar is redundant, and where
+            # it does not (the episode's first call, a served model other than the
+            # one the tracker measured) the request's scalar is the only figure
+            # that survives. This path simply never sent one, so the two interfaces
+            # disagreed about the same conversation for no reason.
+            #
+            # A prefix the builder REBUILT is deliberately not in that list: the
+            # rebuild path clears this scalar (``_last_provider_context_tokens =
+            # None``), so by the time the next decision is built there is nothing
+            # stale to carry (agent review round 1, n1).
+            context_tokens_hint=self._last_provider_context_tokens,
+            # This benchmark's own ceiling, declared here rather than inherited:
+            # see ``DECISION_MAX_OUTPUT_TOKENS``.
+            max_tokens=DECISION_MAX_OUTPUT_TOKENS,
         )
         # Named rather than positional: the outcome carries a shape record
         # beside nine fields, and a tuple unpack would put two same-typed

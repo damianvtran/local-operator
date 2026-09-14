@@ -44,10 +44,14 @@ def focus_is_claimed(app: Any) -> bool:
 
     Delegates to :meth:`OperatorApp._focus_is_claimed`, which is the real
     definition — approval, ask picker, aside, the three full-page modes, the
-    login prompt, the focused sidebar, any pushed screen, and a read-only
-    composer. This is a thin, defensive accessor for the widget layer, NOT a
-    second copy of that logic: a second copy would drift from the first, and
-    the drift would be silent.
+    login prompt, any pushed screen, and a read-only composer. This is a thin,
+    defensive accessor for the widget layer, NOT a second copy of that logic: a
+    second copy would drift from the first, and the drift would be silent.
+
+    The focused Sessions list is NOT in that list on purpose (design round D2):
+    its claim is SOFT, because it needs no key to stay usable — a gesture that
+    lands on the composer's own chrome may take the keyboard back from it, while
+    a live prompt's answer keys may not be taken by anything.
 
     Degrades to ``True`` — "something might be claiming it" — exactly as the
     predicate itself does. Refusing to steal focus is always the safe failure:

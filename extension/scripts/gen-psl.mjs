@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-/* Regenerate src/psl.gen.ts from the Public Suffix List.
+/* Regenerate src/driver/psl.gen.ts from the Public Suffix List.
+ *
+ * WHY THE GENERATED FILE LIVES UNDER `driver/`: it is in the host-free set a
+ * second host vendors whole (`origin-policy.ts` imports it), so it has to sit
+ * beside its only consumer rather than outside the boundary the vendored copy
+ * is taken from.
  *
  * The "All pages on this domain" grant is keyed by the registrable domain
  * (eTLD+1), and computing that WITHOUT a bundled list fails open: any suffix
@@ -21,14 +26,14 @@
  * literal rather than thousands of array elements.
  *
  * Usage: node scripts/gen-psl.mjs [--check]
- *   --check exits non-zero when src/psl.gen.ts differs from a fresh fetch.
+ *   --check exits non-zero when src/driver/psl.gen.ts differs from a fresh fetch.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { domainToASCII } from "node:url";
 
 const SOURCE = "https://publicsuffix.org/list/public_suffix_list.dat";
-const OUT = resolve(import.meta.dirname, "..", "src", "psl.gen.ts");
+const OUT = resolve(import.meta.dirname, "..", "src", "driver", "psl.gen.ts");
 
 const response = await fetch(SOURCE);
 if (!response.ok) throw new Error(`fetch ${SOURCE}: ${response.status}`);
@@ -67,10 +72,10 @@ if (process.argv.includes("--check")) {
   // The date line legitimately differs between runs; compare the rules only.
   const strip = (text) => text.replace(/^export const PSL_GENERATED_AT = .*$/m, "");
   if (strip(current) !== strip(body)) {
-    console.error("src/psl.gen.ts is stale; run node scripts/gen-psl.mjs");
+    console.error("src/driver/psl.gen.ts is stale; run node scripts/gen-psl.mjs");
     process.exit(1);
   }
-  console.log(`src/psl.gen.ts matches upstream (${rules.length} rules)`);
+  console.log(`src/driver/psl.gen.ts matches upstream (${rules.length} rules)`);
 } else {
   await writeFile(OUT, body);
   console.log(`wrote ${OUT}: ${rules.length} rules, generated ${stamp}`);

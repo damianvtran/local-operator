@@ -122,10 +122,12 @@ from local_operator.providers.catalogue import picker_rows
 from local_operator.session import naming
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
+    ACTIVITY_PHASE_QUEUED,
     ACTIVITY_PHASE_RESPONDING,
     ACTIVITY_PHASE_RUNNING,
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
+from local_operator.session.frontend_state import CostKnowledge
 
 # Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
@@ -152,6 +154,8 @@ from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
     SearchSpendSnapshot,
     job_cost,
     search_spend_is_floor,
@@ -397,7 +401,12 @@ LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
 #: figure only becomes exactly known for a session whose spend was accrued
 #: entirely in this process, so the mark is sticky for the life of the
 #: conversation and clears when the ledger it qualifies does.
-RESTORED_COST_PREFIX = "≥"
+#:
+#: ALIASED to ``costs.LOWER_BOUND_MARK`` rather than restated, because the band
+#: and ``/session`` both draw this mark and review R2-1 found them disagreeing
+#: about the same money: the panel printed an unmarked figure for a state the
+#: band marked. One literal, two readers.
+RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 
 #: The states of a mid-turn message, as one set so they cannot drift apart.
 #:
@@ -2847,7 +2856,138 @@ class TranscriptScreen(Screen[None]):
             redirected = self._redirect_gutter_grab(event)
             if redirected is not None:
                 event = redirected
+        # THE CAUSE of a pointer-path focus loss, marked for `set_focus`.
+        # Textual's `NoWidget` branch runs INSIDE this call, so a flag around it
+        # is what lets the repair tell "a pointer event landed on nothing"
+        # apart from "something deliberately un-focused the composer" — the
+        # state alone cannot, and repair-the-state-alone is what broke two
+        # shipped behaviours (see `set_focus`). `finally`, so a handler that
+        # raises cannot leave it set for the next, unrelated re-focus.
+        if isinstance(event, events.MouseEvent):
+            self._pointer_forwarding = True
+            try:
+                super()._forward_event(event)
+            finally:
+                self._pointer_forwarding = False
+            return
         super()._forward_event(event)
+
+    # -- the keyboard is never parked on nothing by a POINTER event ---------
+    #
+    # One rule for this screen, which is the one the composer lives on in every
+    # non-modal mode: while the composer is usable, a pointer event must not
+    # leave the app with NO focused widget. All four composer-focus routes in
+    # this codebase (`composer_focus.py`) restore focus when a GESTURE asks for
+    # it; none of them runs for a pointer event that lands on nothing at all.
+
+    #: True only while a POINTER event is being forwarded by this screen.
+    #:
+    #: `set_focus(None)` is how the app and Textual DELIBERATELY park the
+    #: keyboard as well as how a pointer event loses it, and the two are
+    #: indistinguishable from the state: repairing both resurrects a composer
+    #: the app has just blurred on purpose. Two shipped behaviours pin that
+    #: (`test_the_focused_composer_shows_a_caret_and_the_blurred_one_shows_none`
+    #: — a blurred composer paints no caret; and
+    #: `test_a_blurred_composer_still_paints_the_copy_it_is_deferring_to` — the
+    #: Ctrl+C deferral follows the paint, not the focus), and both went red in
+    #: CI when the repair fired on every transition to `focused=None`. So the
+    #: cause is marked here, where the pointer event enters.
+    _pointer_forwarding = False
+
+    def set_focus(
+        self,
+        widget: Widget | None,
+        scroll_visible: bool = True,
+        from_app_focus: bool = False,
+    ) -> None:
+        """Hand the keyboard back when a POINTER event parks it on nothing.
+
+        THE DEFECT THIS CLOSES (reproduced on this tree, 200x50). A pointer
+        event whose cell falls outside this screen's composited grid takes
+        Textual's own focus path — ``Screen._forward_event``'s
+        ``except NoWidget: self.set_focus(None)`` (``textual/screen.py:1929-1931``)
+        — BEFORE any handler here can see the event, and it forwards nothing
+        afterwards either: with no widget under the pointer there is no child
+        to receive it and nothing is posted to the App. The app was left with
+        NO focused widget, and silently — the draft stayed painted, the frame
+        still read as live, and every later keystroke went to a screen with no
+        text input and was discarded. Measured with an X10 press at column
+        215, an SGR click at 215 and an SGR wheel notch at 215; every in-frame
+        cell tested was fine, so the COORDINATE — not the gesture and not the
+        encoding — is the trigger.
+
+        WHY THE CAUSE IS TESTED, NOT JUST THE STATE. ``set_focus(None)`` is
+        also how this app and Textual park the keyboard DELIBERATELY, and
+        repairing those reverses a decision instead of repairing one: the two
+        tests named on :attr:`_pointer_forwarding` are what that costs, and
+        they were red in CI on the first revision of this change (agent/QA
+        round 1, Q1). So the repair fires only while
+        :attr:`_pointer_forwarding` is set — the one path that produces the
+        silent-loss state — and a deliberate un-focus (`App.set_focus(None)`,
+        `Widget.blur()`) leaves focus exactly where it was put.
+
+        WHY THE CHECK STILL SITS AT THIS SEAM. The repair hangs on the public
+        ``set_focus`` — Textual documents it as "un-focus", where
+        ``_forward_event`` is private — so the STATE that must not persist is
+        tested where Textual defines it, and the CAUSE is supplied by the
+        pointer forwarding above it. Neither half substitutes for the other: a
+        bare state test repairs the deliberate blurs, and a bare cause test at
+        the forwarder would have to re-derive a state this seam already owns.
+        It deliberately runs AFTER ``super()``: ``set_focus`` finishes its own
+        bookkeeping (``_update_focus_styles``, ``call_after_refresh(
+        refresh_bindings)``) after the reactive assignment, and a ``focused``
+        watcher doing this work would re-enter ``set_focus`` mid-flight and can
+        leave the blurred styles applied to a widget that is focused again.
+
+        WHY ``_return_focus_to_composer`` and not ``composer_focus``'s helper,
+        which is the same rule: that helper reports "nothing moved" against
+        ``editor.has_focus`` — a widget REACTIVE set when the widget processes
+        its ``events.Blur`` (``textual/widget.py:360``), which is a message-pump
+        cycle after this call returns. At this instant it still reads True for
+        a composer that has already lost the screen's focus, so the helper is a
+        silent no-op here. Measured: ``composer_may_take_focus=True``,
+        ``_focus_is_claimed()=False``, ``editor.has_focus=True``, and the
+        repair did nothing.
+
+        THE GUARDS, each load-bearing:
+
+        - ``widget is not None or self.focused is not None``: only a transition
+          that actually left the screen unfocused is repaired.
+        - ``self.app.app_focus``: on terminal blur Textual parks focus and
+          stashes the widget to restore on the next key (``App._watch_app_focus``),
+          a dance this app relies on and documents in its own override of that
+          watcher. Measured: alt-tab away, then fire an off-frame pointer event
+          while parked — focus stays parked, and the keystroke after the return
+          still lands, because Textual restores what it stashed.
+        - ``_return_focus_to_composer``'s own ``_focus_is_claimed()``: a live
+          approval or ask, a pushed screen, the aside, the full-page modes and a
+          READ-ONLY composer (``_set_composer_read_only`` clears focus on
+          purpose) all keep their claim. Measured with each claim: the composer
+          does not take the keyboard, and after the claim is released the same
+          event DOES hand it back — so the refusal is the claim's doing rather
+          than nothing happening.
+
+        NOT the narrower alternative of clamping or dropping an out-of-frame
+        coordinate in ``input_decode.x10_mouse_to_sgr``: that covers only the
+        legacy encoding (an SGR click and an SGR wheel notch reproduce this
+        identically), and it would drop a click that was already going to hit
+        nothing while leaving the state it produced in place.
+        """
+        super().set_focus(widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus)
+        if (
+            widget is not None
+            or self.focused is not None
+            or not self._pointer_forwarding
+            or not self.app.app_focus
+        ):
+            return
+        repair = getattr(self.app, "_return_focus_to_composer", None)
+        if not callable(repair):
+            return
+        try:
+            repair()
+        except Exception:  # noqa: BLE001 — never raise out of a focus path
+            pass
 
 
 class OperatorApp(App[None]):
@@ -5587,7 +5727,16 @@ class OperatorApp(App[None]):
             # promotes this dict to `self._tool_cards` when the switch commits,
             # which is the moment these cards become the app's to retire.
             prepared_live_cards: dict[str, ToolCard] = {}
-            self._mark_pending_tool_rows(replay.blocks, session, prepared_live_cards)
+            # The announcement registry for the same presentation, and it must
+            # travel WITH it: a queued row registered here is one the commit
+            # adopts as the app's `_composing_cards` (see
+            # `_apply_sidebar_presentation`), so the start that eventually
+            # arrives adopts the row this painter made instead of mounting a
+            # second one beside it.
+            prepared_queued_cards: dict[str, ToolCard] = {}
+            self._mark_pending_tool_rows(
+                replay.blocks, session, prepared_live_cards, prepared_queued_cards
+            )
             # The replay SKIPPED the still-executing calls (see the `prepare`
             # seed above) precisely so the live row would own them; where no
             # live relay painted one (a local resume), paint the ONE row here
@@ -5602,6 +5751,7 @@ class OperatorApp(App[None]):
                 replay._projection_skipped_live,
                 collect=replay.blocks,
                 session=session,
+                queued_cards=prepared_queued_cards,
             )
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
@@ -5672,6 +5822,7 @@ class OperatorApp(App[None]):
                 history_size=session.history_message_count,
                 working_fallback=DEFAULT_ACTIVITY,
                 tool_cards=prepared_live_cards,
+                composing_cards=prepared_queued_cards,
                 welcome=welcome,
                 welcome_visible=welcome is not None,
             )
@@ -6951,7 +7102,9 @@ class OperatorApp(App[None]):
             # now (`_apply_sidebar_presentation` swapped it above), so this is
             # the same registry the prepare path seeded — repainting after the
             # commit tops it up rather than filling a second one.
-            self._mark_pending_tool_rows(incoming.replay.view.blocks(), session, self._tool_cards)
+            self._mark_pending_tool_rows(
+                incoming.replay.view.blocks(), session, self._tool_cards, self._composing_cards
+            )
             history = session.display_history_window()
             total = session.history_message_count
             if total > incoming.history_size:
@@ -8894,7 +9047,7 @@ class OperatorApp(App[None]):
                     # ``_spend_text``'s docstring calls the more expensive one.
                     self._spend_text(search_usd, floor=True)
                     if search_usd
-                    else ("$—" if billed_unknown else None)
+                    else (UNKNOWN_COST_CELL if billed_unknown else None)
                 )
             ),
             # A local opener label is DISPLAY state until a generated title is
@@ -9539,6 +9692,46 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
 
+        # Cost: the durable RECORD when the session has one, recalled in O(1) —
+        # that is the whole point of the ledger. Only a session with no record
+        # falls back to pricing the one restored reading, and that fallback is
+        # marked FLOOR exactly as before.
+        #
+        # The context figure above stays independent of this: ``restored_usage``
+        # keeps meaning the NEWEST provider reading, because the compaction gate
+        # consumes it and a sum there would be the same lie in the other
+        # direction (design R1).
+        restored_spend = getattr(session, "restored_spend", None)
+        spend: Any = restored_spend() if callable(restored_spend) else None
+        if spend is not None:
+            # The RECORD is the authority for the money, whatever its counts say
+            # (QA round 2, Q3): a record can hold a turn-end remainder with
+            # ``calls == 0``, and gating on ``calls`` kept that money off the
+            # cell and let the one-receipt fallback below paint a floor ABOVE it.
+            figure = spend.published_usd()
+            # ``_total_cost`` is a plain float the app ARITHMETICALLY adds to
+            # (``_spend_total`` on the 1 Hz poll, the subagent harvest), so the
+            # "cannot state" answer must not be stored in it: ``None`` here made
+            # the next poll raise ``TypeError: ... 'NoneType' and 'int'`` (review
+            # R4-1). The unknown is expressed by the CELL below, not by this
+            # field, which keeps its contract "money we have added up so far".
+            self._total_cost = figure if figure is not None else 0.0
+            self._spend_is_floor = figure is not None and spend.knowledge() in {
+                CostKnowledge.FLOOR,
+                CostKnowledge.PARTIAL,
+            }
+            if figure is None:
+                # Money we cannot state (nothing was priceable): ``$—``, and the
+                # mark is impossible because there is no figure to qualify. This
+                # path never passes through ``_apply_frontend_state``, so its
+                # branch cannot reach the cell from there.
+                billed = bool(
+                    getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0)
+                )
+                self._status.update(cost=UNKNOWN_COST_CELL if billed else None)
+            else:
+                self._status.update(cost=self._spend_text())
+            return
         # Priced through the same `_cost_for` every live turn uses, so a
         # restored figure and an accrued one cannot disagree about what the same
         # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
@@ -10344,7 +10537,10 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _mark_pending_tool_rows(
-        blocks: list[Any], session: Any, live_cards: dict[str, ToolCard] | None = None
+        blocks: list[Any],
+        session: Any,
+        live_cards: dict[str, ToolCard] | None = None,
+        queued_cards: dict[str, ToolCard] | None = None,
     ) -> None:
         """Repaint replayed rows whose calls have NOT finished.
 
@@ -10356,7 +10552,29 @@ class OperatorApp(App[None]):
         than by weakening that default:
 
         * ``waiting`` — a gate is parked in front of the call;
-        * ``running`` — the tool is EXECUTING right now.
+        * ``running`` — the tool is EXECUTING right now;
+        * ``queued`` — the call was announced and its dictation is over, and
+          NOTHING has started: it is waiting behind a sibling's execution group
+          (the reported frame, a `wake` behind a `wait(1800000)`) or waiting for
+          a group the turn never reached.
+
+        The third arm is the one the session could not previously express. The
+        scan behind it (``executing_display_tool_ids``) is a MESSAGE-TAIL test —
+        "unanswered in the latest group" — which cannot tell a call that has not
+        started from one that is executing, and this method used to answer the
+        second for both: a replayed row for a queued call was painted
+        ``running``, with no clock, beside a band that said the turn was running
+        it. ``live_tool_start_epochs`` carries the missing half — MEMBERSHIP is
+        "a start was announced", the value is its instant — so a call absent
+        from that map is one nothing has started, and it is painted as what it
+        is. It stays LIVE (it registers below, and `queued` is a live state:
+        the call may still execute), it just stops claiming to execute.
+
+        The map is consulted only when the session HAS one: a reduced facade
+        that does not implement the accessor returns ``None`` from
+        ``live_tool_start_epochs``, and "cannot say" must not be spent as "no
+        call has started" — those rows keep the reading they have always had
+        (live, clock withheld).
 
         The second is why this method exists in this shape. A long tool
         (``wait``, a background ``bash``, a ``task``) parks the turn inside
@@ -10367,7 +10585,7 @@ class OperatorApp(App[None]):
         from the session's own tail scan, so a call that really did stop keeps
         its ``⊘``.
 
-        **``live_cards`` is what OWNS the row's terminal state, and passing it
+        ``live_cards`` is what OWNS the row's terminal state, and passing it
         is not optional for the ``running`` arm.** The rows here were mounted by
         REPLAY, so they are in neither ``_tool_cards`` nor ``_composing_cards``
         — and every turn-death path in this app settles cards by iterating
@@ -10390,6 +10608,19 @@ class OperatorApp(App[None]):
         ``_current_activity`` reads that dictionary for the band. Each caller
         hands in the dictionary that travels with the transcript it is
         painting.
+
+        ``queued_cards`` is that same rule for the third state, and it is a
+        SEPARATE registry on purpose: ``live_cards`` is "calls executing now" —
+        the band's running arm, the batch phrase and every reader that treats a
+        member as work in progress all read it that way — so a queued row
+        registered there would put the ledger's right-hand column and the band
+        above it back to claiming execution for a call nothing has run. It
+        belongs in the announcement registry (``_composing_cards``), which is
+        where a live queued row already lives: that is the dictionary
+        ``_adopt_composing_card`` adopts the real start from and
+        ``_retire_live_tool_cards`` settles on turn death, so a queued row
+        registered here is proposed to the same two paths as one that never left
+        the live surface.
 
         A caller that passes nothing still gets the repaint (the state is
         honest at the moment it is painted) but keeps the old exposure, which is
@@ -10423,30 +10654,52 @@ class OperatorApp(App[None]):
             live_ids = cast(set[str], executing()) - call_ids
             # The session's own start instants for those calls, read ONCE
             # rather than per row: it is a copy of a small map, and the loop
-            # below may touch several rows of one batch.
+            # below may touch several rows of one batch. MEMBERSHIP of this map
+            # is the other half of the answer (see the docstring): a call the
+            # map does not hold has had no start announced at all, which is the
+            # only thing separating "queued behind a sibling" from "executing
+            # right now".
+            # `None` (a facade with no accessor) is NOT an empty map: see
+            # `live_tool_start_epochs`. A session that cannot answer keeps the
+            # reading this method has always given it — the row is live and its
+            # clock is withheld — because "cannot say" must not be spent as "no
+            # call has started", which is what `queued` means below.
             epochs = live_tool_start_epochs(session)
             for block in blocks:
-                if isinstance(block, ToolCard) and block.tool_call_id in live_ids:
-                    # `restore`, not `mark_running`: the row was mounted by
-                    # replay, so its `_started` is when this view painted it,
-                    # not when the tool began. `restore(state="running")`
-                    # clears that stamp, which is what keeps the card live
-                    # while refusing to invent an elapsed time it cannot know
-                    # — the same reason `subagent_view` restores a child's
-                    # in-flight row this way.
-                    #
-                    # `started_at` is what makes that refusal precise rather
-                    # than total. The producer stamped when the call began and
-                    # the session folded it, so for a call owned by a live
-                    # runtime the age IS knowable and the row resumes it
-                    # instead of counting from this switch. A call the map does
-                    # not have — an older runtime, a genuinely unknown start —
-                    # passes `None` and keeps the clockless rendering.
-                    block.restore(state="running", started_at=epochs.get(block.tool_call_id))
-                    if live_cards is not None:
-                        # See the docstring: this is the row's ONLY settle path
-                        # when the turn dies instead of returning a result.
-                        live_cards[block.tool_call_id] = block
+                if not isinstance(block, ToolCard) or block.tool_call_id not in live_ids:
+                    continue
+                has_start = epochs is None or block.tool_call_id in epochs
+                if not has_start:
+                    # Announced, unanswered, ungated — and nothing has started
+                    # it. `restore(state="queued")` rather than `mark_queued`:
+                    # this row was mounted by replay and carries no dictation
+                    # clock, so there is nothing to stop and no byte count to
+                    # keep; `restore` is also the arm that clears a settled
+                    # row's outcome styling and refuses `settled_rows()`.
+                    block.restore(state="queued")
+                    if queued_cards is not None:
+                        queued_cards[block.tool_call_id] = block
+                    continue
+                # `restore`, not `mark_running`: the row was mounted by
+                # replay, so its `_started` is when this view painted it,
+                # not when the tool began. `restore(state="running")`
+                # clears that stamp, which is what keeps the card live
+                # while refusing to invent an elapsed time it cannot know
+                # — the same reason `subagent_view` restores a child's
+                # in-flight row this way.
+                #
+                # `started_at` is what makes that refusal precise rather
+                # than total. The producer stamped when the call began and
+                # the session folded it, so for a call owned by a live
+                # runtime the age IS knowable and the row resumes it
+                # instead of counting from this switch. A call the map does
+                # not have — an older runtime, a genuinely unknown start —
+                # passes `None` and keeps the clockless rendering.
+                block.restore(state="running", started_at=(epochs or {}).get(block.tool_call_id))
+                if live_cards is not None:
+                    # See the docstring: this is the row's ONLY settle path
+                    # when the turn dies instead of returning a result.
+                    live_cards[block.tool_call_id] = block
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
@@ -10533,13 +10786,17 @@ class OperatorApp(App[None]):
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
             self._mark_pending_tool_rows(
-                self._transcript_view().blocks(), self._session, self._tool_cards
+                self._transcript_view().blocks(),
+                self._session,
+                self._tool_cards,
+                self._composing_cards,
             )
             painted = self._paint_skipped_live_tool_rows(
                 self._transcript_view(),
                 self._tool_cards,
                 self._projection_skipped_live,
                 session=self._session,
+                queued_cards=self._composing_cards,
             )
             if painted and self._controller is not None:
                 # The adopt path's settle seam. The skipped call's
@@ -10567,8 +10824,9 @@ class OperatorApp(App[None]):
         *,
         collect: list[Any] | None = None,
         session: Any = None,
+        queued_cards: dict[str, ToolCard] | None = None,
     ) -> list[str]:
-        """Paint the ONE row for a still-executing call the replay skipped.
+        """Paint the ONE row for a still-live call the replay skipped.
 
         Returns the ids it actually painted, so the caller can hand them to
         the settle seam: the visible path registers them with the event
@@ -10584,6 +10842,21 @@ class OperatorApp(App[None]):
         visible row per call": the check against the already-painted cards is
         what makes this a no-op when a live row DOES exist (the reconnect gap,
         where the relay painted it before the disconnect).
+
+        The row's STATE comes from the same scan the caller used to decide the
+        call is live, read one question further. `live_call_ids` is
+        "unanswered in the latest group", which a call queued behind a long
+        sibling answers identically to one executing: both have no result yet.
+        Membership of ``live_tool_start_epochs`` is what separates them, and a
+        call with no start is painted ``queued`` instead of ``running`` — the
+        reported defect was exactly this row, a `wake` waiting out a
+        `wait(1800000)` and shown as executing. A session that cannot answer the
+        question at all (no accessor: a reduced facade) keeps the old reading,
+        because absence of the MAP is not absence of the CALL's start.
+        `queued_cards` therefore receives what `live_cards` must not:
+        `live_cards` is the running registry every reader treats as work in
+        progress (the band's running arm, the batch phrase), and a queued member
+        there would put the lie back into the header instead of the row.
 
         The registry is passed rather than read off ``self`` because the
         prepare caller is painting a presentation that is not yet the app's:
@@ -10607,6 +10880,12 @@ class OperatorApp(App[None]):
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
                 continue
+            if queued_cards is not None and call_id in queued_cards:
+                # The panel this row would be painted into already owns it —
+                # the prepare and commit legs of one switch both run this
+                # painter, and a second row for one call is the duplicate this
+                # whole path exists to prevent.
+                continue
             haystack = collect if collect is not None else view.blocks()
             if any(
                 isinstance(block, ToolCard) and block.tool_call_id == call_id for block in haystack
@@ -10627,15 +10906,42 @@ class OperatorApp(App[None]):
                 getattr(call, "name", "") or "",
                 getattr(call, "arguments", None) or {},
             )
-            card.restore(state="running", started_at=epochs.get(call_id))
+            # See `_mark_pending_tool_rows`: `None` is "this session cannot
+            # answer", which keeps today's reading (live, clock withheld), while
+            # an empty map says nothing has started — the queued arm below.
+            queued_by_absence = epochs is not None and call_id not in epochs
+            if queued_by_absence:
+                # No start has been announced for this call at all, and that is
+                # a different fact from "its start carried no epoch": the call
+                # is queued behind a sibling's execution group, or waiting for a
+                # group the turn never reached. `queued` says so, in the row and
+                # in the band (see `ToolCard.mark_queued`).
+                card.restore(state="queued")
+            else:
+                # `restore(state="running")`, not the constructor's default: the
+                # true start is when the tool began, not when this view painted
+                # the row, so the card must not invent an elapsed time it cannot
+                # know. `started_at` supplies that true start when the session has
+                # one — the producer's own stamp, folded per call, so the row
+                # painted here and the row the live path would have painted for
+                # the same call agree on one age. `None` for a call whose start
+                # carried no epoch, and the clock stays withheld.
+                card.restore(state="running", started_at=(epochs or {}).get(call_id))
             if collect is not None:
                 collect.append(card)
             else:
                 view.append_block(card)
-            # Registered as live so the turn-death paths and the working line
-            # count it, and so `_retire_live_tool_cards` settles it if the
-            # owner dies rather than returning a result.
-            live_cards[call_id] = card
+            if queued_by_absence:
+                # The announcement registry, where a live queued row lives: the
+                # same two paths (`_adopt_composing_card`,
+                # `_retire_live_tool_cards`) must be able to reach this one.
+                if queued_cards is not None:
+                    queued_cards[call_id] = card
+            else:
+                # Registered as live so the turn-death paths and the working line
+                # count it, and so `_retire_live_tool_cards` settles it if the
+                # owner dies rather than returning a result.
+                live_cards[call_id] = card
             painted.append(call_id)
         return painted
 
@@ -18159,6 +18465,12 @@ class OperatorApp(App[None]):
         approval/ask conditions (answered, settled, attached) are subtle enough
         that a second copy would drift, and this predicate wants exactly the
         prompt that method already defines.
+
+        A claim belongs in here only if TAKING the keyboard would destroy keys
+        the claimant needs. The focused Sessions list is the one claimant that
+        does not need any key to stay usable, so its claim is SOFT and is not
+        reported — the note below the full-page-modes branch is where that is
+        argued, and it is the only place the answer for it is written.
         """
         # An unanswered approval or an unsettled ask owns the keys the composer
         # would otherwise swallow.
@@ -18184,11 +18496,24 @@ class OperatorApp(App[None]):
                 return True
         except Exception:  # noqa: BLE001
             return True
-        try:
-            if self._session_sidebar.has_focus:
-                return True
-        except Exception:  # noqa: BLE001
-            return True
+        # The focused Sessions list is deliberately ABSENT from this list, and
+        # that absence is the whole content of design round D2: its claim is
+        # SOFT. It was a hard claim here, which meant a click on the composer's
+        # OWN chrome was refused while the list held the keyboard — measured: a
+        # click on the dock's padding cells, chevron cell included, changed
+        # 0 cells and the next key was still discarded, re-creating for the list
+        # the exact dead zone `ComposerDock`'s docstring was written to remove
+        # for the ToolCard. A claim belongs here only if TAKING it would destroy
+        # keys the claimant needs — a live prompt's answer keys, a pushed
+        # screen's, a read-only composer's. The list answers arrows/enter with
+        # its own bindings while it has focus; it needs no key to stay usable,
+        # so a gesture that lands on the composer's own chrome may take the
+        # keyboard back, and the list is still reachable exactly as before (f9
+        # or `/sidebar focus` in, Esc or f9 out — note that a dismissal is not a
+        # stop). Fixed in the predicate rather than at the dock call site so all
+        # four composer-focus routes keep ONE rule: a bypass at the dock would
+        # leave the transcript's click, the transcript's key and a row's `tab`
+        # binding reading a predicate that still refuses.
         # The catch-all, and the reason a future overlay is safe by DEFAULT
         # rather than by someone remembering to extend the list above: any
         # pushed Screen is a modal route (`/resume`'s session picker is one —
@@ -35174,6 +35499,18 @@ class OperatorApp(App[None]):
         # can now shrink to a row or go away (#525).
         lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))
         lines.append(_key_row("ctrl+b", "show or hide the session sidebar"))
+        # Directly under it, because it is the same surface, and it is now the
+        # ONLY way into that panel's keyboard mode: a pointer press on the list
+        # no longer takes the keyboard (design round D1), so the route in has to
+        # be named somewhere durable. The list's own footer says `f9 focus`
+        # while the panel is on the frame — which is not while the composer has
+        # the keys, i.e. exactly when the question is asked — and a full list's
+        # footer is further squeezed by the page counter (U1). One row carries
+        # both ends: in with `f9`, back out with `esc`. Lowercase `f9` to match
+        # the copy the panel paints, not the `F8` spelling of the row above.
+        # MEASURED: 35 description cells, well inside the 74-cell ceiling this
+        # block documents (and below the ~55 the description column wraps past).
+        lines.append(_key_row("f9", "keys the sessions list; esc returns"))
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).
@@ -35645,6 +35982,8 @@ class OperatorApp(App[None]):
         )
 
     def _context_slash_result(self, SlashResult: Any) -> Any:
+        from local_operator.session.frontend_state import context_block_numbers
+
         data = self._context_breakdown()
         if data is None:
             return SlashResult(kind="notice", text="context breakdown unavailable.", style="info")
@@ -35668,7 +36007,17 @@ class OperatorApp(App[None]):
             rows.append(("Last cache read (exact)", format_context_tokens(data["cache_read"])))
         return SlashResult(
             kind="block",
-            data={"type": "context", "items": rows, "title": "Estimated next request"},
+            data={
+                "type": "context",
+                "items": rows,
+                "title": "Estimated next request",
+                # The same figures the rows were formatted from, unformatted, so
+                # a panel draws a bar instead of parsing "~12.3k". Shared with
+                # the detached runtime's handler (`session/runtime/serving.py`)
+                # through `context_block_numbers` — this block is built by BOTH
+                # hosts and the two must not answer with different numbers.
+                "numbers": context_block_numbers(data, total),
+            },
         )
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
@@ -37829,10 +38178,12 @@ class OperatorApp(App[None]):
         row contradict the receipt two lines above it.
 
         Read in priority order, most specific first. Running work outranks a
-        call still being dictated, which outranks prose, which outranks the
-        whole-turn fallback; a turn with no tools at all therefore never leaves
-        the last two, and a turn between two tool batches falls back to
-        "thinking", which is the honest description of a model call in flight.
+        call still being dictated, which outranks a call whose dictation is
+        over and which nothing has started, which outranks prose, which
+        outranks the whole-turn fallback; a turn with no tools at all therefore
+        never leaves the last two, and a turn between two tool batches falls
+        back to "thinking", which is the honest description of a model call in
+        flight.
         """
         if self._ask_pending is not None and not self._ask_pending.done():
             # FIRST, above the approval prompt: the picker is a modal drawn over
@@ -37874,14 +38225,48 @@ class OperatorApp(App[None]):
             # `wr` then `write` — and the ledger row above follows those because
             # its name column is an identifier field; a status sentence is not,
             # and `composing wr` reads as a typo rather than as a state.
+            #
+            # SPLIT by the cards' own state, because this one registry holds two
+            # different facts. A card is `composing` while the model is still
+            # writing its call and `queued` once the producer says the dictation
+            # is over and the call has not started. Only the first is "composing
+            # a call": saying it under a row whose model stopped writing minutes
+            # ago is the header agreeing with the stuck row the operator
+            # reported, and a queued call left behind a long sibling is exactly
+            # when the band was wrong for longest.
+            composing = [
+                card for card in self._composing_cards.values() if card.state == "composing"
+            ]
+            if composing:
+                count = len(composing)
+                noun = "a call" if count == 1 else f"{count} calls"
+                return (
+                    f"composing {noun}",
+                    ACTIVITY_PHASE_COMPOSING,
+                    True,
+                    None,
+                    self._folded_phase_epoch(ACTIVITY_PHASE_COMPOSING),
+                )
+            # Everything left is announced, dictated to completion, and started
+            # by nothing. `waiting to run` is the same family as the two
+            # approval arms above and says the true thing: the work is queued,
+            # the harness is not doing it yet.
+            #
+            # No clock, on purpose. The dictation clock these rows carried has
+            # ENDED, and there is no other zero to count from — the call has no
+            # start, and the phase edge this arm would use is the moment the
+            # label changed, which is the invented age the phase arms exist to
+            # avoid. `False` is the "this number would not be true" half of the
+            # contract (see the docstring), so the band draws no number at all
+            # rather than an understatement.
             count = len(self._composing_cards)
             noun = "a call" if count == 1 else f"{count} calls"
             return (
-                f"composing {noun}",
-                ACTIVITY_PHASE_COMPOSING,
-                True,
+                f"waiting to run {noun}",
+                ACTIVITY_PHASE_QUEUED,
+                False,
                 None,
-                self._folded_phase_epoch(ACTIVITY_PHASE_COMPOSING),
+                None,
             )
         if self._streaming_block is not None:
             return (
@@ -38565,9 +38950,61 @@ class OperatorApp(App[None]):
                 self._composing_cards[event.tool_call_id] = promoted
         card = self._composing_cards.get(event.tool_call_id)
         if card is None:
-            card = ToolCard(event.tool_call_id, event.tool_name)
+            # ADOPT rather than mount blind. The row for this call may already
+            # exist, in one of two places, and mounting a second one is not a
+            # cosmetic duplicate: `on_tool_started` registers ITS adoption in
+            # `_tool_cards`, so whichever row loses that race is left in
+            # neither dictionary — unreachable by `on_tool_ended` and by
+            # `_retire_live_tool_cards`, and therefore stranded at whatever it
+            # last claimed, for the life of the process.
+            #
+            # (a) The RUNNING registry. A call whose `tool_execution_start`
+            # already arrived — a reveal that replayed the seed's later frames
+            # first, a switch back onto a live turn — has a row that has
+            # outgrown this announcement. The frame is history; the row is the
+            # present. Touching nothing is the whole handler for it, and it is
+            # what keeps "one card per call id" true.
+            if event.tool_call_id in self._tool_cards:
+                return
+            # (b) The REPLAYED-ROW registry: a row painted from the durable
+            # transcript. The reveal path registers the ones it makes live
+            # (`_mark_pending_tool_rows` / `_paint_skipped_live_tool_rows`),
+            # which case (a) or the lookup above has already caught; this scan
+            # is for a row that is mounted but in neither registry — one the
+            # session reported as NOT in flight while the owner's live seed
+            # says otherwise. Adopting it here means the announcement and the
+            # transcript agree on ONE row, and a later start revives that row
+            # through `_painted_tool_card` instead of beside it.
+            card = self._painted_tool_card(event.tool_call_id)
+            if card is None:
+                card = ToolCard(event.tool_call_id, event.tool_name)
+                self._append_block(card)
             self._composing_cards[event.tool_call_id] = card
-            self._append_block(card)
+        # The never-run ending, and it comes FIRST: `mark_not_run` settles the
+        # row, so nothing below it may run for a call that will not.
+        #
+        # Read with `getattr` for the reason `supersedes_tool_call_id` above
+        # documents at length: dispatch keys off `event.type` alone, so a frame
+        # relayed from an owner whose build predates these fields reaches here
+        # as a bare `AgentEvent`. An absent field is an ordinary frame, which is
+        # exactly the older-producer behaviour.
+        not_run = getattr(event, "not_run_reason", None)
+        if not_run:
+            self._composing_cards.pop(event.tool_call_id, None)
+            card.intent = clean_intent(getattr(event, "intent", None)) or card.intent
+            # The frame's own final size, passed THROUGH rather than left to be
+            # inherited: `mark_not_run` settles the row's record from
+            # `_compose_bytes`, and this frame is often the only one a surface
+            # ever sees (the live relay keeps one compose frame per call
+            # in place, and the reconnect seed keeps one entry), so a row built
+            # from it has never been through `set_composing` and would otherwise
+            # claim the model composed nothing over a frame carrying the size.
+            card.mark_not_run(
+                str(not_run),
+                argument_bytes=int(getattr(event, "argument_bytes", 0) or 0),
+            )
+            self._refresh_working_activity()
+            return
         card.set_composing(event.argument_bytes, event.tool_name)
         # The intent arrives from the STREAM, as soon as the model has closed
         # its `i` string — many seconds, for a large `write` minutes, before the
@@ -38576,6 +39013,14 @@ class OperatorApp(App[None]):
         # assignment: a later frame reporting none must not erase one already
         # shown, which would blank the line mid-dictation.
         card.intent = clean_intent(getattr(event, "intent", None)) or card.intent
+        # The dictation is over. The row STAYS in `_composing_cards` and stops
+        # saying the model is still writing: the call has been announced, its
+        # arguments are complete, and it may wait a long while behind a sibling's
+        # execution group before it starts — or never start, in which case the
+        # turn-death path retires it from this same registry. See
+        # `ToolCard.mark_queued`.
+        if getattr(event, "dictation_complete", False):
+            card.mark_queued()
         self._refresh_working_activity()
 
     def on_tool_started(self, message: ToolStarted) -> None:
@@ -38589,7 +39034,11 @@ class OperatorApp(App[None]):
         # The map is the fallback for a producer that sent no stamp.
         started_at = getattr(event, "started_at_epoch", None)
         if started_at is None:
-            started_at = live_tool_start_epochs(self._session).get(event.tool_call_id)
+            # `None` here means the session has no such accessor at all (see
+            # `live_tool_start_epochs`), and the honest answer for it is the one
+            # this line has always given: no stamp to seed from.
+            epochs = live_tool_start_epochs(self._session)
+            started_at = None if epochs is None else epochs.get(event.tool_call_id)
         # Adopt the row that announced this call rather than mounting a second
         # one: the composing card already sits in the right place in the ledger,
         # and swapping it out would flicker a row away and an identical row back
@@ -38664,6 +39113,17 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        if card is None:
+            # An END can reach a card that is still in the ANNOUNCEMENT
+            # registry: a queued row now legitimately sits in
+            # `_composing_cards` for a sibling's whole execution group (the
+            # reported half-hour), so the window for an end to arrive ahead of
+            # its start is no longer confined to the dictation. Falling
+            # straight through would settle a row this registry still owns, and
+            # `_retire_live_tool_cards` is deliberately UNCONDITIONAL — it
+            # would relabel that row `⊘ interrupted` at turn death over an
+            # outcome that really happened.
+            card = self._composing_cards.pop(event.tool_call_id, None)
         if card is None:
             card = self._painted_tool_card(event.tool_call_id)
         # Before the early return below: a batch that just lost one of three
@@ -39576,7 +40036,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 112
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 114
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:

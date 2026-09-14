@@ -168,6 +168,15 @@ from local_operator.session.protocol import (
 # (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
 # about one persisted row (UX review round 1, U2).
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.spend import (
+    SESSION_SPEND_CUSTOM_TYPE,
+    SessionSpend,
+    has_reported_tokens,
+    price_call,
+    price_rows,
+)
+from local_operator.session.spend import recall as recall_spend
+from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.tools.builtin import (
@@ -224,6 +233,29 @@ _SUBAGENT_SUMMARY_CHARS = 500
 #: at process start, before an install can move under us.
 _PROCESS_BOOT_BUILD: Any = None
 _PROCESS_BOOT_BUILD_READ = False
+
+
+def scan_and_price_spend(
+    transcript: Transcript,
+) -> tuple[list[dict[str, Any]], bool, list[tuple[int, bool]]]:
+    """The rebuild's whole body except the publish: scan, loss check, price.
+
+    A module-level function so the WHOLE job is one ``asyncio.to_thread`` unit
+    (review R1-5). The scan is as much of the open as the pricing is:
+    ``all_usage_rows`` copies one dict per usage row and the loss check walks the
+    same entries a second time, over an entry list the worst real session
+    measures at ~255 MB / 8,466 rows. Returns ``(rows, lost_money, priced)``,
+    with ``rows`` empty for a session that has nothing to reconstruct.
+
+    ``lost_money`` is :func:`~local_operator.session.transcript.lost_money_rows`:
+    a POSITIVE report that a money row is gone. Compaction and prune markers are
+    deliberately not it (review R1-4) — every writer that rewrites a row keeps
+    its ``usage``, and the compaction boundary hides rows without removing them.
+    """
+    rows = transcript.all_usage_rows()
+    if not rows:
+        return [], False, []
+    return rows, transcript.lost_money_rows(), price_rows(rows)
 
 
 def _process_boot_build() -> Any:
@@ -2127,6 +2159,50 @@ class Session:
         self._restored_search_spend: tuple[dict[str, Any], ...] = tuple(
             transcript.search_spend_rows()
         )
+        # -- the per-session spend ledger --------------------------------------
+        # One RECALL, not a recount (docs/design-session-spend-ledger.md). The
+        # record is a custom row, so this is a dict lookup on the index the
+        # transcript's constructor already built -- the operator's requirement
+        # is that a front end consults an exact accumulated number instead of
+        # walking every turn row backward to re-price them.
+        #
+        # ``_spend_recorded`` distinguishes "no record" from "a record whose
+        # money is unknown", and the distinction is load-bearing at the front
+        # ends: no record falls back to today's point-in-time receipt marked
+        # FLOOR, while a record that recorded nothing priceable renders ``$—``
+        # rather than a contradiction (``≥$—``).
+        recalled_spend = recall_spend(transcript)
+        self._spend_recorded = recalled_spend is not None
+        self.spend: SessionSpend = recalled_spend or SessionSpend(writer=writer_stamp())
+        #: Highest total this process has persisted, so a total that goes
+        #: BACKWARDS (a second writer on one session directory) is logged rather
+        #: than silently overwriting the durable number.
+        self._spend_persisted_micro = self.spend.micro if self._spend_recorded else 0
+        #: Off-loop pricing tasks (per-call corrections and the one-time
+        #: rebuild). Held so nothing is garbage-collected mid-flight, which
+        #: would cancel a task the transcript write is riding on.
+        self._spend_tasks: set[asyncio.Task[None]] = set()
+        self._spend_persist_task: asyncio.Task[None] | None = None
+        self._spend_persist_dirty = False
+        self._spend_rebuild_started = False
+        #: True when the accumulator was started from a RESTORED receipt rather
+        #: than from a durable record. In-memory only: see
+        #: :meth:`seed_spend_floor` for why the seed must not reach the disk.
+        self._spend_seeded = False
+        #: Set when a downward re-price is applied, consumed by the next record
+        #: write. A cheaper resolved price is legitimate (the paint answer can be
+        #: staler and dearer — ``tui/costs.py``), so the backwards-total log must
+        #: not call it a broken attach invariant (review R1-6). One-shot, cleared
+        #: on every write, so a later unexplained decrease still warns.
+        self._spend_downward_correction = False
+        #: How many calls have accrued LIVE in this process. Distinct from
+        #: ``spend.calls``, which the legacy SEED also increments: the seed is a
+        #: reconstruction of money already in the journal, so it must never look
+        #: like work the rebuild would overwrite (that mistake silently disabled
+        #: the rebuild for every pre-ledger session, which is 92.3% of the
+        #: store). A live call is the opposite -- its message may not be
+        #: persisted yet, so a reconstruction may not contain it.
+        self._spend_live_calls = 0
         # The per-conversation prompt-cache TTL hint (see
         # ``ChatRequest.context_tokens_hint``): the provider-reported context
         # size of THIS session's last turn call, excluding isolated errands
@@ -3705,7 +3781,7 @@ class Session:
             return set()
         return unanswered_tail_call_ids(self._context.messages)
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         """The instant each in-flight call began, keyed by call id.
 
         The local owner answers from its own folded state, which is the same
@@ -3716,8 +3792,10 @@ class Session:
         Empty rather than raising when the store has not been built: the
         accessor is read through ``getattr`` by hosts that may hold a reduced
         facade, and "no live calls" is the honest answer for a session that
-        has never published state. Callers must treat a missing call id the
-        same way: withholding the clock, never defaulting the epoch.
+        has never published state. Callers must treat a missing call id as "no
+        start was announced" (so a replayed row for it is not painted running)
+        and a ``None`` value as "started, instant unknown" (so its clock stays
+        blank) — the two questions the map answers, see the Protocol member.
 
         Through the STORE, not ``frontend_state``: this runs once per tool
         start on the event loop, and the property deep-copies the whole state
@@ -4535,6 +4613,36 @@ class Session:
 
         return await run_credential_verb(
             self._variables, self.journal_credential_change, action, key, value
+        )
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb against THIS session's eval kernel.
+
+        The in-process half of a capability the base protocol declares for every
+        session. The namespace being read is the eval kernel's — a module-global
+        registry keyed by this session's canonical id — and it only exists in the
+        process running the turn loop, which is this one. A session attached to a
+        runtime routes the same verb there instead; both shapes share ONE table
+        (:func:`local_operator.session.variable_ops.run_variable_verb`) so the
+        verbs cannot drift between them.
+
+        ``async`` for signature parity with the routed implementation, not because
+        the work awaits. The assembled values pass ``VariableStore.redact`` before
+        returning: the caller is a front end, and a session credential a cell
+        happened to read must not reach it unscrubbed (the eval worker already
+        scrubbed everything its own ``secrets`` alias disclosed).
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            self._session_id,
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(self._variables, "redact", None),
         )
 
     @property
@@ -5974,6 +6082,316 @@ class Session:
         """
         return self._restored_search_spend
 
+    # -- per-session spend ledger ------------------------------------------
+    # See docs/design-session-spend-ledger.md. The accumulator is owned by the
+    # SESSION (mirrored by the frontend store) because the session is what
+    # persists; the store still owns the event timing and the turn-end
+    # reconciliation, so there is exactly ONE arithmetic site for money.
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable per-session spend, recalled in O(1), or ``None``.
+
+        ``None`` means this session has no record — it predates the ledger, or
+        the record was lost — and a front end must then keep today's behaviour
+        (price the one restored receipt and mark it FLOOR). Returning an empty
+        accumulator instead would paint ``$—`` for a session with real money on
+        it, which is the failure mode the ledger exists to remove.
+        """
+        return self.spend if self._spend_recorded else None
+
+    def accrue_spend(self, micro: int | None, identity: dict[str, str] | None = None) -> int:
+        """Accrue ONE provider call and schedule its durable record.
+
+        The single entry point every accrual site calls (the frontend store's
+        per-call branch, its turn-end remainder, and detached leaf calls), so
+        the addition happens in one place and cannot be billed twice.
+        """
+        index = self.spend.accrue(micro, identity)
+        self._spend_live_calls += 1
+        self.schedule_spend_persist()
+        return index
+
+    def seed_spend_floor(
+        self,
+        micro: int,
+        identity: dict[str, str] | None = None,
+        *,
+        floor: bool = True,
+    ) -> SessionSpend:
+        """Start a PRE-LEDGER session's accumulator from its one legacy figure.
+
+        Exactly what the frontend store has always done with a restored receipt
+        — ``cumulative_parent_cost = <that figure>`` with ``cost_knowledge =
+        FLOOR`` — but expressed IN the accumulator, so the number the band
+        paints and the number that persists are the same object. Without this,
+        the first live call after a resume would publish just its own cost and
+        the restored conversation's dollars would vanish from the cell.
+
+        ``floor=True`` unless the legacy source claimed EXACT: the earlier calls
+        are not in this accumulator at all, so the sum is a true lower bound for
+        a reason the mark is now allowed to mean.
+
+        In-memory only, and deliberately: an unpersisted seed leaves the record
+        ABSENT, so the one-time rebuild still fires and can replace this honest
+        lower bound with the whole reconstructed history. Idempotent by
+        construction (the caller only reaches this while the accumulator is
+        empty), so a refresh that runs many times cannot double the seed.
+        """
+        if self.spend.calls == 0 and self.spend.micro == 0:
+            self.spend.accrue(micro, identity)
+            self.spend.floor = bool(floor)
+            self._spend_seeded = True
+        return self.spend
+
+    def adjust_spend(self, delta_micro: int) -> bool:
+        """Apply a turn-level remainder (money, but not another call)."""
+        changed = self.spend.adjust(delta_micro)
+        if changed:
+            self.schedule_spend_persist()
+        return changed
+
+    def spend_identity(self, usage: Any) -> dict[str, str]:
+        """The serving identity for one call, from the usage or this session.
+
+        The usage's own stamp wins: the failover layer writes the model that
+        ACTUALLY served onto it, and pricing a fallback call at the primary's
+        rates is a wrong number wearing the band's authority.
+        """
+        return serving_identity(usage, getattr(self, "effective_model", None))
+
+    def schedule_spend_price(self, index: int, usage: Any, identity: dict[str, str]) -> None:
+        """Price ONE call with the FULL resolver, off the loop (design §5.2).
+
+        The paint resolver is memo-or-registry only by design, and it cannot
+        price 6.86% of the real store's rows at all — including 86% of one
+        session's true cost. So the painted figure is optimistic for one tick
+        and this task converges it to the price computed where the price is
+        knowable: on a worker, through ``resolve_model_info`` + the same
+        ``cost_for_usage`` the analytics writer uses.
+        """
+        provider = str(identity.get("provider", "") or "")
+        model_id = str(identity.get("model_id", "") or "")
+        if not provider or not model_id:
+            # No serving identity means no honest price. The call stays counted
+            # as unpriced, which marks the total a lower bound instead of
+            # charging it to whichever model happens to be selected.
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (a reduced host): the in-memory total is still right
+        task = loop.create_task(self._price_spend_call(index, usage, provider, model_id))
+        self._spend_tasks.add(task)
+        task.add_done_callback(self._spend_tasks.discard)
+
+    async def _price_spend_call(self, index: int, usage: Any, provider: str, model_id: str) -> None:
+        """Worker-thread half of the per-call correction; never raises."""
+        try:
+            micro, known = await asyncio.to_thread(price_call, provider, model_id, usage)
+        except Exception:  # noqa: BLE001 — a price is not worth a broken turn
+            logger.debug("session spend pricing failed", exc_info=True)
+            return
+        if not known:
+            return
+        delta = self.spend.correct(index, micro)
+        if delta:
+            if delta < 0:
+                self._spend_downward_correction = True
+            # The front end's turn-end remainder measures the turn against the
+            # prices it already counted. A correction it cannot see there is
+            # billed a second time by the remainder, so tell it how much of this
+            # accumulator arrived as a re-price (review R1-1). The index is
+            # passed so a correction whose turn has already closed is clamped
+            # against that turn's floor rather than charged to the NEXT turn's
+            # reconciliation (R2-2), which is why the store needs the session
+            # back: the clamp is a money adjustment on the accumulator.
+            store = self._frontend_state_store
+            if store is not None:
+                store.note_spend_correction(self, index, delta)
+            self.schedule_spend_persist()
+            # Republish so the band converges on the authoritative figure
+            # instead of keeping the optimistic one it painted this tick.
+            self.refresh_frontend_usage()
+
+    def schedule_spend_persist(self) -> None:
+        """Write the record off the loop, coalescing bursts.
+
+        One task in flight at a time, with a dirty flag: a provider call per
+        token is not the shape here, but a burst of corrections plus a turn-end
+        remainder would otherwise queue one write each. The record is
+        replacement state, so only the newest value matters and skipping an
+        intermediate one loses nothing.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop: nothing to schedule, and the total is in memory
+        if self._spend_persist_task is not None and not self._spend_persist_task.done():
+            self._spend_persist_dirty = True
+            return
+        self._spend_persist_task = loop.create_task(self._persist_spend())
+
+    async def _persist_spend(self) -> None:
+        while True:
+            self._spend_persist_dirty = False
+            await self._write_spend_record()
+            if not self._spend_persist_dirty:
+                return
+
+    async def _write_spend_record(self) -> None:
+        """Append the running total; the filesystem work runs on a worker.
+
+        ``append_custom`` is ``_commit``-based, so its write already runs in a
+        thread (``transcript._commit``) and its ``fsync`` costs 0.057 ms median
+        on a 267 MB journal — size-independent, so per call is affordable
+        where a per-turn fat checkpoint was not.
+        """
+        details = self.spend.to_details()
+        previous = self._spend_persisted_micro
+        if details["micro"] < previous:
+            if self._spend_downward_correction:
+                # A re-price can legitimately come out cheaper, and it is the
+                # one writer that is ALLOWED to move the total down. Debug, not
+                # warning: this is not the broken-attach signal (review R1-6).
+                logger.debug(
+                    "session %s spend re-priced downward: %d < %d (writer %s)",
+                    self.session_id,
+                    details["micro"],
+                    previous,
+                    details.get("writer", ""),
+                )
+            else:
+                # The attach protocol (``resume.live_runtime_pid``) is what
+                # prevents this; a log is the observability that says it was
+                # broken, exactly as the ``remainder < 0`` case is logged rather
+                # than swallowed.
+                logger.warning(
+                    "session %s spend went backwards: %d < %d (writer %s)",
+                    self.session_id,
+                    details["micro"],
+                    previous,
+                    details.get("writer", ""),
+                )
+        self._spend_downward_correction = False
+        try:
+            await self._transcript.append_custom(
+                SESSION_SPEND_CUSTOM_TYPE, details, preserve_mtime=True
+            )
+        except Exception:  # noqa: BLE001 — a lost record is not a failed turn
+            logger.debug("session spend record write failed", exc_info=True)
+            return
+        self._spend_recorded = True
+        self._spend_persisted_micro = int(details["micro"])
+
+    def rebuild_spend_if_needed(self) -> None:
+        """Start the ONE-TIME rebuild for a pre-ledger session, off the open.
+
+        Fires when a session has usage rows but no record — 92.3% of the real
+        store when this shipped. Structural guarantees, all of which the design
+        names:
+
+        - **never on the paint path**: this is called from the adopt seam the
+          app already uses (``refresh_frontend_usage``), never from a renderer;
+        - **once per session per process**, by the ``_spend_rebuild_started``
+          flag, asserted by a call count rather than by timing;
+        - **never blocking the open**: the task is fire-and-forget and publishes
+          through the frontend mutation path, so the band paints the pre-rebuild
+          state (today's behaviour) until the correction lands;
+        - **nothing on the event loop, the SCAN included** (review R1-5):
+          ``all_usage_rows`` copies one dict per row and `lost_money_rows`
+          walks the same list again, over an entry list the worst real session
+          measures at ~255 MB / 8,466 rows. The worker therefore does scan,
+          loss check and price, and only the publish returns to the loop;
+        - **never decreasing a persisted total**, checked again after the work.
+        """
+        if self._spend_rebuild_started or self._spend_recorded:
+            return
+        # A SEEDED floor is not a reason to skip: it carries one restored
+        # receipt, and the whole point of the rebuild is to replace it with the
+        # session's real history. Only calls accrued LIVE in this process make
+        # the reconstruction redundant -- ``self.spend.calls`` counts the seed
+        # too, so it cannot answer this question.
+        if self._spend_live_calls:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spend_rebuild_started = True
+        task = loop.create_task(self._rebuild_spend())
+        self._spend_tasks.add(task)
+        task.add_done_callback(self._spend_tasks.discard)
+
+    async def _rebuild_spend(self) -> None:
+        """Sum EVERY usage row (no compaction boundary) through the full resolver.
+
+        The boundary rule is the load-bearing part: money already spent is not
+        invalidated by a later rewrite of the context, and applying the shrink
+        boundary here would delete 8.8x of one real session's bill (§2.2).
+        ``floor`` therefore comes from whether rows were DROPPED, not from
+        whether we reconstructed the number.
+
+        The scan runs on the worker with the pricing (review R1-5), so the only
+        thing this coroutine does on the event loop is decide what to publish.
+        """
+        try:
+            rows, lost_money, priced = await asyncio.to_thread(
+                scan_and_price_spend, self._transcript
+            )
+        except Exception:  # noqa: BLE001 — an unpriced rebuild is not an error
+            logger.debug("session spend rebuild pricing failed", exc_info=True)
+            return
+        if not rows:
+            return
+        # ``floor`` is earned by a POSITIVE report that a money row is gone, never
+        # by a compaction or prune marker (review R1-4): every writer in
+        # ``transcript`` keeps a row's ``usage`` when it rewrites it, and the
+        # boundary only hides rows from the context replay. A marker-based floor
+        # claimed ``≥`` on 494 of the store's sessions whose every row is readable,
+        # which is the noise this mark exists to remove. The remaining bound is
+        # honest and different in kind: an unpriced call makes the total PARTIAL.
+        rebuilt = SessionSpend(floor=lost_money, rebuilt=True, writer=writer_stamp())
+        for row, (micro, known) in zip(rows, priced, strict=False):
+            identity = {
+                "provider": str(row.get("provider", "") or ""),
+                "model_id": str(row.get("model_id", "") or ""),
+            }
+            if known:
+                rebuilt.accrue(micro, identity)
+            elif has_reported_tokens(row):
+                rebuilt.accrue(None, identity)
+        if not rebuilt.calls:
+            return
+        # Bail if anything NEWER landed while this ran: a record that reached the
+        # disk, or a call accrued live in this process (whose message the journal
+        # may not carry yet, so the reconstruction is not a superset of it). A
+        # SEED is deliberately not in that set -- it is the very figure this
+        # replaces, and treating it as newer silently disabled the rebuild for
+        # every pre-ledger session. The trade in the live-call case is stated in
+        # the design doc §12.1: the accumulator keeps a truthful ``floor`` record
+        # rather than an exact reconstruction of older rows.
+        if self._spend_recorded or self._spend_live_calls:
+            return
+        # NEVER DECREASE. A reconstruction can come out BELOW the figure already
+        # on the band, because the two priced different things: the seed prices
+        # ONE restored reading through this session's own effective model, while
+        # the reconstruction needs every ROW to carry a serving identity of its
+        # own (a row written before that field, or by a provider reporting
+        # neither, is unpriceable at full-resolver grade -- `_usage_cost` covers
+        # the 30.1% of rows that carry the provider's own receipt). Replacing
+        # $2.10 with $0.00 because the richer number came from the cheaper
+        # resolver would be a silent downgrade wearing the ledger's authority.
+        # The richer figure wins, no record is written for it, and the rebuild
+        # fires again on a later resume rather than persisting a smaller number.
+        if rebuilt.micro < self.spend.micro:
+            return
+        self.spend = rebuilt
+        self._spend_seeded = False
+        self._spend_recorded = True
+        self._spend_persisted_micro = rebuilt.micro
+        await self._write_spend_record()
+        self.refresh_frontend_usage()
+
     async def measure_preloaded_context(self) -> int:
         """Tokens the NEXT request carries before the user has typed anything.
 
@@ -6497,7 +6915,16 @@ class Session:
             store.refresh_from_session(self)
 
     def refresh_frontend_usage(self) -> None:
-        """Refresh restored usage without scanning transcript/jobs/tool schemas."""
+        """Refresh restored usage without scanning transcript/jobs/tool schemas.
+
+        Also the rebuild's START seam, deliberately: this is the call the app
+        already makes when it adopts a session for display, so an old session's
+        missing total is reconstructed off the open path and the band keeps
+        painting today's state until it lands. A renderer cannot reach the
+        rebuild, which is the structural guard against the per-paint recount the
+        operator named.
+        """
+        self.rebuild_spend_if_needed()
         self._frontend_state_store.refresh_restored_usage(self)
 
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:

@@ -507,13 +507,42 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         sidebar.set_entries(entries)
         await pilot.pause()
         sidebar.focus()
+        await pilot.pause()  # ``Widget.focus()`` lands a cycle later
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
         sidebar.action_edge(False)
         assert sidebar.cursor_id != "current"
         assert sidebar.current_id == "current"
         assert len(sidebar.visible_entries) <= sidebar.page_size
         lines = sidebar.render().plain.splitlines()
         assert len(lines) <= sidebar.size.height
-        assert lines[-1] == f"1–{sidebar.page_size}/101 · ctrl+b hide"
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+        # Focused AND paginated: the footer keeps the exit hint (design round
+        # D4). This assertion used to read `1–{page}/101 · ctrl+b hide` and
+        # passed only because the pagination branch REPLACED the hint — the
+        # counter displaced `esc return` exactly when the list is long enough to
+        # need it, which is the state a user is most likely to be lost in. The
+        # page counter may never be the reason the exit hint disappears, so the
+        # rule is asserted as "both, or the exit alone": which of the two forms
+        # is painted depends on the panel's width.
+        assert lines[-1].startswith(f"1–{sidebar.page_size}/101"), lines[-1]
+        assert (
+            "esc return" in lines[-1]
+        ), "the page counter displaced the only named exit (design round D4)"
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+        # Unfocused and paginated: the position plus the way INTO the keyboard
+        # mode (U1). The counter used to leave a full list naming the entry
+        # nowhere — a whole-frame search for `f9`/`focus` found nothing at
+        # 120x40 or 70x24, so the only route in was advertised solely by the
+        # copy the counter had displaced. `ctrl+b hide` is what gives way when
+        # both do not fit, so the assertion is the rule rather than one string.
+        sidebar.blur()
+        await pilot.pause()
+        assert not sidebar.has_focus, "premise: the list no longer holds the keyboard"
+        unfocused_footer = sidebar.render().plain.splitlines()[-1]
+        assert unfocused_footer.startswith(f"1–{sidebar.page_size}/101"), unfocused_footer
+        assert (
+            "f9 focus" in unfocused_footer
+        ), "a full list names no way into the list's keyboard mode (U1)"
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         sidebar.show_error("read failed")
         assert sidebar.entries
@@ -565,7 +594,13 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         settings_focus = app.focused
         assert settings_focus is not None and settings_focus is not app._editor()
-        await pilot.click("#session-sidebar", offset=(2, 0))
+        # Entered the list the way its own footer names (f9), not by clicking it:
+        # a pointer press on the list no longer moves the keyboard (design round
+        # D1, `SessionSidebar.FOCUS_ON_CLICK = False`), so a click could not put
+        # the sidebar in the state this test is about any more.
+        app.action_focus_sidebar()
+        await pilot.pause()
+        assert app._session_sidebar.has_focus, "premise: f9 focused the list"
         await pilot.press("escape")
         assert app.focused is settings_focus
         app._close_settings_view()

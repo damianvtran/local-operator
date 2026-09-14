@@ -1,3 +1,4 @@
+import type { SnapshotRef } from "./driver/ax-compact";
 import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 
 export const DEFAULT_PORT = 4099;
@@ -35,11 +36,6 @@ export interface StoredSurface {
   appliedGroupId?: number;
 }
 
-export interface SnapshotRef {
-  backendNodeId: number;
-  epoch: number;
-}
-
 export interface PendingOrigin {
   origin: string;
   /** Browser-normalized authority shown to the user, including any
@@ -53,7 +49,9 @@ export interface PendingOrigin {
 // Queue authority stays session-scoped: it survives MV3 worker death but not
 // the browser session that owns the logins being approved.
 export type { AccessQueueEntry, AccessResults, OnceGrants } from "./access-queue";
-export type { AccessRequest } from "./access-flow";
+// The ref handle follows the module that produces it; see driver/ax-compact.ts.
+export type { SnapshotRef } from "./driver/ax-compact";
+export type { AccessRequest } from "./driver/access-flow";
 
 export interface LocalState {
   token?: string;
@@ -78,8 +76,8 @@ export interface SessionState {
   refs?: Record<string, Record<string, SnapshotRef>>;
   // Legacy #329 slots are read only by the lazy migration.
   pendingOrigin?: PendingOrigin;
-  accessRequest?: import("./access-flow").AccessRequest;
-  accessTombstones?: import("./access-flow").AccessTombstones;
+  accessRequest?: import("./driver/access-flow").AccessRequest;
+  accessTombstones?: import("./driver/access-flow").AccessTombstones;
   accessQueueVersion?: number;
   accessQueue?: import("./access-queue").AccessQueueEntry[];
   accessResults?: import("./access-queue").AccessResults;

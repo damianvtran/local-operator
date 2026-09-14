@@ -253,6 +253,25 @@ def test_documented_fallbacks_and_provider_effort(monkeypatch, model, images):
     "effort,budget", [("none", 8192), ("low", 65536), ("high", 65536), ("max", 131072)]
 )
 def test_native_effort_and_budget(effort, budget):
+    """The ladder is the ask for a request that names none, and the provider's
+    own published defaults are the point of it.
+
+    ``none/low/high/max`` map to DeepSeek's server-side 8K/64K/64K/128K output
+    defaults. A request that names no ask now carries the harness's policy bound,
+    and this ladder is what that bound sits ABOVE -- it is a provider-native ask,
+    not a second policy, so it stays in force for exactly the request that named
+    nothing. An earlier revision of this test accepted the opposite: because the
+    contract fills ``max_tokens``, its ``request.max_tokens or ladder`` spelling
+    took the left branch on every rung, so all four asked the same number and
+    ``max`` silently stopped buying its 128K on a shipped provider (review m1 /
+    QA round 1, Q3). The ladder is not dead, and the "escape hatch" that used to
+    be offered for reaching it (``max_tokens=0``) is gone on purpose: it did not
+    mean "no cap" on any wire that requires one, and on a capped model it fell
+    back to the advertised capability.
+
+    An explicit small ask and an explicit ask above the advertised maximum behave
+    as before either way.
+    """
     client = OpenAICompatClient("https://api.deepseek.com/v1")
     body = client._build_body(request(effort=effort))
     assert body["thinking"] == {"type": "disabled" if effort == "none" else "enabled"}
@@ -737,9 +756,13 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
     """A spec WITHOUT the capability keeps the old body, byte for byte.
 
     This is the regression guard. The FIELD decides, and it only ever arrives by
-    derivation: a hand-built spec (every test double and embedder), a local
-    server, and a model from another family must all get exactly the body they
-    got before the capability existed, on the same history DeepSeek fills in.
+    derivation: a spec whose route has no capability -- a local server, a model
+    from another family, an embedder's hand-built spec for one of those -- and a
+    DeepSeek-family spec whose caller STATED the field off must all get exactly
+    the body they got before the capability existed, on the same history
+    DeepSeek fills in. (For the DeepSeek thinking pair itself a hand-built spec
+    now DERIVES the field, which is the change the derivation exists for; that is
+    why the copy below spells ``False`` instead of leaving it to the default.)
     """
     client = OpenAICompatClient(f"https://{provider}.invalid/v1")
     scope = credential_scope("fixture")
@@ -750,7 +773,20 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
         native_turn(text="done"),
     ]
     req = ChatRequest(
-        model=spec().model_copy(update={"provider": provider, "model_id": "some/model"}),
+        # ``requires_reasoning_echo=False`` is SPELLED rather than left implied.
+        # A hand-built spec for the DeepSeek thinking route now derives the
+        # capability at construction (``ModelSpec``'s hook), so the relabelled
+        # copy below would otherwise carry it across from a spec that no longer
+        # means "off" -- the capability is derived for the pair the spec was
+        # BUILT with, and this test's subject is the body builder's field gating
+        # on a route that has none.
+        model=spec().model_copy(
+            update={
+                "provider": provider,
+                "model_id": "some/model",
+                "requires_reasoning_echo": False,
+            }
+        ),
         messages=history,
         system_blocks=["Stable"],
     )

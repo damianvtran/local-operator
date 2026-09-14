@@ -82,6 +82,18 @@ async def capabilities():
                 "notification_contract": 1,
                 "mcp": 1,
                 "radient": 1,
+                # Session code memory: GET/POST/PATCH/DELETE on
+                # `/v1/desktop/sessions/{id}/variables`, reading and writing a
+                # session's LIVE eval-kernel namespace by session id. Its OWN key
+                # rather than a bump of `session_catalogue`, by the same rule
+                # `session_search` states above: a renderer that does not see it
+                # is talking to a backend whose only variables surface is the
+                # legacy agent-id route (which cannot resolve a session id at
+                # all), and its panel says "update the backend" instead of
+                # retrying a call that can never succeed. Everything else in the
+                # renderer works against such a backend, so gating anything else
+                # on this would hide a working surface.
+                "session_variables": 1,
                 # Reading a SUBAGENT's own transcript through its parent's
                 # child route (design § 9.1) — the run sidebar's child reader.
                 # Its own key rather than a bump of `session_catalogue`,
@@ -91,6 +103,16 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # ``/info``'s host read and ``/session``'s one-snapshot ledger
+                # report. A NEW key rather than a bump of `catalogues`, and the
+                # rule is the one `session_search` states above: a renderer
+                # renders `/analytics` and `/failovers` perfectly well against a
+                # backend whose two diagnostic routes do not exist, and gating
+                # those working panels on this version would hide them because a
+                # newer one is missing. Only the two new ops read it, and a
+                # renderer that does not see it shows the backend update action
+                # instead of calling them.
+                "diagnostics": 1,
             },
         },
     )

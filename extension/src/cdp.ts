@@ -1,11 +1,12 @@
-import { BridgeCommandError } from "./errors";
+import { BridgeCommandError } from "./driver/errors";
 import { dropLogCapture } from "./log-capture";
 import { CHROME_API_DEADLINE_MS, CDP_ATTACH_DEADLINE_MS, CDP_DEADLINE_MS, deadline } from "./settle";
 import { getSurfaces, removeSurface, resolveSurfaceToken, touchSurface, type StoredSurface } from "./state";
 
 // Re-exported so the many existing `import { BridgeCommandError } from
-// "./cdp"` sites stay valid; see errors.ts for why the value's home moved.
-export { BridgeCommandError } from "./errors";
+// "./cdp"` sites stay valid; see driver/errors.ts for why the value's home
+// moved (and driver/ for why it is under that path).
+export { BridgeCommandError } from "./driver/errors";
 
 const attached = new Set<number>();
 

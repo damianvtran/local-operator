@@ -773,7 +773,6 @@ def collect_agents(
 def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
     """The bug-report extras. Names only — never a credential value."""
     from local_operator.browser_bridge import state as bridge_state
-    from local_operator.credentials import CredentialManager
     from local_operator.guides.discovery import discover_guides
     from local_operator.paths import config_dir
 
@@ -843,15 +842,44 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         # KEY NAMES ONLY. ``get_credentials`` returns SecretStr values and this
         # screen is pasted into issues; a name answers the diagnostic question
         # ("is it even set?") and a value answers nothing this screen asks.
-        credential_keys=_safe(
-            "env.credentials",
-            lambda: tuple(CredentialManager(root).list_credential_keys()),
-            (),
-            errors,
-        ),
+        # Read through ``_credential_key_names`` because constructing the manager
+        # CREATES its store — see that function.
+        credential_keys=_safe("env.credentials", lambda: _credential_key_names(root), (), errors),
         guides=_safe("env.guides", lambda: len(discover_guides()), 0, errors),
         skills=live.skills,
     )
+
+
+def _credential_key_names(root: Path) -> tuple[str, ...]:
+    """Credential KEY NAMES from the store, read WITHOUT creating it.
+
+    ``CredentialManager.__init__`` calls ``_ensure_config_exists()``, which makes
+    the config directory and an empty ``credentials.env`` (and tightens the mode
+    of a loose file it finds). On this path that is a WRITE on a read: ``/info``
+    exists to describe a host — including a broken one — and leaving new state
+    on it is the same fault class as ``check_latest()`` rewriting the cache,
+    which this module's docstring bans outright. ``_UNREADABLE_ROOT`` covers only
+    the unresolvable-root case, and the desktop route is what made this probe
+    reachable from another process without a human opening the screen.
+
+    So the manager is built through ``__new__``, which skips the ensure step, and
+    only its OWN ``load_from_file`` parser runs: one reader of the store's format
+    in the tree rather than two, which a hand-rolled parser here would cost. A
+    missing file is "no credentials recorded", not an error to create one for,
+    and an unreadable one still raises into ``_safe`` and is reported as
+    degraded. ``config_dir`` is set beside ``config_file`` so the instance stays
+    coherent for any further read method reached from here later.
+    """
+    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
+
+    path = root / CREDENTIALS_FILE_NAME
+    if not path.is_file():
+        return ()
+    manager = CredentialManager.__new__(CredentialManager)
+    manager.config_dir = root
+    manager.config_file = path
+    manager.load_from_file()
+    return tuple(manager.list_credential_keys())
 
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
@@ -860,6 +888,10 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
 #: a ``credentials.env``) fails into `_safe` and is reported as degraded,
 #: instead of silently writing into the process's current directory. `/info`
 #: reads; it must never leave anything behind on the host it is describing.
+#: The credential probe no longer needs the sentinel for that (see
+#: :func:`_credential_key_names`, which cannot create a store at all), but
+#: ``AgentRegistry`` and the other probes still construct their stores here, so
+#: the sentinel keeps its job for them.
 _UNREADABLE_ROOT = Path("/nonexistent/local-operator-info-unreadable-config-root")
 
 

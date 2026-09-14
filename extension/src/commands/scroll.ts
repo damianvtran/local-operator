@@ -4,7 +4,7 @@ import {
   deltaScrollExpression,
   SCROLL_INTO_VIEW_FN,
   scrollExpressionFor,
-} from "../scroll-expressions";
+} from "../driver/scroll-expressions";
 import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
 import { getRefs, surfaceToken, type StoredSurface } from "../state";
 

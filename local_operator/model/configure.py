@@ -523,6 +523,96 @@ def _served_model_family(model_id: str) -> str:
     return model_id.rpartition("/")[2]
 
 
+#: The native endpoint's own effort ladder for the thinking models it hosts
+#: natively: it documents none/low/high/max, high by default.
+_DEEPSEEK_DIRECT_EFFORTS: tuple[str, ...] = ("none", "low", "high", "max")
+
+#: The ids that ladder is documented for -- the native endpoint's own model
+#: list, NOT a family rule: ``deepseek-v4-flash-0731`` is a real id a user can
+#: pin on the same endpoint and it ships no ladder at all, so a regex here would
+#: offer rungs the route rejects.
+_DEEPSEEK_DIRECT_MODELS = frozenset(
+    {
+        "deepseek-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    }
+)
+
+
+def reasoning_echo_required(provider: str, model_id: str) -> bool:
+    """Whether requests to ``(provider, model_id)`` must echo reasoning back.
+
+    THE authoritative statement of the thinking-mode echo rule, and the reason
+    it is a function rather than a line inside :func:`build_model_spec`: the
+    capability has TWO readers now -- the spec builder, and ``ModelSpec``'s own
+    construction-time derivation (``harness/types.py``), which exists because a
+    spec built outside the builder silently dropped the flag and turned a
+    recoverable refusal into a dead turn. Two spellings of one rule is how the
+    two drift, so both call this.
+
+    Family-keyed, not route-keyed: the validator belongs to the WEIGHTS, so the
+    same id reached through an aggregator carries the same contract (see
+    ``ModelSpec.requires_reasoning_echo`` for why one 200 from a lenient host is
+    not evidence about the route). The legacy ``deepseek-chat`` /
+    ``deepseek-reasoner`` rows stay OFF: the former does not run thinking mode,
+    and the latter predates this validator -- its API rejected an input
+    ``reasoning_content`` outright.
+
+    A LOCAL user-operated server is excluded, and that exclusion is load-bearing
+    rather than an optimisation. ``build_model_spec`` returns ``local_model_spec``
+    for those providers before any rule runs, and this function is now reachable
+    from ``ModelSpec``'s construction as well -- so without the check the two
+    paths would disagree, which is the whole defect being removed. The reason the
+    local route is left alone is not "the vendor is not involved": a server the
+    user runs themselves has its own template and its own operator in front of
+    it, so a placeholder sentence per assistant turn would be sent on a route
+    nobody measured a refusal on.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    if provider in LOCAL_PROVIDER_IDS:
+        return False
+    return bool(_DEEPSEEK_THINKING_MODELS.match(_served_model_family(model_id.casefold())))
+
+
+def deepseek_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
+    """The native ladder for a direct-DeepSeek route, or ``()`` when not one.
+
+    The builder's own single spelling of the ladder and of the ids it is
+    documented for, so ``build_model_spec`` no longer restates either inline.
+
+    ``()`` is the honest answer for every other route -- including an
+    AGGREGATOR route to these same ids, which owns its own effort gate and
+    default (see ``build_model_spec``), and the dated snapshots, which the
+    endpoint serves with no ladder.
+
+    **Deliberately NOT called from ``ModelSpec``'s construction hook**, and that
+    is a review outcome rather than an oversight. The ladder is not only a wire
+    input: it decides whether the status band paints an effort segment at all,
+    and the cold viewer and the desktop draft preview render specs built by that
+    path -- so deriving it there moved a rendered surface for a backend
+    resilience fix. It also gave the ladder a SECOND owner that cannot see a
+    provider listing, while this function's branches below run behind
+    ``build_model_spec``'s listing precedence. One owner, and it is the one that
+    can resolve a listing.
+
+    Accepts the ``<hosting>/`` qualified spelling of the id for the same reason
+    :func:`build_model_spec` strips it: one string is the ``provider/model``
+    spelling of a model NAME, and a caller may hand either form to either
+    entry point. Idempotent -- feeding it an already-bare id strips nothing.
+    """
+    from local_operator.model.registry import _hosting_qualified_bare_id
+
+    bare = _hosting_qualified_bare_id(provider, model_id)
+    if bare is not None:
+        model_id = bare
+    if provider != "deepseek" or model_id not in _DEEPSEEK_DIRECT_MODELS:
+        return ()
+    return _DEEPSEEK_DIRECT_EFFORTS
+
+
 #: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
 #: model's provider emits at the head of the content channel, keyed on the MODEL
 #: id like :data:`_SAMPLING_POLICY` and for the same reason -- the template
@@ -676,22 +766,23 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     listing_levels = _listing_effort(canonical, model_name)
     # The native endpoint documents none/low/high/max, high by default. Scope
     # this to the route: aggregators own their own effort gate (and defaults).
-    direct_deepseek = canonical == "deepseek" and model_name in {
-        "deepseek-flash",
-        "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash-vision-exp",
-    }
-    fallback_levels = (
-        ("none", "low", "high", "max") if direct_deepseek else supported_efforts(model_name)
-    )
+    # Both the ladder and the echo rule come from ``model.configure``'s own
+    # helpers rather than being spelled here, because ``ModelSpec``'s
+    # construction hook derives the ECHO too (see ``harness/types.py``) and two
+    # spellings of either rule is how the builder and a directly built spec end
+    # up disagreeing about the same model. The LADDER has this one owner on
+    # purpose -- it is a rendered input as well as a wire one, and a hook cannot
+    # see a provider listing.
+    direct_levels = deepseek_effort_ladder(canonical, model_name)
+    direct_deepseek = bool(direct_levels)
+    fallback_levels = direct_levels or supported_efforts(model_name)
     # Whether requests to this model must echo reasoning back on every
     # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
     # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
     # pinned 0731 snapshot runs the same thinking-mode validator while shipping
     # no ladder at all. See ``ModelSpec.requires_reasoning_echo`` for the
     # measurements, including why the earlier route-keyed form was wrong.
-    requires_reasoning_echo = bool(_DEEPSEEK_THINKING_MODELS.match(_served_model_family(lowered)))
+    requires_reasoning_echo = reasoning_echo_required(canonical, model_name)
     effort_levels = listing_levels if listing_levels is not None else fallback_levels
     # THE LADDER and THE SEED are two separate questions with two different
     # answers, and conflating them is what made two earlier revisions wrong.
@@ -5225,6 +5316,14 @@ class SessionStreamFn:
             if ladder.index(effort) > ladder.index(ceiling):
                 effort = ceiling
         if effort is not None:
+            # A bare ``model_copy``, deliberately NOT ``ChatRequest.with_model``:
+            # this is the per-turn EFFORT fit, so the model is unchanged, the
+            # published ceiling the bound was derived from cannot have moved
+            # and there is nothing to re-derive. ``with_model`` exists for a
+            # request aimed at a DIFFERENT spec -- the failover hops, which all
+            # route through it (review R2-n2). If the bound ever becomes
+            # effort-aware, this is the second site that has to change with
+            # ``with_model`` and the validator (review R2-n3).
             request = request.model_copy(
                 update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
             )
