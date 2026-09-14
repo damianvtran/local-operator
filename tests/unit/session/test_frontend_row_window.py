@@ -262,23 +262,95 @@ def test_the_retained_window_is_the_same_object_across_ticks(
     assert store._state.jobs[0].trajectory[ROWS] == _trajectory(jobs[0])[-1]
 
 
-def test_cap_rotation_ships_exactly_one_replacement() -> None:
-    """Past the cap the window rotates; the memo must not turn that into appends."""
+def test_cap_rotation_ships_the_appended_tail_and_no_replacement() -> None:
+    """Past the cap the window rotates; the delta is the TAIL, not the window.
+
+    WHY THIS EXPECTATION MOVED (it asserted ``["child-0"]`` in
+    ``job_trajectory_replacements`` until ``_capped_overlap_tail`` landed). The
+    marker was a PROXY for the invariant that matters -- a rotation must be
+    reduced correctly and must not be silently mis-shipped -- and it was never the
+    invariant itself: the reducer sends that marker on every full-cap rotation,
+    including the provable ones, which is why a long-running child cost all 500
+    rows per frame. With the rotation proven row for row the wire form is the
+    appended tail and ZERO replacements, and the receiver's own rule,
+    ``(old + tail)[-TRAJECTORY_CAP:]``, lands on this window exactly. The guard
+    the marker was carrying now lives in
+    :func:`test_an_unprovable_rotation_still_ships_a_replacement`, which is the
+    case it was really protecting.
+    """
     rows = _rows(TRAJECTORY_CAP)
     jobs = [_job("child-0", rows)]
     session = _session(jobs)
     store = _store(jobs)
     store.refresh_jobs(session)
+    before = list(store._state.jobs[0].trajectory)
 
     _trajectory(jobs[0]).append(_row(TRAJECTORY_CAP))
     del _trajectory(jobs[0])[:1]
     update = store.refresh_jobs(session)
 
     assert update is not None
+    assert update.job_trajectory_replacements == []
+    tail = update.job_trajectory_appends["child-0"]
+    # The DELTA, not the window: one row, the one the writer appended. Shipping
+    # the rotated window here IS the ~634 KB/frame defect, so the count is the
+    # assertion rather than a detail of it.
+    assert len(tail) == 1
+    assert tail[0][TRAJECTORY_SEQ_KEY] == TRAJECTORY_CAP
+    # SUFFICIENT, not merely different: apply the receiver's rule to the window
+    # this delta replaced and it reproduces the owner's rows. Compared by STAMP
+    # because a delta thaws its rows at the wire boundary while canonical state
+    # holds frozen ones, and the two are deliberately not equal.
+    assert [row[TRAJECTORY_SEQ_KEY] for row in (*before, *tail)[-TRAJECTORY_CAP:]] == [
+        row[TRAJECTORY_SEQ_KEY] for row in _trajectory(jobs[0])
+    ]
+    # The front really moved: the window is the NEWEST cap rows.
+    assert list(store._state.jobs[0].trajectory) == jobs[0].trajectory
+    assert store._state.jobs[0].trajectory_length == TRAJECTORY_CAP
+    assert store._state.jobs[0].trajectory[0][TRAJECTORY_SEQ_KEY] == 1
+
+
+def test_an_unprovable_rotation_still_ships_a_replacement() -> None:
+    """A rotation whose overlap cannot be PROVEN keeps the full replacement.
+
+    The protective intent behind the replacement marker, and the reason it may not
+    simply be deleted now that a rotation usually ships a tail: a tail the reducer
+    cannot reconstruct would hand a viewer the WRONG rows, which is worse than
+    handing it too many. ``_capped_overlap_tail`` proves an overlap row for row
+    rather than trusting agreeing endpoint stamps -- ``_lo_seq`` counts RELAYS, so
+    a row revised in place leaves the first and last stamps identical and an
+    interior edit can pass a stamp-only test unnoticed. Here the rotation is real
+    and row 250 was revised, so no prefix of the new window equals a suffix of the
+    old and the classifier must fall back to the replacement it has always sent.
+    """
+    rows = _rows(TRAJECTORY_CAP)
+    jobs = [_job("child-0", rows)]
+    session = _session(jobs)
+    store = _store(jobs)
+    store.refresh_jobs(session)
+    before = store._state.jobs[0].trajectory
+
+    _trajectory(jobs[0]).append(_row(TRAJECTORY_CAP))
+    del _trajectory(jobs[0])[:1]
+    # A NEW list object, so the roster memo re-freezes the window instead of
+    # serving the one it cached under the old list's identity: a row revised in
+    # place is the single change that memo's fingerprint cannot see, which is the
+    # subject of ``test_the_relay_writer_only_appends_and_trims_the_front`` and
+    # not what this cell is here to test.
+    revised = list(_trajectory(jobs[0]))
+    revised[250] = _row(251, text="revised in place")
+    jobs[0].trajectory = revised
+
+    update = store.refresh_jobs(session)
+
+    assert update is not None
+    # Pinned at the rule, on the same canonical shapes the classifier sees: the
+    # stamps say "499 rows of overlap" and the element-wise comparison refuses it.
+    assert module._capped_overlap_tail(before, store._state.jobs[0].trajectory) is None
     assert update.job_trajectory_replacements == ["child-0"]
-    # One replacement, and the front really moved: the window is the NEWEST cap
-    # rows. (The delta also carries the rotated rows as appends -- pre-existing
-    # behaviour of this reducer, unchanged here.)
+    shipped = update.job_trajectory_appends["child-0"]
+    assert len(shipped) == TRAJECTORY_CAP, "an unprovable rotation shipped a partial tail"
+    assert shipped[250]["result"]["content"][0]["text"] == "revised in place"
     assert list(store._state.jobs[0].trajectory) == jobs[0].trajectory
     assert store._state.jobs[0].trajectory_length == TRAJECTORY_CAP
     assert store._state.jobs[0].trajectory[0][TRAJECTORY_SEQ_KEY] == 1
