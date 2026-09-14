@@ -23,6 +23,7 @@ import pytest
 from local_operator.harness.types import AgentEndEvent, Message, ModelSpec, TextContent
 from local_operator.incidents import format_cut_off_notice, render_cut_off_reason
 from local_operator.session.attention import AttentionStore, conversation_identity
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import JobState
 from local_operator.session.session import _default_convert_to_llm
 from local_operator.session.transcript import Transcript
@@ -347,7 +348,11 @@ class _LatchHost:
     from local_operator.session.runtime.serving import ServingSessionHandle as _H
 
     begin_retire = _H.begin_retire
-    _retiring_refusal = _H._retiring_refusal
+    # ``staticmethod`` because the handle's own is one: assigning the plain
+    # function would rebind it as a METHOD of this stub, so the call below
+    # would pass ``self`` and raise `TypeError`. `test_serving_drain.py`'s
+    # ``DrainHost`` wraps it the same way.
+    _retiring_refusal = staticmethod(_H._retiring_refusal)
 
     #: Typed ``Any`` on purpose: the real attribute holds a ``Session``, and the
     #: tests below substitute a recorder that only implements ``note_cut_off``.
@@ -377,7 +382,13 @@ def test_begin_retire_commits_when_idle_and_names_the_cause() -> None:
     assert host.begin_retire("runtime-retired", " (1.0@a → 1.1@b)") is True
     assert host._retiring_cause == "runtime-retired"
     assert session.notes == [("runtime-retired", " (1.0@a → 1.1@b)")]
-    assert "runtime-retired" in host._retiring_refusal()
+    # The refusal is a TYPED admission category now, and its sentence
+    # deliberately does NOT name the internal cause token any more — the token
+    # was the complaint (design round 1, D2). The cause is still on the handle,
+    # which the assertion above pins.
+    refusal = host._retiring_refusal()
+    assert isinstance(refusal, RuntimeRetiring)
+    assert "runtime-retired" not in str(refusal)
 
 
 def test_begin_retire_refuses_when_a_turn_is_held() -> None:

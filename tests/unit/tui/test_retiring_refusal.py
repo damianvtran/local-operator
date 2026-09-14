@@ -215,7 +215,10 @@ async def test_a_busy_handover_is_announced_once_on_the_retiring_frame(
     """U2/m1: the drain is announced, in the app's own handover vocabulary."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     session = FakeSession()
-    session.runtime_idle = lambda: False  # a runtime still finishing work
+    # ``FakeSession`` has no ``runtime_idle``; the app reads it with a probe, so
+    # the stub is the whole fixture. `test_remote_move.py` stages the same
+    # attribute the same way. Here: a runtime still finishing work.
+    session.runtime_idle = lambda: False  # type: ignore[method-assign]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
@@ -242,7 +245,7 @@ async def test_an_idle_handover_keeps_its_silence(monkeypatch: Any, tmp_path: An
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     session = FakeSession()
-    session.runtime_idle = lambda: True
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
