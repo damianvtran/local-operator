@@ -201,11 +201,19 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: genuinely dead network has to surface an error rather than pin the session in
 #: a silent retry forever.
 #:
-#: Only a CONNECTIVITY loss is continued, never an ordinary stream error. When
-#: the machine is offline nothing was wrong with the request, the credential or
-#: the provider, so re-asking is the whole fix; a 5xx or a refusal means the
-#: provider DID answer, and replaying that turn would re-bill it to hide a
-#: failure the user needs to see.
+#: Only a cut the provider layer certifies as RESUMABLE is continued, and there
+#: are two families today. A CONNECTIVITY loss, where the machine is offline:
+#: nothing was wrong with the request, the credential or the provider, so
+#: re-asking is the whole fix. And an AGGREGATOR's in-band report that one of
+#: its UPSTREAM hosts died mid-stream (``is_aggregator_upstream_stream_failure``):
+#: a gateway is a router, so the next attempt is served by another of its hosts
+#: — re-issuing the turn IS the failover, rather than a pass dying while it
+#: holds a half-composed tool call.
+#:
+#: Everything else stays terminal exactly as before, and the distinction is the
+#: one both predicates are built on: the provider DID answer about the request
+#: it was given — a first-party 5xx, or a refusal, 4xx or in-band — so replaying
+#: that turn would re-bill it while hiding a failure the user needs to see.
 MAX_CONNECTIVITY_CONTINUATIONS = 3
 
 #: What the loop tells the model after the network cut its answer short.
@@ -221,6 +229,110 @@ CONNECTIVITY_CONTINUATION_PROMPT = (
     "Continue it seamlessly from exactly where it stopped — do not repeat any "
     "of it, do not restart, and do not apologise or mention the interruption."
 )
+
+#: What the loop tells the model when the interruption landed inside a TOOL CALL.
+#:
+#: The prompt above assumes the cut fell in a SENTENCE, and its instruction is
+#: to continue that sentence seamlessly. A call still being dictated when the
+#: socket died is truncated JSON: the continuation branch drops it — it cannot
+#: be run, and cannot be replayed faithfully — so the model's own record of
+#: having chosen that action is erased. Leaving it to the prose prompt then asks
+#: the model to continue a sentence it never finished while the action it had
+#: already decided on is silently lost, which is exactly what happened to the
+#: aborted ``write`` call in the incident. This instruction carries the one fact
+#: the drop erased, names the tool so a multi-call turn is unambiguous, and is
+#: written to stand alone — a cut that produced no prose at all gets it on its
+#: own — as well as to follow the prose prompt above.
+CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT = (
+    "[system] A tool call ({tools}) was aborted by the network interruption "
+    "before it finished, so it never ran. If you still need that action, issue "
+    "the call again from scratch."
+)
+
+
+def _continuation_instruction(*, resumable_text: bool, interrupted: list[ToolCall]) -> str:
+    """The instruction appended to an interrupted turn, shaped to the cut.
+
+    Both halves are independent, because the two cuts are: the interruption can
+    land in prose, inside a tool call, or — the incident's shape — in prose with
+    a call already being dictated. The prose half is added only when there is
+    partial prose to continue (this is the same view of "text" the serializer
+    takes; the whitespace-only guard in the continuation branch is what keeps
+    the two from disagreeing), and the call half only when a call was cut off.
+
+    A turn that has NEITHER is re-asked whole rather than continued, so it never
+    reaches here: with nothing committed to history there is no partial answer
+    to refer to and the retry is a clean re-ask.
+    """
+    parts: list[str] = []
+    if resumable_text:
+        parts.append(CONNECTIVITY_CONTINUATION_PROMPT)
+    if interrupted:
+        tools = ", ".join(sorted({call.name for call in interrupted}))
+        parts.append(CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT.format(tools=tools))
+    return " ".join(parts)
+
+
+#: The two fixed ends of `CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT`, split
+#: around its ``{tools}`` hole. Declared from the template itself so the
+#: recogniser below cannot fall out of step with the string it recognises.
+_TOOL_CALL_INSTRUCTION_HEAD, _, _TOOL_CALL_INSTRUCTION_TAIL = (
+    CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT.partition("{tools}")
+)
+
+
+def _is_continuation_tool_list(text: str) -> bool:
+    """Whether ``text`` is a tools list ``_continuation_instruction`` would write.
+
+    The producer writes ``", ".join(sorted({call.name for call in interrupted}))``,
+    so the list is comma-and-space separated and every name is a single
+    whitespace-free token. Checked rather than waved through because the
+    predicate below is what keeps harness chrome out of the user's row: an
+    operator message that merely QUOTES one of these instructions — a whole
+    line, a multi-line paste, a wrapping that put a newline inside the tools
+    list — must stay theirs. A tool name this grammar rejects costs only the
+    pre-fix behaviour (the row paints), never a swallowed operator turn.
+    """
+    names = text.split(", ")
+    return all(name and not any(char.isspace() for char in name) for name in names)
+
+
+def is_connectivity_continuation_instruction(text: str) -> bool:
+    """Whether ``text`` is EXACTLY one of the instructions this module mints.
+
+    :func:`_continuation_instruction` returns three shapes, and the front ends
+    have to recognise all three: the prose prompt alone, the tool-call prompt
+    alone (a cut that produced no prose), and the two joined by a single space
+    (the incident's shape — prose with a call still being dictated).
+
+    Lives HERE, beside the strings it matches, rather than in the shared
+    ``harness.rows`` decision that calls it, for two reasons. The composed shape
+    cannot be enumerated: the tool-call half interpolates the aborted calls'
+    names, so a table of exact strings would have to list every possible tools
+    list. And the shape is a property of the producer, not of a row — the row
+    decision is "does the harness mint this text", and this is how the harness
+    answers that about its own words.
+
+    Deliberately not a loose prefix test on ``[system] ``: that prefix is also
+    minted by the approval and question gates (see
+    ``rows._HARNESS_NOTICE_HEADS``), and an operator is free to type it. What is
+    matched is the fixed sentence each half opens with, plus the exact tail the
+    tool-call half closes with.
+    """
+    stripped = text.strip()
+    if stripped == CONNECTIVITY_CONTINUATION_PROMPT:
+        return True
+    if stripped.startswith(CONNECTIVITY_CONTINUATION_PROMPT + " "):
+        stripped = stripped[len(CONNECTIVITY_CONTINUATION_PROMPT) + 1 :]
+    if not (
+        stripped.startswith(_TOOL_CALL_INSTRUCTION_HEAD)
+        and stripped.endswith(_TOOL_CALL_INSTRUCTION_TAIL)
+    ):
+        return False
+    tools = stripped[
+        len(_TOOL_CALL_INSTRUCTION_HEAD) : len(stripped) - len(_TOOL_CALL_INSTRUCTION_TAIL)
+    ]
+    return _is_continuation_tool_list(tools)
 
 
 # How the loop recognises "this DeepSeek thinking-mode request never carried the
@@ -881,22 +993,30 @@ class AgentLoop:
                                         new_messages,
                                         redact=config.redact_tool_result,
                                     )
-                                if resumable_text:
-                                    # KEYED ON PROSE ALONE, independently of the
-                                    # pairing above — an `elif` here silently lost
-                                    # the instruction for the one shape that most
-                                    # needs it. A cut that produced BOTH partial
+                                if resumable_text or truncated:
+                                    # KEYED ON PROSE ALONE — and on an
+                                    # interrupted CALL, which has no prose to key
+                                    # on — independently of the pairing above.
+                                    # An `elif` here silently lost the
+                                    # instruction for the one shape, and only
+                                    # the prose half was ever emitted, so a turn
+                                    # whose call was cut off mid-arguments got an
+                                    # instruction to "continue seamlessly" a
+                                    # sentence it never finished while the action
+                                    # it had chosen quietly vanished from its
+                                    # history. A cut that produced BOTH partial
                                     # prose and a complete call took the pairing
-                                    # arm and never reached this one, so text the
-                                    # user had already read was committed to
-                                    # history with nothing telling the model not
-                                    # to repeat it, and the answer could restart
-                                    # mid-sentence ("Paris is the capital of Paris
-                                    # is the capital of France."). Keeping the
-                                    # calls (above) is what made that shape
-                                    # reachable: before it, any turn with a call
-                                    # had its calls cleared and fell into the
-                                    # text arm, which did append this prompt.
+                                    # arm and never reached this one at all, so
+                                    # text the user had already read was
+                                    # committed to history with nothing telling
+                                    # the model not to repeat it, and the answer
+                                    # could restart mid-sentence ("Paris is the
+                                    # capital of Paris is the capital of
+                                    # France."). Keeping the calls (above) is
+                                    # what made that shape reachable: before it,
+                                    # any turn with a call had its calls cleared
+                                    # and fell into the text arm, which did append
+                                    # this prompt.
                                     #
                                     # Ordering is load-bearing: the synthetic tool
                                     # results are appended FIRST, so the prompt
@@ -943,14 +1063,28 @@ class AgentLoop:
                                     # then summarises. It is harness chrome, so
                                     # the front ends suppress it on replay the
                                     # same way they already suppress the
-                                    # compaction continuation prompt. REPLAY is
+                                    # compaction continuation prompt, through the
+                                    # ONE shared decision in `harness.rows`
+                                    # (`is_harness_chrome`), which recognises EVERY
+                                    # shape `_continuation_instruction` can return —
+                                    # the composed form included. Equality with the
+                                    # prose prompt alone was not enough: the
+                                    # composed and tool-call-only shapes are not
+                                    # members of `harness_chrome_prompts()`, and a
+                                    # resumed session painted them as the
+                                    # operator's own words. REPLAY is
                                     # the only surface that needs it: this row
                                     # reaches the transcript via
                                     # `_persist_new_messages`, which appends
                                     # without emitting a `MessageStartEvent`, so
                                     # there is no live announcement to suppress
                                     # and the announce loop is correctly untouched.
-                                    prompt = Message.user(CONNECTIVITY_CONTINUATION_PROMPT)
+                                    prompt = Message.user(
+                                        _continuation_instruction(
+                                            resumable_text=resumable_text,
+                                            interrupted=truncated,
+                                        )
+                                    )
                                     context.messages.append(prompt)
                                     new_messages.append(prompt)
                             # Neither text nor a surviving call? The message is
@@ -974,16 +1108,26 @@ class AgentLoop:
                             # must too.
                             yield TurnEndEvent(message=assistant, tool_results=[])
                             # The notice states what HAS happened, not what is
-                            # hoped for. It is emitted BEFORE the retry, so it
-                            # cannot honestly claim a reconnection — on a
+                            # hoped for, and it is WRITTEN FOR BOTH FAMILIES the
+                            # branch serves: our own connection dying, and a
+                            # gateway reporting its upstream host dying in band.
+                            # "network connection lost" was true of the first and
+                            # false of the second — on an aggregator's upstream
+                            # failure the machine's network is fine and the
+                            # gateway's host is what died — so it named a cause
+                            # the loop cannot know. What it CAN know is the one
+                            # fact both share: the stream stopped mid-answer and
+                            # the rest of the turn is being fetched on the next
+                            # attempt. It is emitted BEFORE the retry, so it
+                            # cannot honestly claim a reconnection either — on a
                             # genuinely dead network the old wording told the user
                             # three times that the machine had reconnected and
                             # then ended the run. Naming the budget also shows it
                             # being spent rather than repeating one identical line.
                             yield NoticeEvent(
                                 text=(
-                                    "network connection lost mid-response — "
-                                    f"retrying ({connectivity_continuations}/"
+                                    "response stream cut mid-answer — "
+                                    f"resuming the turn ({connectivity_continuations}/"
                                     f"{MAX_CONNECTIVITY_CONTINUATIONS})"
                                 ),
                                 kind="warning",

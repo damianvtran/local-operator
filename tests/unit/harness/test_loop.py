@@ -25,6 +25,7 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
+from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -58,6 +59,7 @@ from local_operator.harness.types import (
 from local_operator.providers.failover import (
     ProviderError,
     _mark_mid_stream_connectivity,
+    stream_with_failover,
     wrap_transport_error,
 )
 
@@ -3254,8 +3256,12 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     assert on_screen == "The answer is 42."
 
     # A visible notice explains the seam rather than the text silently jumping.
+    # Its wording names what the loop KNOWS (the stream stopped mid-answer and
+    # the turn is being resumed) rather than a cause: this one branch also serves
+    # an aggregator whose upstream host died, where the machine's network is
+    # fine.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert any("network connection lost" in text for text in notices)
+    assert any("response stream cut mid-answer" in text for text in notices)
 
     # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
     # partial answer as HISTORY, so the model writes the remainder instead of
@@ -3355,7 +3361,7 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     # its position, rather than three identical claims of a reconnection.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert notices == [
-        f"network connection lost mid-response — retrying ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
+        f"response stream cut mid-answer — resuming the turn ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
 
@@ -3403,6 +3409,273 @@ async def test_connectivity_continuation_drops_truncated_tool_calls() -> None:
         not m.tool_calls for m in messages if isinstance(m, Message) and m.role == "assistant"
     )
     assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+#: The exact in-band failure OpenRouter served the reported sentinel pass when
+#: one of its upstream hosts (Together) died mid-body. Written here as the wire
+#: text rather than as a paraphrase, because the classifier reads the composed
+#: message and a paraphrase would test the wrong string.
+_AGGREGATOR_UPSTREAM_CUT = (
+    "provider_unavailable: Upstream error from Together: Stream error: "
+    "h2 protocol error: error reading a body from connection"
+)
+
+
+class _AggregatorAuth:
+    """Minimal ``FailoverAuthStore``: one bearer, no siblings to rotate to."""
+
+    def __init__(self, keys: dict[str, list[str]]) -> None:
+        self.keys = keys
+
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None, **kwargs: Any
+    ) -> str | None:
+        pool = self.keys.get(provider, [])
+        return pool[0] if pool else None
+
+    def rotate_sibling(
+        self,
+        provider: str,
+        session_id: str | None,
+        error: Any,
+        api_key: str | None = None,
+        *,
+        model_id: str = "",
+    ) -> bool:
+        return False
+
+
+class _AggregatorGateway:
+    """OpenRouter's behaviour on the wire: answer, stream, then die in band.
+
+    ``failures`` is indexed by call number; an entry of ``None`` (or an
+    exhausted list) means this call is served cleanly. Each failing call emits
+    the partial answer and the HALF-DICTATED call first, because that is the
+    only shape that reaches the driver's ``forwarded_any`` raise sites — with
+    nothing forwarded the driver retries in place and the loop never sees a
+    failure at all.
+    """
+
+    def __init__(self, failures: list[BaseException | None]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def stream(self, request: ChatRequest, api_key: str | None, oauth_access: Any = None):
+        index = self.calls
+        self.calls += 1
+        if index < len(self.failures) and self.failures[index] is not None:
+            yield StreamTextDelta(delta="Let me write that down. ")
+            yield tool_call_delta(
+                0, id="c1", name="write", args='{"path": "/tmp/notes", "content": "hel'
+            )
+            raise self.failures[index]  # type: ignore[misc]
+        yield StreamTextDelta(delta="done")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+def _aggregator_cut() -> ProviderError:
+    """The recorded in-band upstream failure, as OpenRouter delivers it."""
+    return ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True)
+
+
+def _aggregator_harness(
+    failures: list[BaseException | None],
+) -> tuple[Any, _AggregatorGateway, list[ChatRequest]]:
+    """A loop ``stream_fn`` wired to the REAL failover driver, plus its parts.
+
+    This is the shape ``create_stream_fn`` produces, minus the session plumbing
+    this test does not exercise, and driving the driver is the whole point: a
+    fake ``stream_fn`` would hand the loop an already-certified error, so the
+    test would only be asserting that the loop reads a flag rather than that the
+    incident is recovered end to end.
+
+    Returns the stream_fn, the gateway (for call counts) and the requests that
+    were actually sent (for history assertions).
+    """
+    gateway = _AggregatorGateway(failures)
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+    sent: list[ChatRequest] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        sent.append(request)
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    return stream_fn, gateway, sent
+
+
+#: The loop config the aggregator cases run under: the reported sentinel pass's
+#: own selector, so the provider half of the resumability decision is exercised.
+_AGGREGATOR_MODEL = ModelSpec(provider="openrouter", model_id="deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_aggregator_upstream_cut_mid_call_continues_the_turn() -> None:
+    """THE REPORTED BUG: 13 minutes of work died on a gateway's upstream blip.
+
+    Driven through the real failover driver, so the reproduction is the incident
+    itself: OpenRouter commits 200, streams prose and the beginning of a tool
+    call, and then one of its upstream hosts dies mid-body. Before the fix the
+    driver handed that raise up uncertified, the loop took it as an ordinary
+    stream error and the run ended with ``stop_reason="error"`` — discarding both
+    the partial answer and the half-composed call. Now the partial answer becomes
+    history and the continued turn finishes, so the user reads ONE answer.
+    """
+    executed: list[str] = []
+    stream_fn, gateway, _sent = _aggregator_harness([_aggregator_cut(), None])
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None, "a gateway upstream blip must not end the pass"
+    assert ends[0].aborted is False
+
+    # What the user read, exactly once: the partial answer and its continuation.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "Let me write that down. done"
+    # The gateway was asked a second time — the re-route the incident needed.
+    assert gateway.calls == 2
+    # The truncated call never ran: it is dropped rather than executed, which the
+    # sibling test above locks down. Here the point is that the turn lives.
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_aggregator_cut_mid_call_tells_the_model_the_call_was_aborted() -> None:
+    """The MID-TOOL-CALL half: a dropped call must not vanish silently.
+
+    The prose prompt tells the model to continue a sentence seamlessly. A call
+    still being dictated when the socket died is truncated JSON — unrunnable and
+    unreplayable — so the loop drops it, erasing the model's own record of having
+    chosen that action. Without an instruction shaped for that cut the model
+    continues the prose and the ``write`` it had already decided on is simply
+    lost, one of the two things the incident cost.
+
+    Asserted on the request that is actually re-sent, through the real Anthropic
+    serializer, so the instruction AND the wire shape are both covered.
+    """
+    executed: list[str] = []
+    stream_fn, _gateway, sent = _aggregator_harness([_aggregator_cut(), None])
+
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    )
+
+    retry_messages = sent[1].messages
+    # The partial answer survives as history — what makes the retry additive.
+    assert retry_messages[1].text == "Let me write that down. "
+    # The truncated call is gone from history (unrunnable, unreplayable)...
+    assert all(
+        not m.tool_calls for m in retry_messages if isinstance(m, Message) and m.role == "assistant"
+    )
+    # ...and the instruction carries what the drop erased, naming the tool so a
+    # multi-call turn is unambiguous.
+    instruction = retry_messages[-1].text
+    assert retry_messages[-1].role == "user"
+    assert "write" in instruction
+    assert "aborted" in instruction
+    assert "issue the call again from scratch" in instruction
+    # ...and replay must not paint it as the operator's own words: the composed
+    # shape the loop persists has to be recognised by the one shared chrome
+    # decision every surface folds through (round-1 M1).
+    assert is_harness_chrome(instruction)
+    # The prose half is still there, so a cut in BOTH places gets both rules.
+    assert loop_module.CONNECTIVITY_CONTINUATION_PROMPT in instruction
+    # Persisted too, so a resumed session can explain the seam.
+    assert any(isinstance(m, Message) and m.text == instruction for m in messages)
+
+    # WIRE LEGAL: it must serialize, not merely look right in the loop.
+    from local_operator.providers.clients import AnthropicClient
+
+    body = AnthropicClient("https://api.anthropic.com")._build_body(
+        ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+            messages=retry_messages,
+        )
+    )
+    roles = [entry["role"] for entry in body["messages"]]
+    assert roles[-1] == "user", "never a prefill"
+    # No unpaired tool_use/tool_result survives the drop.
+    assert roles.count("assistant") == 1
+
+
+@pytest.mark.asyncio
+async def test_aggregator_upstream_cut_budget_surfaces_a_bounded_error() -> None:
+    """An aggregator that keeps failing must END the pass, not loop forever.
+
+    The continuation budget is shared with the offline case on purpose: a gateway
+    whose every upstream host is down is exactly the case a bounded, named
+    failure is for, and the provider's own words must survive to the frame.
+    """
+    gateway = _AggregatorGateway([_aggregator_cut() for _ in range(20)])
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream_fn, model=_AGGREGATOR_MODEL), None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    # The gateway's own diagnosis survives, so the operator can see WHICH host died.
+    assert "provider_unavailable" in ends[0].error
+    assert "Upstream error from Together" in ends[0].error
+    # Bounded: the initial attempt plus exactly the continuation budget.
+    assert gateway.calls == MAX_CONNECTIVITY_CONTINUATIONS + 1
+
+
+@pytest.mark.asyncio
+async def test_aggregator_in_band_refusal_mid_stream_still_terminates() -> None:
+    """A REFUSAL is not a routing failure, even in band from a gateway.
+
+    Same channel and the same driver raise site — but a 400 is the provider
+    answering about OUR bytes, deterministic in them, so it must not spend the
+    continuation budget or hide itself behind a retry. This is the boundary the
+    provider-layer controls assert directly; here it is proven to survive the
+    whole loop, through the real driver.
+    """
+    refusal = ProviderError(400, "invalid_request_error: messages: field required", retryable=False)
+    gateway = _AggregatorGateway([refusal, None])
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream_fn, model=_AGGREGATOR_MODEL), None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    assert "invalid_request_error" in ends[0].error
+    assert gateway.calls == 1, "a refusal must not be re-asked"
 
 
 @pytest.mark.asyncio

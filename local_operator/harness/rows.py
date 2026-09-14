@@ -141,6 +141,15 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     having been copied INCOMPLETELY into the phone fold (it suppressed the
     third and rendered the first two) is the drift this function exists to
     make impossible. A fourth prompt is added in one place.
+
+    This tuple is the EXACT-match half of the decision only. One chrome prompt
+    has a family of shapes rather than a single string — the connectivity
+    instruction, which ``harness.loop._continuation_instruction`` composes per
+    cut (prose alone, an aborted tool call alone, or the two joined) — and those
+    cannot be enumerated here because the tool-call half interpolates the
+    aborted calls' names. :func:`is_harness_chrome` therefore adds the producer's
+    own recogniser for that family; there is still exactly ONE decision, and it
+    is this function plus that one recogniser, not a list per surface.
     """
     from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
     from local_operator.session.goal_loop import LOOP_PROMPT
@@ -158,8 +167,22 @@ def is_harness_chrome(text: str) -> bool:
     callers is the exact substrate this module exists to remove — one surface
     would suppress a chrome prompt that the other painted as the user's own
     words the moment a persisted prompt gained a trailing newline.
+
+    Two legs, one decision. Exact membership covers the three prompts that are
+    single fixed strings; the loop's
+    :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
+    covers the shapes of the fourth, which the producer composes per cut and
+    which therefore cannot live in a tuple. Equality alone used to be the whole
+    test, and the composed "prose then an aborted tool call" instruction — the
+    incident's own shape — was a member of neither, so a resumed session
+    painted it (and the tool-call-only shape) as the operator's own words.
     """
-    return text.strip() in harness_chrome_prompts()
+    from local_operator.harness.loop import is_connectivity_continuation_instruction
+
+    stripped = text.strip()
+    return stripped in harness_chrome_prompts() or is_connectivity_continuation_instruction(
+        stripped
+    )
 
 
 def is_harness_injection(row: Any) -> bool:
