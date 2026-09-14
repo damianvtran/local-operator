@@ -26,7 +26,9 @@ the operator's live window (#648). Timings that are constants in production
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -35,6 +37,7 @@ from typing import Any
 
 import pytest
 
+import local_operator
 from local_operator.session.runtime import registry
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
@@ -677,6 +680,38 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 # that instant. Exiting here lets the app finish its own
                 # shutdown with its context still live, and the pump above it
                 # lets the last messages land first.
+                #
+                # QUIESCE FIRST, and this is the part that actually removes the
+                # race: the teardown stops every timer in the tree, and a timer
+                # whose task was created by a callback that came back from a
+                # THREAD cannot resolve ``active_app`` (``call_from_thread``
+                # schedules on the loop with the calling thread's EMPTY context,
+                # and Textual's own ``_stop_all`` then awaits a task whose
+                # ``_tick`` raises ``LookupError``). Measured while
+                # remediating this round: with every pre-exit timer still clean
+                # (diagnosed in-process), the stage still died in teardown when
+                # it left a stream and an in-flight adoption behind — ubuntu
+                # run 34824475709 is the same failure on a slower runner. So the
+                # stage now waits for the app's workers and the session's turn
+                # to finish before it exits: there is then nothing in flight to
+                # hand a timer back from a thread.
+                await app.workers.wait_for_complete()
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline and getattr(
+                    viewer.frontend_state, "streaming", False
+                ):
+                    await pilot.pause()
+                    await asyncio.sleep(0.05)
+                #
+                # What this does NOT do (review round 2, NIT 2): ``run_test``'s
+                # ``finally`` still calls ``_shutdown`` from the TEST's frame,
+                # unconditionally and without an idempotency guard, so the
+                # teardown is made BENIGN rather than avoided — the app's own
+                # loop has already stopped its timers under the live
+                # ``active_app``, and by then there are none left to tick in the
+                # window where the contextvar is gone. Do not read this as "the
+                # hazard is gone": a stage that skips ``app.exit()`` still has
+                # it.
                 await pilot.pause()
                 app.exit()
     finally:
@@ -692,3 +727,252 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 pass
         child.wait(timeout=10)
     assert successor_pid != old_pid
+
+
+# -- the ARMED probe (QA round 1, Q-4) ------------------------------------------
+#
+# Every stage above runs on the repo's own interpreter, which is an editable
+# venv: ``install_kind()`` answers EDITABLE, ``_tree_is_replaceable()`` is
+# False, and the files-gone probe is DISARMED. That is exactly where QA's
+# BLOCKER lived — the armed path had no end-to-end coverage anywhere in the
+# repo, so the interaction between the drain and the idle predicate shipped
+# unmeasured (Q-1). This cell builds a real non-editable install of the tree
+# under test and removes the loaded package while a turn is running.
+
+
+def _noneditable_install(tmp_path: Path, *, stamp: str) -> tuple[Path, Path]:
+    """A throwaway uv-tool-shaped, non-editable install. ``(prefix, tree)``.
+
+    No network and no build backend: the package is HARDLINKED out of the tree
+    under test (cheap for ~2 000 files, and REAL paths — a symlink would resolve
+    back to the worktree, so removing the copy would remove nothing), a
+    hand-written ``dist-info`` is what makes ``importlib.metadata`` see a real
+    non-editable distribution, and the dependencies are reached through one
+    ``.pth`` line pointing at the interpreter that runs this test. That line is
+    a bare PATH on purpose: ``site`` appends it WITHOUT processing the ``.pth``
+    files inside it, so the test venv's editable-install finder is never
+    installed in the child — which is what lets the child import the copy this
+    test is about to delete.
+    """
+    import importlib.metadata
+    import json
+    import sysconfig
+
+    package = Path(local_operator.__file__).resolve().parent
+    prefix = tmp_path / "uv" / "tools" / "local-operator"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(prefix)],
+        check=True,
+        capture_output=True,
+        timeout=300,
+    )
+    site = (
+        prefix
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    site.mkdir(parents=True, exist_ok=True)
+    tree = site / "local_operator"
+    shutil.copytree(package, tree, copy_function=os.link)
+
+    version = importlib.metadata.version("local-operator")
+    dist = site / f"local_operator-{version}.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
+    )
+    (dist / "INSTALLER").write_text("uv\n", encoding="utf-8")
+    # The deps path below makes the test venv's site-packages visible to the
+    # child, and THAT holds the real editable install's ``direct_url.json``.
+    # ``update._direct_url_payload`` deliberately scans EVERY distribution of
+    # this name and takes the first that publishes the marker, so without this
+    # the child would answer EDITABLE and the probe would stay disarmed. This is
+    # what a non-editable directory install writes for itself (PEP 610): a URL
+    # and an empty ``dir_info``, editable absent.
+    (dist / "direct_url.json").write_text(
+        json.dumps({"url": prefix.as_uri(), "dir_info": {}}), encoding="utf-8"
+    )
+    (site / "_test_deps.pth").write_text(
+        str(Path(sysconfig.get_paths()["purelib"])) + "\n", encoding="utf-8"
+    )
+    (prefix / ".lop-source").write_text(stamp, encoding="utf-8")
+    return prefix, tree
+
+
+def _install_probe(prefix: Path) -> list[str]:
+    """What the CHILD's own interpreter says about the install it will run from.
+
+    Measured in the child rather than assumed from the fixture: if this answers
+    anything but ``UV_TOOL`` / ``True`` / a path inside the prefix, the cell
+    proves nothing — and a fixture that silently disarmed the probe is how Q-1
+    reached a green board in the first place.
+    """
+    probe = subprocess.run(
+        [
+            str(prefix / "bin" / "python"),
+            "-c",
+            "import local_operator; print(local_operator.__file__)\n"
+            "import local_operator.update as u; print(u.install_kind())\n"
+            "import local_operator.session.runtime.process as p; print(p._tree_is_replaceable())",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd="/tmp",
+        env={k: v for k, v in os.environ.items() if not k.startswith("CMUX_")},
+    )
+    return (probe.stdout + probe.stderr).strip().splitlines()
+
+
+def _armed_child_env(config_dir: Path, session_id: str) -> dict[str, str]:
+    """``_child_env`` WITHOUT ``LOP_BUILD_PREFIX``.
+
+    This child runs from its own non-editable prefix, so ``build_prefix()`` is
+    None and ``installed_build`` reads the marker in its own ``sys.prefix`` —
+    the production shape rather than the e2e stage's fake marker. The shortened
+    settle/stagger and the stripped ``CMUX_*`` are inherited from the shared
+    helper; the grace stays long so only the probe can retire this runtime.
+    """
+    env = _child_env(config_dir, config_dir, session_id)
+    env.pop("LOP_BUILD_PREFIX", None)
+    return env
+
+
+@pytest.mark.asyncio
+async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    """Q-1's pin on the ARMED path: the drain must COMPLETE, not merely latch.
+
+    ``uv tool install --force`` removes the old distribution before writing the
+    new one, so a window in production exists in which a runtime's loaded tree
+    is absent. This cell reproduces that window for real — a non-editable
+    install of this tree, booted from its own interpreter, with the package
+    directory deleted mid-turn — and asserts what a user can see: the runtime
+    announces the handover while its turn is STILL running, the turn finishes
+    (nothing aborted, no cut-off vocabulary), and the process EXITS.
+
+    That last assertion is the pin. On the head QA measured, the drain latched
+    and the process never exited: ``may_refresh`` reached its warm-window term
+    through a function-local import of ``session.runtime.process`` — which this
+    child runs as ``__main__``, so the import was answered from DISK, gone, and
+    raised ``ImportError``; ``process._idle_for_refresh`` reads a failing
+    predicate as "not idle", so ``begin_retire``/``_clean_exit`` were unreachable
+    for as long as the tree stayed gone and the session was refused forever
+    while its lease kept any successor from booting.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    config = headless_tui_env
+    session_id = "refresharmed1"
+    _seed(config, session_id)
+    (config / "config.yml").write_text(
+        "values:\n  hosting: test\n  model_name: mock\n  tool_approval_mode: auto\n",
+        encoding="utf-8",
+    )
+    prefix, tree = _noneditable_install(tmp_path, stamp=OLD_MARKER)
+    probe = _install_probe(prefix)
+    assert probe, "the install probe printed nothing"
+    assert str(prefix) in probe[0], f"the child imports something else: {probe}"
+    assert "UV_TOOL" in probe[1], f"install_kind is not UV_TOOL: {probe}"
+    assert probe[2] == "True", f"the probe is not armed: {probe}"
+
+    child = subprocess.Popen(
+        [str(prefix / "bin" / "python"), "-m", "local_operator.session.runtime.process"],
+        env=_armed_child_env(config, session_id),
+        # cwd set to a directory with no package in it, and that matters more
+        # than it looks: ``-m`` puts the cwd first on ``sys.path``, so running
+        # this child from the checkout would import the WORKTREE's
+        # ``local_operator`` instead of the install under test — and the tree
+        # this cell removes could never be the loaded one.
+        cwd=str(tmp_path),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    viewer = None
+    try:
+        record = await _wait_for_record(config, session_id)
+        pid = int(record.pid)
+        viewer = await AttachedSession.connect(
+            record, session_id, config_dir=config, takeover_factory=_never_take_over
+        )
+        await viewer.prompt("please [bash:12]")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            state = getattr(viewer, "frontend_state", None)
+            if state is not None and getattr(state, "streaming", False):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the runtime never started the turn")
+
+        shutil.rmtree(tree)  # what `uv tool install --force` does first
+
+        # (a) It announces the handover, while the turn is still live.
+        deadline = time.monotonic() + 60
+        drain_lines: list[str] = []
+        while time.monotonic() < deadline:
+            drain_lines = [
+                line for line in _lines_for_pid(pid) if "no new work will be admitted" in line
+            ]
+            if drain_lines:
+                break
+            await asyncio.sleep(0.1)
+        assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}"
+        assert "loaded module tree is gone" in drain_lines[0], drain_lines[0]
+        assert getattr(
+            viewer.frontend_state, "streaming", False
+        ), "the latch must land while the turn is STILL running"
+
+        # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with
+        # the process still resident, holding the session's lease.
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline and _alive(child):
+            await asyncio.sleep(0.2)
+        assert not _alive(child), "the drain latched and the runtime NEVER exited:\n" + chr(
+            10
+        ).join(_lines_for_pid(pid)[-10:])
+        assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly"
+
+        # (c) Nothing in flight was aborted: the turn's own reply is durable.
+        durable = (config / "sessions" / session_id / "transcript.jsonl").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        assert "Hello from the mock provider!" in durable, "the live turn never completed"
+        # ... and the session recorded that turn as COMPLETE, which is the
+        # durable equivalent of the viewer's cut-off vocabulary (that vocabulary
+        # belongs to the stages above, where a viewer exists to paint it — the
+        # raw JSONL is not the instrument for it: the words appear in payloads
+        # that have nothing to do with this turn). A drain that aborted the turn
+        # writes an ERROR attention row for it, so the kind is the assertion.
+        rows = [json.loads(line) for line in durable.splitlines() if line.strip()]
+        attention = [
+            row["payload"]["details"]
+            for row in rows
+            if row.get("type") == "custom"
+            and isinstance(row.get("payload"), dict)
+            and row["payload"].get("custom_type") == "completion_attention"
+        ]
+        assert attention, f"no completion was recorded at all:\n{durable[-2000:]}"
+        assert [
+            row for row in attention if row.get("kind") == "error"
+        ] == [], "the drain cut the turn off:\n" + json.dumps(attention, indent=2)
+        assert any(row.get("kind") == "complete" for row in attention), attention
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        for other in {child.pid, *(int(r.pid) for r, _ in registry.scan(config))}:
+            try:
+                os.kill(other, 9)
+            except ProcessLookupError:
+                pass
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover — the kill above reaps it
+            pass

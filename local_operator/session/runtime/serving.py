@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
 
+from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
@@ -1240,6 +1241,14 @@ class ServingSessionHandle(SessionHandle):
         which of the two shapes the sender bought, because that is the part
         they can act on: re-issuing a spooled wake is not necessary.
 
+        ``mode`` is recorded and deliberately NOT honoured on delivery, which
+        is the one thing a reader of this row has to know: both drain paths
+        deliver ``mailbox`` (plus ``wake`` when the sender asked for one),
+        because a boot has no live turn for a ``steer`` to join — mailbox-plus-
+        wake is the only shape that can land at all. Keeping the sender's
+        stated intent in the row is for whoever reads the spool later, not an
+        instruction to the successor (review round 2, NIT 1).
+
         Falls back to the refusal when there is nowhere to spool to (no session
         directory, an unwritable inbox): the caller then gets the sentence that
         tells it to send again, which is the same contract every other admission
@@ -1306,13 +1315,31 @@ class ServingSessionHandle(SessionHandle):
                 return "busy"
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             return "busy probe failed"
-        # Term 2 is the reaper's own helper, not a re-derivation: one place
-        # decides what "inside the warm window" means. Lazy import — the
-        # process module imports this one inside ``amain``, never at load.
-        from local_operator.session.runtime.process import _wake_within_window
-
-        if _wake_within_window(self):
-            return "wake due within the warm window"
+        # Term 2 is the SHARED helper, not a re-derivation: one place decides
+        # what "inside the warm window" means, and it lives in
+        # ``local_operator.buildwatch`` so that reaching it cannot fail here.
+        # It used to be a function-local import of the runtime module, which is
+        # answered from DISK whenever ``sys.modules`` has no entry — and the
+        # runtime runs that module as ``__main__``, so at the one moment this
+        # predicate matters most (the loaded tree has been replaced) the import
+        # raised ``ImportError``; ``_idle_for_refresh`` reads a failing
+        # predicate as "not idle", so a draining runtime could never reach its
+        # exit (QA round 1, Q-1 — a session refused forever, holding the lease
+        # so that no successor could boot). ``buildwatch`` is stdlib-only and
+        # imported at module scope by both sides, so it is still importable
+        # then.
+        #
+        # The consult is ALSO under the policy this file applies to the busy
+        # probe above: a predicate that cannot be evaluated must not pin the
+        # runtime. Failing open ("no wake") is the same answer
+        # ``wake_within_window`` gives its own accessor, and it is what makes
+        # this class of failure a degraded-but-alive runtime instead of a
+        # wedged one.
+        try:
+            if _wake_within_window(self):
+                return "wake due within the warm window"
+        except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
+            logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
         return ""
 
     def next_wake_due_at(self) -> int | None:
