@@ -620,6 +620,105 @@ def test_tail_page_read_cost_is_the_page_not_the_journal(tmp_path, monkeypatch):
     assert oracle_counted[0] * 4 >= size
 
 
+def test_cursor_page_read_cost_is_the_page_plus_the_walk_to_it(tmp_path, monkeypatch):
+    """The OTHER page shape this change moves: a ``before_id`` page mid-journal.
+
+    Same structural instrument as the tail case, bounded the other way round.
+    Reading backward to a cursor must cost the page, the bytes AFTER that cursor
+    (which the walk has to pass through on its way down), and one chunk of
+    boundary slack — and must not touch the history BEFORE the cursor at all,
+    which is most of this file and is exactly what the forward reader paid for.
+    Both halves are asserted, and the forward implementation is measured here
+    too so the bound cannot rot into a description.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=10000, pad=900)
+    path = directory / TRANSCRIPT_FILENAME
+    size = path.stat().st_size
+    cursor = ids[9000]  # ~1000 rows from the tail: one long scroll back
+    rows = [raw for raw in path.read_bytes().split(b"\n") if raw.strip()]
+    row_ids = [json.loads(raw)["id"] for raw in rows]
+    cursor_index = row_ids.index(cursor)
+    tail_bytes = sum(len(raw) + 1 for raw in rows[cursor_index:])  # cursor row + newer
+    head_bytes = size - tail_bytes
+
+    with _counted_reads(monkeypatch, path) as counted:
+        page = read_transcript_page(directory, before_id=cursor, limit=100)
+    page_bytes = sum(len(entry.to_json().encode("utf-8")) for entry in page.entries)
+    assert [entry.id for entry in page.entries] == ids[8900:9000]
+    assert counted[0] <= page_bytes + tail_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+    # The prefix before the cursor — ~90% of this journal — is never read.
+    assert counted[0] < head_bytes
+
+    with _counted_reads(monkeypatch, path) as oracle_counted:
+        reference = _forward_transcript_page(directory, before_id=cursor, limit=100)
+    assert _page_signature(reference) == _page_signature(page)
+    # ... while the forward read has to walk that prefix, so it exceeds the same
+    # bound this test asserts: that is the guard's teeth for this shape.
+    assert oracle_counted[0] >= head_bytes
+    assert oracle_counted[0] > page_bytes + tail_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+
+
+def test_backward_page_answers_a_duplicated_id_with_its_newest_row(tmp_path):
+    """A repeated cursor id resolves to the NEWER row, deliberately (review R1-2).
+
+    Ids are ``uuid4().hex`` on the append path, so a repeat means a corrupted or
+    concatenated journal rather than anything the codebase can write. The
+    forward reader answered with whichever occurrence it MET first — the oldest;
+    reading backward meets the newest first, and matching the old answer would
+    mean walking to the file's start whenever an id repeats, giving up the whole
+    optimisation for the one case that is already anomalous. So the newest
+    occurrence is the boundary, and this test pins that rather than leaving it to
+    the direction of the scan. Row order is unaffected and the cursor row is
+    still never returned, so a duplicate cannot make a caller loop.
+    """
+    directory = tmp_path / "dupes"
+    directory.mkdir()
+
+    def _dup_row(content: str) -> str:
+        return TranscriptEntry(
+            "dup", 1.0, ENTRY_MESSAGE, {"role": "user", "content": content}
+        ).to_json()
+
+    written = [
+        _row_line(0),
+        _row_line(1),
+        _row_line(2),
+        _dup_row("dup older"),
+        _row_line(3),
+        _dup_row("dup newer"),
+        _row_line(4),
+    ]
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(written) + "\n", encoding="utf-8")
+
+    # before_id excludes its row: the page ends at the row before the NEWEST dup.
+    before = read_transcript_page(directory, before_id="dup")
+    assert [entry.id for entry in before.entries] == [
+        "row-00000",
+        "row-00001",
+        "row-00002",
+        "row-00003",
+    ]
+    assert before.has_more is False and before.reconciled is False
+    assert "dup" not in {entry.id for entry in before.entries}
+
+    # through_id includes its row: the page's newest row is the NEWER dup.
+    through = read_transcript_page(directory, through_id="dup")
+    assert [entry.id for entry in through.entries] == [
+        "row-00000",
+        "row-00001",
+        "row-00002",
+        "dup",
+        "row-00003",
+        "dup",
+    ]
+    assert json.loads(through.entries[-1].to_json())["payload"]["content"] == "dup newer"
+    assert json.loads(through.entries[3].to_json())["payload"]["content"] == "dup older"
+
+    assert [
+        entry.id for entry in read_transcript_page(directory, before_id="dup", limit=1).entries
+    ] == ["row-00003"]
+
+
 @pytest.mark.asyncio
 async def test_custom_entries_ignored_by_replay(transcript):
     await transcript.append_message(Message.user("hi"))

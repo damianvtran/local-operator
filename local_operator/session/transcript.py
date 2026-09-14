@@ -417,33 +417,54 @@ def _iter_complete_lines_backward(
     boundaries) and about when to stop. Sharing the split keeps the one trap in
     one place; sharing the loop would fuse two different stop conditions.
 
-    THE TRAP: ``pending`` is the bytes after the last-read chunk that have NOT
-    yet been split into rows. It only ever grows by one chunk and is split
-    exactly once, when a row boundary lands inside it — so a row larger than a
-    chunk (the 256 KiB-1 MiB bookkeeping rows in the fixtures) costs one join,
-    not one re-split per chunk. The first version of the suffix reader re-split
-    the carried tail every step and the no-compaction fallback over a 100 MB
-    file went quadratic, slower than the forward parse it replaces.
+    THE TRAP, and it is the same one twice: the bytes of a row larger than a
+    chunk must cost ONE pass, never one copy per chunk. So the fragments of a row
+    whose head is still unread are carried in a LIST and joined exactly once — in
+    the chunk that turns out to hold the row's terminating newline (``chunk[:b]``
+    is the head, the carried fragments are the contiguous tail behind it).
+
+    Both halves of that were wrong at first, in this function and in the suffix
+    reader it was extracted from: the first version re-SPLIT the carried tail on
+    every step (quadratic in the row's size), and the fix for that still
+    re-COPIED it on every step via ``pending = chunk + pending`` — measured by
+    review on a single row at EOF, 32 MiB 0.036 s -> 64 MiB 0.289 s -> 128 MiB
+    1.654 s against a 0.024 s single-read floor, i.e. the quadratic survived as
+    an extra copy per chunk and the page path was 2.6x SLOWER than the forward
+    reader it replaces once a row reached tens of MB. Accumulating the fragments
+    and joining once restores the O(R) this docstring claims: one pass over the
+    row's bytes, however many chunks it spans.
     """
     position = end_of_file
-    pending = b""
+    # Fragments of one row, in READ order (newest first), each piece contiguous
+    # with the next. Never joined until the boundary that ends the row arrives.
+    carried: list[bytes] = []
     while True:
         chunk_start = max(0, position - chunk_bytes)
         handle.seek(chunk_start)
-        pending = handle.read(position - chunk_start) + pending
+        chunk = handle.read(position - chunk_start)
         position = chunk_start
         if position > 0:
-            boundary = pending.find(b"\n")
+            boundary = chunk.find(b"\n")
             if boundary < 0:
-                # No complete row yet; the whole buffer is a row's tail.
+                # No row ends in this chunk: all of it is row tail, and it is
+                # contiguous with what is already carried. Keep it WITHOUT
+                # copying the fragments held so far.
+                carried.append(chunk)
                 continue
             # Everything before the first newline is the tail of a row whose
-            # head is still unread; keep it for the next chunk.
-            complete = pending[boundary + 1 :].split(b"\n")
-            pending = pending[:boundary]
+            # head is still unread; keep it for the next chunk. Everything
+            # after it are complete rows, except the last one, which continues
+            # into the carried fragments (a newline is one byte and cannot
+            # straddle a boundary, so searching this chunk alone is exact).
+            complete = chunk[boundary + 1 :].split(b"\n")
+            if carried:
+                complete[-1] += b"".join(reversed(carried))
+            carried = [chunk[:boundary]]
         else:
-            complete = pending.split(b"\n")
-            pending = b""
+            complete = chunk.split(b"\n")
+            if carried:
+                complete[-1] += b"".join(reversed(carried))
+            carried = []
         complete.reverse()
         yield position, complete
         if position == 0:
@@ -460,15 +481,31 @@ def read_transcript_page(
     """Read a tail page, or the page immediately before ``before_id``.
 
     The read runs BACKWARD from EOF in chunks, one
-    :func:`_iter_complete_lines_backward` pair at a time, so its cost is
-    proportional to the page plus the distance from EOF to a requested cursor —
-    never to the whole journal. It used to scan forward from byte 0 and
-    JSON-decode every row: on a real 243 MB conversation the desktop open path
-    spent 1.7 s and read the whole file to produce the same 100 rows this
-    returns in milliseconds, and every ``loadOlder`` page re-paid the scan from
-    byte 0. The cursor stays an ID rather than a byte offset because
-    ``compact_file`` replaces the file atomically and old offsets become lies,
-    so the read stays stateless — only its direction changed.
+    :func:`_iter_complete_lines_backward` pair at a time, so its cost is the page
+    plus the distance from EOF to a requested cursor. It used to scan forward
+    from byte 0 and JSON-decode every row: on a real 243 MB conversation the
+    desktop open path spent 1.7 s and read the whole file to produce the same
+    100 rows this returns in milliseconds, and every ``loadOlder`` page re-paid
+    the scan from byte 0. The cursor stays an ID rather than a byte offset
+    because ``compact_file`` replaces the file atomically and old offsets become
+    lies, so the read stays stateless — only its direction changed.
+
+    WHICH PAGES THAT MAKES CHEAP, stated so this cannot read as a promise the
+    code does not keep. The tail page — no cursor, which is what an open asks
+    for — costs the chunk that carries it. A ``before_id`` page costs the bytes
+    between its cursor and EOF, because locating an id without an index means
+    walking to it, and the walk starts at the end. So a cursor near the file's
+    HEAD costs the whole journal read backward, which is exactly the read the
+    forward scan performed (0.011 s -> 4.05 s on the 70 MB copy in the PR's own
+    table, and a reviewer's 20 000-row journal: 0.000 s -> 0.453 s). That is the
+    mirror image of the reader this replaces, per-page worst case for per-page
+    worst case: paging from the tail to the top costs the same bytes in total
+    either way (Σ(EOF − cursor) ≈ Σ(cursor) over symmetric page positions).
+    What changed is WHICH pages are cheap, and the ones a reader pays are the
+    tail and the first scrolls back. A bounded walk with a forward fallback, or
+    a cursor->offset index, would fix the deep case; the index would have to be
+    maintained across ``compact_file`` rewriting the file, so it is deliberately
+    not built here and the worst case is named instead.
 
     Contract, unchanged from the forward implementation: ``before_id`` is
     EXCLUDED and the page is the one immediately before it; ``through_id`` is
@@ -482,6 +519,23 @@ def read_transcript_page(
     missing ``through_id`` returns an empty reconciled page: a replaced file
     cannot satisfy that snapshot, and serving a newer tail under an older state
     cursor would silently fold unseen rows into the paired watermark.
+
+    TWO DELIBERATE, NAMED DIFFERENCES from the forward reader, both about inputs
+    that are already anomalous:
+
+    - A cursor id that appears MORE THAN ONCE resolves to the NEWEST occurrence,
+      not the oldest. Entry ids are ``uuid4().hex`` on the append path, so a
+      repeat means a corrupted or concatenated journal; the forward reader
+      stopped at whichever occurrence it met first — the oldest — and
+      reproducing that answer would mean walking to the file's start whenever an
+      id repeats, discarding the whole optimisation for the corrupt case that is
+      the only way to reach it. Row order is unaffected and the cursor row is
+      still never in the page, so nothing can loop on a duplicate.
+    - Rows are decoded with ``errors="replace"``, like
+      :func:`read_replay_suffix` already did. A byte-corrupt line is now dropped
+      as malformed instead of raising ``UnicodeDecodeError`` out of a display
+      read (a 500 on the desktop open). Robustness, not an accidental change:
+      the two readers of the same file no longer disagree about a damaged row.
     """
     if before_id is not None and through_id is not None:
         raise ValueError("choose before_id or through_id, not both")
