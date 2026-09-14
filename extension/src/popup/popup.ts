@@ -5,7 +5,8 @@ import {
   type AccessQueueEntry,
 } from "../access-queue";
 import type { BroadGrant } from "../origin-policy";
-import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
+import { DEFAULT_PORT, getLocal } from "../state";
+import { getPopupLocal, getPopupSession } from "./read-state";
 import { EXTENSION_UPDATE_NOTE, PROTO_VERSION } from "../protocol.gen";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
@@ -449,6 +450,20 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // and its copy tells the user to reload and open it again, so the next open is
 // precisely the one most likely to be a DIFFERENT card.
 //
+// `disconnected` is NOT pinned, for that same reason and by the same test, and
+// it is written down here because this branch's new catch makes arriving at it
+// from a pinned card (148px `connected`, 219px `pairing`) reachable from one
+// more failure mode. Its whole copy is "try again", so the next open is the one
+// most likely to be a different card — the daemon answered, or the read that
+// failed recovered — and a pin would charge that open the mis-size. This is a
+// DECLINED pin, not an oversight, and it differs from `unresponsive`'s case in
+// one way worth recording: no round has measured an arrival cost for this card
+// to weigh against the bet (this branch's stalled frames are 261.77px settling
+// down from a 344px stranded #pending, pinned on neither side), while the
+// conditional wedge pin above was tried on exactly that idea and measured
+// negative. If it is ever revisited, pin it from a measurement of the arrival,
+// not from symmetry with `standby`.
+//
 // THIS IS A TRADE, AND THESE ARE ITS NUMBERS. Measured from the seed a real
 // browser carried when this block was written (`86px`; it reads `148px` now
 // that the update advisory reserves a slot in the Connected card — see above),
@@ -573,7 +588,7 @@ function show(state: State): void {
     // real popup is a DOM timing fact: hiding a section with `display: none`
     // blurs the focused element ASYNCHRONOUSLY, a frame later, and every path
     // that leaves and re-enters the pairing state awaits at least once in
-    // between (render() awaits getSession() and /health). So by the time we are
+    // between (render() awaits its storage projections and /health). So by the time we are
     // back here the blur has always landed, `document.activeElement` is the
     // body, and the term cannot decide. Removed rather than kept as a
     // "cheap invariant", because a guard whose only justification is a race it
@@ -583,8 +598,30 @@ function show(state: State): void {
   pairingShown = state === "pairing";
 }
 
-async function daemonHealth(): Promise<Health | null> {
-  const { port = DEFAULT_PORT } = await getLocal();
+/** Paint the unreachable card with the copy the failure behind it can support.
+ *
+ * `#disconnected` is reached by two different failures and only one of them
+ * measured anything (popup.html carries both sentences, and why): a /health
+ * probe that answered nothing is a diagnosis, while renderOnce()'s own catch —
+ * a saved-state read that threw or stalled past CHROME_API_DEADLINE_MS —
+ * established nothing about the daemon, and can even have discarded a HEALTHY
+ * probe result (the third member of the Promise.all a render awaits IS the
+ * probe, and Promise.all rejects on the first rejection). Swapping two authored
+ * pairs rather than rewriting one paragraph's text keeps the shipped sentences
+ * in the markup and keeps the `lop browser status` chip on both paths. The
+ * Retry button is the same element either way: a failed state read needs it
+ * exactly as much as a dead daemon does. */
+function showDisconnected(measured: boolean): void {
+  for (const id of ["disconnected-title-measured", "disconnected-sub-measured"]) {
+    document.getElementById(id)?.classList.toggle("hidden", !measured);
+  }
+  for (const id of ["disconnected-title-unchecked", "disconnected-sub-unchecked"]) {
+    document.getElementById(id)?.classList.toggle("hidden", measured);
+  }
+  show("disconnected");
+}
+
+async function daemonHealth(port: number): Promise<Health | null> {
   try {
     // BOUNDED, because renders are serialised. An unbounded probe against a
     // daemon that accepts the TCP connection but never answers would suspend
@@ -611,8 +648,8 @@ async function daemonHealth(): Promise<Health | null> {
 
 // Renders are SERIALISED, never run concurrently.
 //
-// `render()` is async with two awaits before it paints (getSession, the real
-// /health fetch) and more on the connected path, and it is entered from six
+// `render()` awaits storage and the real /health fetch before it paints,
+// and it is entered from six
 // sites: module load, storage.onChanged, both Retry buttons, the post-pairing
 // path, moveQueue() and decide(). Unserialised, a render that STARTS first can
 // FINISH last and repaint a state older than one already on screen. Measured in
@@ -660,8 +697,29 @@ async function renderOnce(): Promise<void> {
   // A pending site decision wins the popup: it is the one thing the user must
   // act on (findings U2/D1). The daemon reports it in /health so the popup
   // shows it even after a worker restart.
-  const session = await getSession();
-  const health = await daemonHealth();
+  // Start independent reads together, and probe as soon as the port arrives.
+  // All data is gathered BEFORE any latch/DOM mutation; the existing render
+  // scheduler still admits exactly one painter. No cached connected authority,
+  // and no missing consent state silently treated as an empty queue on failure.
+  let snapshot;
+  try {
+    const localRead = getPopupLocal();
+    snapshot = await Promise.all([
+      getPopupSession(),
+      localRead,
+      localRead.then(({ port = DEFAULT_PORT }) => daemonHealth(port)),
+    ]);
+  } catch (error) {
+    // A stalled/rejected read must release the render latch and leave a Retry,
+    // not strand #pending or keep a previously connected card authoritative.
+    // NOT the measured diagnosis: this path never established that the daemon
+    // is unreachable, and its own /health answer may be one of the results
+    // Promise.all just discarded.
+    console.warn("popup state read failed", error);
+    showDisconnected(false);
+    return;
+  }
+  const [session, { allowAllSites }, health] = snapshot;
   const queue = liveQueue(session.accessQueue, Date.now());
   const selected = selectEntry(queue, selectedEntryId);
   selectedEntryId = selected?.entryId;
@@ -834,12 +892,13 @@ async function renderOnce(): Promise<void> {
   // "Update needed" rather than sending the user back to code entry (D2).
   // `revoked` is the same channel's second fact: the worker saw 4003, i.e. this
   // install was UNPAIRED rather than never paired (UX round 3, U5).
-  const { connState, revoked } = (await chrome.storage.session.get([
-    "connState",
-    "revoked",
-  ])) as { connState?: string; revoked?: boolean };
+  const { connState, revoked } = session;
   if (!health) {
-    show(connState === "incompatible" ? "incompatible" : "disconnected");
+    // The probe DID answer for nothing here (a refusal, a non-ok response, or
+    // its own timeout), so this card may carry the diagnosis — the copy the
+    // catch above must not use.
+    if (connState === "incompatible") show("incompatible");
+    else showDisconnected(true);
     return;
   }
   if (connState === "incompatible") {
@@ -1033,14 +1092,13 @@ async function renderOnce(): Promise<void> {
     const detail = document.getElementById("connected-detail");
     // The all-sites switch means no prompt will ever appear; say so here so
     // the popup does not merely look idle while the agent roams.
-    const { allowAllSites } = await getLocal();
     document.getElementById("connected-all-sites")?.classList.toggle("hidden", allowAllSites !== true);
     if (detail && label) {
       const url = health.current_url;
       // Parallel sessions can each drive their own tab now; the card stays a
       // one-line status (no list, no redesign), so with several surfaces the
       // label carries the count and the trough the most recently driven URL.
-      const surfaceCount = Object.keys(await getSurfaces()).length;
+      const surfaceCount = Object.keys(session.surfaces ?? {}).length;
       if (url) {
         label.textContent =
           surfaceCount > 1 ? `Driving ${surfaceCount} tabs` : health.current_title || "Driving";
@@ -1504,7 +1562,7 @@ function renderQueueControls(queue: AccessQueueEntry[], selected: AccessQueueEnt
 }
 
 async function moveQueue(delta: -1 | 1): Promise<void> {
-  const { accessQueue } = await getSession();
+  const { accessQueue } = await getPopupSession();
   const queue = liveQueue(accessQueue, Date.now());
   selectedEntryId = adjacentEntryId(queue, selectedEntryId, delta);
   await render();
@@ -1655,7 +1713,7 @@ async function decideOnce(decision: OriginDecision): Promise<void> {
       // "Request changed." interstitial: looping it on every click was the
       // reported bug. A rejection WITH an id is a real miss — replaced or
       // expired — and gets the matching notice.
-      const { accessQueue } = await getSession();
+      const { accessQueue } = await getPopupSession();
       const originStillPending = liveQueue(accessQueue, Date.now()).some(
         (entry) => entry.origin === origin,
       );

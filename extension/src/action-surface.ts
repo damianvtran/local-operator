@@ -1,4 +1,5 @@
 import type { QueueSnapshot } from "./approval-store";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 
 export interface ActionSurfaceFailure {
   operation: string;
@@ -38,7 +39,17 @@ export async function reconcileActionSurface(
     ["action title", () => chrome.action.setTitle({ title })],
     ["pending observer", () => observer?.(snapshot)],
   ];
-  const settled = await Promise.allSettled(operations.map(([, operation]) => Promise.resolve().then(operation)));
+  // allSettled isolates rejection, not silence. Startup awaits reconciliation
+  // before dialing, and consent awaits it AFTER the durable grant transaction:
+  // neither may hang forever on a cosmetic Chrome API. Bound each existing
+  // operation without retrying/launching replacement writes on timeout (Chrome
+  // cannot cancel them, so a retry could overtake a later queue snapshot).
+  // No grant/ownership mutation is abandoned or moved out of its serial lane.
+  const settled = await Promise.allSettled(operations.map(([name, operation]) => deadline(
+    Promise.resolve().then(operation),
+    CHROME_API_DEADLINE_MS,
+    `approval action surface: ${name}`,
+  )));
   const failures: ActionSurfaceFailure[] = [];
   settled.forEach((result, index) => {
     if (result.status === "rejected") {
