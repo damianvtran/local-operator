@@ -187,10 +187,22 @@ def _candidate_keys(inner: str) -> list[str]:
     while the plain-name segments catch a key the shell glued an operator or a
     suffix onto, as in ``${TOKEN-SUB}`` or ``${TOKEN#x}``, where the maximal run
     would be ``TOKEN-SUB`` and would match nothing.
+
+    The raw ``inner`` and its stripped form are candidates too, and that is not
+    redundant: the store accepts ANY key, so ``MY KEY``, ``API:KEY`` and
+    ``KEY#2`` are names Settings can hold, and no run shape can spell them —
+    punctuation outside the run classes splits the text, so the fragment would
+    be handed over as a literal. Adding the whole fragment back makes the
+    predicate a strict superset of a plain ``inner`` test.
     """
     keys: list[str] = []
-    for key in (*_NAME_RUN_RE.findall(inner), *_NAME_RE.findall(inner)):
-        if key not in keys:
+    for key in (
+        *_NAME_RUN_RE.findall(inner),
+        *_NAME_RE.findall(inner),
+        inner,
+        inner.strip(),
+    ):
+        if key and key not in keys:
             keys.append(key)
     return keys
 
