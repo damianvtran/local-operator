@@ -1094,6 +1094,27 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     ),
     _DoorRoute("snapshot", "GET", "/v1/desktop/sessions/{session_id}"),
     _DoorRoute("history", "GET", "/v1/desktop/sessions/{session_id}/history"),
+    # The session's code memory (added upstream while this branch was in review:
+    # the completeness test below is what reported it, which is the property the
+    # round-2 MAJOR asked for — a route added under the door fails HERE).
+    _DoorRoute("variables", "GET", "/v1/desktop/sessions/{session_id}/variables"),
+    _DoorRoute(
+        "create_variable",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/variables",
+        {"key": "counter", "value": "1", "type": "int"},
+    ),
+    _DoorRoute(
+        "update_variable",
+        "PATCH",
+        "/v1/desktop/sessions/{session_id}/variables/{key}",
+        {"value": "2", "type": "int"},
+    ),
+    _DoorRoute(
+        "delete_variable",
+        "DELETE",
+        "/v1/desktop/sessions/{session_id}/variables/{key}",
+    ),
     _DoorRoute("events", "GET", "/v1/desktop/sessions/{session_id}/events"),
     _DoorRoute("failovers", "GET", "/v1/desktop/sessions/{session_id}/failovers"),
     _DoorRoute(
@@ -1373,17 +1394,20 @@ def _claimed_receipts(config_dir: Path) -> set[str]:
 
 
 def _fill(value: Any, session_id: str) -> Any:
-    """Replace the placeholder a row uses where the session id is only known at run time."""
+    """Replace the placeholders a row uses where the rest is only known at run time."""
     if isinstance(value, dict):
         return {key: _fill(item, session_id) for key, item in value.items()}
     if isinstance(value, list):
         return [_fill(item, session_id) for item in value]
-    return session_id if value == "SESSION_ID" else value
+    if value == "SESSION_ID":
+        return session_id
+    return "counter" if value == "KEY" else value
 
 
 def _request_for(route: _DoorRoute, session_id: str) -> tuple[str, str, dict[str, Any] | None]:
     """A row as ``(method, url, payload)``, with the session id substituted."""
     url = route.template.replace("{session_id}", session_id).replace("{aside_id}", ASIDE_ID)
+    url = url.replace("{key}", "counter")
     if route.session_in_query:
         url += f"?session_id={session_id}"
     if route.query:
