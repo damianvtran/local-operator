@@ -51,6 +51,8 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
+from local_operator import buildwatch as _buildwatch
+
 if TYPE_CHECKING:
     from local_operator.update import BuildStamp
 
@@ -77,28 +79,26 @@ DEFAULT_GRACE_S = 3.0
 #: layer, and a knob would let the two drift apart.
 WARM_WINDOW_S = 90.0
 
-#: How often an idle runtime re-reads the install on disk. Cheap (one
-#: dist-info lookup + one 60-byte file), but there is no reason to do it on
-#: every 250 ms reaper tick: a runtime that is already idle can afford to
-#: notice an update within a few seconds, and a busy one never checks.
-BUILD_CHECK_S = 5.0
-
-#: A freshly written install is not a stable one: ``lop-update`` runs
-#: ``uv tool install --force`` (which rewrites site-packages over several
-#: seconds) and THEN writes ``.lop-source``. Retiring against a half-written
-#: tree would spawn a successor that imports a mix of two builds. Require
-#: the marker's mtime to be at least this old before acting on it.
-#: Env-overridable ONLY so the e2e stage can flip a fake marker and observe
-#: the retirement within its budget; production never sets the variable.
-BUILD_SETTLE_S = 10.0
-
-#: After the refresh predicate first holds, sleep a uniform random slice of
-#: this before re-checking and retiring. This host runs ~16 resident
-#: runtimes; ``lop-update`` would otherwise have all of them notice on the
-#: same tick and their viewers spawn sixteen successors within a second.
-#: Spread over 20 s the eager re-engages average ≤1 spawn/s. Same env
-#: override rule as the settle: test-only.
-BUILD_STAGGER_S = 20.0
+# The build-watch timings, the env readers that shorten them for the e2e stage,
+# and the changed-and-settled comparison `_build_changed` live in ONE module that
+# the ``serve`` daemon (`server/retire.py`) imports too — a second copy of a
+# settle rule would be free to disagree with this one about the same torn
+# install (see that module's docstring).
+#
+# Bound here under the private names this module has always published
+# (`_build_changed`, `_build_settle_seconds`, …) because `session.runtime.server`
+# and this module's own tests reach for them HERE; a definition moving does not
+# move its name. Assignments rather than `import ... as`, because they are
+# re-exports of a module whose own names are public: the alias is this module's
+# historical spelling, not a second definition.
+BUILD_CHECK_S = _buildwatch.BUILD_CHECK_S
+BUILD_SETTLE_S = _buildwatch.BUILD_SETTLE_S
+BUILD_STAGGER_S = _buildwatch.BUILD_STAGGER_S
+_build_changed = _buildwatch.build_changed
+_build_pair = _buildwatch.build_pair
+_build_prefix = _buildwatch.build_prefix
+_build_settle_seconds = _buildwatch.build_settle_seconds
+_build_stagger_seconds = _buildwatch.build_stagger_seconds
 
 
 def _grace_seconds() -> float:
@@ -108,88 +108,6 @@ def _grace_seconds() -> float:
     except ValueError:
         return DEFAULT_GRACE_S
     return value if value > 0 else DEFAULT_GRACE_S
-
-
-def _positive_seconds(raw: str, default: float) -> float:
-    """``raw`` as a positive float, else ``default``.
-
-    Same shape as ``_grace_seconds``: the refresh timings are constants in
-    production and only the e2e stage shortens them (``LOP_BUILD_SETTLE_S``,
-    ``LOP_BUILD_STAGGER_S``), so a malformed or non-positive value falls back
-    to the constant rather than disabling the protection it names. ``0`` is
-    deliberately NOT accepted for the settle: a zero settle is the torn-tree
-    race this constant exists to prevent, and a test that wants "fast" can
-    say ``0.1``. The two readers below spell their variable names out as
-    literals so the ambient-environment audit (``test_ambient_env_isolation``)
-    can see them.
-    """
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
-def _build_settle_seconds() -> float:
-    return _positive_seconds(os.environ.get("LOP_BUILD_SETTLE_S", ""), BUILD_SETTLE_S)
-
-
-def _build_stagger_seconds() -> float:
-    return _positive_seconds(os.environ.get("LOP_BUILD_STAGGER_S", ""), BUILD_STAGGER_S)
-
-
-def _build_prefix() -> str | None:
-    """Where to read the install stamp from: ``sys.prefix`` in production.
-
-    ``LOP_BUILD_PREFIX`` exists ONLY so the e2e stage can point a real
-    ``process.py`` at a temp directory carrying a fake ``.lop-source`` and
-    flip it under the runtime. Nothing outside ``tests/e2e`` sets it, and a
-    production runtime that inherited it by accident would merely compare
-    against a marker that never changes — it can never retire early.
-    """
-    return os.environ.get("LOP_BUILD_PREFIX") or None
-
-
-def _build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
-    """The build now on disk, if it differs from ``boot`` AND has settled.
-
-    ``None`` means "nothing to do": same stamp, an unreadable stamp, a boot
-    stamp that was never captured (a reduced test server), or a marker still
-    inside the settle window (see ``BUILD_SETTLE_S``). Editable checkouts have
-    no ``.lop-source`` and a constant version, so they never trip this — by
-    design, matching ``design-build-skew.md`` §6.5: a developer's worktree
-    runtime must not retire because they touched a file.
-    """
-    if boot is None:
-        return None
-    from local_operator import update as update_mod
-
-    prefix = _build_prefix()
-    try:
-        on_disk = update_mod.installed_build(prefix)
-    except Exception:  # noqa: BLE001 — an unreadable stamp is "no change"
-        logger.debug("build stamp unreadable; no refresh", exc_info=True)
-        return None
-    if on_disk == boot:
-        return None
-    age = update_mod.build_marker_age_s(prefix)
-    if age is None or age < _build_settle_seconds():
-        # Younger than the settle, or unknowable: the install may still be
-        # mid-write. Try again next check; the marker only gets older.
-        return None
-    return on_disk
-
-
-def _build_pair(boot: "BuildStamp | None", newer: "BuildStamp") -> str:
-    """``" (old → new)"`` for the cut-off reason, or ``""`` without a boot stamp.
-
-    The build pair is what makes a retirement self-explaining to whoever reads
-    the reason later: "the runtime retired" is only actionable when it names
-    which build it left for.
-    """
-    if boot is None:
-        return ""
-    return f" ({boot.label()} → {newer.label()})"
 
 
 def _should_refresh(handle: object, boot: "BuildStamp | None") -> "BuildStamp | None":

@@ -3184,12 +3184,34 @@ def sessions_command(args: argparse.Namespace) -> int:
     # unconditionally would re-flow the live-only listing every existing
     # consumer parses, so it is appended only when the flag brought stored rows.
     show_stored = any(row["state"] == "stored" for row in rows)
+    # WHY is the column THIS change adds, and it follows LAST_ACTIVE's precedent
+    # for the same reason: it is appended only when some row has something to
+    # say, so a healthy listing parses exactly as it did before. It is also the
+    # answer to the one question the 2026-09-13 kill wave left the operator
+    # unable to ask from a shell — "why did this session die, and did I ask for
+    # it?" — because a killed runtime publishes nothing and its reason survives
+    # only in the attention store (``completion_reason``).
+    from local_operator.incidents import outcome_summary
+
+    why = {
+        row["session_id"]: (
+            outcome_summary(str(row.get("completion_reason") or ""))
+            # A ``complete`` row has no why: its reason is a success sentence,
+            # and a column that explains every healthy session says nothing.
+            if row.get("completion_kind") not in ("", "complete")
+            else ""
+        )
+        for row in rows
+    }
+    show_why = any(why.values())
     header = (
         f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
         f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+    if show_why:
+        header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3210,8 +3232,35 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+        if show_why:
+            cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
+            line += f" {cell:<{WHY_COLUMN_WIDTH}}"
         print(line)
     return 0
+
+
+def _clamp_reason_cell(summary: str) -> str:
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH`, marked when it had to cut.
+
+    A silent slice is indistinguishable from a complete sentence, and this
+    column's whole purpose is to answer "why did this session die". A slice at
+    exactly the width used to drop the last word (``CUT_OFF_UNKNOWN`` is 58
+    cells, so the row ended ``...the cause could not be `` with ``determined``
+    gone) and read as a finished sentence that happens to stop mid-clause. The
+    previous worst case, the involuntary ``runtime-killed`` reason at 47 cells,
+    filled the column exactly — which is why nothing clipped until this branch
+    added a longer reason, so the marker is what keeps the next longer sentence
+    honest rather than what fixes one string.
+
+    The ellipsis is INSIDE the budget, so the table's fixed width and every
+    other row's columns are unchanged; a summary that already fits is returned
+    byte-for-byte, because a fitting cell must not pay for a cut that did not
+    happen. The full sentence stays one flag away in ``--json``'s
+    ``completion_reason``, which is what this column is a summary OF.
+    """
+    if len(summary) <= WHY_COLUMN_WIDTH:
+        return summary
+    return summary[: WHY_COLUMN_WIDTH - 1] + "…"
 
 
 def _wake_create(args: argparse.Namespace) -> int:
@@ -4014,6 +4063,16 @@ def _elide_id(session_id: str, width: int) -> str:
     return session_id[: max(width - 1, 1)] + "…"
 
 
+#: Width of `lop sessions`' trailing WHY column, in characters.
+#:
+#: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
+#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: is 96 cells — and an unbounded column re-flows the whole table on a normal
+#: terminal. The full text is one flag away in ``--json``'s
+#: ``completion_reason`` and is what a script should read.
+WHY_COLUMN_WIDTH = 48
+
+
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
 #: Every continuation line on that surface already indents to it, so a new
 #: line that wraps at column 0 reads as a different block (round 2, D13).
@@ -4197,6 +4256,7 @@ def stop_command(args: argparse.Namespace) -> int:
                 only_pids={rec.pid for rec in targets},
                 force=args.force,
                 _root=config_dir(),
+                _command="lop stop --all",
             )
         )
         return _report_stops(outcomes, args.json, summary=True)
@@ -4212,7 +4272,15 @@ def stop_command(args: argparse.Namespace) -> int:
         return 1
 
     outcome = asyncio.run(
-        control.stop_session(record, timeout_s=timeout_s, force=args.force, _root=config_dir())
+        control.stop_session(
+            record,
+            timeout_s=timeout_s,
+            force=args.force,
+            _root=config_dir(),
+            # The artifact's point is naming WHO stopped it, so the CLI records
+            # what the user typed rather than the function they reached.
+            _command="lop stop",
+        )
     )
     return _report_stops([outcome], args.json)
 

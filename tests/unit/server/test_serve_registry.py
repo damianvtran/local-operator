@@ -76,6 +76,11 @@ def test_publish_is_atomic_and_0600_under_a_0700_directory(tmp_path: Path) -> No
     # And the payload is the record, whole.
     data = json.loads(path.read_text())
     assert data["instance_id"] == "instance-under-test"
+    # The whole payload, field by field. ``retiring_from``/``retiring_to`` are
+    # here because the retirement poll writes them into a LIVE record
+    # (``server/retire.py``), so a reader of this file has to find them — and
+    # they must be ``""`` for a daemon that is not leaving, which this test's
+    # freshly built record is.
     assert set(data) == {
         "pid",
         "host",
@@ -89,7 +94,10 @@ def test_publish_is_atomic_and_0600_under_a_0700_directory(tmp_path: Path) -> No
         "claim_key",
         "started_at",
         "heartbeat_at",
+        "retiring_from",
+        "retiring_to",
     }
+    assert (data["retiring_from"], data["retiring_to"]) == ("", "")
 
 
 def test_unpublish_is_best_effort_and_namespace_scoped(tmp_path: Path, monkeypatch) -> None:

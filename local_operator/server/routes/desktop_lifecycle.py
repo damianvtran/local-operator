@@ -397,6 +397,17 @@ async def stop(body: Stop, request: Request):
         return {"data": {"sessions": rows}}
 
     async with errors():
+        # THE ORDERING ASK, distinct from the door below and the reason it is a
+        # SECOND call rather than a redundant one: this handler claims a durable
+        # receipt (`receipts(request).run`) BEFORE `execute` takes a bridge, and a
+        # claimed receipt whose operation never ran is INDETERMINATE for the
+        # client's retry (`DesktopReceipts._claim`, `retry_safe=False` —
+        # "reconcile session state before issuing a new request"), against a config
+        # dir the successor SHARES. A latched daemon that answered the typed
+        # `503 daemon-retiring` only after claiming the receipt would leave the
+        # client unable to do what that answer tells it to do (retry against the
+        # successor). The door still governs admission; this governs ORDER.
+        host(request).assert_admitting()
         return reply(
             await receipts(request).run("stop:" + body.request_id, body.model_dump(), execute)
         )
@@ -422,14 +433,26 @@ async def aside(session_id: str, body: AsideInput, request: Request):
     if len(turns) >= 32:
         raise HTTPException(422, "Start a new aside after 16 exchanges")
     turns.append(Message.user(body.text))
-    if previous is not None:
-        # A continuation owns the prefix. Keeping the old panel adoptable lets
-        # two requests promote the same exchange under distinct receipt IDs.
-        previous.adopted = True
-    entry = Aside(session_id, turns, time.monotonic())
-    values[body.request_id] = entry
+    entry: Aside | None = None
     try:
         async with errors(), host(request).session(session_id) as bridge:
+            # THE STATE MOVES IN HERE, AFTER THE DOOR, and that ordering is the
+            # whole reason this handler is written this way: ``values[...]`` and
+            # ``previous.adopted`` are the aside store's admission, they used to be
+            # written BEFORE the bridge was taken, and a latched daemon would then
+            # refuse a request that had already claimed its ``request_id`` — so the
+            # client's retry against the successor answered 409 "This aside request
+            # was already used" (review round 2 measured exactly that shape on
+            # ``/asides``: 409, past the admission question). Refusing before the
+            # claim costs nothing here because ``complete_aside`` is the only thing
+            # that needs the entry, and it runs after the door.
+            if previous is not None:
+                # A continuation owns the prefix. Keeping the old panel adoptable
+                # lets two requests promote the same exchange under distinct
+                # receipt IDs.
+                previous.adopted = True
+            entry = Aside(session_id, turns, time.monotonic())
+            values[body.request_id] = entry
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
             answer = await bridge.remote.complete_aside(turns)
@@ -438,9 +461,13 @@ async def aside(session_id: str, body: AsideInput, request: Request):
                 {"data": {"aside_id": body.request_id, "text": answer, "off_record": True}}
             )
     finally:
-        entry.running = False
-        if previous is not None and len(turns) % 2:
-            previous.adopted = False
+        # Guarded on the entry: a refusal at the door raises out of the block above
+        # before anything was claimed, and un-claiming state that was never claimed
+        # would be the same half-applied write this reordering exists to remove.
+        if entry is not None:
+            entry.running = False
+            if previous is not None and len(turns) % 2:
+                previous.adopted = False
 
 
 @router.get(
@@ -499,6 +526,10 @@ async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
         return {"data": {"aside_id": aside_id, "status": "adopted"}}
 
     async with errors():
+        # The ordering ask, for the reason spelled out on ``stop`` above: this
+        # route claims its receipt before ``execute`` reaches the door, and a
+        # claimed-but-unfinished receipt is indeterminate for the client's retry.
+        host(request).assert_admitting()
         return reply(
             await receipts(request).run(
                 session_id + ":adopt:" + body.request_id,

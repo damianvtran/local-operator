@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import copy
 import hmac
 import inspect
@@ -671,6 +672,16 @@ _GRACEFUL_DROP_REASONS = frozenset(
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
+#: How long a thread-mode serve loop waits between close-latch re-checks.
+#: ``_request_close`` wakes the loop directly (``_wake_close_wait``), so this is
+#: a BACKSTOP rather than the mechanism: work is signalled, not polled — the
+#: same choice ``analytics/recorder.py`` makes when it wakes its writer with a
+#: queue sentinel instead of sleeping on a flag. A signal can still be missed (a
+#: close that lands before the loop published its event, or a loop that has
+#: already stopped), and a serve loop that parks forever would hang the join in
+#: ``close()`` and leave the listener bound, so the wait keeps a timeout.
+_CLOSE_WAIT_BACKSTOP_S = 0.2
+
 _PAYLOAD_OPS = {
     "slash_result",
     "cancel_subagents",
@@ -1148,6 +1159,14 @@ class RuntimeServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
+        #: Loop-side wake for ``_closed``. Created ON the runtime loop by
+        #: ``_closed_wait``, awaited there and set by ``_request_close`` from
+        #: whatever thread latches the close, via ``call_soon_threadsafe`` — an
+        #: ``asyncio.Event`` may not be touched from a foreign thread directly.
+        #: ``None`` outside thread mode (nothing parks, so nothing to wake) and
+        #: until ``_closed_wait`` publishes it; a close that lands first finds
+        #: the latch already set and never parks at all.
+        self._close_event: asyncio.Event | None = None
         self._push_scheduled = False
         # One warning per contiguous run of oversized frames, not one per
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
@@ -1434,6 +1453,7 @@ class RuntimeServer:
         if self._closed.is_set():
             return
         self._closed.set()
+        self._wake_close_wait()
         if self._unsubscribe is not None:
             try:
                 self._unsubscribe()
@@ -1447,11 +1467,64 @@ class RuntimeServer:
                 logger.debug("runtime event unsubscribe failed", exc_info=True)
             self._unsubscribe_events = None
 
+    def _wake_close_wait(self) -> None:
+        """Wake the thread-mode serve loop parked on its close event.
+
+        Safe from any thread, like every other caller of ``_request_close``:
+        ``call_soon_threadsafe`` is the only thread-safe way to touch another
+        loop's objects, and on the loop's own thread it merely schedules for the
+        next iteration. Both guards are load-bearing rather than defensive —
+        ``_close_event`` is None outside thread mode and until ``_closed_wait``
+        publishes it, and a loop that has already stopped raises ``RuntimeError``
+        from ``call_soon_threadsafe``. The 2.0 s join in ``close()`` covers both,
+        so this must never raise into a close.
+        """
+        event = self._close_event
+        loop = self._loop
+        if event is None or loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(event.set)
+
     def _on_runtime_loop(self) -> bool:
         try:
             return asyncio.get_running_loop() is self._loop
         except RuntimeError:
             return False
+
+    def _open_mcp_wiring_gate(self) -> None:
+        """Tell the session's deferred MCP wiring that the record is published.
+
+        The latch lives on the HANDLE (``ServingSessionHandle.
+        mcp_publication_gate``), read the same way this class reads every other
+        optional handle capability — ``subscribe_events``, ``refresh_attention``,
+        ``is_busy`` — so a handle that has none is inert rather than an error.
+        That covers every registrant constructed for a viewer or a test, and it
+        is why the gate is a handle attribute rather than a RuntimeServer
+        parameter: the runtime did not create the session and has no other
+        business naming its wiring.
+
+        WHAT THE LATCH IS, AND WHAT IT GUARANTEES: it is a
+        :class:`~local_operator.session.runtime.publication.PublicationGate`,
+        which binds the loop its waiting task runs on and hops with
+        ``call_soon_threadsafe`` when it is opened from anywhere else. So this
+        method is correct from the runtime's own thread (thread mode, via
+        ``start()``) as well as from the session's — the cross-thread case is
+        the latch's business rather than a caller's, which is the point of
+        using that class instead of a bare ``asyncio.Event``.
+
+        WHY IT EXISTS: the deferred wiring task's first instruction is a
+        synchronous import of the MCP SDK. A task starts at the loop's next free
+        instant, which in ``process.amain`` is the inbox drain BEFORE this
+        publisher runs, so on a machine with a server declared the import took
+        the loop for its full duration inside the pre-publication window and the
+        record waited behind it (measured +2.3 s, 14 of 14 runs). Setting the
+        latch here moves the wiring to the far side of publication, which is
+        what ``serving.spawn_owned_session`` states the design already promised.
+        """
+        gate = getattr(self._handle, "mcp_publication_gate", None)
+        if gate is not None:
+            gate.set()
 
     # -- the runtime's own loop -----------------------------------------------
 
@@ -1466,14 +1539,27 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
-        # Port 0: the OS picks; the record carries the number. Binding
-        # loopback only is the security invariant of the whole design.
-        self._server = await asyncio.start_server(
-            self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
-        )
-        port = self._server.sockets[0].getsockname()[1]
-        self._record.control_port = port
-        self._publisher = RecordPublisher(self._record, self._config_root)
+        try:
+            # Port 0: the OS picks; the record carries the number. Binding
+            # loopback only is the security invariant of the whole design.
+            self._server = await asyncio.start_server(
+                self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
+            )
+            port = self._server.sockets[0].getsockname()[1]
+            self._record.control_port = port
+            self._publisher = RecordPublisher(self._record, self._config_root)
+        finally:
+            # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
+            # not only the happy one. The record is written inside
+            # ``RecordPublisher.__init__``, so on the success path this is
+            # genuinely post-publication; a bind that raises reaches here too,
+            # and that case matters because ``_run`` (thread mode) swallows the
+            # exception and the process lives on — with no record and, without
+            # this, a latch shut for the session's life. MCP late beats MCP
+            # never, and the release cannot mask the failure: the exception
+            # still propagates.
+            # See ``RuntimeServer._open_mcp_wiring_gate``.
+            self._open_mcp_wiring_gate()
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.
         # Probed, not required — a handle without the capability leaves attach
@@ -1500,8 +1586,22 @@ class RuntimeServer:
             await self._shutdown_on_loop()
 
     async def _closed_wait(self) -> None:
+        """Park until the close latch flips, woken by :meth:`_request_close`.
+
+        This used to re-check the latch on a 200 ms ``sleep``, so ``close()`` —
+        which joins this thread — inherited the remainder of whatever interval
+        it landed in as pure latency, on every close. The event is created HERE,
+        on the loop that awaits it, and published to the cross-thread writer
+        immediately before parking; a close that beat the publication has
+        already set ``_closed``, so the loop condition below is false and it
+        never parks. The timeout is the backstop, not the read path; see
+        ``_CLOSE_WAIT_BACKSTOP_S``.
+        """
+        event = asyncio.Event()
+        self._close_event = event
         while not self._closed.is_set():
-            await asyncio.sleep(0.2)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(event.wait(), timeout=_CLOSE_WAIT_BACKSTOP_S)
 
     def _ensure_shutdown_task(self) -> asyncio.Task[None]:
         """Create the one teardown task; called only on the runtime loop."""

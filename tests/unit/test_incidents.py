@@ -281,3 +281,138 @@ def test_recovery_is_not_an_incident_type() -> None:
     contradiction = classify_incident(format_mcp_recovery_message("files", 3))
     assert contradiction.category == "mcp"
     assert "tools are gone" in contradiction.render()
+
+
+# ---------------------------------------------------------------------------
+# The stop attribution: one act, one vocabulary, read back intact
+# ---------------------------------------------------------------------------
+
+
+def test_a_deliberate_stops_attribution_speaks_the_receipts_language() -> None:
+    """Design round 1, D2/D3: the durable sentence must not spell a signal.
+
+    The operator reads the stop RECEIPT at the keypress — ``killed "X"`` for the
+    terminal rung, ``stopped "X" (sigterm)`` for the one before it — and the
+    durable row lands in the list beside that receipt, so ``SIGKILL`` there split
+    one act into two vocabularies on two surfaces a reader compares directly.
+    The rung is named in the receipt's nouns, and an unrecognised rung renders
+    as the neutral word rather than echoing the writer's token.
+    """
+    from local_operator.incidents import STOP_RUNG_LABELS, render_stop_attribution
+
+    assert STOP_RUNG_LABELS == {
+        "socket": "stopped on request",
+        "sigterm": "stopped with a signal",
+        "sigkill": "killed",
+    }
+    assert render_stop_attribution(rung="sigkill", command="lop stop") == (" (killed by lop stop)")
+    assert render_stop_attribution(rung="socket", command="/stop") == (
+        " (stopped on request by /stop)"
+    )
+    # A rung this build does not know: the operator's word, never the token.
+    assert render_stop_attribution(rung="future-rung", command="lop stop") == (
+        " (stopped by lop stop)"
+    )
+    for token in ("SIGKILL", "SIGTERM"):
+        assert token not in render_stop_attribution(rung="sigkill", command="lop stop")
+
+
+def test_the_killers_pid_is_labelled_because_the_neighbouring_one_is_not() -> None:
+    """D2: one token, two opposite referents, one list.
+
+    An error row's parenthetical names the runtime that DIED
+    (``attention._record_detail``: build, pid, started-at); a deliberate row's
+    names the process that killed it. Unlabelled, a reader comparing the two
+    concludes the same relationship about both.
+    """
+    from local_operator.incidents import render_stop_attribution
+
+    assert (
+        render_stop_attribution(rung="sigkill", killer_pid=40609) == " (killed by killer pid 40609)"
+    )
+    assert render_stop_attribution(rung="sigkill", command="/stop", killer_pid=40609) == (
+        " (killed by /stop, killer pid 40609)"
+    )
+
+
+def test_the_row_phrase_reads_back_out_of_the_durable_sentence() -> None:
+    """The INVERSE, pinned as a round trip: three surfaces have only the sentence.
+
+    ``rows.completion_notice`` and the sidebar entry are handed the stored reason
+    and nothing else, so ``stop_rung_phrase`` recovers the attribution from the
+    sentence and must spend it exactly when the ladder ESCALATED — a rung-1
+    request is what the word ``Interrupted`` already means, and appending its own
+    sentence would read ``Interrupted — the session was stopped by the user``.
+    """
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+        stop_rung_phrase,
+    )
+
+    def reason(rung: str, *, command: str = "lop stop", pid: object = 4242) -> str:
+        return render_cut_off_reason(
+            DELIBERATE_CUT_OFF_CAUSE,
+            detail=render_stop_attribution(rung=rung, command=command, killer_pid=pid),
+        )
+
+    assert stop_rung_phrase(reason("sigkill", command="/stop --all")) == "killed by /stop --all"
+    assert stop_rung_phrase(reason("sigterm")) == "stopped with a signal by lop stop"
+    # Rung 1 is the plain request, and an unrecognised rung has nothing the row
+    # does not already say.
+    assert stop_rung_phrase(reason("socket")) == ""
+    assert stop_rung_phrase(reason("future-rung")) == ""
+    # Not our sentence at all: a provider's prose, a pre-attribution reason, or
+    # an involuntary cause must all leave the surface printing what it did.
+    assert stop_rung_phrase("") == ""
+    assert stop_rung_phrase("the session was stopped by the user") == ""
+    assert stop_rung_phrase(render_cut_off_reason("runtime-killed")) == ""
+    assert stop_rung_phrase("429 Too Many Requests") == ""
+
+
+def test_the_list_column_explains_a_plain_request_the_row_word_covers() -> None:
+    """``outcome_summary`` for a surface with no deliberate word of its own.
+
+    ``lop sessions`` prints state, not ``Interrupted``, so its WHY column has to
+    say something for a stop on the plain request rung — and for a death nobody
+    asked for it is the reason's own first clause, with the build/pid
+    parenthetical left to the ``--json`` row.
+    """
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        outcome_summary,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    socket_stop = render_cut_off_reason(
+        DELIBERATE_CUT_OFF_CAUSE,
+        detail=render_stop_attribution(rung="socket", command="/stop", killer_pid=7),
+    )
+    assert outcome_summary(socket_stop) == "the session was stopped by the user"
+    escalated = render_cut_off_reason(
+        DELIBERATE_CUT_OFF_CAUSE,
+        detail=render_stop_attribution(rung="sigkill", command="/stop --all", killer_pid=7),
+    )
+    assert outcome_summary(escalated) == "killed by /stop --all"
+    killed = render_cut_off_reason("runtime-killed", detail=" (0.54.39@dec7933, pid 1)")
+    assert outcome_summary(killed) == (
+        "the runtime disappeared without exiting cleanly while this turn was running, "
+        "and nothing recorded a stop"
+    )
+
+
+def test_runtime_killed_says_nothing_recorded_a_stop() -> None:
+    """D4: the post-marker meaning of the token, in the sentence itself.
+
+    The row above a deliberate stop reads ``Interrupted``, so "asked for" versus
+    "never asked" is decided by this copy — and after this change that is
+    decidable from the artifacts rather than guessed at.
+    """
+    from local_operator.incidents import cause_from_reason, render_cut_off_reason
+
+    sentence = render_cut_off_reason("runtime-killed", detail=" (build, pid 1)")
+    assert "nothing recorded a stop" in sentence
+    # The inverse still recovers the token from the longer sentence.
+    assert cause_from_reason(sentence) == "runtime-killed"

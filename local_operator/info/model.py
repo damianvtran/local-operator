@@ -171,6 +171,22 @@ class SessionLine:
     #: never be summed as one. See :attr:`SessionsInfo.subagents_unreported`.
     subagents_running: int | None = None
     subagents_queued: int | None = None
+    #: The LAST STORED OUTCOME for this session, read from the attention store:
+    #: its kind (``complete`` / ``error`` / ``interrupted`` ...) and the reason
+    #: the harness recorded for it (``incidents.render_cut_off_reason``'s
+    #: sentence). Empty when the store has no row for the session.
+    #:
+    #: WHY IT LIVES HERE RATHER THAN ON THE RECORD. ``runtime-killed`` is the
+    #: token the 2026-09-13 kill wave reached the operator through, and the one
+    #: question that wave left unanswerable from a shell — "why did this session
+    #: die, and did I ask for it?" — needs the OUTCOME, which only the attention
+    #: store holds: a dead runtime publishes nothing, so its record is gone and
+    #: its reason outlives it in the store alone. The kind is carried beside the
+    #: reason so a reader never has to parse English to tell an involuntary death
+    #: from a stop somebody asked for (``incidents.is_deliberate_cause`` does that
+    #: from the cause, and the cause is recoverable from the reason).
+    completion_kind: str = ""
+    completion_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -326,6 +342,15 @@ class EnvInfo:
     mcp_settling: bool = False
     mcp_failures: tuple[tuple[str, str], ...] = ()
     approval_mode: str = ""
+    #: The TERMINAL theme name (the `tui.theme` scope) — an APP fact, not a host
+    #: probe: `collect_live` takes it as a parameter and the TUI supplies
+    #: `theme.current_theme()`. `docs/DESKTOP_API.md` keeps that scope distinct
+    #: from the desktop's own theme, so a read with no TUI behind it (the desktop
+    #: `/info` host view) has nothing to measure here and ships the default.
+    #: `""` is therefore this field's documented UNKNOWN spelling rather than a
+    #: value a reading could take — the name of a registered theme is never
+    #: empty, since `set_theme` raises on an unknown one — which is why the
+    #: desktop route does not null it the way it nulls `approval_mode`.
     theme: str = ""
     terminal_size: tuple[int, int] | None = None
     term: str = ""

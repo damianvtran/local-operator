@@ -88,10 +88,17 @@ def _fake_tui_module() -> types.ModuleType:
     ``types.ModuleType("local_operator.tui")`` alone has no ``__path__``, so
     the moment anything imports a SUBMODULE through it Python raises
     ``ModuleNotFoundError: ... is not a package``. That is not hypothetical
-    here: the CLI's viewer factory imports ``session.attached``, which reaches
-    ``session.frontend_state``, which imports ``local_operator.tui.costs`` —
-    so a bare stub turned the whole TUI launch path into an error return that
-    these tests then read as "the session was never built".
+    here: the CLI's viewer factory imports ``session.attached``, whose pricing
+    helpers import ``local_operator.tui.costs`` (function-locally, so at call
+    time rather than at import), and ``tui.costs`` is a SUBMODULE of the stub —
+    so a bare stub turns a viewer-path import into an error return that these
+    tests then read as "the session was never built".
+
+    ``session.frontend_state`` used to be the importer that made this bite at
+    module scope; it reads ``local_operator.model.costs`` now, which is why a
+    bare stub no longer breaks a plain ``import local_operator.session.attached``
+    (measured). The ``__path__`` stays: a submodule import through this stub is
+    still reachable from the viewer path, and the failure mode is the one above.
 
     Giving the stub the real package's ``__path__`` keeps submodule imports
     resolving against the real tree while ``run_tui`` stays faked, which is

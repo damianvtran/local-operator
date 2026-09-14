@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from local_operator.paths import config_dir
 
@@ -273,10 +273,16 @@ def _run_record_evidence(directory: Path) -> tuple[Any, Any]:
     """``(live_foreign_owner, dead_owner)`` for this conversation's records.
 
     Read RAW rather than through ``registry.scan``, and in ONE pass that returns
-    both facts, because ``scan`` UNLINKS every stale record it meets: a scan
+    both facts, because ``scan`` used to UNLINK every stale record it met: a scan
     performed first would destroy exactly the dead-owner evidence this
     classification depends on (the daemon's own sweep is a scan, so the ordering
-    is not hypothetical).
+    is not hypothetical). ``scan`` now MOVES a dead record to the run
+    directory's ``reaped/`` sidecar instead, and this reader reads BOTH
+    directories for that reason: the live directory is where an unreaped record
+    still sits, and the sidecar is where a sweep has already put it, so the
+    classification no longer depends on whether some other process happened to
+    sweep first (INCIDENT 2026-09-13, session ``5e109d459222``, which read as
+    "the cause could not be determined" for a death that had a recorded cause).
 
     ``live_foreign_owner`` is a live pid that is NOT this process. Excluding
     ourselves is load-bearing rather than tidiness: a successor runtime publishes
@@ -293,7 +299,11 @@ def _run_record_evidence(directory: Path) -> tuple[Any, Any]:
     try:
         if not run.is_dir():
             return None, None
-        paths = sorted(run.glob("*.json"))
+        # Both the live directory and the sidecar a ``scan`` moves dead records
+        # into. A record is in exactly one of them (the move is a rename), so
+        # a path appearing twice is impossible and no dedupe is needed.
+        reaped = run / registry.REAPED_DIRNAME
+        paths = sorted(run.glob("*.json")) + sorted(reaped.glob("*.json"))
     except OSError:
         return None, None
     for path in paths:
@@ -334,6 +344,113 @@ def _stopped_marker(directory: Path) -> bool:
     return bool(isinstance(entry, dict) and entry.get("stopped_at"))
 
 
+def _durable_stop_marker(directory: Path) -> dict[str, Any] | None:
+    """The durable stop marker a KILLER staged before an irreversible step.
+
+    Read from the CONVERSATION directory, not from a run directory derived from
+    a config root: the writer (``registry.write_stop_marker``) is handed the
+    same transcript directory this classifier starts from, so one spelling
+    keeps the two sides in step — and the marker must sit somewhere that
+    outlives the record it describes, because a clean stop unpublishes the
+    record and a sweep moves a dead one aside while the transcript directory
+    survives both. That durability is the whole reason this rung exists: at the
+    SIGKILL rung the target records nothing, so the file below is the only
+    artifact that can say the runtime was killed, by whom, and whether it was
+    asked for.
+    """
+    from local_operator.session.runtime import registry
+
+    return registry.read_stop_marker(directory)
+
+
+def _stop_marker_covers_run(
+    marker: dict[str, Any],
+    directory: Path,
+    dead: Any | None,
+    *,
+    run_started_at: float | None = None,
+) -> bool:
+    """Whether ``marker`` attests to the RUN this classification is about.
+
+    A marker is keyed to a RUN — ``(session_id, pid, started_at)`` — not to a
+    session, and this is where that is enforced. A session can be stopped
+    deliberately (marker naming sigkill), reopened, run again, and then die
+    involuntarily; without this check the SURVIVING marker would narrate the
+    later, unexplained death as the user's own act, which is the one misreading
+    a durable marker can introduce. So: the session id must be this
+    conversation's, and the marker has to be shown to describe THIS run by
+    whichever run key is available.
+
+    THE RUN KEY HAS TWO SOURCES, and neither may be skipped.
+
+    * A dead RECORD, when one survived: pid and start time must be the
+      marker's, which is the strongest form of the check.
+    * The run's own START, when there is no record at all — and there is no
+      record in the NORMAL rung-3 shape, because the ladder that wrote the
+      marker is the same ladder that unpublished the record
+      (``control._recover_record``), and because a sweep can move it to the
+      ``reaped/`` sidecar's retention bound. Skipping the check there (this
+      function used to ``return True``) let a marker from an EARLIER deliberate
+      stop of the same session narrate a LATER involuntary death as
+      ``interrupted``/``user-stop`` — naming the earlier run's killer — once the
+      sidecar's own bound evicted the record. That is a wrong-verdict hole in
+      the direction that HIDES a crash, reported as QA round 1's Q-1.
+
+    WHY ``at`` IS THE BOUND AND ``started_at`` IS NOT: ``started_at`` is the
+    TARGET PROCESS's start, which for any runtime that was already resident
+    when its turn began — the ordinary case — is EARLIER than the run, so
+    bounding on it would refuse legitimate markers. ``at`` is the moment the
+    killer staged the file, and a stop of THIS run necessarily happens after
+    this run started. A marker with no usable ``at`` keeps the old permissive
+    answer rather than inventing a refusal: no bound is no evidence, and
+    refusing on no evidence would delete the attribution rung 3 exists for.
+    """
+    if str(marker.get("session_id") or "") != directory.name:
+        return False
+    if dead is None:
+        return _marker_postdates_run(marker, run_started_at)
+    if int(marker.get("pid") or -1) != int(getattr(dead, "pid", -2) or -2):
+        return False
+    started = marker.get("started_at")
+    if _is_stamp(started):
+        return abs(float(started) - float(getattr(dead, "started_at", 0.0) or 0.0)) < (
+            _RUN_KEY_TOLERANCE_S
+        )
+    return True
+
+
+#: How far two readings of the SAME run key may differ, in seconds. The key is
+#: written by two processes (the killer stamps the marker, the target stamped
+#: its record) from the same clock, so this only absorbs rounding.
+_RUN_KEY_TOLERANCE_S = 1.0
+
+
+def _is_stamp(value: object) -> TypeGuard[float | int]:
+    """Whether ``value`` is a usable epoch stamp (``bool`` is an ``int``).
+
+    A ``TypeGuard`` rather than a plain ``bool`` so a caller that has already
+    asked can read the stamp without re-narrowing it: a ``dict.get`` returns
+    ``Any | None``, and ``float()`` of that is a type error the guard makes go
+    away instead of an inline ``isinstance`` chain repeated at each use.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0
+
+
+def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) -> bool:
+    """Whether a marker with NO record to compare against still fits this run.
+
+    See :func:`_stop_marker_covers_run` for why the bound is the marker's own
+    stamp and not the target's start time, and why an absent or unusable stamp
+    is permissive.
+    """
+    if run_started_at is None or not _is_stamp(marker.get("at")):
+        return True
+    # These fractional writer stamps order DIFFERENT events, unlike the two
+    # rounded copies of one process key compared above. Any look-behind here
+    # attributes a rapid re-engagement's death to the preceding turn's stop.
+    return float(marker["at"]) >= float(run_started_at)
+
+
 def _record_detail(record: Any) -> str:
     """A parenthetical naming the record that outlived its process, or ``""``.
 
@@ -366,7 +483,7 @@ def _record_detail(record: Any) -> str:
 
 
 def _classify_orphaned_run(
-    directory: Path, *, reaped_owner: Any | None = None
+    directory: Path, *, reaped_owner: Any | None = None, run_started_at: float | None = None
 ) -> tuple[str, str, str]:
     """``(kind, cause, reason)`` for a started run whose owner is gone.
 
@@ -375,26 +492,50 @@ def _classify_orphaned_run(
     is not a stop. Only POSITIVE evidence of a deliberate act records an
     interruption. Evidence, in order:
 
-    * a recorded stop marker → ``interrupted`` / ``user-stop``;
+    * a DURABLE STOP MARKER staged by the process that took the irreversible
+      step (``runtime-stop.json``) → ``interrupted`` / ``user-stop``, with the
+      rung and the killer as the detail. It outranks everything below because
+      it is the only evidence a forced stop can leave: the target at the
+      SIGKILL rung is not executing;
+    * a stop recorded in the wake index (the in-process stop path) →
+      ``interrupted`` / ``user-stop``, no detail;
     * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
       the record's build, pid and start time as the detail — this is the case
       study's shape, and the one that used to read as a user cancel;
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
 
-    ``reaped_owner`` IS THAT SECOND RUNG'S EVIDENCE WHEN SOMEBODY ALREADY TOOK
-    IT. ``registry.scan`` deletes a stale record as it reports it, so a caller
-    whose own sweep is what proved the pid dead — the mobile daemon's discovery
-    loop — destroys the evidence before classifying and landed every one of
-    those deaths on the no-evidence arm, i.e. "the cause could not be
-    determined" for the exact shape that HAD a determined cause (review round 2,
-    MINOR-1; the designer's D6 measured the same sentence at the same moment on
-    the phone). The record the caller is holding is passed in and preferred to a
-    fresh read, which by then finds nothing. Only the DEAD rung uses it: the
-    deliberate-stop marker above is still read from disk, and the caller's
-    live-owner gate (:func:`_run_record_evidence` inside
-    :func:`_import_transcript_outcome`) has already run, so a successor that
-    published while the record was being reaped still wins.
+    Why the marker is FIRST, and why the order is the fix. Before it existed,
+    the same event (a stop that escalated to SIGKILL against a runtime that
+    could not answer) reached the operator as three incompatible verdicts —
+    ``runtime-killed`` here, no cause at all once a sweep had reaped the record,
+    and ``owner-lost`` viewer-side — because every rung below reports what the
+    process left behind and a SIGKILLed process leaves NOTHING. A marker is
+    written by the killer before the signal, so the deliberate act survives the
+    process it was done to, and one event yields exactly one verdict.
+
+    ``reaped_owner`` IS THE DEAD RUNG'S EVIDENCE WHEN SOMEBODY ALREADY TOOK IT.
+    ``registry.scan`` moves a stale record into a sidecar as it reports it (it
+    used to DELETE it), and this reader reads that sidecar too — so the daemon's
+    discovery loop can sweep before the classifier runs and the classification
+    is unchanged. The caller's own record is still preferred when it has one,
+    because it is strictly more evidence (the sweep may have run before the
+    caller proved the pid dead). Only the DEAD rung uses it: the marker rungs
+    answer for themselves, and the caller's live-owner gate
+    (:func:`_run_record_evidence` inside :func:`_import_transcript_outcome`) has
+    already run, so a successor that published while the record was being reaped
+    still wins.
+
+    ``run_started_at`` IS THE MARKER RUNG'S SECOND RUN KEY. The marker is keyed
+    to a run, and when no record survives to compare pid and start time against,
+    the run's own start — the in-flight ``attention_started`` entry's timestamp,
+    passed by the caller that already read it — is what keeps a marker from an
+    EARLIER stop of the same session from narrating a later involuntary death as
+    the user's own act (QA round 1, Q-1; see :func:`_stop_marker_covers_run` for
+    why the bound is the marker's own stamp and not the target's ``started_at``).
+    ``None`` — no entry, or a caller that has no transcript — keeps the
+    marker-only answer, because refusing on no evidence would delete the
+    attribution the rung-3 shape exists for.
 
     THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
     the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
@@ -411,17 +552,43 @@ def _classify_orphaned_run(
         CUT_OFF_UNKNOWN,
         DELIBERATE_CUT_OFF_CAUSE,
         render_cut_off_reason,
+        render_stop_attribution,
     )
 
+    # The dead record is read unconditionally rather than on the third rung
+    # only: the marker above is keyed to a RUN, so the rung that uses it has to
+    # know whether a dead record contradicts it (see
+    # :func:`_stop_marker_covers_run`). One directory read either way — the
+    # helper reads both the live directory and the reaped sidecar in one pass.
+    _, dead = _run_record_evidence(directory)
+    if dead is None:
+        dead = reaped_owner
+    marker = _durable_stop_marker(directory)
+    if (
+        marker is not None
+        and marker.get("deliberate")
+        and _stop_marker_covers_run(marker, directory, dead, run_started_at=run_started_at)
+    ):
+        raw_killer = marker.get("killer")
+        killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(
+                DELIBERATE_CUT_OFF_CAUSE,
+                detail=render_stop_attribution(
+                    rung=str(marker.get("rung") or ""),
+                    command=str(killer.get("command") or killer.get("argv0") or ""),
+                    killer_pid=killer.get("pid"),
+                ),
+            ),
+        )
     if _stopped_marker(directory):
         return (
             "interrupted",
             DELIBERATE_CUT_OFF_CAUSE,
             render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
         )
-    _, dead = _run_record_evidence(directory)
-    if dead is None:
-        dead = reaped_owner
     if dead is not None:
         return (
             "error",
@@ -474,7 +641,14 @@ def _import_transcript_outcome(
     from local_operator.incidents import is_cut_off_cause, is_deliberate_cause
 
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
-    started = transcript.latest_custom("attention_started")
+    # The ENTRY rather than only its details, because the run's own START is the
+    # bound the stop marker is checked against when the record is gone
+    # (``_stop_marker_covers_run``): the entry's timestamp is this turn's start,
+    # and it is the only run key left once the ladder unpublishes the record or
+    # the reaped sidecar's retention bound evicts it.
+    started_entry = transcript.latest_custom_entry("attention_started")
+    started = dict(started_entry.payload.get("details", {})) if started_entry is not None else None
+    run_started_at = float(started_entry.ts) if started_entry is not None else None
     if (
         isinstance(started, dict)
         and started.get("conversation_id") == identity
@@ -519,7 +693,7 @@ def _import_transcript_outcome(
             )
             return kind, cause, reason, str(token)
         kind, cause, reason = _classify_orphaned_run(
-            transcript.directory, reaped_owner=reaped_owner
+            transcript.directory, reaped_owner=reaped_owner, run_started_at=run_started_at
         )
         store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
         return kind, cause, reason, str(token)

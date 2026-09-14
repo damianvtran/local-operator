@@ -37,7 +37,14 @@ TOKEN = "desktop-diagnostics-test-token"
 #: something the route never serves.
 PARENT = "aabbccddee01"
 CHILD = "aabbccddee02"
-pytestmark = pytest.mark.asyncio
+# Marked PER TEST rather than with a module-wide `pytestmark = pytest.mark.asyncio`.
+# This file also holds three deliberately SYNCHRONOUS tests (pure-helper
+# assertions over the context block and the registry row), and a module-level
+# mark lands on them too: every run emitted `PytestWarning: marked with
+# '@pytest.mark.asyncio' but it is not an async function` three times (review
+# round 2, N4). The wider hazard is the same shape one step on — with a
+# module-wide mark, a test that SHOULD be async and forgets to be one passes as
+# a sync function and asserts nothing.
 
 
 @pytest_asyncio.fixture
@@ -158,6 +165,7 @@ def test_both_hosts_build_the_context_block_from_one_helper():
     assert block.data["numbers"] == breakdown
 
 
+@pytest.mark.asyncio
 async def test_info_route_serves_a_host_snapshot_in_the_reply_envelope(desktop):
     """§5.1: the blocks, the units, and the deliberately EMPTY live half."""
     client, _ = desktop
@@ -214,6 +222,7 @@ async def test_info_route_serves_a_host_snapshot_in_the_reply_envelope(desktop):
     assert isinstance(data["env"]["credential_keys"], list)
 
 
+@pytest.mark.asyncio
 async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_path):
     """A read path must not leave the store it reads behind.
 
@@ -230,12 +239,52 @@ async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_
 
     assert data["env"]["credential_keys"] == []
     assert not credentials.exists()
+    # ... and this ordinary case must NOT be disclosed as a failure. A missing
+    # store is an answer ("none recorded"), not a "could not look", so a raise
+    # on ENOENT would paint a degraded row on every healthy host and still pass
+    # every other assertion in this file (review round 1, R1-F2).
+    named = {name for name, _reason in data["degraded"]}
+    assert "env.credentials" not in named, data["degraded"]
     # Scoped to the credential store on purpose: the registry probes in this same
     # snapshot legitimately materialise their OWN directories (``agents/``,
     # ``run/``), which is how those stores work everywhere. The claim here is
     # that the CREDENTIAL probe no longer creates the store it reads.
 
 
+@pytest.mark.asyncio
+async def test_info_route_discloses_an_unresolvable_config_root(desktop, monkeypatch):
+    """F2 on the WIRE: an unreadable root is a degraded ROW, not an empty list.
+
+    The credential probe used to short-circuit on `is_file()`, which is False on
+    the unresolvable-root sentinel, so `env.credential_keys` came back `[]` —
+    the same value `_safe` falls back to — and `env.credentials` vanished from
+    the payload's `degraded` list. "No credentials recorded" and "could not
+    look" then read identically to every client, which is the one thing this
+    screen exists not to do. Asserted against the HTTP RESPONSE on purpose: the
+    collector merely returning without raising is not the property that matters,
+    the disclosure surviving serialisation is.
+    """
+    import local_operator.paths as paths_mod
+
+    def boom() -> Path:
+        raise OSError("home unreadable")
+
+    monkeypatch.setattr(paths_mod, "config_dir", boom)
+    client, _ = desktop
+    response = await client.get("/v1/desktop/info")
+    assert response.status_code == 200, response.text
+
+    data = json.loads(response.text)["result"]["data"]
+    named = {name for name, _reason in data["degraded"]}
+
+    # NAMING the field is the whole disclosure: it is what makes the panel render
+    # `—` with a reason instead of a confident empty store.
+    assert "env.credentials" in named, data["degraded"]
+    assert "env.config_dir" in named, data["degraded"]
+    assert data["env"]["credential_keys"] == []
+
+
+@pytest.mark.asyncio
 async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
     """§5.3: the two side attributes, and what an UNNAMED session looks like.
 
@@ -274,6 +323,7 @@ async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
     }
 
 
+@pytest.mark.asyncio
 async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_path):
     """Secret hygiene: the payload may name a key, never a value or a prefix."""
     client, _ = desktop
@@ -303,6 +353,7 @@ async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_pa
     # `_multiplexer` consults marker PRESENCE, never a value.
 
 
+@pytest.mark.asyncio
 async def test_session_report_route_encodes_tuple_keyed_groups_as_arrays(desktop, tmp_path):
     """§5.2: `by_model`/`by_purpose_outcome` are arrays on the WIRE."""
     client, _ = desktop
@@ -346,6 +397,7 @@ async def test_session_report_route_encodes_tuple_keyed_groups_as_arrays(desktop
     assert len(data["recent"]) == 2
 
 
+@pytest.mark.asyncio
 async def test_every_group_by_is_an_array_of_keyed_objects(desktop, tmp_path):
     """One shape for every breakdown, so a FOURTH one added later inherits it.
 
@@ -408,6 +460,7 @@ async def test_every_group_by_is_an_array_of_keyed_objects(desktop, tmp_path):
     }
 
 
+@pytest.mark.asyncio
 async def test_recent_limit_defaults_and_is_clamped_not_rejected(desktop, tmp_path):
     """The 0..50 bound is the STORE's rule; HTTP passes it through unchanged."""
     client, _ = desktop
@@ -438,6 +491,7 @@ async def test_recent_limit_defaults_and_is_clamped_not_rejected(desktop, tmp_pa
     assert await recent({"recent_limit": -1}) == []
 
 
+@pytest.mark.asyncio
 async def test_report_distinguishes_unknown_from_zero(desktop, tmp_path):
     """§5.0 on a legacy ledger: absent is not a measured zero."""
     client, _ = desktop
@@ -469,6 +523,7 @@ async def test_report_distinguishes_unknown_from_zero(desktop, tmp_path):
     assert data["by_purpose_outcome"] == [{"purpose": "unknown", "outcome": "unknown", "calls": 1}]
 
 
+@pytest.mark.asyncio
 async def test_report_is_unavailable_not_empty_for_an_unreadable_ledger(desktop, tmp_path):
     """An unopenable store is its own fact; the panel says so rather than "0"."""
     client, _ = desktop
@@ -478,6 +533,7 @@ async def test_report_is_unavailable_not_empty_for_an_unreadable_ledger(desktop,
     assert response.json()["result"]["data"]["available"] is False
 
 
+@pytest.mark.asyncio
 async def test_report_and_info_reject_a_non_canonical_session_id(desktop):
     """The path shape is a route declaration, so it is enforced before the handler."""
     client, _ = desktop
@@ -488,6 +544,7 @@ async def test_report_and_info_reject_a_non_canonical_session_id(desktop):
     assert (await client.get("/v1/desktop/sessions/AABBCCDDEE01/report")).status_code == 422
 
 
+@pytest.mark.asyncio
 async def test_diagnostics_capability_is_advertised_and_both_ops_are_gated(desktop):
     """§5.6: one new key, and the plane's own boundary on both routes."""
     client, _ = desktop
