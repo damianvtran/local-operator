@@ -1492,6 +1492,40 @@ class RuntimeServer:
         except RuntimeError:
             return False
 
+    def _open_mcp_wiring_gate(self) -> None:
+        """Tell the session's deferred MCP wiring that the record is published.
+
+        The latch lives on the HANDLE (``ServingSessionHandle.
+        mcp_publication_gate``), read the same way this class reads every other
+        optional handle capability — ``subscribe_events``, ``refresh_attention``,
+        ``is_busy`` — so a handle that has none is inert rather than an error.
+        That covers every registrant constructed for a viewer or a test, and it
+        is why the gate is a handle attribute rather than a RuntimeServer
+        parameter: the runtime did not create the session and has no other
+        business naming its wiring.
+
+        WHAT THE LATCH IS, AND WHAT IT GUARANTEES: it is a
+        :class:`~local_operator.session.runtime.publication.PublicationGate`,
+        which binds the loop its waiting task runs on and hops with
+        ``call_soon_threadsafe`` when it is opened from anywhere else. So this
+        method is correct from the runtime's own thread (thread mode, via
+        ``start()``) as well as from the session's — the cross-thread case is
+        the latch's business rather than a caller's, which is the point of
+        using that class instead of a bare ``asyncio.Event``.
+
+        WHY IT EXISTS: the deferred wiring task's first instruction is a
+        synchronous import of the MCP SDK. A task starts at the loop's next free
+        instant, which in ``process.amain`` is the inbox drain BEFORE this
+        publisher runs, so on a machine with a server declared the import took
+        the loop for its full duration inside the pre-publication window and the
+        record waited behind it (measured +2.3 s, 14 of 14 runs). Setting the
+        latch here moves the wiring to the far side of publication, which is
+        what ``serving.spawn_owned_session`` states the design already promised.
+        """
+        gate = getattr(self._handle, "mcp_publication_gate", None)
+        if gate is not None:
+            gate.set()
+
     # -- the runtime's own loop -----------------------------------------------
 
     def _run(self) -> None:
@@ -1505,14 +1539,27 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
-        # Port 0: the OS picks; the record carries the number. Binding
-        # loopback only is the security invariant of the whole design.
-        self._server = await asyncio.start_server(
-            self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
-        )
-        port = self._server.sockets[0].getsockname()[1]
-        self._record.control_port = port
-        self._publisher = RecordPublisher(self._record, self._config_root)
+        try:
+            # Port 0: the OS picks; the record carries the number. Binding
+            # loopback only is the security invariant of the whole design.
+            self._server = await asyncio.start_server(
+                self._on_connection, host="127.0.0.1", port=0, limit=_MAX_LINE_BYTES
+            )
+            port = self._server.sockets[0].getsockname()[1]
+            self._record.control_port = port
+            self._publisher = RecordPublisher(self._record, self._config_root)
+        finally:
+            # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
+            # not only the happy one. The record is written inside
+            # ``RecordPublisher.__init__``, so on the success path this is
+            # genuinely post-publication; a bind that raises reaches here too,
+            # and that case matters because ``_run`` (thread mode) swallows the
+            # exception and the process lives on — with no record and, without
+            # this, a latch shut for the session's life. MCP late beats MCP
+            # never, and the release cannot mask the failure: the exception
+            # still propagates.
+            # See ``RuntimeServer._open_mcp_wiring_gate``.
+            self._open_mcp_wiring_gate()
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.
         # Probed, not required — a handle without the capability leaves attach

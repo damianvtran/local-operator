@@ -63,6 +63,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
+from local_operator.model.costs import cost_summary, job_cost, turn_cost
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
@@ -70,7 +71,6 @@ from local_operator.session.spend import (
     serving_identity,
     usage_prices_known,
 )
-from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     #: The duck-typed session members this store calls when a real session is
