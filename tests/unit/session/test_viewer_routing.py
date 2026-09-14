@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import os
+import socket
+import statistics
 import threading
 import time
 from typing import Any
@@ -542,14 +544,26 @@ def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root)
     synchronisation: a descheduled serve thread can still be short of its park
     when the close lands, and then the latch is already set, the loop never
     waits, and even the POLLED code returns in ~1 ms — a silent false negative,
-    not a flake. That is why the bound is the MINIMUM of five closes, each
-    against a fresh server: one starved round cannot carry the verdict, and five
-    consecutive starved rounds would be needed for a false pass. The ceiling is
-    half the poll interval, so a parked poll cannot meet it, but its margin to
-    the FIXED code is scheduling-dependent rather than generous: measured on a
-    loaded dev host (load 162-212, n=15) the signalled close was 1.0 ms median
-    with a 27.0 ms worst sample, i.e. ~3.7x headroom at worst. CI's dedicated
-    runner is the safer environment for that bound.
+    not a flake.
+
+    That is why the bound is the MEDIAN of five closes, each against a fresh
+    server, and why the choice of aggregate is load-bearing rather than
+    cosmetic. Both arms have a tail, and it points in opposite directions. The
+    buggy arm's tail is a starved round (~1 ms). The fixed arm's tail is a
+    scheduling delay, and single rounds here do exceed the 100 ms ceiling on a
+    loaded host (measured up to 128 ms at load 176-216). A MINIMUM would invert
+    the guard: it passes as soon as ANY one of the five rounds is starved, so it
+    is strictly WEAKER than the single sample it replaced — P(false pass) =
+    1-(1-p)^N rises with N instead of falling. A MAXIMUM would false-fail on any
+    one slow round. The median absorbs one outlier in either direction: roughly
+    three of the five rounds must be starved for a false pass, and one slow
+    round no longer false-fails.
+
+    So do NOT read a per-round margin out of this — the per-round margin is
+    scheduling-dependent and a single round can exceed the ceiling while the
+    test is still correct. What carries the test is the aggregate: measured on a
+    loaded dev host the five-round median was 1-7 ms against the 100 ms ceiling.
+    CI's dedicated runner is the safer environment for that bound.
     """
     samples: list[float] = []
     for _ in range(5):
@@ -561,6 +575,13 @@ def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root)
         try:
             server.start()
             assert server.ready.wait(timeout=5.0), "viewer endpoint never bound"
+            # ``ready`` is set on the FAILED-bind path too (``_run``'s except),
+            # so it cannot tell a live listener from a dead one — and a round on
+            # the dead path closes in ~1 ms and would pass while measuring
+            # nothing. Dial the port the round published: CONNECTED is exactly
+            # the invariant the record exists to advertise.
+            with socket.create_connection(("127.0.0.1", server.record.control_port), timeout=2):
+                pass
             # Let the serve loop REACH its wait before timing the close, so the
             # close lands MID-INTERVAL. Without this settle the assertion races
             # the loop's phase: ``ready`` is set microseconds before the loop
@@ -577,16 +598,61 @@ def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root)
         finally:
             server.close()
 
-    fastest = min(samples)
-    assert fastest < 0.1, (
-        f"the fastest of {len(samples)} parked closes took {fastest * 1000:.0f} ms "
-        f"(round {samples.index(fastest)}) — close() is waiting out the serve "
-        "loop's wait instead of waking it. Samples (ms): "
-        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, even "
-        "the pre-fix poll is expected near 145-153 ms measured through this "
-        "test's own 50 ms settle, so no round here was woken early "
+    aggregate = statistics.median(samples)
+    assert aggregate < 0.1, (
+        f"the median of {len(samples)} parked closes took {aggregate * 1000:.0f} ms "
+        "— close() is waiting out the serve loop's wait instead of waking it. "
+        "Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, the "
+        "pre-fix poll measured through this test's own 50 ms settle lands in "
+        "139.5-191.2 ms (median ~151 ms, n=50), so a median under the ceiling "
+        "needs three of these five rounds woken early — the loop is not waiting "
         "(viewer_server.close -> _wake_close_wait -> ViewerServer._serve's park)."
     )
+
+
+def test_close_on_the_endpoints_own_loop_does_not_join_itself(viewer_root):
+    """A close issued from the endpoint's OWN thread must not raise.
+
+    ``close()`` joins the serve thread, and ``Thread.join`` raises
+    ``RuntimeError: cannot join current thread`` when the caller IS that
+    thread. The guard is the only thing stopping that exception escaping a
+    method documented as safe from any thread, and nothing in-repo closes this
+    way — so without this test the guard can be dropped by a refactor with
+    nothing to notice it.
+    """
+    server = _started(_Host(), viewer_root)
+    port = server.record.control_port
+    path = viewer_record_path(os.getpid(), viewer_root)
+
+    thread = server._thread
+    loop = server._loop
+    assert thread is not None and loop is not None, "precondition: endpoint running"
+    raised: list[str] = []
+
+    def _capture(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        # Only handler calls that carry an exception are record failures; the
+        # loop also routes non-exception advisories through this hook.
+        if context.get("exception") is not None:
+            raised.append(repr(context["exception"]))
+
+    loop.set_exception_handler(_capture)
+
+    # The shape the guard exists for: the caller runs ON the endpoint's loop, so
+    # close() must skip the self-join instead of raising into that loop.
+    loop.call_soon_threadsafe(server.close)
+
+    deadline = time.time() + 5.0
+    while thread.is_alive() and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert raised == [], f"close() raised on the endpoint's own loop: {raised}"
+    assert not thread.is_alive(), "the serve thread must exit after a self-thread close"
+    assert not path.exists(), "the loop's own shutdown must remove the record"
+    # And the port must really be free again: the record is gone AND nothing
+    # answers on the port it advertised.
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
 
 
 def test_close_removes_the_record(viewer_root):

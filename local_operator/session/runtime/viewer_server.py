@@ -304,12 +304,16 @@ class ViewerServer:
         self._wake_close_wait()
         thread = self._thread
         # A close issued from the loop's OWN thread must not join itself: `join`
-        # raises ``RuntimeError: cannot join current thread`` and would abandon
-        # the ``unpublish_viewer`` below. Nothing is lost by skipping it —
-        # close() returns into the loop, whose wait is already satisfied by the
-        # latch and whose ``finally`` runs ``_shutdown``, so the port is
-        # released and the record removed there. ``RuntimeServer.close`` carries
-        # the same guard for the same reason.
+        # raises ``RuntimeError: cannot join current thread``, and that exception
+        # escapes a method whose docstring promises it is safe from any thread —
+        # it surfaces on whichever caller happened to run on that loop. (The
+        # record does NOT leak from the abandoned ``unpublish_viewer`` below: the
+        # latch is already set, so ``_serve`` exits and its ``finally`` runs
+        # ``_shutdown``, which unpublishes.) Nothing is lost by skipping the
+        # join — close() returns into the loop, whose wait the latch has already
+        # satisfied, and whose ``finally`` releases the port and removes the
+        # record. ``RuntimeServer.close`` carries the same guard for the same
+        # reason.
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             # The serve loop runs `_shutdown` itself. `_wake_close_wait` above
             # is what makes that immediate: without it this join waits out the
