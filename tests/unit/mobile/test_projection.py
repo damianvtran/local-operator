@@ -1107,6 +1107,47 @@ def test_diff_counts_only_from_reported_details() -> None:
     assert _diff_counts({"added": "junk"}) == (0, 0)
 
 
+def test_a_live_notice_carries_its_severity_to_the_phone() -> None:
+    """Design round 1, D1: a LIVE notice must arrive with its tier.
+
+    ``NoticeRow`` reads the glyph and the ink from ``details.severity`` alone,
+    so a fold that drops it draws a ``warning`` truncation as the quiet ``·``
+    in ``text-ink-dim`` -- and then flips the SAME event to amber ``!`` on the
+    next refresh, when it arrives through the replay fold, which carries the
+    field. The two produces must agree, so this asserts the live entry against
+    the replayed one rather than against a literal.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    fold = make_fold()
+    live = NoticeEvent(text="the model hit the output limit", kind="warning")
+    fold.fold_event(live)
+    live_entry = fold.projection.transcript[-1]
+    assert live_entry.kind == "notice"
+    assert live_entry.details["severity"] == "warning"
+
+    # The same event as a REPLAYED row (the message the harness journals), read
+    # through the fold that has always carried the tier.
+    replayed = fold_messages_to_entries(
+        [
+            Message(
+                role="assistant",
+                content=[TextContent(text="partial answer")],
+                id="a1",
+                stop_reason="length",
+            )
+        ]
+    )
+    replayed_notices = [e for e in replayed if e.kind == "notice"]
+    assert replayed_notices, "the replay fold must also emit the notice row"
+    assert live_entry.details["severity"] == replayed_notices[-1].details["severity"]
+
+    # All three kinds map across, not just the one this PR made visible.
+    for kind in ("info", "warning", "error"):
+        fold.fold_event(NoticeEvent(text=f"note {kind}", kind=kind))
+        assert fold.projection.transcript[-1].details["severity"] == kind
+
+
 def test_projection_version_bumps_on_every_fold() -> None:
     fold = make_fold()
     v0 = fold.projection.version

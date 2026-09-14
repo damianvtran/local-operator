@@ -541,7 +541,11 @@ def assistant_stop_notice(
     happened; the notice exists for the turn that shows nothing at all. The
     length arm is deliberately NOT guarded that way — it is the one whose
     prose misleads most, and the empty variant of it still needs a line, since
-    "spent the whole budget and said nothing" has no text to explain it.
+    "spent the whole budget and said nothing" has no text to explain it. It is
+    split THREE ways rather than two, because a cut tool call is neither: there
+    is no answer on that turn to cut off, and saying there is puts a false row
+    directly beneath the failed call card that already says the arguments were
+    cut (design round 1, D3).
 
     Returning ``None`` means "this turn needs no notice", which is the
     ordinary case. Every surface must call this — the phone had no
@@ -555,6 +559,14 @@ def assistant_stop_notice(
     close it. The emptiness test below is the whole decision for the
     error/aborted arms, so whose definition of "empty" wins cannot be a
     per-host choice.
+
+    The same strip decides the length arm's silent variant, which is why the
+    live loop's ``length`` branch strips too: a turn whose whole answer was
+    ``"   "`` is silent to the reader, and a bare truthiness test on the
+    loop's side had the live notice announce a CUT ANSWER over a fold that
+    said no answer existed at all — the two-voices failure this module exists
+    to prevent, on the one event class it cannot see both halves of (review
+    R2-n4).
     """
     text = text.strip()
     if stop_reason == "refusal":
@@ -569,11 +581,17 @@ def assistant_stop_notice(
     if stop_reason == "length":
         # Tier `warning`, not `error`: the turn produced what it produced and
         # stopped where the limit sits, which is a statement about the reply's
-        # completeness rather than a diagnosis of anything failing -- the same
-        # tier the live loop's own truncation notices take, so the two
-        # surfaces cannot describe one event in two voices.
-        if text or has_tool_calls:
+        # completeness rather than a diagnosis of anything failing — the same
+        # tier the live loop's own truncation notices take.
+        #
+        # The three arms are the three shapes the loop itself distinguishes
+        # (prose, a call in flight, neither), and this is the phone's only view
+        # of a cut turn on a late-attaching client, so a fold that collapses
+        # them cannot be fixed downstream.
+        if text:
             return "answer cut off at the output limit", "warning"
+        if has_tool_calls:
+            return "tool call cut off at the output limit (nothing ran)", "warning"
         return "no answer: the model spent its whole output budget", "warning"
     if not text and not has_tool_calls and stop_reason in ("error", "aborted"):
         return ("turn failed" if stop_reason == "error" else "interrupted"), "error"

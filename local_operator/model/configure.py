@@ -5225,6 +5225,14 @@ class SessionStreamFn:
             if ladder.index(effort) > ladder.index(ceiling):
                 effort = ceiling
         if effort is not None:
+            # A bare ``model_copy``, deliberately NOT ``ChatRequest.with_model``:
+            # this is the per-turn EFFORT fit, so the model is unchanged, the
+            # published ceiling the bound was derived from cannot have moved
+            # and there is nothing to re-derive. ``with_model`` exists for a
+            # request aimed at a DIFFERENT spec -- the failover hops, which all
+            # route through it (review R2-n2). If the bound ever becomes
+            # effort-aware, this is the second site that has to change with
+            # ``with_model`` and the validator (review R2-n3).
             request = request.model_copy(
                 update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
             )

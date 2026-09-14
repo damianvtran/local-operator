@@ -1217,9 +1217,23 @@ class ProjectionFold:
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )
         elif isinstance(event, NoticeEvent):
+            # ``kind`` rides into ``details`` as the phone's ``severity``. This
+            # fold is the phone's ONLY view of a LIVE notice, `NoticeRow` reads
+            # the glyph and the ink from that field alone, and dropping it drew
+            # every live warning as the quiet ``·`` in ``text-ink-dim`` -- the
+            # tier this surface's own test file calls "a receipt nobody has to
+            # read" -- while the SAME event, replayed after a reconnect, took
+            # the branch below and rendered amber ``!``. One event, two inks,
+            # decided by whether the client attached before or after it
+            # (design round 1, D1; measured, replay ``{'severity': 'warning'}``
+            # against live ``{}``). The three kinds map 1:1 onto the phone's
+            # ``info|warning|error``.
             self._append(
                 TranscriptEntry(
-                    id=f"nt-{time.time_ns()}", kind="notice", text=_compact(event.text, 400)
+                    id=f"nt-{time.time_ns()}",
+                    kind="notice",
+                    text=_compact(event.text, 400),
+                    details={"severity": event.kind},
                 )
             )
         elif isinstance(event, SteeringDeliveredEvent):

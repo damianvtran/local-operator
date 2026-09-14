@@ -26,7 +26,7 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
-from local_operator.harness.rows import is_harness_chrome
+from local_operator.harness.rows import assistant_stop_notice, is_harness_chrome
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     AbortSignal,
@@ -454,7 +454,7 @@ async def test_length_pairs_but_does_not_execute():
     # loop's own events.
     assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
         "the model hit the output limit mid tool call "
-        "-- nothing was executed; re-asking it to "
+        "— nothing was executed; re-asking it to "
         "re-emit the call in smaller pieces"
     ]
 
@@ -2864,6 +2864,48 @@ async def test_empty_length_truncation_retries_at_lower_effort():
 
 
 @pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
+    """Review R2-n4, the behaviour half: whitespace is nothing, so a turn that
+    emitted only whitespace GETS the silent treatment — the same lower-rung retry
+    an empty turn gets.
+
+    This is the consequence of stripping on both sides, and it is stated rather
+    than discovered: ``not assistant.text`` read "   " as a spoken answer, so the
+    turn neither retried nor announced itself, and the reader was left holding an
+    answer the fold called "no answer". The retry exists precisely for a turn
+    with nothing visible on screen.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="   "),
+                StreamEndEvent(stop_reason="length"),
+            ],  # nothing a reader can see, then the limit
+            [StreamTextDelta(delta="here is the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[1].model.reasoning_effort == "medium"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("retrying at effort medium" in n.text for n in notices)
+    # And the whitespace turn does not ride into the retry's history, for the
+    # same reason the empty one does not.
+    assert all(
+        not (m.role == "assistant" and not m.text.strip() and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
     """Retries are bounded; when they are spent the turn ends, but the user
     sees WHY instead of minutes of thinking followed by silence."""
@@ -2921,11 +2963,62 @@ async def test_text_only_length_truncation_is_announced_but_not_retried():
     assert len(notices) == 1
     assert "output limit" in notices[0].text
     assert notices[0].kind == "warning"
+    # The copy is pinned here because it is the one row of the family the user
+    # can be left holding with no other move: a text truncation is NOT
+    # auto-continued below, and its sibling rows all name one, so this one must
+    # name a remedy too (design round 1, D4). It also uses the family's em dash,
+    # not the `--` it shipped with on the first pass (D2).
+    assert notices[0].text == (
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    )
     # The partial answer is still delivered as the turn's text -- the notice is
     # added beside it, not instead of it.
     assert "partial" in "".join(
         getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
     )
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_is_silent_to_both_surfaces():
+    """Review R2-n4: the live notice and the folded receipt must agree that a
+    whitespace-only answer is NO answer.
+
+    The loop tested ``not assistant.text`` while ``assistant_stop_notice``
+    strips, so a ``length`` stop whose whole answer was ``"   "`` had the live
+    row claim an answer was cut off over a fold that said no answer existed --
+    two voices for one event, which is the failure this family exists to
+    prevent. Both sides strip now.
+    """
+    stream = ScriptedStream(
+        [
+            # Whitespace, then the limit: no visible answer at all. The model
+            # has no ladder, so there is no lower rung to retreat to and the
+            # turn ends on the notice rather than retrying.
+            [StreamTextDelta(delta="   "), StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    model = ModelSpec(provider="test", model_id="m")  # no ladder: no rung below
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    # The SILENT arm, not the partial-answer arm: nothing was said.
+    assert "no visible output" in notices[0].text
+    assert "answer" not in notices[0].text
+
+    # And the fold reads the same turn the same way -- if this ever diverges,
+    # the live row and the replayed row disagree about one event.
+    assert assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    ) == ("no answer: the model spent its whole output budget", "warning")
 
 
 @pytest.mark.asyncio

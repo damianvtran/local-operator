@@ -679,15 +679,23 @@ def test_a_length_stop_is_announced_on_both_surfaces() -> None:
     empty = assistant_stop_notice(
         text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
     )
-    assert empty is not None and empty[1] == "warning"
+    assert empty == ("no answer: the model spent its whole output budget", "warning")
 
-    # A truncated TOOL CALL produced something, so it takes the content arm too:
-    # the model is told separately that the call was cut (the loop's
-    # ``TRUNCATED_RESULT_TEXT``), and the user is told here.
+    # A truncated TOOL CALL produced something, but not an ANSWER, so it takes
+    # its own arm rather than the content one: the call card directly above
+    # already says the arguments were cut, and repeating "answer cut off" there
+    # was a second, false row for one event (design round 1, D3).
     with_call = assistant_stop_notice(
         text="", has_tool_calls=True, stop_reason="length", provider_payload=None
     )
-    assert with_call is not None and with_call[1] == "warning"
+    assert with_call == ("tool call cut off at the output limit (nothing ran)", "warning")
+
+    # Prose and a cut call together is the content arm: there IS an answer, and
+    # the loop's own live notice names the call half separately.
+    both = assistant_stop_notice(
+        text="here is the file", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert both == ("answer cut off at the output limit", "warning")
 
     # An ordinary stop still needs nothing, which is what keeps the notice
     # meaningful rather than decorative.

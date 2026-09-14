@@ -1272,7 +1272,15 @@ class AgentLoop:
 
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
-                        silent = not assistant.text and not assistant.tool_calls
+                        # Whitespace-only prose counts as NOTHING, which is how
+                        # ``rows.assistant_stop_notice`` reads the same turn:
+                        # it strips before deciding, so a bare truthiness test
+                        # on ``text`` here had the live notice announce a CUT
+                        # ANSWER over a fold that reported no answer at all
+                        # (review R2-n4). Both sides strip, so the two surfaces
+                        # cannot describe one event in two voices.
+                        has_text = bool(assistant.text and assistant.text.strip())
+                        silent = not has_text and not assistant.tool_calls
                         if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
                             lower = _lower_effort(config.model)
                             if lower is not None:
@@ -1338,21 +1346,28 @@ class AgentLoop:
                             yield NoticeEvent(
                                 text=(
                                     "the model hit the output limit mid tool call "
-                                    "-- nothing was executed; re-asking it to "
+                                    "— nothing was executed; re-asking it to "
                                     "re-emit the call in smaller pieces"
                                 ),
                                 kind="warning",
                             )
-                        elif assistant.text:
+                        elif has_text:
                             # A partial ANSWER, which is the case the missing
                             # signal hid best: the prose that arrived reads as a
                             # complete short reply, and neither the TUI nor the
                             # phone folded the stop into a notice (review round 1,
                             # B1; reproduced by QA Q1 against a live provider).
+                            #
+                            # The remedy clause is not decoration: this is the
+                            # one truncation the loop does NOT auto-continue
+                            # (above), so the reader is the only actor left and
+                            # every sibling row in the family names a move
+                            # (design round 1, D4).
                             yield NoticeEvent(
                                 text=(
-                                    "the model hit the output limit -- this answer "
-                                    "is cut off, and the rest was never sent"
+                                    "the model hit the output limit — this answer "
+                                    "is cut off, and the rest was never sent — "
+                                    "ask again to continue, or narrow the request"
                                 ),
                                 kind="warning",
                             )

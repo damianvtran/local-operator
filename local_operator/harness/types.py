@@ -2169,7 +2169,8 @@ class ModelSpec(BaseModel):
 #: it was before the bound existed, and the operator's own ledger
 #: (``~/.local-operator/analytics.db``, 876,719 recorded calls) is what says
 #: where that line is: 430 calls ever emitted more than 16,384 output tokens, and
-#: 300 of those are ordinary sessions across 127 conversations -- which is why a
+#: 300 of those are ordinary calls in 127 ordinary sessions (91 conversations,
+#: rolling each session up to its root the way the rollup does) -- which is why a
 #: benchmark-sized ceiling was the wrong number for every other interface; 2
 #: ordinary calls exceeded 65,536, both ``anthropic/claude-opus-5`` at exactly its
 #: own 128,000 published ceiling, i.e. already truncated by the provider; NONE
@@ -2467,6 +2468,15 @@ class ChatRequest(BaseModel):
         The marker survives the copy (pydantic copies private attributes), so a
         request that has been through two hops is still recognisably
         policy-bounded on the third rather than silently becoming a named ask.
+
+        The re-derivation runs through :func:`turn_output_budget` with no
+        ``ceiling``, and so does the ``mode="after"`` validator on
+        :class:`ChatRequest`. Those two are the only call sites that derive a
+        bound from a spec, and ``turn_output_budget``'s own docstring invites a
+        configuration key to feed ``ceiling``. When that key lands, BOTH have
+        to be threaded with it: threading the validator alone would leave a
+        failover hop re-deriving the unconfigured 131,072 and silently
+        discarding the bound the hop exists to respect (review R2-n3).
         """
         update: dict[str, Any] = {"model": spec}
         if self._max_tokens_from_policy:

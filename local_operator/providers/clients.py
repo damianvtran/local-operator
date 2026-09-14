@@ -1355,9 +1355,14 @@ def _effective_max_tokens(request: ChatRequest) -> int:
     # "nobody asked" and fell through to the ADVERTISED CAPABILITY, putting
     # 943,718 back on the wire on exactly the model shape this clamp exists for
     # (QA round 1, Q4). ``0`` can no longer arrive -- ``ChatRequest.max_tokens``
-    # is ``ge=1`` -- but the ``None`` arm stays, because a request assembled
-    # without the validator (``model_construct``, a test double) must still not
-    # be read as a request for the whole capability.
+    # is ``ge=1`` -- but be exact about what the ``None`` arm is, because it is
+    # easy to read as a guard it is not: an unbounded ask IS still reachable
+    # through it. It preserves main's behaviour for a request the validator
+    # never saw (``model_construct``, a test double, a caller that genuinely
+    # named nothing), and such a request is read as asking for the model's own
+    # published capability -- measured at 943,718 on muse-spark, unchanged from
+    # main by design (review R2-m1, which caught this comment claiming the
+    # opposite). What this delta changed is that ``0`` can no longer reach it.
     named = request.max_tokens
     requested = request.model.max_output_tokens if named is None else named
     if request.model.provider == "deepseek":

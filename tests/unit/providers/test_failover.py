@@ -600,17 +600,12 @@ async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -
             max_output_tokens=1_047_576,
         )
     )
-    got = [
-        event
-        async for event in stream_with_failover(primary, auth, settings, client_for)
-    ]
+    got = [event async for event in stream_with_failover(primary, auth, settings, client_for)]
 
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
     # The primary is retried on its own credential before the chain moves, so the
     # two routes are grouped rather than indexed.
-    assert {ask for model_id, ask in seen if model_id == "gpt-4o"} == {
-        DEFAULT_TURN_OUTPUT_TOKENS
-    }
+    assert {ask for model_id, ask in seen if model_id == "gpt-4o"} == {DEFAULT_TURN_OUTPUT_TOKENS}
     assert [ask for model_id, ask in seen if model_id == "claude-3-haiku-20240307"] == [4_096]
 
 
