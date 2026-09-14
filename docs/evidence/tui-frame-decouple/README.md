@@ -1,4 +1,56 @@
-# The TUI against N attached sessions — the instrument, and the before-numbers
+# The TUI against N attached sessions
+
+## Current measurement contract
+
+The default `--workload capped` mirrors runtime append/front eviction and reports
+replacement job counts per frame. `--workload suffix` disables owner eviction to
+isolate append cost; its results must **not** stand in for long-running runtime
+performance. The earlier natural-demand numbers below used that suffix workload.
+The decoded-callback instrument also bypasses the transport's watched-job filter
+and byte budget: all-detail results are reducer stress, not default parked socket
+traffic. Real-socket QA must include both watched and unwatched connections.
+
+Use `--continuous` for capacity measurements. It schedules the next screen
+refresh after each compositor update without bypassing Textual's refresh timer.
+The boundary is completed `_display`, not physical terminal presentation. Frame
+intervals and wall FPS cover only active streaming, ending at the last delivered
+round; drain and screenshot time are excluded.
+
+```sh
+.venv/bin/python scripts/bench_tui_sessions.py \
+  --source-root /path/to/baseline --sessions 12 --samples 240 \
+  --deltas 400 --max-rounds 800 --continuous \
+  --capture /tmp/tui-before --output /tmp/tui-before.json
+# Repeat without --source-root, using after output paths, for this checkout.
+```
+
+The script isolates HOME/config before app imports and scrubs every `CMUX_*`
+and `LOP_*` variable. It asserts module provenance, every typed character,
+contiguous follower sequences, and exact retained row content for every job.
+Captures are native 120x40 SVGs with geometry and a second settled frame; convert
+with `rsvg-convert` and view the PNGs. Generated evidence stays outside the repo.
+
+Delivery uses absolute 50ms deadlines. A reusable frame pool and round budget
+bound memory/catch-up work: `pending_offered_rounds_peak` measures virtual overdue
+rounds, not queued Python tasks. Read it alongside deadline lag, actual delivered
+throughput, budget exhaustion and pending input. A slow consumer may fall behind
+the nominal 20 updates/s/source. This instrument does not model socket buffers
+or JSON decoding, and independent real-socket QA remains necessary.
+
+Natural-demand frame counts are **not capacity FPS**. Neither is
+`frames_per_loop_cpu_second`: dividing out CPU share cannot remove wall-clock
+refresh timers. Compare sustained baseline/fixed runs on the same host, not
+idle-host extrapolations. Synthetic job clock fields can change byte widths;
+report delta byte ranges and identical roster/retention sizes alongside results.
+
+The production fix reuses follower rows, narrows retention reads, and coalesces
+per-source callbacks. It does **not** move ingestion/reduction off Textual's loop
+or bound full-detail subscriptions by visibility.
+
+## Historical natural-demand baseline (not capacity FPS)
+
+The observations below predate continuous redraw and fixed-deadline delivery.
+They are preserved for provenance, not as the basis of current FPS claims.
 
 `scripts/bench_tui_sessions.py`. Measured on an **unmodified `origin/main`**
 checkout (`1296cda41`, `/tmp/lo-tui-baseline`) with the harness from this branch,
@@ -49,8 +101,8 @@ when the numbers did. The audit's reference frame at the same roster shape is
 ### What it does not measure
 
 - **`job_todo_updates`, `job_trajectory_replacements` and descendant usage.** The
-  fixture's children have no todos and the window never rotates past the cap, so
-  those parts of the delta vocabulary ride empty. The audit measured the todos +
+  fixture's children have no todos or replacement frames; append deltas do rotate
+  the follower's window at its cap. The audit measured the todos +
   descendant-usage shape at +1.1 ms/delta over the base.
 - **The sidebar catalog poll and prewarm** (`/tmp/tui-coupling-audit.md` F5/F6).
   Those scale with store size, not with attached sessions.

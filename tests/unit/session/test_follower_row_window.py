@@ -560,3 +560,42 @@ def test_a_follower_that_has_no_older_runtime_count_derives_it_from_its_window(
     follower.apply_update(stripped)
 
     assert follower._state.jobs[0].trajectory_length == len(follower._state.jobs[0].trajectory) == 7
+
+
+@pytest.mark.parametrize("invalid_count", [None, "not-a-count", [], {}])
+def test_invalid_explicit_count_refuses_entire_delta(invalid_count: Any) -> None:
+    """Skipping old rows must not skip shell validation or commit half a delta."""
+    wire = _Wire(children=2, rows=6)
+    follower = _follower(wire)
+    follower.apply_update(wire.append_rows())
+    previous = follower.state
+    frame = wire.append_rows()
+    valid_count = frame.changes["jobs"][1]["trajectory_length"]
+    frame.changes["jobs"][1]["trajectory_length"] = invalid_count
+    with pytest.raises(ValueError):
+        follower.apply_update(frame)
+    assert follower.state == previous
+    assert follower._state.sequence == previous.sequence
+
+    # A refused packet must leave the same sequence available for a corrected
+    # retry, including the cached windows of jobs processed before the bad one.
+    frame.changes["jobs"][1]["trajectory_length"] = valid_count
+    follower.apply_update(frame)
+    assert follower.state == wire.owner.state
+
+
+def test_mutating_delta_and_public_shell_cannot_change_retained_rows() -> None:
+    """The identity proof is sound only when neither input nor readers own rows."""
+    wire = _Wire(children=1, rows=6)
+    follower = _follower(wire)
+    follower.apply_update(wire.append_rows())
+    frame = wire.append_rows()
+    follower.apply_update(frame)
+    expected = follower.state
+    frame.job_trajectory_appends["child-0"][-1]["result"]["content"][0]["text"] = "changed"
+    public = follower.state
+    with pytest.raises(ValueError, match="frozen"):
+        public.jobs[0].label = "changed"
+    with pytest.raises(TypeError):
+        public.jobs[0].trajectory[-1]["result"]["content"][0]["text"] = "changed"
+    assert follower.state == expected
