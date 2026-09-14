@@ -1332,25 +1332,6 @@ class AgentLoop:
                                 ),
                                 kind="warning",
                             )
-                        elif assistant.tool_calls:
-                            # Visible truncation with a call in flight: the call was
-                            # cut mid-arguments and will NOT be executed (the batch
-                            # below pairs placeholders instead). Nothing else said so
-                            # -- the loop's only length notice was the silent arm
-                            # above, no surface had a length arm at all, and the
-                            # result the model got back read just "aborted" -- so a
-                            # model asked to write a large file reported that the
-                            # call "came through empty", declined to retry, and the
-                            # file was never written (QA round 1, Q2). Say which
-                            # limit it was and that the loop is re-asking.
-                            yield NoticeEvent(
-                                text=(
-                                    "the model hit the output limit mid tool call "
-                                    "— nothing was executed; re-asking it to "
-                                    "re-emit the call in smaller pieces"
-                                ),
-                                kind="warning",
-                            )
                         elif has_text:
                             # A partial ANSWER, which is the case the missing
                             # signal hid best: the prose that arrived reads as a
@@ -1358,16 +1339,54 @@ class AgentLoop:
                             # phone folded the stop into a notice (review round 1,
                             # B1; reproduced by QA Q1 against a live provider).
                             #
-                            # The remedy clause is not decoration: this is the
-                            # one truncation the loop does NOT auto-continue
-                            # (above), so the reader is the only actor left and
-                            # every sibling row in the family names a move
-                            # (design round 1, D4).
+                            # This arm also owns the turn that streamed prose AND a
+                            # call in flight, which is why it is tested before
+                            # ``tool_calls`` below: ``rows.assistant_stop_notice``
+                            # reads that same turn text-first, so checking the call
+                            # first had the live row announce "mid tool call" over
+                            # a fold that said "answer cut off" -- one event in two
+                            # voices, the exact failure this family exists to
+                            # prevent, on a turn where there genuinely IS an answer
+                            # to cut off (design round 2, D7).
+                            #
+                            # The remedy clause is not decoration: with no call in
+                            # flight this is the one truncation the loop does NOT
+                            # auto-continue (above), so the reader is the only actor
+                            # left and every sibling row in the family names a move
+                            # (design round 1, D4). A cut call IS re-asked, but only
+                            # the call: the answer's remainder was never sent, and
+                            # only the reader can ask for it.
                             yield NoticeEvent(
                                 text=(
                                     "the model hit the output limit — this answer "
                                     "is cut off, and the rest was never sent — "
                                     "ask again to continue, or narrow the request"
+                                ),
+                                kind="warning",
+                            )
+                        elif assistant.tool_calls:
+                            # Visible truncation with a call in flight and no prose
+                            # to pronounce it: the call was cut mid-arguments and
+                            # will NOT be executed (the batch below pairs
+                            # placeholders instead). Nothing else said so -- the
+                            # loop's only length notice was the silent arm above,
+                            # no surface had a length arm at all, and the result
+                            # the model got back read just "aborted" -- so a model
+                            # asked to write a large file reported that the call
+                            # "came through empty", declined to retry, and the file
+                            # was never written (QA round 1, Q2). Say which limit
+                            # it was and that the loop is re-asking.
+                            #
+                            # Reachable only when the turn streamed NO prose (the
+                            # arm above takes that case). The reader still learns
+                            # the call never ran, from the placeholder result
+                            # appended below: ``TRUNCATED_RESULT_TEXT`` says so on
+                            # the call's own row.
+                            yield NoticeEvent(
+                                text=(
+                                    "the model hit the output limit mid tool call "
+                                    "— nothing was executed; re-asking it to "
+                                    "re-emit the call in smaller pieces"
                                 ),
                                 kind="warning",
                             )

@@ -691,7 +691,11 @@ def test_a_length_stop_is_announced_on_both_surfaces() -> None:
     assert with_call == ("tool call cut off at the output limit (nothing ran)", "warning")
 
     # Prose and a cut call together is the content arm: there IS an answer, and
-    # the loop's own live notice names the call half separately.
+    # the live loop agrees -- it tests ``has_text`` before ``tool_calls`` too
+    # (design round 2, D7). It used to check the call first, so this same turn
+    # was "mid tool call" live and "answer cut off" here. The call half still
+    # reaches the reader, on its own row: the placeholder result appended for it
+    # says it was cut and nothing ran.
     both = assistant_stop_notice(
         text="here is the file", has_tool_calls=True, stop_reason="length", provider_payload=None
     )

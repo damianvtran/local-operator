@@ -460,6 +460,62 @@ async def test_length_pairs_but_does_not_execute():
 
 
 @pytest.mark.asyncio
+async def test_length_with_prose_and_a_call_takes_the_answer_arm():
+    """Design round 2 (D7): prose and a cut call is ONE event, one description.
+
+    This turn -- the model streamed a partial answer and was still dictating a
+    call when the limit hit -- used to be described two ways: the live loop
+    checked ``tool_calls`` first and said "mid tool call — nothing was
+    executed", while ``rows.assistant_stop_notice`` checked ``text`` first and
+    folded the same turn as "answer cut off at the output limit". Prose wins on
+    both sides now, and it is the honest reading: there IS an answer on this
+    turn and it IS incomplete.
+
+    The call half is not lost by that. It is still not executed (the
+    placeholder below keeps Q2's fix), and the model still learns why from
+    ``TRUNCATED_RESULT_TEXT`` -- which says "nothing ran" on the call's own row,
+    where a reader looks for that fact rather than in a notice about the answer.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="here is the file"),
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="length"),
+            ],
+            # The placeholder result goes back to the model; it stops cleanly.
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert executed == []
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    ]
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert len(tool_messages) == 1 and tool_messages[0].is_error
+    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+
+    # And the fold reads the same turn the same way: content, not "a call was
+    # cut". If this ever diverges, the live row and the replayed row disagree
+    # about one event -- which is what D7 caught.
+    assert assistant_stop_notice(
+        text="here is the file",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+    ) == ("answer cut off at the output limit", "warning")
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_go_back_to_model():
     """Validation failure never raises; the model receives an is_error result
     and may recover on the next turn."""
