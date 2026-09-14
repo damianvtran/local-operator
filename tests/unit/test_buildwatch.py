@@ -110,6 +110,70 @@ class TestTheWatch:
         self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
         assert buildwatch.build_changed(OLD) == NEW
 
+    def test_a_version_only_stamp_is_not_a_move_when_the_version_stands_still(self) -> None:
+        """QA round 2, OBS-1: a stamp nobody could read is an absence of evidence.
+
+        ``update.source_ref`` answers ``""`` for a marker that is missing,
+        unreadable, empty, truncated or not a commit, so the stamp on disk for an
+        aged ``chmod 000`` marker is ``0.54.30`` against a boot stamp of
+        ``0.54.30@1111111`` — different, and different only by the ref that could
+        not be read. QA measured the consequence on a real daemon (announced,
+        latched, exited, record removed, onto a build it could not read). The ref is
+        the primary key here precisely because two builds share one version string.
+        """
+        self.state["build"] = BuildStamp(version=OLD.version)
+        self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
+        assert buildwatch.build_changed(OLD) is None
+        assert buildwatch.proves_a_move(OLD, BuildStamp(version=OLD.version)) is False
+
+    def test_a_version_move_with_no_ref_is_still_a_move(self) -> None:
+        """The other direction, so the OBS-1 guard cannot close over every PyPI install.
+
+        A wheel upgrade writes ``pypi <version>``: no commit to record, and the
+        version is the thing that moved. Refusing version-only stamps outright
+        would turn this guard into "the feature never fires on a PyPI install".
+        """
+        moved = BuildStamp(version="0.54.31")
+        self.state["build"] = moved
+        self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
+        assert buildwatch.build_changed(OLD) == moved
+        assert buildwatch.proves_a_move(OLD, moved) is True
+
+    def test_a_stamp_with_nothing_in_it_is_not_a_build_to_leave_for(self) -> None:
+        """Both halves unreadable — no dist-info version and no marker — is not a move."""
+        self.state["build"] = BuildStamp(version="")
+        self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
+        assert buildwatch.build_changed(OLD) is None
+
+    def test_handover_build_is_the_move_without_the_settle(self) -> None:
+        """The announced phase's own read: a move does not settle a second time.
+
+        ``build_changed`` waits out ``BUILD_SETTLE_S`` because a detection may not
+        act on a half-written install. A handover that has ALREADY been announced
+        is not a detection any more: it is the question "is this still true?", and
+        answering it through the settle would delay the withdrawal — and the
+        re-announcement — by up to a settle window for no gain.
+        """
+        self.state["build"] = NEW
+        self.state["age"] = 0.0
+        assert buildwatch.build_changed(OLD) is None
+        assert buildwatch.handover_build(OLD) == NEW
+
+    def test_handover_build_withdraws_on_a_reverted_install(self) -> None:
+        """MINOR-2 at the rule's seam: back on ``boot`` is not a handover."""
+        self.state["build"] = NEW
+        assert buildwatch.handover_build(OLD) == NEW
+        self.state["build"] = OLD
+        assert buildwatch.handover_build(OLD) is None
+
+    def test_handover_build_withdraws_on_an_unreadable_install(self) -> None:
+        self.state["build"] = BuildStamp(version=OLD.version)
+        assert buildwatch.handover_build(OLD) is None
+
+    def test_handover_build_needs_a_baseline(self) -> None:
+        self.state["build"] = NEW
+        assert buildwatch.handover_build(None) is None
+
     def test_the_override_shortens_what_counts_as_settled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

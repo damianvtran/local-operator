@@ -132,15 +132,33 @@ def boot_build() -> "BuildStamp | None":
         return None
 
 
-def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
-    """The build now on disk, if it differs from ``boot`` AND has settled.
+def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
+    """The build the install on disk is PROVEN to have moved to, or ``None``.
 
-    ``None`` means "nothing to do": same stamp, an unreadable stamp, a boot
-    stamp that was never captured (a reduced test server), or a marker still
-    inside the settle window (see ``BUILD_SETTLE_S``). Editable checkouts have
-    no ``.lop-source`` and a constant version, so they never trip this — by
-    design, matching ``design-build-skew.md`` §6.5: a developer's worktree
-    runtime must not retire because they touched a file.
+    This is the reading both phases of the daemon's watch are made of: the
+    detection that announces a handover, and the re-check every announced tick
+    makes to ask whether the handover it announced is still the state of the
+    install (``server/retire.py``). ``build_changed`` adds the settle window to
+    it; the announced phase deliberately does not, because a move that has
+    already been announced does not need to settle twice.
+
+    ``None`` means the question is unproven, and it covers three shapes:
+
+    * **the install is back to ``boot``** — a ``lop-update`` that failed and was
+      rolled back, or one superseded by the running build. The process is the
+      right one after all, so an announcement written earlier is withdrawn and
+      the daemon goes on serving (review round 2, MINOR-2: the announcement used
+      to be written once and never re-read, so the daemon still latched, exited
+      and removed its record — leaving a reader a ``retiring_to`` that named a
+      build no longer on disk);
+    * **the stamp cannot be resolved into a build at all** — see
+      :func:`proves_a_move`, the fail-closed rule QA round 2's OBS-1 asked for;
+    * the exception/unreadable case below, the same direction for the same
+      reason.
+
+    A DIFFERENT build than the one announced is NOT ``None``: it is the newer
+    move, and the caller re-announces onto it rather than leaving for a build
+    that has already been replaced.
     """
     if boot is None:
         return None
@@ -152,8 +170,66 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     except Exception:  # noqa: BLE001 — an unreadable stamp is "no change"
         logger.debug("build stamp unreadable; no refresh", exc_info=True)
         return None
-    if on_disk == boot:
+    if on_disk == boot or not proves_a_move(boot, on_disk):
         return None
+    return on_disk
+
+
+def proves_a_move(boot: "BuildStamp", on_disk: "BuildStamp") -> bool:
+    """Does ``on_disk`` read as a BUILD, rather than as a stamp nobody could read?
+
+    WHY THIS GUARD IS HERE AND NOT IN ``update``. ``update.source_ref`` maps an
+    absent, unreadable, empty or non-commit ``.lop-source`` to ``""`` (and
+    ``write_source_marker`` documents why each of those must never raise), so
+    ``installed_build`` answers a VERSION-ONLY stamp for all of them. That stamp
+    is legitimate evidence of a move after a wheel upgrade — the marker reads
+    ``pypi <version>``, the version itself moved, and the label
+    ``0.54.39`` vs ``0.54.40`` names the handover honestly. It is *not* evidence
+    of a move when the version is unchanged, because the ref is the PRIMARY key
+    precisely for that case: ``lop-update`` builds from ``main`` while
+    ``pyproject.toml`` still names the last release, so two genuinely different
+    builds share one version string and only the recorded commit tells them
+    apart. A version-only stamp that differs from a ``version@ref`` boot stamp
+    therefore says "I could not read the ref", not "the build moved" — and
+    leaving a process behind for a build it could not read is the failure QA
+    round 2 measured on a real daemon (OBS-1: ``chmod 000`` on an aged marker,
+    production settle, and the daemon announced, latched, exited and removed its
+    record onto ``0.54.39``).
+
+    It lives at this layer because the fix belongs to whoever ACTS on the answer
+    rather than to the reader: ``update.py`` is deliberately total and silent
+    (``installed_build`` is called from a runtime's construction path, where
+    raising would stop every runtime on the host), and a caller that only
+    COMPARES labels is right to treat an unreadable ref as a difference. Only a
+    caller about to leave a process behind has to be strict, and both of this
+    module's callers are.
+    """
+    if not on_disk.version and not on_disk.source_ref:
+        # Nothing at all could be read: no dist-info, no marker. A stamp like
+        # this labels as "unknown" and is not a build to leave for.
+        return False
+    if on_disk.source_ref:
+        return True
+    return on_disk.version != boot.version
+
+
+def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
+    """The build now on disk, if it differs from ``boot`` AND has settled.
+
+    ``None`` means "nothing to do": same stamp, an unreadable stamp, a boot
+    stamp that was never captured (a reduced test server), a stamp that does not
+    read as a build (see :func:`proves_a_move`), or a marker still inside the
+    settle window (see ``BUILD_SETTLE_S``). Editable checkouts have no
+    ``.lop-source`` and a constant version, so they never trip this — by design,
+    matching ``design-build-skew.md`` §6.5: a developer's worktree runtime must
+    not retire because they touched a file.
+    """
+    newer = handover_build(boot)
+    if newer is None:
+        return None
+    from local_operator import update as update_mod
+
+    prefix = build_prefix()
     try:
         age = update_mod.build_marker_age_s(prefix)
     except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
@@ -171,7 +247,7 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
         # Younger than the settle, or unknowable: the install may still be
         # mid-write. Try again next check; the marker only gets older.
         return None
-    return on_disk
+    return newer
 
 
 def build_pair(boot: "BuildStamp | None", newer: "BuildStamp") -> str:

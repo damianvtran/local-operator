@@ -29,6 +29,17 @@ separate events, and the order between them is the design:
 3. only once the drain is empty does it LATCH: refuse new work with the typed
    ``503 daemon-retiring``, then exit cleanly and remove the record.
 
+AND THE ANNOUNCEMENT IS RE-READ EVERY TICK, because it is a claim about the
+install rather than a fact about this process: the poll re-asks
+``buildwatch.handover_build`` while it is announced, WITHDRAWS the handover from
+the record when the install turns out to be back on ``boot`` (a ``lop-update``
+rolled back or superseded) or unreadable, and re-announces onto a newer build if
+the install moved on again (review round 2, MINOR-2). Announcing once and acting
+on it forever meant a daemon that latched, exited and removed its record leaving
+its readers a ``retiring_to`` that named a build no longer on disk. The LATCH is
+still one-way, and its place in the sequence is unchanged: withdrawal is a
+record change, not an un-latch, and it can only happen before ``latch`` runs.
+
 WHY NOT "DRAIN, THEN ANNOUNCE", the obvious order and this module's first shape:
 because the terms that hold a daemon include a STANDING ATTACHMENT — the desktop
 app's replayable ``/v1/desktop/sessions/{id}/events`` relay and the watch lease
@@ -287,6 +298,33 @@ def announce(
     publisher.heartbeat(retiring_from=retiring_from, retiring_to=retiring_to)
 
 
+def withdraw(publisher: "session_registry.RecordPublisher") -> None:
+    """Take the handover back out of the record. THE WRITE IS THE WITHDRAWAL.
+
+    Called when the poll re-reads the install and the move it announced is no
+    longer there: the marker is back on the build this process loaded (a
+    ``lop-update`` that failed and was rolled back, or was superseded by the
+    running build — review round 2, MINOR-2), or the stamp cannot be read as a
+    build at all (:func:`buildwatch.proves_a_move`). In both cases the daemon is
+    NOT leaving: it is serving the right build, or a build nobody can identify,
+    and a record that still told its readers to let go would be telling them to
+    hand over to nothing.
+
+    NOT AN UN-LATCH, and it cannot become one: this is a record field, the latch
+    is :func:`latch`'s ``app.state`` flag, and the poll only reaches here before
+    ``latch`` has run. A withdrawal after the refusal exists is unrepresentable
+    by construction rather than by convention.
+
+    Allowed to FAIL, exactly like :func:`announce`, and the caller must let it:
+    a read-only or full record directory is the failure class the sibling
+    ``heartbeat_loop`` swallows as self-healing, and the poll's answer is the same
+    one it gives a failed announcement — log at WARNING, retry on the next check,
+    and do NOT proceed to the latch while the record still claims a handover the
+    process no longer believes in.
+    """
+    publisher.heartbeat(retiring_from="", retiring_to="")
+
+
 def latch(app: "FastAPI") -> None:
     """Refuse new work, from here until the process exits.
 
@@ -296,7 +334,10 @@ def latch(app: "FastAPI") -> None:
 
     Called ONLY after the announcement is readable AND the drain is empty, so
     the refusal can never arrive before the record has told a client to let go
-    (see the module docstring for why that order is the design).
+    (see the module docstring for why that order is the design). "Readable" is
+    re-read on every tick rather than remembered: the poll withdraws the
+    announcement if the install on disk stops proving the move it announced, and
+    the latch is reachable only on a tick where the announcement still stands.
     """
     if getattr(app, "state", None) is not None:
         setattr(app.state, RETIRING_STATE_ATTR, True)
@@ -409,8 +450,9 @@ async def retirement_poll(
     ``buildwatch.build_changed`` is the shared rule — same stamp, an unsettled
     marker or an unreadable one is "no action", and ``LOP_BUILD_PREFIX`` (the
     e2e-only override) points the whole check at a fake install root. This loop
-    adds only what is this process's own: the announcement, the in-flight gate
-    and the refusal.
+    adds only what is this process's own: the announcement, the re-read of it
+    (``buildwatch.handover_build``, which is why an announcement can be WITHDRAWN
+    again), the in-flight gate and the refusal.
     """
     if boot is None:
         boot = buildwatch.boot_build()
@@ -474,6 +516,78 @@ async def retirement_poll(
                     "itself; the new build is already on disk, so start it again with "
                     "`lop serve` (or `lop update` first if the install needs finishing)",
                 )
+            continue
+
+        # THE PREMISE IS RE-READ, and this is the whole of round 2's MINOR-2: the
+        # announcement is a claim about the INSTALL on disk, not a fact about this
+        # process, so acting on it for the rest of the process's life is acting on
+        # a snapshot. One read decides both ways it can stop holding — the install
+        # is back on the build this process loaded (a `lop-update` that failed and
+        # was rolled back, or was superseded by the running build: the process is
+        # the right one after all), or the stamp no longer reads as a build at all
+        # (the fail-closed direction `buildwatch.proves_a_move` states). Either
+        # way this daemon is NOT leaving, and a daemon that latched, exited and
+        # removed its record on a stale announcement left its readers a
+        # `retiring_to` naming a build that was no longer on disk. Read per check
+        # interval, which is what the detection phase above already costs per
+        # tick; nothing here is a hot path.
+        standing = buildwatch.handover_build(boot)
+        if standing is None:
+            try:
+                withdraw(publisher)
+            except Exception:  # noqa: BLE001 — a failed withdrawal is RETRIED, never latched over
+                # Symmetrical with a failed announcement, and for the same reason:
+                # the record is the channel every reader acts on, so proceeding to
+                # the latch while it still claims a handover this process has
+                # stopped believing would retire the daemon under a notice that
+                # names the wrong build. Keep serving and try again next check.
+                logger.warning(
+                    "serve daemon: the handover to %s no longer holds but it could not be "
+                    "withdrawn from %s; keeping the announcement and retrying on the next "
+                    "check",
+                    announced.label(),
+                    getattr(publisher, "path", "the record"),
+                    exc_info=True,
+                )
+                continue
+            logger.info(
+                "serve daemon: the handover to %s no longer holds — the install on disk is "
+                "back on %s or no longer readable; withdrawn from the record and still "
+                "serving on this build",
+                announced.label(),
+                boot.label(),
+            )
+            announced = None
+            last_reason = None
+            continue
+        if standing != announced:
+            # The install moved ON AGAIN while this process was announced. Nothing
+            # has latched yet, so the honest record is the one naming the build
+            # that is actually there now rather than the one it first noticed.
+            try:
+                announce(
+                    app,
+                    publisher,
+                    retiring_from=boot.label(),
+                    retiring_to=standing.label(),
+                )
+            except Exception:  # noqa: BLE001 — as above: retried, never latched over
+                logger.warning(
+                    "serve daemon: the install on disk moved on to %s but the record at %s "
+                    "could not be updated; retrying on the next check",
+                    standing.label(),
+                    getattr(publisher, "path", "the record"),
+                    exc_info=True,
+                )
+                continue
+            logger.info(
+                "serve daemon: the install on disk moved on to %s while %s was announced; "
+                "the record now names %s",
+                standing.label(),
+                announced.label(),
+                standing.label(),
+            )
+            announced = standing
             continue
 
         reason = in_flight(app)

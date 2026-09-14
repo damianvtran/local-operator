@@ -24,23 +24,29 @@ desktop app's own relay — held through the ROUTE, not through a hand-built
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Iterator
+from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Timeout
 
 from local_operator import buildwatch
 from local_operator import update as update_mod
+from local_operator.credentials import CredentialManager
 from local_operator.server import registry as serve_registry
 from local_operator.server import retire
 from local_operator.server.registry import ServeRecord
@@ -54,6 +60,9 @@ from local_operator.update import BuildStamp
 
 OLD = BuildStamp(version="0.54.30", source_ref="1111111")
 NEW = BuildStamp(version="0.54.31", source_ref="2222222")
+#: A third build, for the case where the install moves ON while a handover to
+#: ``NEW`` is already announced: the record must name this one, not the first.
+NEWER = BuildStamp(version="0.54.32", source_ref="3333333")
 
 #: How long a test lets the poll run for, in seconds. The check interval is
 #: shortened below; this is a multiple of it, so a test can assert on "several
@@ -297,6 +306,185 @@ async def test_no_boot_stamp_means_no_watch(disk: dict[str, Any], monkeypatch) -
     stop.set()
 
 
+async def _wait_for_withdrawal(publisher: FakePublisher) -> None:
+    """Block until the record no longer announces a handover, or fail loudly."""
+    for _ in range(1000):
+        if not publisher.record.retiring_to:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("the handover was never withdrawn from the record")
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stamp_is_never_a_build_to_retire_onto(disk: dict[str, Any]) -> None:
+    """QA round 2's OBS-1, at the rule's own seam: a stamp nobody could read is NOT a move.
+
+    ``update.source_ref`` maps an unreadable, empty, truncated or non-commit
+    ``.lop-source`` to ``""``, so ``installed_build`` answers a VERSION-ONLY stamp
+    for all of them — and a version-only stamp differs from a ``version@ref`` boot
+    stamp without the build having moved anywhere. QA measured the consequence on a
+    real daemon: with an aged marker ``chmod 000``-ed, the daemon announced
+    ``0.54.39@1111111 → 0.54.39``, latched, exited and removed its record — i.e. it
+    left for a build it could not read. The ref is the primary key precisely
+    because two different builds share one version string here, so a version-only
+    stamp is an absence of evidence rather than evidence of a move.
+    """
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    await asyncio.sleep(QUIET_S)  # the boot stamp is OLD, the daemon is watching
+
+    disk["build"] = BuildStamp(version=OLD.version)  # the marker cannot be read
+    await asyncio.sleep(QUIET_S)
+
+    assert publisher.writes == [], "a stamp that could not be read is not a handover"
+    assert exited == [], "the daemon left for a build it could not read"
+    assert retire.retiring(cast(Any, app)) is False
+    assert not task.done()
+
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_a_version_move_with_no_ref_is_still_a_move(disk: dict[str, Any]) -> None:
+    """The other direction of the same guard, so it cannot close too far.
+
+    A wheel upgrade writes ``pypi <version>``: the ref is empty because there is no
+    commit to record, and the version is exactly what moved. Refusing that would
+    silently disable the whole feature for every PyPI install, which is why the
+    guard asks about the VERSION when the ref is unreadable rather than refusing
+    every version-only stamp.
+    """
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    await asyncio.sleep(QUIET_S)
+
+    disk["build"] = BuildStamp(version="0.54.40")
+    await _wait_for_announcement(publisher)
+
+    assert publisher.record.retiring_from == OLD.label()
+    assert publisher.record.retiring_to == "0.54.40"
+    assert exited == []
+
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_a_reverted_install_withdraws_the_announcement_and_keeps_serving(
+    disk: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """MINOR-2: an announcement that stops being true is taken back out of the record.
+
+    The announcement used to be written once and never re-read, so an install that
+    went BACK to the running build — a ``lop-update`` that failed and was rolled
+    back, or one the running build superseded — still latched, exited and removed
+    its record, having told every reader to hand over to a build that was no longer
+    there. For an unsupervised daemon that is "the daemon is gone" with no
+    successor, and for a reader of the record it is a ``retiring_to`` that names
+    nothing.
+
+    Both halves are asserted: the fields are CLEARED (a reader must not keep acting
+    on a handover that is not happening) and the daemon is still serving — then, as
+    the second half of the test, it announces again when the install really does
+    move, because a withdrawal must not disarm the watch it belongs to.
+    """
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    await asyncio.sleep(QUIET_S)
+
+    disk["build"] = NEW
+    await _wait_for_announcement(publisher)
+    _announced_not_latched(app, publisher, exited)
+
+    with caplog.at_level(logging.INFO):
+        disk["build"] = OLD  # the install is back on the build this process loaded
+        await _wait_for_withdrawal(publisher)
+
+    assert publisher.writes[-1] == {"retiring_from": "", "retiring_to": ""}
+    assert publisher.record.retiring_from == "" and publisher.record.retiring_to == ""
+    assert retire.retiring(cast(Any, app)) is False, "a withdrawn handover must not latch"
+    assert exited == [], "the daemon is the right build after all; it stays"
+    assert not task.done(), "the watch goes on watching"
+    assert "no longer holds" in caplog.text, "the withdrawal is visible to an operator"
+
+    disk["build"] = NEW
+    await _wait_for_announcement(publisher)
+    _announced_not_latched(app, publisher, exited)
+
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_a_stamp_that_stops_reading_as_a_build_withdraws_the_announcement(
+    disk: dict[str, Any],
+) -> None:
+    """An announced handover whose stamp can no longer be read is withdrawn too.
+
+    The fail-closed rule of OBS-1 is not the detection's alone: an install that was
+    readable when it was announced and is unreadable now is the same "never leave
+    for a build you could not read", and the answer is the same one the reversion
+    gets — take the handover back out of the record and keep serving rather than
+    latching on a claim nothing on disk still supports.
+    """
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    await asyncio.sleep(QUIET_S)
+
+    disk["build"] = NEW
+    await _wait_for_announcement(publisher)
+
+    disk["build"] = BuildStamp(version=OLD.version, source_ref="")  # unreadable marker
+    await _wait_for_withdrawal(publisher)
+
+    assert retire.retiring(cast(Any, app)) is False
+    assert exited == [], "the daemon does not leave for a stamp it cannot read"
+
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_an_install_that_moves_on_again_re_announces_onto_the_new_build(
+    disk: dict[str, Any],
+) -> None:
+    """MINOR-2's second half: the record names the build that is there NOW.
+
+    Between the announcement and the latch an installer can run twice (an update
+    that lands while the drain is still held). The daemon is leaving either way, but
+    a reader must not be sent to the build that has already been replaced: the
+    target is re-read and the record rewritten onto the newest one.
+    """
+    app, publisher = FakeApp(), FakePublisher(_record())
+    task, stop, exited = await _start(app, publisher)
+    await asyncio.sleep(QUIET_S)
+
+    disk["build"] = NEW
+    await _wait_for_announcement(publisher)
+
+    disk["build"] = NEWER
+    for _ in range(1000):
+        if publisher.record.retiring_to == NEWER.label():
+            break
+        await asyncio.sleep(0.005)
+    else:
+        raise AssertionError(
+            f"the record still names {publisher.record.retiring_to!r} after the install moved on"
+        )
+
+    assert publisher.record.retiring_from == OLD.label()
+    re_announced = [
+        write for write in publisher.writes if write.get("retiring_to") == NEWER.label()
+    ]
+    assert re_announced, "the re-announcement must be a record write, not a field edit"
+    assert retire.retiring(cast(Any, app)) is False, "re-announcing is not latching"
+    assert exited == []
+
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # the in-flight predicate: one case per term
 # ---------------------------------------------------------------------------
@@ -376,10 +564,23 @@ async def test_an_in_flight_desktop_request_holds_the_daemon(
 
 @pytest.mark.asyncio
 async def test_a_watching_desktop_window_holds_the_daemon(disk: dict[str, Any], tmp_path) -> None:
-    """A live lease IS a viewer, and a viewer is never cut off.
+    """DEFENSIVE GUARD for the lease term, not a description of a reachable state.
 
-    ``expires`` is written by ``watch`` (``time.monotonic() + WATCH_TTL``), so
-    this sets the state that call leaves behind rather than inventing one.
+    ``expires`` is what ``watch`` writes (``time.monotonic() + WATCH_TTL``), and
+    this sets that state directly. QA round 2's OBS-2 measured what a real daemon
+    does with it: taking the lease over the app's own flow (``POST /watch`` while
+    the relay was open, ``200 {"lease_seconds": 45}``) and then closing the relay
+    without renewing left the daemon latching 5 s later with the log naming the
+    RELAY term and no lease term at all. The lease rides the same subscription and
+    does not outlive it, so ``users == 0`` with a live lease is not a state a real
+    daemon reaches — the relay is the binding term (see
+    ``test_an_in_flight_desktop_request_holds_the_daemon``).
+
+    Kept, and labelled, rather than dropped: the term exists in ``in_flight`` as a
+    guard for a viewer whose socket has gone while its lease has not, and a guard
+    nobody exercises is a guard that rots silently. What this test pins is that the
+    term still holds the daemon and still releases it when the lease lapses — not
+    that the production flow can produce it.
     """
     pool = DesktopSessions(tmp_path)
     bridge = _live_bridge(tmp_path)
@@ -475,7 +676,21 @@ async def test_a_retiring_daemon_refuses_to_spawn_a_runtime(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_retiring_daemon_still_answers_reads(tmp_path) -> None:
-    """The announcement is readable until the exit removes the record."""
+    """The RECORD plane stays open to a latched daemon — session-scoped reads do not.
+
+    ``list`` is how a reader discovers what is on this host (``scan()`` and the
+    desktop app's own discovery read the record the same way), so it has to keep
+    answering until the clean exit removes the record: it is what makes the
+    handover OBSERVABLE instead of a daemon that vanishes.
+
+    It is also the reason the door can be the gate for everything else. Nothing
+    here takes a bridge, so nothing here is refused — and the same is true of
+    ``GET /health`` and of the record file itself. Every route that DOES take a
+    bridge is refused once latched, reads included (see
+    ``test_every_route_that_reaches_the_door_refuses_once_latched``), because a
+    session-scoped answer can only come from the build the daemon has already told
+    its readers to leave.
+    """
     pool = DesktopSessions(tmp_path, retiring=lambda: True)
     assert await pool.list(10) == []
 
@@ -764,70 +979,461 @@ async def test_a_desktop_relay_holds_an_announced_daemon_that_keeps_serving(
 
 @pytest.mark.asyncio
 async def test_a_bridge_asserts_admission_for_every_work_path(tmp_path: Path) -> None:
-    """The bridge-level gate is the SAME question the pool's is (MAJOR-2).
+    """The bridge-level gate, held across the latch — what the door cannot express.
 
-    One method rather than one per caller: ``warm``, ``/messages`` and
-    ``/commands`` all ask it, so a path added later reaches the same answer by
-    calling the same thing. Pinned here in isolation because the route tests
-    below exercise the route's error ladder rather than the bridge's own gate.
+    The door refuses a bridge that is not yet handed out; this is the question the
+    callers that already HOLD one ask: ``warm``'s own speculation and the
+    lease-warm loop run in-process, do not come through a route, and must not
+    delegate to a route's refusal. The routes no longer call it — the enforcement is
+    the pool's door (``DesktopSessions.session``), which they all come through — so
+    this pins the in-process half rather than a route's error ladder.
     """
     latch = {"on": False}
     pool = DesktopSessions(tmp_path, retiring=lambda: latch["on"])
     session_id = await pool.create(str(tmp_path))
-    latch["on"] = True  # the daemon latches
     async with pool.session(session_id) as bridge:
+        assert bridge.retiring_probe is pool.retiring_probe  # one probe, one answer
+        bridge.assert_admitting()  # before the latch, the same bridge admits
+
+        latch["on"] = True  # the daemon latches while this bridge is held
         with pytest.raises(retire.DaemonRetiring) as raised:
             bridge.assert_admitting()
         assert raised.value.code == "daemon-retiring"
         assert str(raised.value) == retire.RETIRING_MESSAGE
 
-        latch["on"] = False  # the same bridge admits again before its daemon latches
+        latch["on"] = False  # and admits again if the handover is withdrawn
         bridge.assert_admitting()
     await pool.close()
 
 
-@pytest.mark.parametrize(
-    ("label", "suffix"),
-    [
-        ("create", ""),
-        ("warm", "/warm"),
-        ("messages", "/messages"),
-        ("commands", "/commands"),
-        ("answers", "/answers"),
-    ],
+#: The ``request_id`` the matrix rows are sent with. One id, because the point of
+#: the side-effect assertion below is that a REFUSED request claims nothing — a
+#: claimed receipt is indeterminate for the client's retry (see ``stop``'s comment)
+#: and a claimed aside id answers 409 on the retry against the successor.
+REQUEST_ID = "01234567-89ab-cdef-0123-456789abcdef"
+
+
+#: A well-formed ``aside_id`` (the route's own pattern), spelled once.
+ASIDE_ID = "abcdef01-2345-6789-abcd-ef0123456789"
+
+
+@dataclass(frozen=True)
+class _DoorRoute:
+    """One desktop route, as the request that reaches the door.
+
+    Keyed by the handler function's own name rather than by the URL it happens to
+    live at: the completeness test below matches this table against the ROUTER and
+    against an AST walk of the router modules, and matching on a URL a test
+    spelled itself is how a table comes to look complete while a route added
+    under it is not covered.
+    """
+
+    endpoint: str
+    method: str
+    template: str
+    payload: dict[str, Any] | None = None
+    query: str = ""
+    session_in_query: bool = False
+
+
+#: EVERY route in the desktop plane that obtains a bridge, which — because the
+#: pool's ``session()`` is the only thing in the process that builds one — is
+#: every route that can admit or start work. Review round 2 measured the previous
+#: five-row version of this list: it gated ``/messages`` and ``/commands``, and
+#: left ``/mcp``, ``/credentials``, ``/fork`` (and its child admission),
+#: ``/asides`` and ``/adopt`` reaching ``bind_runtime()`` on the same latched
+#: daemon. The list was the mechanism then and is the TEST now.
+REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
+    _DoorRoute(
+        "create_session",
+        "POST",
+        "/v1/desktop/sessions",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": "/"},
+    ),
+    _DoorRoute("skills", "GET", "/v1/desktop/skills", session_in_query=True),
+    _DoorRoute("mcp_status", "GET", "/v1/desktop/sessions/{session_id}/mcp"),
+    _DoorRoute(
+        "mcp_control",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/mcp",
+        {"action": "list"},
+    ),
+    _DoorRoute(
+        "credential",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/credentials",
+        {"action": "list", "key": "TEST_KEY"},
+    ),
+    _DoorRoute(
+        "fork",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/fork",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "message": ""},
+    ),
+    _DoorRoute(
+        "stop",
+        "POST",
+        "/v1/desktop/stop",
+        {
+            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "targets": ["SESSION_ID"],
+            "confirmed": True,
+        },
+    ),
+    _DoorRoute(
+        "aside",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/asides",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "text": "hello"},
+    ),
+    _DoorRoute(
+        "adopt",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/asides/{aside_id}/adopt",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "confirmed": True},
+    ),
+    _DoorRoute("snapshot", "GET", "/v1/desktop/sessions/{session_id}"),
+    _DoorRoute("history", "GET", "/v1/desktop/sessions/{session_id}/history"),
+    _DoorRoute("events", "GET", "/v1/desktop/sessions/{session_id}/events"),
+    _DoorRoute("failovers", "GET", "/v1/desktop/sessions/{session_id}/failovers"),
+    _DoorRoute(
+        "entities",
+        "GET",
+        "/v1/desktop/sessions/{session_id}/command-entities",
+        query="command=help",
+    ),
+    _DoorRoute(
+        "prompt",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/messages",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef", "text": "hello"},
+    ),
+    _DoorRoute(
+        "command",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/commands",
+        {
+            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "command": "compact",
+            "args": "",
+        },
+    ),
+    _DoorRoute(
+        "answer",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/answers",
+        {
+            "epoch": "epoch",
+            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "approved": True,
+        },
+    ),
+    _DoorRoute(
+        "watch",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/watch",
+        {"subscription_id": "0" * 32, "visible": False, "can_notify": False},
+    ),
+    _DoorRoute("warm", "POST", "/v1/desktop/sessions/{session_id}/warm", {}),
 )
+
+#: Routes that refuse WITHOUT the door, because they never take a bridge: a
+#: refusal there is the pool's own (``DesktopSessions.create``) and there is no
+#: other entry. Named and one entry long, so the completeness test below can
+#: assert the whole plane rather than a subset of it.
+GATED_WITHOUT_THE_DOOR = frozenset({"create_session"})
+
+_DESKTOP_ROUTER_MODULES = (
+    "local_operator.server.routes.desktop_sessions",
+    "local_operator.server.routes.desktop_lifecycle",
+    "local_operator.server.routes.desktop_catalogues",
+)
+
+
+@dataclass(frozen=True)
+class _PlaneRoute:
+    """One desktop route as the ROUTER describes it: handler, method, template."""
+
+    endpoint: str
+    method: str
+    template: str
+
+
+@dataclass(frozen=True)
+class _Module:
+    """One module of the desktop plane, as the walks below see it."""
+
+    name: str
+    path: Path
+
+
+def _modules(*names: str) -> list[_Module]:
+    """The named modules, IMPORTED rather than globbed.
+
+    Importing is the point: a walk over the filesystem would report a router that
+    is never mounted (and so cannot serve a request), and would miss one mounted
+    from somewhere the glob does not reach. These are the modules the app mounts
+    (``server/app.py``'s ``include_router`` calls) plus the pool itself.
+    """
+    loaded: list[_Module] = []
+    for name in names:
+        module = importlib.import_module(name)
+        loaded.append(_Module(name, Path(cast(str, module.__file__))))
+    return loaded
+
+
+def _router_modules() -> list[_Module]:
+    """The three routers that serve the desktop plane's session routes."""
+    return _modules(*_DESKTOP_ROUTER_MODULES)
+
+
+def _pool_module() -> _Module:
+    return _modules("local_operator.server.utils.desktop_sessions")[0]
+
+
+def _plane_routes() -> dict[str, _PlaneRoute]:
+    """Every route the desktop routers publish, keyed by HANDLER NAME."""
+    found: dict[str, _PlaneRoute] = {}
+    for name in _DESKTOP_ROUTER_MODULES:
+        module = importlib.import_module(name)
+        for route in module.router.routes:
+            handler = route.endpoint.__name__
+            methods = sorted(set(route.methods or set()) - {"HEAD", "OPTIONS"})
+            found[handler] = _PlaneRoute(handler, methods[0] if methods else "", route.path)
+    return found
+
+
+def _enclosing(tree: ast.Module, lineno: int) -> str:
+    """The innermost function containing ``lineno``, by name."""
+    best: tuple[int, str] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        end = node.end_lineno or node.lineno
+        if node.lineno <= lineno <= end and (best is None or node.lineno > best[0]):
+            best = (node.lineno, node.name)
+    return best[1] if best else "<module>"
+
+
+def _door_handlers(module: _Module) -> set[str]:
+    """AST walk: this module's own handlers that obtain a session bridge.
+
+    Module-level functions only — the router's handlers — matched on the call
+    ``….session(…)``, which IS the door: ``DesktopSessions.session`` is the only
+    thing in the process that builds a bridge (see :func:`_door_bypasses`), so
+    "obtains a bridge" and "reaches the door" are the same set.
+    """
+    tree = ast.parse(module.path.read_text(encoding="utf-8"))
+    reached: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "session"
+            ):
+                reached.add(node.name)
+                break
+    return reached
+
+
+def _door_bypasses(modules: list[_Module]) -> list[str]:
+    """Every place in ``modules`` that obtains a bridge WITHOUT going through the door.
+
+    THE MECHANISM GUARD, and the reason the refusal does not depend on anyone
+    remembering to ask. There are exactly two ways round ``DesktopSessions.session``
+    and both are reported here:
+
+    * **building a bridge** — ``DesktopSessionBridge(...)`` anywhere but inside the
+      pool's own ``session`` is a second door by definition, and a later edit that
+      wanted to hand out a bridge "just this once" would be caught;
+    * **reaching the pool's cache** — ``pool.bridges[session_id]`` in a handler
+      skips the refusal entirely and is the way round that a route would actually
+      take, so a read of ``….bridges`` from outside the pool's module is reported
+      as well.
+
+    A list of offenders rather than a boolean so the failure names the line — and
+    so the falsification test below can drive this same code over a scratch copy.
+    """
+    pool = _pool_module().path
+    offenders: list[str] = []
+    for module in modules:
+        tree = ast.parse(module.path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "DesktopSessionBridge"
+            ):
+                owner = _enclosing(tree, node.lineno)
+                if module.path != pool or owner != "session":
+                    offenders.append(
+                        f"{module.name}:{node.lineno} builds a bridge in {owner}() "
+                        "instead of obtaining one from DesktopSessions.session"
+                    )
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "bridges"
+                and not isinstance(node.ctx, ast.Store)
+                and module.path != pool
+            ):
+                offenders.append(
+                    f"{module.name}:{node.lineno} reaches the pool's bridge cache directly "
+                    f"from {_enclosing(tree, node.lineno)}()"
+                )
+    return offenders
+
+
+def test_the_door_is_the_only_way_to_a_bridge() -> None:
+    """The property that makes ``DesktopSessions.session`` the ENFORCEMENT.
+
+    Round 2's MAJOR-1 was that the gate lived on a maintained list of routes, and
+    five routes in the same plane were not on it. The fix is only a fix if the
+    door is the only way in — so this asserts that for the modules that can serve a
+    desktop request, and the next test shows the assertion can go red.
+    """
+    assert _door_bypasses([*_router_modules(), _pool_module()]) == []
+
+
+def test_the_mechanism_walk_catches_a_route_that_bypasses_the_door(tmp_path: Path) -> None:
+    """The guard above, driven in the direction that FAILS.
+
+    A scratch copy of the real router module with two synthetic ungated handlers
+    appended — one reaching the pool's cache, one building its own bridge, which is
+    what a route added without the door could look like — must be reported. Without
+    this, \"no bypasses\" would be a claim about a walk nobody has seen fail.
+    """
+    source = next(m for m in _router_modules() if m.name.endswith("desktop_lifecycle"))
+    scratch = tmp_path / "scratch_desktop_lifecycle.py"
+    scratch.write_text(
+        source.path.read_text(encoding="utf-8")
+        + "\n\n@router.post('/v1/desktop/sessions/{session_id}/frobnicate')\n"
+        "async def frobnicate(session_id: str, request: Request):\n"
+        "    bridge = host(request).bridges[session_id]\n"
+        "    await bridge.remote.bind_runtime()\n"
+        "    return reply({'data': {}})\n"
+        "\n\n@router.post('/v1/desktop/sessions/{session_id}/widgets')\n"
+        "async def widgets(session_id: str, request: Request):\n"
+        "    bridge = DesktopSessionBridge(host(request).root, session_id, '/tmp')\n"
+        "    await bridge.acquire()\n"
+        "    return reply({'data': {}})\n",
+        encoding="utf-8",
+    )
+    offenders = _door_bypasses([_Module("scratch.desktop_lifecycle", scratch)])
+    assert any("bridge cache directly" in line for line in offenders), offenders
+    assert any("builds a bridge in widgets()" in line for line in offenders), offenders
+
+
+def test_the_refusal_matrix_covers_every_route_that_reaches_the_door() -> None:
+    """The matrix above is complete BY CONSTRUCTION, and this is the construction.
+
+    Walked, not remembered: the handlers come from an AST walk of the router
+    modules and the paths from the routers they build, so a route that reaches the
+    door and has no row in ``REFUSAL_MATRIX`` fails HERE. That is what round 2's
+    MAJOR-1 asks for — the route list stops being the mechanism and becomes a test
+    — and it is the difference between this and the five-row table it replaces,
+    which named ``/messages``, ``/commands`` and ``/warm`` while ``/mcp``,
+    ``/credentials``, ``/fork``, ``/asides`` and ``/adopt`` reached the spawn seam
+    on a latched daemon unmentioned.
+
+    ``create_session`` is the one route that refuses WITHOUT the door (the pool
+    refuses it directly — it needs no bridge because it makes a session rather than
+    a runtime), and it is named in ``GATED_WITHOUT_THE_DOOR`` rather than left out,
+    so the two sets together are the whole plane.
+    """
+    plane = _plane_routes()
+    reached: set[str] = set()
+    for module in _router_modules():
+        reached |= _door_handlers(module)
+    covered = {row.endpoint for row in REFUSAL_MATRIX}
+    assert reached | set(GATED_WITHOUT_THE_DOOR) == covered, (
+        "REFUSAL_MATRIX must cover exactly the routes that reach the door "
+        f"(walked: {sorted(reached)}, gated otherwise: {sorted(GATED_WITHOUT_THE_DOOR)}, "
+        f"covered: {sorted(covered)})"
+    )
+    unknown = sorted(endpoint for endpoint in covered if endpoint not in plane)
+    assert unknown == [], f"a row names a handler the desktop routers do not publish: {unknown}"
+
+
+def _claimed_receipts(config_dir: Path) -> set[str]:
+    """The request ids a receipt has been claimed for, read live from the journal.
+
+    ``DesktopReceipts`` INSERTs the row BEFORE the operation runs, so a claimed id is
+    a side effect that outlives the request — which is why "refused" has to mean "no
+    row" rather than "no db": the database is created by the first claim of any
+    kind, and a refused request is exactly the one that must leave no trace in it.
+    """
+    path = config_dir / "desktop-receipts.db"
+    if not path.exists():
+        return set()
+    with closing(sqlite3.connect(path)) as db:
+        return {row[0] for row in db.execute("SELECT id FROM receipts")}
+
+
+def _fill(value: Any, session_id: str) -> Any:
+    """Replace the placeholder a row uses where the session id is only known at run time."""
+    if isinstance(value, dict):
+        return {key: _fill(item, session_id) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill(item, session_id) for item in value]
+    return session_id if value == "SESSION_ID" else value
+
+
+def _request_for(route: _DoorRoute, session_id: str) -> tuple[str, str, dict[str, Any] | None]:
+    """A row as ``(method, url, payload)``, with the session id substituted."""
+    url = route.template.replace("{session_id}", session_id).replace("{aside_id}", ASIDE_ID)
+    if route.session_in_query:
+        url += f"?session_id={session_id}"
+    if route.query:
+        url += ("&" if "?" in url else "?") + route.query
+    payload = None if route.payload is None else _fill(route.payload, session_id)
+    return route.method, url, cast(dict[str, Any] | None, payload)
+
+
+@pytest.mark.parametrize("route", REFUSAL_MATRIX, ids=lambda route: route.endpoint)
 @pytest.mark.asyncio
-async def test_every_admitting_path_refuses_once_latched(
-    label: str,
-    suffix: str,
+async def test_every_route_that_reaches_the_door_refuses_once_latched(
+    route: _DoorRoute,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     restore_app_state: None,
 ) -> None:
-    """The refusal matrix: EVERY path that can admit or start work answers 503.
+    """The refusal matrix, one row per route that reaches the door.
 
-    Round 1 measured the gap by execution: on a latched daemon
-    ``POST /messages`` returned 200 and reached ``admit_prompt`` while ``/warm``
-    answered 503 against the same process — and ``admit_prompt``'s
-    ``_ensure_bound`` is the one call that can START a session runtime, which is
-    exactly what ``warm``'s own refusal exists to prevent. ``/commands`` reaches
-    it more directly still (``bind_runtime()``).
+    Round 1 measured the gap by execution: on a latched daemon ``POST /messages``
+    returned 200 and reached ``admit_prompt`` while ``/warm`` answered 503 against
+    the same process — and ``admit_prompt``'s ``_ensure_bound`` is the one call in
+    the plane that can START a session runtime, which is what ``warm``'s refusal
+    exists to prevent. ``/commands`` reaches it more directly still
+    (``bind_runtime()``). Round 2's MAJOR-1 measured the SAME gap one layer out:
+    five further routes (``/mcp``, ``/credentials``, ``/fork`` and its child
+    admission, ``/asides``, ``/adopt``) reached that seam while the body, the
+    README and this module's own five-row table said the refusal was complete.
 
-    ``/answers`` is gated for a different and stated reason: it cannot spawn
-    (``answer_gate`` needs a connected client and raises otherwise), but a
-    latched daemon is a process whose socket is about to close, so an answer
-    delivered through it is a delivery nobody can confirm.
+    Every row asserts the TYPED refusal AND that no runtime was started: the spawn
+    seam (``_ensure_bound``/``warm_runtime``) is patched to fail loudly, so a path
+    that reached it would fail this test rather than quietly start a process. That
+    instrument is exercised in the failing direction by
+    ``test_the_spawn_seam_spy_catches_a_route_the_door_does_not_cover`` below —
+    round 2's MINOR-1 was exactly that its earlier form could not distinguish
+    "refused" from "never tried".
 
-    Each row asserts the TYPED refusal AND that no runtime was started: the
-    spawn seam (``_ensure_bound``/``warm_runtime``) is patched to fail loudly, so
-    a path that reached it would fail this test rather than quietly start a
-    process, and no receipt row is left behind for a retry against the successor.
+    The rows do NOT include the reads that stay open (``GET /v1/desktop/sessions``,
+    ``GET /health``, the record file): those never take a bridge, which is why the
+    door can be the gate for everything that does.
     """
     from local_operator.server.app import app
     from local_operator.session.attached import AttachedSession
 
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "matrix-token")
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    # The rows that declare `Depends(get_desktop_auth)` resolve it before the
+    # handler runs — before the door, which is inside the handler — so the plane's
+    # credential manager is part of the harness rather than an accident of the
+    # route order (`entities` is the one row that needs it).
+    app.state.credential_manager = CredentialManager(tmp_path)
     # The route's OWN probe (the expression `host()` builds), so this test drives
     # the real wiring rather than a pool that agrees with itself. The session is
     # created BEFORE the latch, because a latched daemon cannot create one — the
@@ -850,49 +1456,100 @@ async def test_every_admitting_path_refuses_once_latched(
     monkeypatch.setattr(AttachedSession, "_ensure_bound", _no_spawn)
     monkeypatch.setattr(AttachedSession, "warm_runtime", _no_spawn)
 
-    payloads: dict[str, dict[str, Any]] = {
-        "": {"request_id": "01234567-89ab-cdef-0123-456789abcdef"},
-        "/warm": {},
-        "/messages": {
-            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "text": "hello",
-        },
-        "/commands": {
-            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "command": "compact",
-            "args": "",
-        },
-        "/answers": {
-            "epoch": "epoch",
-            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "approved": True,
-        },
-    }
-    payload = payloads[suffix]
-    url = "/v1/desktop/sessions"
-    if suffix:
-        url = f"/v1/desktop/sessions/{session_id}{suffix}"
-    else:
-        payload = {**payload, "cwd": str(tmp_path)}
+    method, url, payload = _request_for(route, session_id)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer matrix-token"},
+            # A GET row that streams (``/events``) would hang the read if it ever
+            # stopped refusing, so the budget is explicit rather than the harness'
+            # default: a regression fails here instead of wedging CI.
+            timeout=Timeout(15.0),
+        ) as client:
+            response = await client.request(method, url, json=payload)
 
+        assert (
+            response.status_code == 503
+        ), f"{route.endpoint}: {response.status_code} {response.text[:200]}"
+        detail = response.json()["detail"]
+        assert detail["code"] == "daemon-retiring", route.endpoint
+        assert detail["message"] == retire.RETIRING_MESSAGE, route.endpoint
+        assert started == [], f"{route.endpoint} reached the spawn seam"
+        bridge = pool.bridges.get(session_id)
+        assert bridge is None or bridge.warm_task is None, f"{route.endpoint} started a warm"
+        assert _claimed_receipts(tmp_path) == set(), (
+            f"{route.endpoint} claimed a receipt before refusing, which leaves the "
+            "client's retry indeterminate"
+        )
+        # `or {}` because sibling tests in this suite tear down by setting these
+        # attributes to None rather than deleting them, and a refusal must be
+        # judged against an EMPTY store either way.
+        assert REQUEST_ID not in (
+            getattr(app.state, "desktop_asides", None) or {}
+        ), f"{route.endpoint} claimed aside state before refusing"
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_spawn_seam_spy_catches_a_route_the_door_does_not_cover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_app_state: None,
+) -> None:
+    """The instrument above, exercised in the direction that FAILS (MINOR-1).
+
+    Round 2's MINOR-1 finding was that the evidence for "no runtime was started"
+    could not fail: it argued from ``run/mobile`` being empty, which an isolated
+    config root produces whether the route was refused or never tried at all. The
+    argument is replaced by a spy on the seam (above), and THIS test is what makes
+    the spy meaningful: with the door's refusal removed — the state review round 2
+    measured on a real daemon — the same request, on the same latched pool, through
+    the same route, reaches ``_ensure_bound`` and the spy fires.
+
+    ``/mcp`` is the route because it is the one the reviewer measured: it reached
+    ``bind_runtime()`` on a latched daemon with the daemon log naming the spawn
+    attempt (``engage:``/``could not start a runtime``).
+    """
+    from local_operator.server.app import app
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "matrix-token")
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    # The rows that declare `Depends(get_desktop_auth)` resolve it before the
+    # handler runs — before the door, which is inside the handler — so the plane's
+    # credential manager is part of the harness rather than an accident of the
+    # route order (`entities` is the one row that needs it).
+    app.state.credential_manager = CredentialManager(tmp_path)
+    app.state.serve_retiring = False
+    pool = DesktopSessions(
+        tmp_path,
+        retiring=lambda: bool(getattr(app.state, retire.RETIRING_STATE_ATTR, False)),
+    )
+    app.state.desktop_sessions = pool
+    session_id = await pool.create(str(tmp_path))
+    app.state.serve_retiring = True
+
+    reached: list[str] = []
+
+    async def _spy(*_args: Any, **_kwargs: Any) -> None:
+        reached.append("spawn")
+        raise AssertionError("the runtime spawn seam was entered")
+
+    monkeypatch.setattr(AttachedSession, "_ensure_bound", _spy)
+    # ONLY the door is removed: everything else about the daemon — the probe, the
+    # latch, the route and the seam — is exactly what the matrix above drives.
+    monkeypatch.setattr(DesktopSessions, "assert_admitting", lambda self: None)
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://localhost",
             headers={"Authorization": "Bearer matrix-token"},
         ) as client:
-            response = await client.post(url, json=payload)
-
-        assert response.status_code == 503, f"{label}: {response.status_code} {response.text}"
-        detail = response.json()["detail"]
-        assert detail["code"] == "daemon-retiring", label
-        assert detail["message"] == retire.RETIRING_MESSAGE, label
-        assert started == [], f"{label} reached the spawn seam"
-        bridge = pool.bridges.get(session_id)
-        assert bridge is None or bridge.warm_task is None, f"{label} started a warm"
-        assert not (
-            tmp_path / "desktop-receipts.db"
-        ).exists(), f"{label} claimed a receipt before refusing"
+            with pytest.raises(AssertionError, match="spawn seam was entered"):
+                await client.post(f"/v1/desktop/sessions/{session_id}/mcp", json={"action": "list"})
+        assert reached == ["spawn"], "the spy did not see the path reach the seam"
     finally:
         await pool.close()
 
@@ -900,6 +1557,77 @@ async def test_every_admitting_path_refuses_once_latched(
 # =============================================================================
 # The announcement write, the probes, the reload child and the baseline
 # =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_aside_request_answers_409_and_claims_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_app_state: None,
+) -> None:
+    """The aside store's duplicate check is about the REQUEST, and it answers first.
+
+    ``/asides`` keys its off-record entries on the request id, and a repeated id is
+    wrong whichever daemon receives it — so that check runs before the door, and on
+    a latched daemon it answers the ``409`` the client gets in every other state.
+    Pinned here rather than left as an anomaly in a transcript, and pinned in the
+    form that matters: the 409 must not be the surface of a request that ADMITTED
+    anything. A FRESH id on the same route is the typed 503, which
+    ``test_every_route_that_reaches_the_door_refuses_once_latched`` asserts.
+    """
+    from local_operator.server.app import app
+    from local_operator.server.routes.desktop_lifecycle import Aside
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "matrix-token")
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.credential_manager = CredentialManager(tmp_path)
+    # The claim the duplicate check reads, in the shape the route itself leaves: the
+    # store is keyed by request id and the route only asks whether it is there.
+    app.state.desktop_asides = {
+        REQUEST_ID: Aside(session_id="", turns=[], created=time.monotonic())
+    }
+    app.state.serve_retiring = False
+    pool = DesktopSessions(
+        tmp_path,
+        retiring=lambda: bool(getattr(app.state, retire.RETIRING_STATE_ATTR, False)),
+    )
+    app.state.desktop_sessions = pool
+    session_id = await pool.create(str(tmp_path))
+    app.state.serve_retiring = True  # the daemon latches
+
+    started: list[str] = []
+
+    async def _no_spawn(*_args: Any, **_kwargs: Any) -> None:
+        started.append("spawn")
+        raise AssertionError("a duplicate aside request reached the runtime spawn seam")
+
+    monkeypatch.setattr(AttachedSession, "_ensure_bound", _no_spawn)
+    monkeypatch.setattr(AttachedSession, "warm_runtime", _no_spawn)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer matrix-token"},
+        ) as client:
+            response = await client.post(
+                f"/v1/desktop/sessions/{session_id}/asides",
+                json={"request_id": REQUEST_ID, "text": "hello"},
+            )
+
+        assert response.status_code == 409, response.text
+        assert "already used" in response.json()["detail"]
+        assert started == [], "the duplicate reached the spawn seam"
+        assert _claimed_receipts(tmp_path) == set()
+        assert list(app.state.desktop_asides) == [REQUEST_ID], "the claim was rewritten"
+    finally:
+        await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# the announcement is re-read (MINOR-2) and a stamp nobody can read is not a move
+# (OBS-1): both ends of the same rule, driven through the REAL poll
+# ---------------------------------------------------------------------------
 
 
 class _FailingPublisher(FakePublisher):
