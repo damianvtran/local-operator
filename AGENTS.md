@@ -34,11 +34,11 @@ depends on which tests it draws, and the suite's known heavy corner
 and a real copied interpreter, and the boot-bound
 `tests/unit/tui/test_slash_echo.py`) measured a peak worker **process tree** of
 **441.5 MB** at `-n 6` on 2026-09-14 with a peak aggregate of 1,647.3 MB across
-the six — so the charge is 1.36x over the heaviest draw *observed*, in that
-corner: 441.5 MB is 3.4% of the tree sampled every 1.5 s, which refutes a 400 MB
-charge but does not calibrate the suite. The worst single worker ever observed
-is ~1,090 MB and is NOT covered by the charge; what bounds that case is the
-aggregate, because a count of N is only ever produced on a host
+the six — so the charge is 1.36x over the heaviest draw *observed*, and the
+corner it comes from is 3.4% of the tree, sampled every 1.5 s: that refutes a
+400 MB charge but does not calibrate the suite. The worst single worker ever
+observed is ~1,090 MB and is NOT covered by the charge; what bounds that case is
+the aggregate, because a count of N is only ever produced on a host
 with at least 1,200 x N MB of available memory (the budget is the smaller of
 half of available and available minus the reserve) — an inequality over what the
 host had *free* when it chose N, not over what N workers then claim.
@@ -53,12 +53,14 @@ per-instance wall time: **cap 3 → 313.3 s / 225.2 s; cap 6 → 188.9 s / 161.6
 188.7 s; cap 8 → 171.3 s** — 6 beat 3 in that run, and 8 beat 6 by only 9%. An
 independent A/B (review round 1) reproduced the ordering but not the magnitude
 (15-16%, with a different baseline), so quote the direction and never a headline
-percentage — the percentage the waves above produced is withdrawn and is quoted
-nowhere in this repo. What ships is the reserve CAP moving (`min(3072, total / 8)`
-→ `min(2048, total / 8)` — the 1/8 fraction, and so every small-host floor and
-the proportional protection a CI container gets, is unchanged), which takes this
-host from the released constants' 2 / 2 / 3 / 3 / 3 / 4 to 3 / 4 / 4 / 4 / 4 / 4
-at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB available: **two** workers at
+speedup percentage — the **cap-6-over-cap-3** percentage the waves above produced
+is withdrawn as a claim, while their CPU deltas and the 9% for cap 8 over cap 6
+are measured figures and stay. What ships is the reserve CAP moving
+(`min(3072, total / 8)` → `min(2048, total / 8)` — the 1/8 fraction, and so every
+small-host floor and the proportional protection a CI container gets, is
+unchanged), which takes this host from the released constants' 2 / 2 / 3 / 3 / 3 / 4
+to 3 / 4 / 4 / 4 / 4 / 4 at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB
+available: **two** workers at
 4,848 MB, **one** at 4,522 MB and at 4,964-5,313 MB, none at 5,555 MB. The
 **per-worker charge did NOT move**: an earlier revision halved it to 400 MB, and
 the 441.5 MB peak tree above refused it. `_CPU_SHARE` and the 2..8 clamp did not
