@@ -22,6 +22,7 @@ from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import ICON_MCP
 from local_operator.tui.widgets.toast import (
+    _HOST_LEADS,
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
     TOAST_MAX_WIDTH,
@@ -29,6 +30,7 @@ from local_operator.tui.widgets.toast import (
     TOAST_MIN_WIDTH,
     TOAST_PADDING_CELLS,
     Toast,
+    _phrase_host,
     format_mcp_startup,
     toast_max_width,
 )
@@ -51,6 +53,30 @@ MULTI = McpStartupOutcome(
     failures={"slack": "command not found", "linear": "handshake timed out"},
     tool_count=12,
 )
+#: Every failure the network's: the shape the operator hit (9 of 11 remote
+#: servers dark at once) and the one whose footer must say WHY, once, instead of
+#: listing nine names that all mean the same thing.
+NETWORK_MULTI = McpStartupOutcome(
+    configured=("github", "linear", "slack"),
+    connected=("github",),
+    failures={
+        "slack": "network: cannot reach slack.example.com",
+        "linear": "network: cannot resolve linear.example.com",
+    },
+    tool_count=4,
+    network_failures=frozenset({"slack", "linear"}),
+)
+#: One network failure and one local one: no shared cause, so no grouping.
+MIXED_MULTI = McpStartupOutcome(
+    configured=("github", "linear", "slack"),
+    connected=("github",),
+    failures={
+        "slack": "network: cannot reach slack.example.com",
+        "linear": "command not found: linear-mcp",
+    },
+    tool_count=4,
+    network_failures=frozenset({"slack"}),
+)
 
 
 class ToastApp(App[None]):
@@ -70,6 +96,26 @@ class ToastApp(App[None]):
 
 
 # -- message content ---------------------------------------------------------
+
+
+#: The card's detail row leads with its own glyph (design round 2, D2-2), so every
+#: expectation on the row under the head is written through this helper, which
+#: checks the glyph is there. WHY that row has one: the card FLOATS over the
+#: transcript, so a row of it lands on a transcript row — the durable notice's
+#: first row ends with its ``— /mcp`` signpost, and with the card's text starting
+#: one cell later the two read as ONE sentence (measured at stand-down:
+#: ``…linear.example.com — network: linear, notion, slack``). A glyph at the
+#: card's own left edge is the boundary that cannot be read as a continuation of
+#: whatever it abuts. It spends 2 of the card's cells, which is why the budgets
+#: below are written against the row the card PAINTS.
+_DETAIL_GLYPH = "✗"
+
+
+def _detail_row(text) -> str:  # type: ignore[no-untyped-def]
+    """The card's detail row, with its own glyph stripped."""
+    row = text.plain.split("\n")[1]
+    assert row.startswith(f"{_DETAIL_GLYPH} "), row
+    return row[len(_DETAIL_GLYPH) + 1 :]
 
 
 def test_a_clean_startup_names_what_loaded() -> None:
@@ -93,7 +139,7 @@ def test_a_failure_names_the_server_and_its_error_and_holds_longer() -> None:
     text, duration = payload
     lines = text.plain.split("\n")
     assert lines[0] == f"{ICON_MCP} MCP: 2 of 3 servers up, 31 tools"
-    assert lines[1] == "failed: slack — command not found: slack-mcp"
+    assert _detail_row(text) == "failed: slack — command not found: slack-mcp"
     assert duration == TOAST_FAILURE_MS
 
 
@@ -103,8 +149,8 @@ def test_one_failure_and_many_share_an_opening() -> None:
     one = format_mcp_startup(PARTIAL)
     many = format_mcp_startup(MULTI)
     assert one is not None and many is not None
-    assert one[0].plain.split("\n")[1].startswith("failed: ")
-    assert many[0].plain.split("\n")[1].startswith("failed: ")
+    assert _detail_row(one[0]).startswith("failed: ")
+    assert _detail_row(many[0]).startswith("failed: ")
 
 
 def test_several_failures_coalesce_into_one_two_line_message() -> None:
@@ -115,7 +161,264 @@ def test_several_failures_coalesce_into_one_two_line_message() -> None:
     assert payload is not None
     text, _duration = payload
     assert text.plain.count("\n") == 1
-    assert text.plain.split("\n")[1] == "failed: linear, slack"
+    assert _detail_row(text) == "failed: linear, slack"
+
+
+def test_a_wholly_network_group_states_the_cause_in_the_one_marker() -> None:
+    """A fleet-wide outage is ONE fact, not N server faults.
+
+    Reported as a bare list it read as nine unrelated MCP problems; the grouped
+    form states the shared cause up front while still naming the servers — in
+    the SAME ``network: `` spelling the durable notice and the ``/mcp`` row
+    print, so one marker is legible across all three surfaces (design review
+    D1-6). Dropping the word ``failed`` costs nothing: the head line on the row
+    above already states it (``MCP: 0 of 2 servers up``).
+    """
+    payload = format_mcp_startup(NETWORK_MULTI)
+    assert payload is not None
+    text, _duration = payload
+    assert _detail_row(text) == "network: linear, slack"
+
+
+def test_a_mixed_group_keeps_the_plain_list() -> None:
+    """The grouped label claims a SHARED cause, so one local failure takes it
+    away — the plain list names each server instead."""
+    payload = format_mcp_startup(MIXED_MULTI)
+    assert payload is not None
+    text, _duration = payload
+    assert _detail_row(text) == "failed: linear, slack"
+
+
+def test_a_single_network_failure_carries_the_phrase_alone() -> None:
+    """D1-2: the transport line names its own server, so the head is a duplicate.
+
+    ``failed: slack — network: cannot reach slack.example.com`` stacked two
+    colons and said the server twice inside 57 cells; the host is the identity
+    the user acts on, the phrase carries both the layer and the server, and the
+    head is what goes. The headless (hostless) stdio copy keeps its head — see
+    ``test_a_hostless_transport_line_keeps_its_head``.
+    """
+    outcome = McpStartupOutcome(
+        configured=("github", "slack"),
+        connected=("github",),
+        failures={"slack": "network: cannot reach slack.example.com"},
+        network_failures=frozenset({"slack"}),
+    )
+    payload = format_mcp_startup(outcome)
+    assert payload is not None
+    text, _duration = payload
+    assert _detail_row(text) == "network: cannot reach slack.example.com"
+
+
+def test_every_row_of_the_card_carries_its_own_glyph() -> None:
+    """D2-2: the card floats, so each of its rows must be self-identifying.
+
+    The detail row used to start on a bare word, which is what let the row read as
+    the continuation of the transcript row the card covers: at stand-down the
+    durable notice's first row ends with its ``— /mcp`` signpost and the card's
+    fill lands one cell later, so ``…linear.example.com — network: linear, notion,
+    slack`` read as one sentence, the signpost having been painted over. Both
+    variants of the card now mark every row.
+    """
+    for outcome in (PARTIAL, NETWORK_MULTI):
+        payload = format_mcp_startup(outcome)
+        assert payload is not None
+        head, detail = payload[0].plain.split("\n")
+        assert head.startswith(f"{ICON_MCP} "), head
+        assert detail.startswith(f"{_DETAIL_GLYPH} "), detail
+
+
+def test_the_detail_glyph_is_the_spine_glyph() -> None:
+    """The card's failure glyph is a MIRROR of the notice spine's ``error`` arm.
+
+    Same class of mirror as ``_NETWORK_MARKER`` (pinned next door): a divergence
+    would leave the card marking its row with a symbol the notice never uses, and
+    nothing else in the tree compares the two.
+    """
+    from local_operator.tui.widgets.toast import _TOAST_FAILURE_GLYPH
+    from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+
+    assert _TOAST_FAILURE_GLYPH == NOTICE_GLYPHS["error"]
+
+
+def test_a_host_that_does_not_carry_the_server_name_keeps_the_head() -> None:
+    """D2-3: the head-drop is gated on the phrase naming the server ALREADY.
+
+    D1-2 dropped ``failed: <name> —`` because the phrase names the server by host
+    — true for ``linear`` at ``linear.example.com``, false for a name its host
+    says nothing about. Measured with ``jira`` at ``https://mcp.acme.com/mcp``,
+    the dropped head left the card naming a host and no server, so for its 10 s
+    life the user could not tell which of their servers was down. The pairing is
+    not the doubling D1-2 objected to: the name and the host are different
+    facts.
+    """
+    outcome = McpStartupOutcome(
+        configured=("jira", "github"),
+        connected=("github",),
+        failures={"jira": "network: cannot reach mcp.acme.com"},
+        network_failures=frozenset({"jira"}),
+    )
+    payload = format_mcp_startup(outcome)
+    assert payload is not None
+    assert _detail_row(payload[0]) == "failed: jira — network: cannot reach mcp.acme.com"
+    # And the case D1-2 was about still drops the head: the host carries the name.
+    linear = McpStartupOutcome(
+        configured=("linear", "github"),
+        connected=("github",),
+        failures={"linear": "network: cannot reach linear.example.com"},
+        network_failures=frozenset({"linear"}),
+    )
+    linear_payload = format_mcp_startup(linear)
+    assert linear_payload is not None
+    assert _detail_row(linear_payload[0]) == "network: cannot reach linear.example.com"
+
+
+def test_a_short_name_that_is_only_in_the_layer_wording_keeps_its_head() -> None:
+    """R4-4: the gate asks the phrase for its HOST, not whether it contains a name.
+
+    ``net``, ``reach`` and ``or`` all occur inside ``network: cannot reach …``, so
+    a substring test over the whole phrase dropped the head for a server the phrase
+    never names — the D2-3 harm one step over, since the card then named a host and
+    no server for its 10-second life. The gate now reads the host token the phrase
+    actually carries (the manager's own lead-ins), so only a name the host holds is
+    treated as already said.
+    """
+    for name in ("net", "reach", "or", "work", "the"):
+        outcome = McpStartupOutcome(
+            configured=(name, "github"),
+            connected=("github",),
+            failures={name: "network: cannot reach mcp.acme.com"},
+            network_failures=frozenset({name}),
+        )
+        payload = format_mcp_startup(outcome)
+        assert payload is not None
+        assert _detail_row(payload[0]) == f"failed: {name} — network: cannot reach mcp.acme.com"
+    # And a name the host DOES hold is still treated as already said (D1-2).
+    linear = McpStartupOutcome(
+        configured=("linear", "github"),
+        connected=("github",),
+        failures={"linear": "network: cannot reach linear.example.com"},
+        network_failures=frozenset({"linear"}),
+    )
+    linear_payload = format_mcp_startup(linear)
+    assert linear_payload is not None
+    assert _detail_row(linear_payload[0]) == "network: cannot reach linear.example.com"
+
+
+def test_the_transport_phrases_and_the_host_mirror_agree() -> None:
+    """R5-1: ``_HOST_LEADS`` mirrors the manager's phrase table, so pin the pair.
+
+    Same class of mirror as the app's `` (timed out)`` and this widget's network
+    marker, both of which the repo already compares against the manager; this one
+    had nothing. A divergence is not only a lost dedup: :func:`_phrase_host`
+    returns the FIRST token after a matching lead-in, so a phrase reworded to put
+    something else there (``no response from the server at {host}``) would drop
+    the head for a server named ``the``, ``server`` or ``at`` — the R4-4 harm
+    restored, silently, in copy that lives on the card for the session.
+    """
+    from local_operator.mcp import manager as manager_module
+
+    for token, phrase in manager_module._TRANSPORT_DETAIL_TEXT.items():
+        composed = f"{manager_module.NETWORK_FAILURE_MARKER}{phrase.format(host='h.example.com')}"
+        assert _phrase_host(composed) == "h.example.com", (token, composed)
+    # Every lead-in must be exercised by a phrase above: a stale one is a live
+    # trap, because it would keep matching copy the manager no longer composes
+    # and answer a host for it.
+    phrases = tuple(manager_module._TRANSPORT_DETAIL_TEXT.values())
+    assert {lead for lead in _HOST_LEADS if any(lead in p for p in phrases)} == set(
+        _HOST_LEADS
+    ), _HOST_LEADS
+
+
+def test_a_hostless_transport_line_keeps_its_head() -> None:
+    """The other half of D1-2, and the reason the marker selects the rung.
+
+    A hostless stdio failure has no host to identify its server, so dropping
+    the head there would lose WHICH server failed. The manager only ever puts
+    the ``network: `` marker on a line that names a host, which is what makes
+    the marker a reliable signal rather than a string sniff.
+    """
+    outcome = McpStartupOutcome(
+        configured=("local",),
+        failures={"local": "transport closed before the server answered"},
+    )
+    payload = format_mcp_startup(outcome)
+    assert payload is not None
+    text, _duration = payload
+    line = _detail_row(text)
+    # R1-3: the CAUSE leads, so the clamp can only ever eat the tail — the old
+    # copy put ``closed`` in a trailing parenthetical that every narrow card
+    # cut off entirely (``failed: local — the tra…``).
+    assert line.startswith("failed: local — transport closed before the server")
+    assert cell_len(line) <= TOAST_MAX_WIDTH - TOAST_PADDING_CELLS
+
+
+def test_the_grouped_footer_still_clamps_to_the_card_it_was_given() -> None:
+    """The budget is what keeps the row from wrapping into a third line.
+
+    The marker leads on every card width that fits it at all, and below that it
+    sheds whole (see the count test below) rather than leaving a one-letter
+    ghost of a name."""
+    for max_cells in (58, 44, 24, 12):
+        payload = format_mcp_startup(NETWORK_MULTI, max_cells)
+        assert payload is not None
+        text, _duration = payload
+        row = text.plain.split("\n")[1]
+        # The PAINTED row, glyph included: the glyph is why the detail now has 2
+        # cells less to spend, and a row sized to the old budget would wrap.
+        assert cell_len(row) <= max_cells, (max_cells, row)
+        if max_cells >= len("network: ") + len(_DETAIL_GLYPH) + 1:
+            # No trailing space in the assertion: at the tightest budget here the
+            # clamp spends the marker's own space and the row reads `network:…`,
+            # which is still the marker leading with the shed marked.
+            assert row.startswith(f"{_DETAIL_GLYPH} network:"), (max_cells, row)
+
+
+def test_a_group_that_will_not_fit_reports_its_count_not_a_ghost_of_a_name() -> None:
+    """D1-3: the marker survives the narrow end; the names are the parts shed.
+
+    Measured before this change at 28 columns: ``failed (network): l…`` where
+    the base fitted ``failed: linear, not…``, i.e. the card kept the category and
+    lost the payload. The marker is the signal this change exists to add and the
+    names are still carried whole by the durable notice and by ``/mcp``, so a
+    group that cannot fit beside the marker is reported as its count.
+    """
+    payload = format_mcp_startup(NETWORK_MULTI, 20)
+    assert payload is not None
+    text, _duration = payload
+    assert _detail_row(text) == "network: 2 servers"
+    # Below even the count, the marker still leads rather than vanishing.
+    narrow = format_mcp_startup(NETWORK_MULTI, 12)
+    assert narrow is not None
+    # Even at 10 cells of budget, where the count cannot fit either and the clamp
+    # spends the marker's own trailing space, the MARKER is what survives: the
+    # row reads `network:…`.
+    assert _detail_row(narrow[0]).startswith("network:")
+
+
+def test_the_wide_card_carries_the_whole_grouped_footer() -> None:
+    """At 100 columns the row fits entirely: nothing is shed."""
+    payload = format_mcp_startup(NETWORK_MULTI, TOAST_MAX_WIDTH - TOAST_PADDING_CELLS)
+    assert payload is not None
+    text, _duration = payload
+    assert _detail_row(text) == "network: linear, slack"
+
+
+def test_the_mirrored_marker_is_the_managers_own() -> None:
+    """``_NETWORK_MARKER`` is a mirror, so the two spellings must stay equal.
+
+    The widget renders an outcome and deliberately does not import from the
+    SDK-backed manager module, so the marker is a copy. Two behaviours lean on
+    it: the D1-2 head-drop rung (a line the marker leads names its host, which is
+    what makes the duplicated head removable) and the D1-6 one-spelling property
+    across the card, the notice and ``/mcp``. Nothing else in the tree compares
+    the two, so a divergence would disable both silently with every test green
+    (agent review round 2, R2-5).
+    """
+    from local_operator.mcp.manager import NETWORK_FAILURE_MARKER
+    from local_operator.tui.widgets.toast import _NETWORK_MARKER
+
+    assert _NETWORK_MARKER == NETWORK_FAILURE_MARKER
 
 
 def _fills(text) -> dict[str, str]:  # type: ignore[no-untyped-def]
@@ -194,7 +497,7 @@ def test_the_same_failure_toasts_once_the_round_has_settled() -> None:
     text, _duration = payload
     lines = text.plain.split("\n")
     assert lines[0] == f"{ICON_MCP} MCP: 1 of 2 servers up"
-    assert lines[1] == "failed: notion — needs authorization"
+    assert _detail_row(text) == "failed: notion — needs authorization"
 
 
 def test_a_hard_discovery_failure_does_not_invent_a_server_tally() -> None:
@@ -207,7 +510,7 @@ def test_a_hard_discovery_failure_does_not_invent_a_server_tally() -> None:
     text, duration = payload
     lines = text.plain.split("\n")
     assert lines[0] == f"{ICON_MCP} MCP discovery failed"
-    assert lines[1] == "failed: discovery — config unreadable"
+    assert _detail_row(text) == "failed: discovery — config unreadable"
     assert duration == TOAST_FAILURE_MS
 
 
@@ -230,7 +533,7 @@ def _failure_row(name: str, error: str, cells: int) -> str:
         McpStartupOutcome(configured=(name,), failures={name: error}), max_cells=cells
     )
     assert payload is not None
-    return payload[0].plain.split("\n")[1]
+    return _detail_row(payload[0])
 
 
 def test_a_command_with_a_reason_sheds_the_reason_before_the_command() -> None:
@@ -249,8 +552,12 @@ def test_a_command_with_a_reason_sheds_the_reason_before_the_command() -> None:
     assert _failure_row("minerva-qa", line, 58) == "failed: minerva-qa — /mcp reauth minerva-qa…"
     # 44 is where the mark itself stops fitting but the command still does; the
     # bare command is what keeps the clamp from eating the name's last cell.
-    assert _failure_row("minerva-qa", line, 44).endswith("minerva-qa…")
-    assert _failure_row("minerva-qa", line, 43) == "failed: minerva-qa — /mcp reauth minerva-qa"
+    # The detail row's own glyph spends 2 cells, so the boundaries below sit 2
+    # cells higher than they did before it: 46 is where the MARK still fits (44
+    # cells of detail against a 44-cell budget) and 45 where only the command
+    # does. Same two rungs, re-measured on the row the card paints.
+    assert _failure_row("minerva-qa", line, 46).endswith("minerva-qa…")
+    assert _failure_row("minerva-qa", line, 45) == "failed: minerva-qa — /mcp reauth minerva-qa"
 
 
 def test_a_diagnostic_with_a_dash_is_still_clamped_exactly_as_before() -> None:
@@ -265,8 +572,12 @@ def test_a_diagnostic_with_a_dash_is_still_clamped_exactly_as_before() -> None:
 
     text = "notion rejected our credentials (401) — set its API key or headers"
     row = _failure_row("notion", text, 58)
-    assert row == truncate_cells(f"failed: notion — {text}", 58)
-    assert row == "failed: notion — notion rejected our credentials (401) —…"
+    # 56, not 58: the row's own glyph spends 2 cells on EVERY card row now (D2-2),
+    # which is a card-wide change and not a change to the shed rule this test is
+    # about — the row here is still the clamp of the whole line rather than a
+    # command with its reason dropped.
+    assert row == truncate_cells(f"failed: notion — {text}", 56)
+    assert row == "failed: notion — notion rejected our credentials (401)…"
 
 
 # -- width -------------------------------------------------------------------

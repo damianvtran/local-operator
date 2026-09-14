@@ -12674,16 +12674,26 @@ async def test_the_durable_notice_carries_one_dash_and_no_orphaned_pointer() -> 
             assert joined.count("—") == 1, joined
             assert "/mcp for details" not in joined
 
-            # A DIAGNOSTIC failure still gets the pointer: the rule is about a
-            # line that already names /mcp, not about suppressing the signpost.
-            # Read across the wrap, since the diagnostic row wraps too at 44.
+            # A DIAGNOSTIC failure still gets the pointer WHERE THE COLUMN CAN
+            # HOLD IT: the rule is about a line that already names /mcp, not about
+            # suppressing the signpost. Read across the wrap, since the diagnostic
+            # row wraps too at 44.
             diagnostic_block = " ".join(
                 row.strip()
                 for row in rows[rows.index(next(r for r in rows if "MCP slack failed" in r)) :]
                 if row.strip()
             )
             assert diagnostic in diagnostic_block, diagnostic_block
-            assert "/mcp for details" in diagnostic_block, diagnostic_block
+            if width >= 80:
+                assert "/mcp for details" in diagnostic_block, diagnostic_block
+            else:
+                # Rung 4, and this test was asserting the opposite: the 45-cell
+                # sentence leaves the 34-cell body column at 44 columns no room
+                # for EITHER form of the signpost, so the honest contract there is
+                # the sentence whole with no fragment of the pointer (the ladder
+                # is pinned per width in test_mcp_startup_announce.py; what this
+                # test owns is the D5 rule that a command line never gets one).
+                assert "\u2014 /mcp" not in diagnostic_block, diagnostic_block
 
 
 @pytest.mark.asyncio
