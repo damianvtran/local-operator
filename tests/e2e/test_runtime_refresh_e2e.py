@@ -457,3 +457,220 @@ def test_an_unwatched_idle_runtime_retires_and_spawns_nothing(
             except ProcessLookupError:
                 pass
         child.wait(timeout=10)
+
+
+def _runtime_log_lines() -> list[str]:
+    """Every line this ISOLATED config dir's runtimes have written.
+
+    The runtimes share one ``runtime.log`` (``paths.runtime_log_path``), so a
+    reader attributes a line by the pid it names — which is why the drain and
+    exit records carry one.
+    """
+    from local_operator.paths import log_dir
+
+    try:
+        raw = (log_dir() / "runtime.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return raw.splitlines()
+
+
+def _lines_for_pid(pid: int) -> list[str]:
+    return [line for line in _runtime_log_lines() if f"pid {pid}" in line]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
+    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound, end to end, against a runtime that never becomes idle.
+
+    A turn that holds the bash tool for longer than the bound (three checks at
+    ``BUILD_CHECK_S``), a marker flipped under it, and a viewer watching. This
+    runtime has a live turn AND an attached viewer — either alone used to keep a
+    stale runtime resident forever, which is how the reporting host ended up
+    with eight runtimes executing an install tree that was gone.
+
+    What must hold, in order:
+    (i) admissions stop WHILE THE TURN IS STILL RUNNING — a prompt sent then is
+        refused with the retiring sentence rather than queued;
+    (ii) nothing in flight is aborted: the turn's own reply lands, and nothing
+        on screen says ``interrupted``/``stopped``;
+    (iii) a peer message sent mid-drain is SPOOLED for the successor, not
+        refused and not run against the build that is leaving;
+    (iv) the runtime leaves for the build on disk, and the viewer's eager
+        re-engage boots a successor from the NEW stamp.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    _stale_child_env(monkeypatch)
+    config = headless_tui_env
+    session_id = "refreshdrain1"
+    _seed(config, session_id)
+    (config / "config.yml").write_text(
+        "values:\n  hosting: test\n  model_name: mock\n  tool_approval_mode: auto\n",
+        encoding="utf-8",
+    )
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    (prefix / ".lop-source").write_text(OLD_MARKER, encoding="utf-8")
+    monkeypatch.setenv("LOP_BUILD_PREFIX", str(prefix))
+    monkeypatch.setenv("LOP_BUILD_SETTLE_S", "0.5")
+    monkeypatch.setenv("LOP_BUILD_STAGGER_S", "0.5")
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "120")
+
+    new_ref = NEW_MARKER.split()[0][:7]
+    child = _spawn(config, prefix, session_id)
+    viewer = None
+    try:
+        record = await _wait_for_record(config, session_id)
+        old_pid = int(record.pid)
+        viewer = await AttachedSession.connect(
+            record, session_id, config_dir=config, takeover_factory=_never_take_over
+        )
+
+        async def factory() -> Any:
+            return viewer
+
+        app = OperatorApp(factory)
+        with bounded(240, "runtime drain: a busy runtime at the bound"):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await wait_for_adoption(app, pilot)
+                app._loaded_build = BuildStamp(version=record.version, source_ref=record.source_ref)
+                await pilot.pause()
+                # A turn LONGER than the bound, so the drain has to latch mid-turn.
+                await viewer.prompt("please [bash:30]")
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    state = getattr(viewer, "frontend_state", None)
+                    if state is not None and getattr(state, "streaming", False):
+                        break
+                    await pilot.pause()
+                    await asyncio.sleep(0.05)
+                else:
+                    raise AssertionError("the runtime never started the turn")
+
+                _flip(prefix)  # lop-update ran, mid-turn
+
+                # The drain announces itself in the runtime's own log, and it
+                # must do so while the turn is still live.
+                deadline = time.monotonic() + 120
+                drain_lines: list[str] = []
+                while time.monotonic() < deadline:
+                    drain_lines = [
+                        line
+                        for line in _lines_for_pid(old_pid)
+                        if "no new work will be admitted" in line
+                    ]
+                    if drain_lines:
+                        break
+                    await pilot.pause()
+                    await asyncio.sleep(0.1)
+                assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}"
+                assert new_ref in drain_lines[0], drain_lines[0]
+                assert _alive(child), "the runtime left while its turn was running"
+                assert getattr(
+                    viewer.frontend_state, "streaming", False
+                ), "the drain must have latched while the turn was STILL running"
+
+                # (i) a caller asking to run a NEW turn is refused, not queued.
+                # ``prompt_and_wait`` is the non-streaming prompt op (a loop's
+                # idiom): an interactive viewer's text becomes a steer while a
+                # turn is live, and a steer rides the turn already running —
+                # which is in-flight work, not an admission.
+                with pytest.raises(RuntimeError) as caught:
+                    await asyncio.wait_for(
+                        viewer.prompt_and_wait("a follow-up sent mid-drain"), timeout=60
+                    )
+                assert "retiring" in str(caught.value), str(caught.value)
+                assert "send it again" in str(caught.value), str(caught.value)
+
+                # (iii) a peer message is spooled for the successor instead.
+                sent = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; from local_operator.cli import main; sys.exit(main())",
+                        "send",
+                        "--session",
+                        session_id,
+                        "--wake",
+                        "hello from a peer",
+                    ],
+                    env=_child_env(config, prefix, session_id),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                assert sent.returncode == 0, sent.stdout + sent.stderr
+                assert "spooled" in (sent.stdout + sent.stderr), sent.stdout + sent.stderr
+
+                # (ii) the turn finishes rather than being aborted, and the
+                # runtime leaves once it has.
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline and _alive(child):
+                    await pilot.pause()
+                    await asyncio.sleep(0.1)
+                assert not _alive(child), "the runtime never left after its turn ended"
+                assert child.returncode == 0, f"the runtime exited {child.returncode}"
+                exit_lines = [
+                    line
+                    for line in _lines_for_pid(old_pid)
+                    if "session runtime: exiting (retiring" in line
+                ]
+                assert exit_lines, "\n".join(_lines_for_pid(old_pid)[-10:])
+                assert new_ref in exit_lines[-1], exit_lines[-1]
+
+                # (iv) the viewer re-engages: a new pid, bound, on the NEW build.
+                deadline = time.monotonic() + 60
+                new_record = None
+                while time.monotonic() < deadline:
+                    new_record = _record_for(config, session_id)
+                    if (
+                        new_record is not None
+                        and int(new_record.pid) != old_pid
+                        and not viewer.is_cold
+                    ):
+                        break
+                    await pilot.pause()
+                    await asyncio.sleep(0.05)
+                assert (
+                    new_record is not None and int(new_record.pid) != old_pid
+                ), "no successor runtime was engaged after the drain"
+                assert not viewer.is_cold
+                assert new_record.source_ref == NEW_MARKER.split()[0]
+                # The spooled peer message is read by that successor, before
+                # its socket even listens — so the work in flight was not the
+                # only thing the drain preserved. Read from the TRANSCRIPT, the
+                # durable copy: this is the receipt a later resume reads.
+                from local_operator.session.transcript import Transcript
+
+                durable = ""
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(0.1)
+                    sessions_dir = config / "sessions" / session_id
+                    durable = "\n".join(
+                        str(entry.payload) for entry in Transcript(sessions_dir).entries()
+                    )
+                    if "hello from a peer" in durable:
+                        break
+                assert "hello from a peer" in durable, "the spooled peer message was lost"
+                text = transcript_text(app)
+                assert "Hello from the mock provider!" in text, "the live turn never completed"
+                for word in FORBIDDEN:
+                    assert word not in text, f"{word!r} reached the ledger:\n{text}"
+                successor_pid = int(new_record.pid)
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        for pid in {child.pid, *(int(r.pid) for r, _ in registry.scan(config))}:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+        child.wait(timeout=10)
+    assert successor_pid != old_pid

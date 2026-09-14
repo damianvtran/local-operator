@@ -411,11 +411,27 @@ class ServingSessionHandle(SessionHandle):
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
         #: Set once this handle has COMMITTED to retiring, by
-        #: :meth:`begin_retire`. Non-empty means the admission paths refuse (see
-        #: that method) — a runtime that is leaving must not start a turn it
-        #: will abort one await later. Deliberately never cleared: a retirement
-        #: is a one-way door for the process.
+        #: :meth:`begin_retire` OR :meth:`begin_drain`. Non-empty means the
+        #: admission paths refuse (see those methods) — a runtime that is
+        #: leaving must not start a turn it will abort one await later.
+        #: Deliberately never cleared: a retirement is a one-way door for the
+        #: process.
         self._retiring_cause: str = ""
+        #: Set by :meth:`begin_drain`, the latch that does NOT require an idle
+        #: runtime. It says the leaving is a HANDOVER with time left in it: the
+        #: runtime still has work to finish, so a message that arrives in the
+        #: meantime is SPOOLED for the successor (``inbox.jsonl``, drained at
+        #: boot) rather than refused — the sender asked this session to act, and
+        #: a refusal would lose that where a deferral does not. Cleared by
+        #: nothing: the drain ends in an exit.
+        self._draining = False
+        #: Set by :meth:`begin_retire`, the rung that takes the exit IN THIS
+        #: STEP. The distinction is what keeps the cut-off taxonomy honest: a
+        #: turn aborted after THIS flag must be labelled with the retirement
+        #: (there is no gap left to attribute anything else to), while a turn
+        #: aborted during a DRAIN is a user's own stop arriving before the exit
+        #: the drain was still waiting for — see :meth:`_note_deliberate_stop`.
+        self._exit_committed = False
         #: Installed by the runtime process (``process.amain``): fires the
         #: process's stop event so a socket ``stop`` op exits the way SIGTERM
         #: does. ``None`` under a host that has no process to exit.
@@ -1125,10 +1141,70 @@ class ServingSessionHandle(SessionHandle):
         if reason:
             return False
         self._retiring_cause = cause or "retiring"
+        self._exit_committed = True
         session = getattr(self, "_session", None)
         note = getattr(session, "note_cut_off", None)
         if callable(note):
             note(self._retiring_cause, detail)
+        return True
+
+    def begin_drain(self, cause: str, detail: str = "") -> bool:
+        """Commit this runtime to leaving WITHOUT requiring it to be idle.
+
+        THE HARD-STALE RUNG, and the session-runtime expression of the shape
+        ``server/retire.py`` gives the ``serve`` daemon — notice the install
+        move, announce the handover, refuse new work, leave when nothing is in
+        flight. Three things differ, and each is what a VIEWER makes different:
+
+        * the announcement is a frame to a client that is waiting on this very
+          connection, so it must land BEFORE the refusal (see
+          ``process._begin_drain`` for the ordering argument);
+        * the drain is BOUNDED by the caller (``process._BuildWatch``), because
+          a session runtime can be busy for hours and the process that runs its
+          next engage is waiting on this one leaving;
+        * a message that arrives mid-drain is SPOOLED for the successor rather
+          than refused, because a session has a successor to defer to.
+
+        :meth:`begin_retire` refuses while any work would be lost, which is
+        right for a refresh that can wait — the runtime will retire on its own
+        at the next instant nothing is running — and wrong for a runtime whose
+        loaded build has been replaced on disk: a session busy for hours never
+        reaches such an instant, so "ask again next check" is a promise the
+        build breaks. This latch drops the idle gate and keeps everything else:
+
+        * admissions refuse from HERE — invariant (i), no new work after the
+          commit. ``prompt`` refuses; ``receive_peer_message`` SPOOLS, because
+          a wake or a steer is a message somebody is waiting on rather than a
+          turn this runtime is being asked to run now;
+        * nothing in flight is touched — invariant (ii). The live turn, its
+          subagents, its jobs and a parked gate run to completion, and the
+          process leaves at the first instant the reaper finds the work done;
+        * wakes that fire from now on are spooled for the successor rather than
+          run against a build that is leaving — invariant (iv), see
+          ``Session.retire_wakes_to_inbox``.
+
+        Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
+        running when this latches is expected to FINISH, and arming a cut-off
+        for it would relabel a completed turn as an error — that note belongs
+        to the rung that actually takes the exit, which is still
+        :meth:`begin_retire`.
+
+        ``cause`` is the vocabulary token the refusal and the eventual cut-off
+        note carry; ``detail`` is free text for the log. Returns whether the
+        drain is latched — False only when this handle is already disposing, in
+        which case the disposal owns the exit and a second one must not race it.
+        """
+        if getattr(self, "_disposing", False):
+            return False
+        self._draining = True
+        self._retiring_cause = cause or "retiring"
+        session = getattr(self, "_session", None)
+        divert = getattr(session, "retire_wakes_to_inbox", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 — a failed divert must not block the drain
+                logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
     def _retiring_refusal(self) -> str:
@@ -1137,6 +1213,45 @@ class ServingSessionHandle(SessionHandle):
             f"the session runtime is retiring ({self._retiring_cause}); the message "
             "was not admitted — send it again and the next engage runs the new build"
         )
+
+    async def _spool_for_successor(self, text: str, *, mode: str, sender: dict[str, Any]) -> str:
+        """Spool one message for the successor runtime, and receipt it.
+
+        The draining alternative to refusing. ``inbox.jsonl`` is drained by the
+        successor at boot (``process._drain_inbox_into``) BEFORE its control
+        socket listens, so a row written here lands ahead of anything a socket
+        client could send — the ordering guarantee is the whole reason this
+        vehicle works for a message that arrived at a dying process. It is
+        also the one channel that survives the handover: a peer wake or a
+        steer is someone asking THIS session to do something, and turning that
+        into a refusal they must re-issue is a worse answer than a deferral
+        they were told about.
+
+        Falls back to the refusal when there is nowhere to spool to (no session
+        directory, an unwritable inbox): the caller then gets the sentence that
+        tells it to send again, which is the same contract every other admission
+        gets once a runtime is leaving.
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        session = getattr(self, "_session", None)
+        transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        if directory is None:
+            raise RuntimeError(self._retiring_refusal())
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+            )
+        except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
+            logger.warning("could not spool a peer message for the successor", exc_info=True)
+            written = False
+        if not written:
+            raise RuntimeError(self._retiring_refusal())
+        logger.info("session runtime: spooled a peer message for the successor")
+        return "spooled (will be read when the session next opens)"
 
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
@@ -1260,14 +1375,18 @@ class ServingSessionHandle(SessionHandle):
         supervised sibling; both are a person or a supervisor saying "stop",
         and each was one teardown away from being reported as a failure.
 
-        Refused while a retirement is latched, matching ``request_stop``: the
+        Refused while the EXIT is committed, matching ``request_stop``: the
         runtime is already ending that turn for its own reason (a build flip)
         and the cut-off verdict for it belongs to the retire path, which
-        recorded it when it latched. Non-raising by contract — it runs inside a
-        stop, and a stop must not fail because a host session has no say in its
-        own taxonomy.
+        recorded it when it latched. A runtime that is merely DRAINING is not
+        that case and must not suppress this: the drain waits for the live turn
+        to finish, which can be minutes, and a user's ``/stop`` arriving in that
+        window ends the turn by their own hand — labelling it a retirement would
+        report the operator's own cancel as housekeeping. Non-raising by
+        contract — it runs inside a stop, and a stop must not fail because a host
+        session has no say in its own taxonomy.
         """
-        if self._retiring_cause:
+        if self._exit_committed:
             return
         note = getattr(self._session, "note_deliberate_stop", None)
         if callable(note):
@@ -1909,7 +2028,14 @@ class ServingSessionHandle(SessionHandle):
         # later. The QUIET record-only delivery (``mailbox``, no wake) is
         # deliberately still admitted: it opens no turn, and refusing it would
         # drop a durable note the sender was promised it had delivered.
+        #
+        # A DRAIN is the one case where the wake/steer shape is neither run nor
+        # refused: the runtime is still here (it has work to finish first), so
+        # the message can be deferred to the successor that is already owed.
+        # A COMMITTED exit has no such window and keeps the refusal.
         if self._retiring_cause and (wake or mode != "mailbox"):
+            if self._draining and not self._exit_committed:
+                return await self._spool_for_successor(text, mode=mode, sender=sender or {})
             raise RuntimeError(self._retiring_refusal())
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}
