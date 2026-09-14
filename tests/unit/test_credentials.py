@@ -1,5 +1,7 @@
 import errno
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -344,3 +346,114 @@ def test_read_key_names_returns_empty_only_when_the_store_is_absent(tmp_path: Pa
     finally:
         # Restore traversal so the tmp_path tree can still be cleaned up.
         locked.chmod(0o700)
+
+
+_READ_NAMES_PROBE = """
+import errno
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from local_operator.credentials import CredentialManager
+
+root, expected, fault = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+def read():
+    try:
+        result = CredentialManager.read_key_names(root)
+    except OSError as exc:
+        assert expected != errno.ENOENT and exc.errno == expected, repr(exc)
+    else:
+        assert expected == errno.ENOENT and result == [], (expected, result)
+
+if fault:
+    with patch('local_operator.credentials.os.' + fault,
+               side_effect=OSError(expected, 'injected diagnostic failure')):
+        read()
+else:
+    read()
+print('PASS')
+"""
+
+
+def _probe_read_names(root: Path, expected: int, fault: str = "") -> None:
+    # A timeout in this pytest process cannot reliably interrupt a blocked
+    # syscall in a collector worker. A subprocess deadline kills and reaps just
+    # our probe, so restoring the FIFO regression cannot hang the whole suite.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env.update(HOME=str(root.parent), LOCAL_OPERATOR_CONFIG_DIR=str(root))
+    result = subprocess.run(
+        [sys.executable, "-c", _READ_NAMES_PROBE, str(root), str(expected), fault],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PASS"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "device", "directory"])
+def test_read_key_names_rejects_special_files_with_deadline(tmp_path: Path, kind: str) -> None:
+    store = tmp_path / CREDENTIALS_FILE_NAME
+    if kind == "fifo":
+        os.mkfifo(store)
+    elif kind == "device":
+        # The same character-device rejection as /dev/zero, but a regressed
+        # reader reaches EOF instead of allocating unbounded host memory.
+        store.symlink_to("/dev/null")
+    else:
+        store.mkdir()
+    _probe_read_names(tmp_path, errno.EISDIR if kind == "directory" else errno.EINVAL)
+
+
+@pytest.mark.parametrize("fault", ["open", "fstat"])
+@pytest.mark.parametrize(
+    "code", [errno.ENOENT, errno.EACCES, errno.ELOOP, errno.ENOTDIR, errno.EIO]
+)
+def test_read_key_names_preserves_diagnostic_errnos_with_deadline(
+    tmp_path: Path, fault: str, code: int
+) -> None:
+    (tmp_path / CREDENTIALS_FILE_NAME).write_text("SYNTHETIC_KEY=fixture\n")
+    _probe_read_names(tmp_path, code, fault)
+
+
+def test_regular_store_symlink_preserves_parser_and_ordinary_load(tmp_path: Path) -> None:
+    target = tmp_path / "fixture-store"
+    target.write_text("# comment\nSYNTHETIC_KEY=fixture=value\nEMPTY_KEY=\n")
+    (tmp_path / CREDENTIALS_FILE_NAME).symlink_to(target.name)
+    assert CredentialManager.read_key_names(tmp_path) == ["SYNTHETIC_KEY"]
+    assert CredentialManager.read_key_names(tmp_path, non_empty=False) == [
+        "SYNTHETIC_KEY",
+        "EMPTY_KEY",
+    ]
+    manager = CredentialManager(tmp_path)
+    assert manager.get_credential("SYNTHETIC_KEY").get_secret_value() == "fixture=value"
+    assert manager.list_credential_keys() == ["SYNTHETIC_KEY"]
+
+
+def test_regular_store_closes_descriptor_on_validation_failure(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.credentials import _open_regular_store
+
+    store = tmp_path / CREDENTIALS_FILE_NAME
+    store.write_text("SYNTHETIC_KEY=fixture\n")
+    real_open = os.open
+    opened = []
+
+    def track_open(path, flags):
+        fd = real_open(path, flags)
+        opened.append(fd)
+        return fd
+
+    def fail_stat(fd):
+        raise OSError(errno.EIO, "injected fstat failure")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "open", track_open)
+        patcher.setattr(os, "fstat", fail_stat)
+        with pytest.raises(OSError, match="injected fstat failure"):
+            _open_regular_store(str(store), os.O_RDONLY)
+    assert len(opened) == 1
+    with pytest.raises(OSError) as closed:
+        os.read(opened[0], 1)
+    assert closed.value.errno == errno.EBADF
