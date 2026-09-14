@@ -310,6 +310,254 @@ def test_an_unsupervisable_store_never_reports_another_stores_supervisor(
     assert payload["installed"] is False
 
 
+def test_status_reports_a_fire_that_could_not_be_delivered(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE SURFACE THE DEFECT NEVER HAD. 510 failed engages on this machine left
+    a WARNING in an unrotated log and nothing on any screen: every other line
+    here rendered such a wake as an ordinary overdue row, which is exactly the
+    reassurance that kept it invisible."""
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "statussess05",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "nightly cleanup", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess05", due, error="unreachable: 180s", now_ms=NOW_MS)
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+
+    def _block(label: str) -> str:
+        """One `wake status` line, with its hanging-indent continuations joined.
+
+        The surface folds prose at its label column, so a line's payload is
+        spread over several physical lines; joining them keeps these assertions
+        about the SENTENCE rather than about the terminal width.
+        """
+        lines = out.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith(label))
+        block = [lines[start]]
+        for line in lines[start + 1 :]:
+            if not line.startswith(" "):
+                break
+            block.append(line)
+        return " ".join(block)
+
+    retrying = _block("retrying:")
+    assert "retrying:" in retrying, f"an owed fire was not reported: {out}"
+    assert "statussess05" in retrying, retrying
+    assert "nightly cleanup" in retrying, retrying
+    assert "retried with backoff" in retrying, retrying
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["retrying"] == 1 and payload["undelivered"] == 0
+    assert payload["deliveries"][0]["session_id"] == "statussess05"
+    assert payload["deliveries"][0]["occurrence_ms"] == due
+    assert payload["deliveries"][0]["attempts"] == 1
+    assert payload["deliveries"][0]["last_error"] == "unreachable: 180s"
+
+
+def test_status_says_an_undelivered_fire_is_still_owed(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Past the report threshold the fire is STILL OWED and still retried.
+
+    The whole point of the fix is that a wake is not dropped when a budget
+    expires, so the surface must not read as "lost" either — it names the
+    attempt count, the age, the last error, and the next attempt.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 900_000
+    _arm(
+        tmp_path,
+        "statussess06",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "collect metrics", "next_due_at": due}],
+    )
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "statussess06", due, error="could not reach a runtime", now_ms=NOW_MS
+        )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+
+    def _block(label: str) -> str:
+        """One `wake status` line, with its hanging-indent continuations joined.
+
+        The surface folds prose at its label column, so a line's payload is
+        spread over several physical lines; joining them keeps these assertions
+        about the SENTENCE rather than about the terminal width.
+        """
+        lines = out.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith(label))
+        block = [lines[start]]
+        for line in lines[start + 1 :]:
+            if not line.startswith(" "):
+                break
+            block.append(line)
+        return " ".join(block)
+
+    line = _block("undelivered:")
+    assert "undelivered:" in line, f"an undelivered fire was not reported: {out}"
+    assert "statussess06" in line, line
+    assert f"{deliveries.UNDELIVERED_AFTER_ATTEMPTS} attempt(s)" in line, line
+    assert "could not reach a runtime" in line, line
+    assert "STILL OWED" in line, line
+    assert "dropped" in line, line
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["undelivered"] == 1
+    assert payload["deliveries"][0]["state"] == deliveries.STATE_UNDELIVERED
+    assert payload["deliveries"][0]["attempts"] == deliveries.UNDELIVERED_AFTER_ATTEMPTS
+    assert payload["deliveries"][0]["next_attempt_in_s"] > 0
+
+
+def test_list_marks_an_owed_fire_as_retrying(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The table's own vocabulary, extended by one word.
+
+    The DUE column is where this listing states why a wake is not firing
+    (`dormant`, `ghost`, `stale`), and an owed fire is a fourth reason with a
+    different consequence: the supervisor is still working on it. Rendering it
+    as `stale` would say the opposite — the legend promises `stale` wakes are
+    left to the session's next open.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "statussess08",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "nightly cleanup", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess08", due, error="unreachable", now_ms=NOW_MS)
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "statussess08" in line)
+    assert "retrying" in line, line
+    assert "overdue" not in line, line
+    assert "still owed" in out, out
+    assert "lop wake status" in out, out
+
+
+def test_list_marks_a_stale_owed_fire_as_undelivered_rather_than_stale(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Past the bound, the owed fire is the STRONGER fact.
+
+    A stale schedule is normally given up on; one with an owed record is still
+    being retried, and that is what the column must say.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(9 * 86400 * 1000)
+    _arm(
+        tmp_path,
+        "statussess09",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "forgotten cleanup", "next_due_at": due}],
+    )
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "statussess09", due, error="could not reach a runtime", now_ms=NOW_MS
+        )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "statussess09" in line)
+    assert "undelivered" in line, line
+    assert "stale" not in line.split("forgotten cleanup")[0], line
+    # And the stale legend is NOT printed for a store whose only old wake is
+    # one the supervisor is still retrying.
+    assert "the supervisor no longer fires these" not in out, out
+
+
+def test_status_counts_a_stale_wake_with_an_owed_fire_as_fireable(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reconcilable counts, and no contradiction between the two lines.
+
+    `scheduled` must still equal fireable + dormant + stale + ghost, so a stale
+    row that is nevertheless being fired belongs in `fireable` — otherwise the
+    same wake would be reported as given up on AND as still owed.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(9 * 86400 * 1000)
+    _arm(
+        tmp_path,
+        "statussess10",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "old but owed", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess10", due, error="unreachable", now_ms=NOW_MS)
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stale"] == 0, payload
+    assert payload["retrying"] == 1 and payload["undelivered"] == 0
+    assert payload["unfireable"]["stale"] == []
+    assert (
+        payload["scheduled"]
+        == (len(payload["unscheduled"]) if "unscheduled" in payload else payload["armed"])
+        or payload["armed"] == 1
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "stale:" not in out, out
+    assert "retrying:" in out, out
+
+
+def test_a_record_for_a_different_occurrence_is_not_reported(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ledger names an OCCURRENCE, and the recurrence is a different fire.
+
+    A recurring wake that has already advanced its next due time must not
+    inherit the previous occurrence's failed delivery, or every healthy watch
+    with a single old failure would report an owed fire forever.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    _arm(
+        tmp_path,
+        "statussess07",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "hourly watch", "next_due_at": NOW_MS + 60_000}],
+    )
+    deliveries.note_failure(
+        tmp_path, "statussess07", NOW_MS - 3_600_000, error="old failure", now_ms=NOW_MS - 3_600_000
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "retrying:" not in out and "undelivered:" not in out, out
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deliveries"] == [] and payload["retrying"] == 0
+
+
 # --- The REAL parser ---------------------------------------------------------
 #
 # Every test above hand-builds an `argparse.Namespace`, which is why round 1's

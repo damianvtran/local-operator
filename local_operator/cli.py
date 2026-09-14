@@ -3467,11 +3467,18 @@ def _wake_rows() -> "list[dict[str, Any]]":
     import time as _time
 
     from local_operator.paths import config_dir
+    from local_operator.wakes.deliveries import read_deliveries
     from local_operator.wakes.store import read_index
     from local_operator.wakes.supervisor import STALE_AFTER_S, _session_exists
 
     root = config_dir()
     now_ms = int(_time.time() * 1000)
+    # The supervisor's ledger of fires it attempted and has not yet handed to a
+    # runtime. Read once, here, so the row's state and the `status` summary are
+    # derived from the same copy — the defect this whole PR is about was a wake
+    # that had failed to fire being visible on NO surface, and two surfaces
+    # disagreeing would be a smaller version of the same thing.
+    deliveries = read_deliveries(root)
     rows: list[dict[str, Any]] = []
     for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
@@ -3486,6 +3493,7 @@ def _wake_rows() -> "list[dict[str, Any]]":
         # remove, so the two surfaces share the predicate rather than deriving
         # it twice.
         ghost = not dormant and not _session_exists(root, session_id)
+        record = deliveries.get(session_id)
         for raw in entry.get("schedules") or ():
             if not isinstance(raw, dict):
                 continue
@@ -3537,6 +3545,16 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     # fields were added rather than defaulted to a lie.
                     "last_fired_at": entry.get("last_fired_at"),
                     "last_attempt_at": entry.get("last_attempt_at"),
+                    # THE OWED FIRE, if the supervisor has one for this very
+                    # occurrence. Matched on `occurrence_ms` rather than on the
+                    # session alone: a record is about one attempt at one due
+                    # time, and a recurring schedule whose next occurrence is
+                    # already different must not inherit it.
+                    "delivery": (
+                        record
+                        if record is not None and record.get("occurrence_ms") == due
+                        else None
+                    ),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -3552,6 +3570,11 @@ def wake_command(args: argparse.Namespace) -> int:
     it reports whether the thing that fires wakes for closed sessions exists.
     """
     from local_operator.paths import config_dir
+
+    # BOTH branches render a wake's delivery state — `list` as the DUE-column
+    # word, `status` as prose — so the two words are named once, here, rather
+    # than imported into one branch and silently unbound in the other.
+    from local_operator.wakes.deliveries import STATE_RETRYING, STATE_UNDELIVERED
 
     command = getattr(args, "wake_command", None) or "status"
 
@@ -3666,6 +3689,18 @@ def wake_command(args: argparse.Namespace) -> int:
                 # this at all, which is a stronger statement than "the
                 # supervisor stopped retrying" (round 2, Q4).
                 state = "ghost"
+            elif row.get("delivery"):
+                # AN OWED FIRE IS WORK IN PROGRESS. The supervisor has attempted
+                # this occurrence, failed, and is retrying it from that record —
+                # which is also the reason a row PAST the staleness bound is
+                # still being fired at all. Reading it as `stale` would state
+                # the opposite of what the process is doing, and the legend
+                # under the table promises `stale` wakes are not fired.
+                state = (
+                    "undelivered"
+                    if row["delivery"].get("state") == STATE_UNDELIVERED
+                    else "retrying"
+                )
             elif row["stale"]:
                 state = "stale"
             else:
@@ -3725,32 +3760,81 @@ def wake_command(args: argparse.Namespace) -> int:
         # row, and only for the states actually present: what "stale" and
         # "dormant" COST is the thing a reader needs told, but telling it per
         # row is what made a single wake occupy 155 columns.
-        # The legend folds to the terminal like the rows do (round 2, D12):
-        # a legend that wraps is the same ragged frame the table just stopped
-        # producing. 9 = the width of the state word plus its gap.
-        def _legend(word: str, text: str) -> None:
-            import textwrap
-
-            print()
-            for line in textwrap.wrap(
-                f"{word:<9}{text}", width=term_width, subsequent_indent=" " * 9
-            ):
-                print(line)
-
-        if any(row["stale"] and not row["dormant"] and not row["ghost"] for row in rows):
-            _legend(
-                "stale",
-                "the supervisor no longer fires these; they are delivered when "
-                "their session is next opened",
+        #
+        # AN OWED FIRE IS EXCLUDED FROM `stale`, exactly as it is from that
+        # count on `status`: the stale sentence promises the session's next open
+        # will deliver the wake, and for a fire the supervisor is still retrying
+        # that is not the plan. It gets its own words instead — `retrying` after
+        # a failed attempt, `undelivered` past `UNDELIVERED_AFTER_ATTEMPTS`,
+        # where the attempt count is what tells the reader whether this is a busy
+        # host or a session that will never construct (`lop wake status` carries
+        # both figures).
+        legend_rows: list[tuple[str, str]] = []
+        if any(
+            row["stale"] and not row["dormant"] and not row["ghost"] and not row.get("delivery")
+            for row in rows
+        ):
+            legend_rows.append(
+                (
+                    "stale",
+                    "the supervisor no longer fires these; they are delivered when "
+                    "their session is next opened",
+                )
             )
         if any(row["dormant"] for row in rows):
-            _legend("dormant", "the session was stopped; reopening it re-arms its wakes")
-        if any(row["ghost"] for row in rows):
-            _legend(
-                "ghost",
-                "no session with this id exists on disk; nothing can fire these, and "
-                "nothing clears them automatically",
+            legend_rows.append(
+                ("dormant", "the session was stopped; reopening it re-arms its wakes")
             )
+        if any(row["ghost"] for row in rows):
+            legend_rows.append(
+                (
+                    "ghost",
+                    "no session with this id exists on disk; nothing can fire these, and "
+                    "nothing clears them automatically",
+                )
+            )
+        if any(
+            row.get("delivery") and row["delivery"].get("state") == STATE_RETRYING for row in rows
+        ):
+            legend_rows.append(
+                (
+                    "retrying",
+                    "the supervisor tried to fire this and could not reach the session; it is "
+                    "still owed and retried with a backoff ('lop wake status' has the attempts "
+                    "and the error)",
+                )
+            )
+        if any(
+            row.get("delivery") and row["delivery"].get("state") == STATE_UNDELIVERED
+            for row in rows
+        ):
+            legend_rows.append(
+                (
+                    "undelivered",
+                    "the supervisor has failed to reach this session repeatedly; the fire is "
+                    "STILL OWED and retried at the capped backoff, not dropped "
+                    "('lop wake status' has the attempts and the error)",
+                )
+            )
+
+        if legend_rows:
+            # THE LEGEND COLUMN IS SIZED FROM THE WORDS ACTUALLY RENDERED, and
+            # the fold follows it (round 2, D12) so a legend wraps the way the
+            # rows do. Every earlier word was at most 8 characters, so a fixed
+            # 9-wide column was invisible; `undelivered` is 11 and a fixed column
+            # ran the label straight into its sentence ("undeliveredthe
+            # supervisor has…"), which is the one line that explains a state.
+            import textwrap
+
+            legend_w = max(len(word) for word, _ in legend_rows) + 1
+            for word, text in legend_rows:
+                print()
+                for line in textwrap.wrap(
+                    f"{word:<{legend_w}}{text}",
+                    width=term_width,
+                    subsequent_indent=" " * legend_w,
+                ):
+                    print(line)
         if not show_when:
             # The omission is STATED, not silent: the absolute time was dropped
             # to keep the table aligned on a narrow terminal (round 2, D12), and
@@ -3817,8 +3901,16 @@ def wake_command(args: argparse.Namespace) -> int:
     # be engaged, and the supervisor retires on a ghost-only store. Excluded
     # from `fireable` for exactly the same reason stale is.
     ghost = [row for row in armed if row["ghost"]]
-    stale = [row for row in armed if row["stale"] and not row["ghost"]]
-    fireable = [row for row in armed if not row["stale"] and not row["ghost"]]
+    # AN OWED FIRE STAYS FIREABLE PAST THE STALENESS BOUND. The supervisor
+    # retries it from its own record — that is the whole exception the ledger
+    # introduces — so counting such a row as `stale` would put this frame back
+    # in contradiction with the process: `stale` promises the wake is left to
+    # the session's next open, which is not the plan for a fire something is
+    # still working on.
+    stale = [row for row in armed if row["stale"] and not row["ghost"] and not row.get("delivery")]
+    fireable = [
+        row for row in armed if (not row["stale"] or row.get("delivery")) and not row["ghost"]
+    ]
     overdue = [row for row in fireable if row["overdue"]]
     upcoming = fireable  # already sorted soonest-first by `_wake_rows`
 
@@ -3836,6 +3928,49 @@ def wake_command(args: argparse.Namespace) -> int:
         found = wedged_runtime(config_dir(), session_id)
         if found is not None:
             wedged.append((session_id, found[0], found[1]))
+
+    # THE OWED FIRES, which nothing on this surface could report before: the
+    # supervisor engaged a due wake, could not hand it to a runtime, and the
+    # only trace was a WARNING in wake-supervisor.log (510 lifetime on this
+    # machine, 128 in one day) while every other screen showed the wake as an
+    # ordinary overdue row. The record behind this line is the one the
+    # supervisor retries from, so the count is what the supervisor owes rather
+    # than a re-derivation of it — the two cannot disagree.
+    def _delivery_rows(state: str | None) -> "list[dict[str, Any]]":
+        return [
+            row
+            for row in armed
+            if row.get("delivery") and (state is None or row["delivery"].get("state") == state)
+        ]
+
+    owed = _delivery_rows(None)
+    stalled = _delivery_rows(STATE_UNDELIVERED)
+    retrying = _delivery_rows(STATE_RETRYING)
+
+    def _attempts_label(row: dict[str, Any]) -> str:
+        """``"4 attempt(s) since <time>"`` for one owed fire.
+
+        The age is the part that matters: whether a fire has been retrying for
+        a minute or for an hour is what tells the operator whether this is the
+        loaded-host case or a session that will never construct. The timestamp
+        renderer is imported HERE rather than hoisted: this status surface
+        otherwise renders every time relatively (its own ``_format_due``
+        ladder), and importing the absolute one at the top would put a name in
+        scope that only this helper uses.
+        """
+        from local_operator.wakes.display import format_wake_time
+
+        record = row["delivery"]
+        attempts = record.get("attempts")
+        count = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
+        first = record.get("first_attempt_ms")
+        if isinstance(first, int) and not isinstance(first, bool):
+            return f"{count} attempt(s) since {format_wake_time(first)}"
+        return f"{count} attempt(s)"
+
+    def _next_attempt_s(row: dict[str, Any]) -> float | None:
+        nxt = row["delivery"].get("next_attempt_ms")
+        return (nxt - int(time.time() * 1000)) / 1000.0 if isinstance(nxt, int) else None
 
     # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
     # monitoring consumer branching on `state` had to string-match prose, and
@@ -3906,6 +4041,26 @@ def wake_command(args: argparse.Namespace) -> int:
         "wedged": [
             {"session_id": session_id, "pid": pid, "heartbeat_age_s": age}
             for session_id, pid, age in wedged
+        ],
+        # The owed fires, one entry per wake whose delivery is outstanding.
+        # Additive: a monitoring consumer that predates this block keeps
+        # parsing the counts above.
+        "undelivered": len(stalled),
+        "retrying": len(retrying),
+        "deliveries": [
+            {
+                "session_id": row["session_id"],
+                "message": row["message"],
+                "wake_id": row["wake_id"],
+                "occurrence_ms": row["delivery"].get("occurrence_ms"),
+                "state": row["delivery"].get("state"),
+                "attempts": row["delivery"].get("attempts"),
+                "first_attempt_ms": row["delivery"].get("first_attempt_ms"),
+                "last_attempt_ms": row["delivery"].get("last_attempt_ms"),
+                "next_attempt_in_s": _next_attempt_s(row),
+                "last_error": row["delivery"].get("last_error"),
+            }
+            for row in owed
         ],
     }
     if args.json:
@@ -3997,6 +4152,37 @@ def wake_command(args: argparse.Namespace) -> int:
         worst = max(row["overdue_s"] for row in overdue)
         summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
         print(_wrap_status(summary, "overdue:"))
+    if stalled:
+        # THE DEEPEST-FAILING ONE, because a count alone cannot distinguish "a
+        # wake is 20 seconds late on a busy host" from "a session has not
+        # constructible for an hour", and only the second is worth attention.
+        deepest = max(stalled, key=lambda row: row["delivery"].get("attempts") or 0)
+        nxt = _next_attempt_s(deepest)
+        retry = f", next attempt in {_format_duration(nxt)}" if nxt is not None and nxt > 0 else ""
+        print(
+            _wrap_status(
+                f"{len(stalled)} — {deepest['session_id']} {deepest['message']!r} could not be "
+                f"handed to a runtime: {_attempts_label(deepest)}{retry} (last error: "
+                f"{deepest['delivery'].get('last_error') or 'unknown'}). It is STILL OWED "
+                "and retried with backoff — a fire that cannot be delivered is no longer "
+                "dropped.",
+                "undelivered:",
+            )
+        )
+    if retrying:
+        soonest = min(
+            retrying,
+            key=lambda row: row["delivery"].get("next_attempt_ms") or 0,
+        )
+        nxt = _next_attempt_s(soonest)
+        when = f" (next attempt in {_format_duration(nxt)})" if nxt is not None and nxt > 0 else ""
+        print(
+            _wrap_status(
+                f"{len(retrying)} — {soonest['session_id']} {soonest['message']!r}: "
+                f"{_attempts_label(soonest)}, retried with backoff{when}",
+                "retrying:",
+            )
+        )
     if stale:
         print(
             _wrap_status(

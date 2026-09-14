@@ -618,7 +618,7 @@ async def test_a_wake_written_during_the_sleep_is_seen_within_a_slice(
 
     passes = 0
 
-    def fake_sweep(self, config_dir, index, moment):  # noqa: ANN001, ANN202
+    def fake_sweep(self, config_dir, index, moment, **_kwargs):  # noqa: ANN001, ANN202
         # Hooked at the SWEEP, the seam serve() actually drives now that
         # engagements no longer block the loop. The first pass finds nothing
         # due and returns, which is what lets serve() reach its sleep — the
@@ -762,7 +762,7 @@ async def test_retirement_re_reads_after_a_grace_before_exiting(
         )
         await real_sleep(0)
 
-    def fake_sweep(self, config_dir, index, moment):  # noqa: ANN001, ANN202
+    def fake_sweep(self, config_dir, index, moment, **_kwargs):  # noqa: ANN001, ANN202
         raise _StopServing
 
     monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
@@ -820,13 +820,13 @@ async def test_a_slow_engagement_does_not_hold_the_serve_loop(
     passes = 0
     real_sweep = mod._Sweeper.sweep
 
-    def watching_sweep(self, config_dir, index, moment):  # noqa: ANN001, ANN202
+    def watching_sweep(self, config_dir, index, moment, **kwargs):  # noqa: ANN001, ANN202
         # Stop on the CONDITION, not on a pass count: serve() spins freely
         # here because sleeps are collapsed, so "pass 2" would race the test's
         # write rather than prove anything about it.
         nonlocal passes
         passes += 1
-        launched = real_sweep(self, config_dir, index, moment)
+        launched = real_sweep(self, config_dir, index, moment, **kwargs)
         if "sessionlater" in index:
             seen_later.extend(sorted(index))
             raise _StopServing
@@ -1247,6 +1247,11 @@ async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _always_raises)
     monkeypatch.setattr(mod, "SLICE_S", 0.05)
+    # THE RETRY CADENCE IS THE LEDGER'S, not the pass interval's: a failed fire
+    # is held for its recorded backoff (15 s by default), so this test shortens
+    # the base to observe more than one attempt inside its own budget. Without
+    # this the assertion below would be measuring the backoff, not the retry.
+    monkeypatch.setattr("local_operator.wakes.deliveries.RETRY_BASE_S", 0.05)
 
     loop_exceptions: list[dict[str, object]] = []
     asyncio.get_running_loop().set_exception_handler(
@@ -1264,8 +1269,15 @@ async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
     assert (
         not loop_exceptions
     ), f"a RuntimeError escaped the engage as an unretrieved task exception: {loop_exceptions}"
-    # Retried, not lost: the schedule is untouched, so later passes try again.
+    # Retried, not lost: a failed engage is recorded in the supervisor's own
+    # ledger and retried once its backoff elapses (the schedule being untouched
+    # is no longer what carries the retry — that was the defect).
     assert attempts > 1, f"the wake was not retried after the failure (attempts={attempts})"
+    from local_operator.wakes.deliveries import read_delivery
+
+    record = read_delivery(tmp_path, "alwaysfail01")
+    assert record is not None, "a failed engage left no durable record of the owed fire"
+    assert record["attempts"] >= 1 and record["occurrence_ms"] == now_ms - 5_000, record
     # THROTTLED: many attempts, few lines. The burst bound is _SKIP_BURST.
     # Matched on the `failed:` prefix rather than the wrapper's old prose: the
     # subject now comes from the exception itself, which already names the
@@ -1348,3 +1360,189 @@ async def test_an_unanticipated_raise_from_an_engage_does_not_flood_the_log(
     assert errors, "the belt swallowed the failure without a word"
     assert len(errors) <= mod._SKIP_LOG_BURST, f"{len(errors)} lines; the throttle was bypassed"
     assert "ValueError" in errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fire_is_held_for_its_backoff_and_retried_when_it_elapses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_live_runtimes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A fire that cannot be delivered is OWED: recorded, retried, and held.
+
+    Two properties, and the second is the one that was missing. It must survive
+    the failure (the record is what a restart and the CLI read), and the retry
+    must be paced by the RECORDED backoff rather than by the slice — the old
+    code retried on the next pass, so every attempt cost a full engage deadline
+    out of two engagement slots and one unreachable session starved the fleet.
+    """
+    from local_operator.wakes import deliveries
+
+    calls: list[str] = []
+
+    async def _failing(session_id, *_args: object, **_kwargs: object) -> object:
+        calls.append(session_id)
+        raise TimeoutError(f"could not reach a runtime for session {session_id} within 180s")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _failing)
+    due = NOW_MS - 5_000
+    write_entry(tmp_path, "heldsession1", cwd=str(tmp_path), schedules=[_schedule(due)])
+
+    fired = await fire_due_wakes(tmp_path)
+
+    assert fired == 0 and calls == ["heldsession1"]
+    record = deliveries.read_delivery(tmp_path, "heldsession1")
+    assert record is not None, "a failed fire left no durable record"
+    assert record["state"] == deliveries.STATE_RETRYING
+    assert record["attempts"] == 1
+    assert record["occurrence_ms"] == due
+    assert "could not reach a runtime for session heldsession1 within 180s" in record["last_error"]
+
+    # The NEXT pass, immediately, must not re-engage: the wait is the record's.
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert await fire_due_wakes(tmp_path) == 0
+    assert calls == ["heldsession1"], f"the retry ignored the recorded backoff: {calls}"
+    held = [rec for rec in caplog.records if rec.message.startswith("backoff:")]
+    assert held, "the hold was silent; an operator reading the log cannot see why nothing is firing"
+    assert "last error" in held[0].message and "heldsession1" in held[0].message, held[0].message
+
+    # Once the backoff has elapsed, the fire is attempted again.
+    assert await fire_due_wakes(tmp_path, now_ms=record["next_attempt_ms"] + 1) == 0
+    assert calls == ["heldsession1", "heldsession1"], calls
+    retried = deliveries.read_delivery(tmp_path, "heldsession1")
+    assert retried is not None and retried["attempts"] == 2, retried
+
+
+@pytest.mark.asyncio
+async def test_an_owed_fire_past_the_staleness_bound_is_still_fired(
+    tmp_path: Path, engagements, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE VANISH. A wake refused as stale is right; one already owed is not.
+
+    The staleness bound exists because the session's own resume catch-up
+    delivers arbitrarily-old overdue wakes, so racing a runtime for a week-old
+    one buys nothing. That argument does not hold for a fire this process has
+    ALREADY taken on and failed to deliver: the session is not running (that is
+    why it was engaged at all), so nothing else will fire it, and after the
+    bound the old code skipped it on every pass forever — the wake the operator
+    scheduled stopped existing with a single WARNING to show for it.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes import supervisor as mod
+    from local_operator.wakes.store import read_index
+
+    stale_due = NOW_MS - int(8 * 86400 * 1000)
+    write_entry(tmp_path, "owedstale001", cwd=str(tmp_path), schedules=[_schedule(stale_due)])
+
+    # Unchanged for a wake nobody attempted: refused, and left to the session.
+    assert await fire_due_wakes(tmp_path) == 0
+    assert engagements == []
+
+    # Owed: the same schedule, with the supervisor having tried and failed.
+    deliveries.note_failure(
+        tmp_path, "owedstale001", stale_due, error="unreachable", now_ms=NOW_MS - 1_000
+    )
+    index = await asyncio.to_thread(read_index, tmp_path)
+    owed = deliveries.read_deliveries(tmp_path)
+
+    # AND IT KEEPS THE SUPERVISOR ALIVE. A stale-only store retires (exit 0,
+    # which launchd leaves down); an owed fire must not be retired away — the
+    # process that owes it would be the one leaving it to nobody.
+    assert mod._has_fireable_wakes(
+        index, config_dir=tmp_path, deliveries=owed
+    ), "an owed fire past the staleness bound was treated as nothing to supervise"
+    # Still held by its backoff, so this pass does no work: fireable and
+    # engaged are different questions, and conflating them is what made the
+    # retry cost a full deadline per pass.
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 0
+    assert engagements == []
+
+    # Once the backoff elapses the fire is attempted — eight days overdue,
+    # which the old code refused on every pass forever.
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS + 60_000) == 1
+    assert [call["session_id"] for call in engagements] == ["owedstale001"]
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_fire_clears_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_live_runtimes
+) -> None:
+    """A retry that finally reaches a runtime must leave nothing owed.
+
+    Asserted through the real success path (the engage returns), because a
+    record left behind by a successful delivery would hold the session's next
+    occurrence behind a backoff that no longer describes anything.
+    """
+    from local_operator.wakes import deliveries
+
+    async def _succeeds(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _succeeds)
+    due = NOW_MS - 5_000
+    write_entry(tmp_path, "deliverable01", cwd=str(tmp_path), schedules=[_schedule(due)])
+    deliveries.note_failure(
+        tmp_path, "deliverable01", due, error="unreachable", now_ms=NOW_MS - 60_000
+    )
+
+    assert await fire_due_wakes(tmp_path) == 1
+    assert deliveries.read_delivery(tmp_path, "deliverable01") is None
+
+
+@pytest.mark.asyncio
+async def test_a_record_is_dropped_when_its_occurrence_is_no_longer_owed(
+    tmp_path: Path, engagements, no_live_runtimes
+) -> None:
+    """Self-healing, like the index it is derived from.
+
+    A record claims "this occurrence was attempted and not yet handed to a
+    runtime". The claim expires when the schedule no longer names that
+    occurrence (the runtime that took it advanced the schedule) or when the
+    entry is gone (the wake was cancelled, or the session was reaped).
+    """
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 5_000
+    write_entry(
+        tmp_path, "advanced00001", cwd=str(tmp_path), schedules=[_schedule(due + 1_200_000)]
+    )
+    deliveries.note_failure(
+        tmp_path, "advanced00001", due, error="unreachable", now_ms=NOW_MS - 1_000
+    )
+    deliveries.note_failure(
+        tmp_path, "reapedsess001", due, error="unreachable", now_ms=NOW_MS - 1_000
+    )
+
+    assert await fire_due_wakes(tmp_path) == 0
+
+    assert (
+        deliveries.read_delivery(tmp_path, "advanced00001") is None
+    ), "a record for an occurrence the schedule no longer names survived the reconcile"
+    assert (
+        deliveries.read_delivery(tmp_path, "reapedsess001") is None
+    ), "a record for a session with no index entry survived the reconcile"
+
+
+def test_a_dormant_session_keeps_its_owed_fire(tmp_path: Path) -> None:
+    """Stopped is not cancelled: the fire stays owed, and reopening delivers it.
+
+    The dormancy contract (a stopped session's wakes do not fire until it is
+    reopened) is about WHEN the occurrence runs, not whether the supervisor
+    still owes the attempt — so the record must survive reconciliation, or the
+    delivery history vanishes the moment someone stops the session.
+    """
+    from local_operator.wakes import deliveries
+    from local_operator.wakes import supervisor as mod
+
+    due = NOW_MS - 5_000
+    deliveries.note_failure(
+        tmp_path, "dormant000001", due, error="unreachable", now_ms=NOW_MS - 1_000
+    )
+    index = {"dormant000001": {"schedules": [_schedule(due)], "stopped_at": NOW_MS - 1_000}}
+
+    loaded = deliveries.read_deliveries(tmp_path)
+    mod._reconcile_deliveries(tmp_path, index, loaded)
+
+    assert deliveries.read_delivery(tmp_path, "dormant000001") is not None
