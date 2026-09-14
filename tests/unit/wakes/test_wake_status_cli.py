@@ -1106,7 +1106,47 @@ def test_a_ghost_with_an_owed_record_is_not_reported_as_retried(
     assert "ghost" in row, row
     # `, owed ` and not the bare word: the synthetic id itself contains "owed".
     assert ", owed " not in row, row
-    assert "one failed attempt so far" not in listed, listed
+    assert "failed attempts." not in listed, listed
+
+
+@pytest.mark.parametrize("threshold", [3, 5])
+def test_retry_legend_uses_the_actual_failure_threshold(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys, threshold: int
+) -> None:
+    """Two failures are still retrying; the legend must cover the whole bucket.
+
+    Moving the real classifier's threshold also moves the rendered boundary,
+    so a copy-only hardcoded replacement cannot silently drift from state.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    monkeypatch.setattr(deliveries, "UNDELIVERED_AFTER_ATTEMPTS", threshold)
+    now = int(time.time() * 1000)
+    due = now - 600_000
+    session_id = "retrythreshold"
+    _arm(
+        tmp_path,
+        session_id,
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "retry boundary", "next_due_at": due}],
+    )
+    for attempts in range(1, threshold + 1):
+        record = deliveries.note_failure(tmp_path, session_id, due, error="x", now_ms=now)
+        assert record is not None and record["attempts"] == attempts
+        retrying = attempts < threshold
+        assert record["state"] == (
+            deliveries.STATE_RETRYING if retrying else deliveries.STATE_UNDELIVERED
+        )
+        assert wake_command(_args(wake_command="list", json=False)) == 0
+        out = capsys.readouterr().out
+        description = (
+            f"fewer than {threshold} failed attempts."
+            if retrying
+            else f"{threshold}+ failed attempts."
+        )
+        assert description in out, out
+        assert "one failed attempt so far" not in out, out
 
 
 def test_the_owed_legends_come_first_and_share_one_tail(
@@ -1146,7 +1186,7 @@ def test_the_owed_legends_come_first_and_share_one_tail(
     # The legends are located by their own text rather than by their column
     # padding: the label width is sized from the words actually rendered (round
     # 2, D12), so it moves with which states are present.
-    owed_legend = out.index("one failed attempt so far")
+    owed_legend = out.index(f"fewer than {deliveries.UNDELIVERED_AFTER_ATTEMPTS} failed attempts.")
     assert out.index("these are still owed and retried with a backoff") > owed_legend, out
     # D5: one short clause per word and ONE shared sentence, not the same
     # ~100 characters restated three lines apart.
@@ -1185,4 +1225,6 @@ def test_the_when_note_lands_under_the_table_not_under_the_legends(
     assert wake_command(_args(wake_command="list", json=False)) == 0
     out = capsys.readouterr().out
     assert "WHEN hidden" in out, out
-    assert out.index("WHEN hidden") < out.index("one failed attempt so far"), out
+    assert out.index("WHEN hidden") < out.index(
+        f"fewer than {deliveries.UNDELIVERED_AFTER_ATTEMPTS} failed attempts."
+    ), out

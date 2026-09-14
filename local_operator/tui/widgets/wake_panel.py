@@ -30,7 +30,7 @@ from textual.widgets import Static
 
 from local_operator.harness.wake import format_duration
 from local_operator.tui import theme as theme_mod
-from local_operator.wakes.display import format_wake_time
+from local_operator.wakes.display import format_age, format_wake_time
 
 #: The most wake rows the band will spend. ``MAX_WAKE_SCHEDULES`` is 16, far
 #: more than the band can afford; the cap plus an overflow marker keeps a
@@ -158,12 +158,9 @@ class WakePanel(Container):
         state = str(owed.get("state") or "retrying")
         first = owed.get("first_attempt_ms")
         if isinstance(first, int) and not isinstance(first, bool):
-            # WHOLE SECONDS: `format_duration` is a compound renderer that falls
-            # back to raw milliseconds for a sub-second remainder, which turned a
-            # nine-day age into `777600440ms`. The remainder carries no
-            # information at this granularity.
-            age_ms = max(now_ms - first, 0) // 1000 * 1000
-            return f"{state} · owed {format_duration(age_ms)}"
+            # This is an approximate age, not round-trippable schedule syntax:
+            # even whole-second ages need more than two terms after a poll tick.
+            return f"{state} · owed {format_age(max(now_ms - first, 0) / 1000)}"
         return state
 
     @classmethod
