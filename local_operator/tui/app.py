@@ -1091,6 +1091,20 @@ TERMINAL_GATE_TIMEOUT_S = 30.0
 #: measures actual laid-out rows and reserves a viewport above the reader.
 RESUME_RENDER_MESSAGES = 80
 
+#: How often a completion poller with no observed focus edge may re-ask the host
+#: whether this terminal is in the foreground.
+#:
+#: It exists because the focus EDGE is not guaranteed to arrive at all: Textual
+#: learns focus from the terminal's own focus reports, and a terminal that was
+#: already focused when the reports were enabled sends none, so an app that
+#: starts focused would otherwise never acknowledge anything it displays. 30 s
+#: is a compromise in the safe direction — long enough that a background
+#: terminal pays one host probe per half minute instead of one per tick, short
+#: enough that a result the operator just opened is receipted while they are
+#: still looking at it. Only terminals where the probe actually MEASURES focus
+#: (see `focus_is_measurable`) use it; everywhere else the fence is unchanged.
+ATTENTION_FOCUS_REFRESH_S = 30.0
+
 #: Raw messages per yielded render slice. A request fills a rendered viewport
 #: buffer across as many slices as needed; it is not one tiny RPC per notch.
 #: Construction is paid during interaction, so use smaller slices than the
@@ -22206,9 +22220,29 @@ class OperatorApp(App[None]):
 
         self.run_worker(run(), group="background-notify")
 
+    def _attention_focus_refresh_due(self) -> bool:
+        """Whether this tick may re-ask the host for focus evidence.
+
+        A cadence, not a throttle on the poll: the poller itself is a 1 s tick
+        and cheap, while `terminal_is_foreground` shells out (osascript on
+        macOS) so it must not run per tick for a session whose terminal never
+        reported focus. A refusal is not recorded as a failure — the terminal is
+        simply not frontmost yet — and the next due tick asks again, which is
+        what makes this self-healing rather than a gate that stays shut.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_attention_focus_probe_at", 0.0)
+        if last and now - last < ATTENTION_FOCUS_REFRESH_S:
+            return False
+        self._attention_focus_probe_at = now
+        return True
+
     async def _poll_completion_attention(self) -> None:
         from local_operator.harness.rows import completion_notice
-        from local_operator.tui.attention import terminal_is_foreground
+        from local_operator.tui.attention import (
+            focus_is_measurable,
+            terminal_is_foreground,
+        )
 
         # BEFORE the guards below, which are about the ATTACHED session's read
         # receipt: a session that has no attention API, or a poll already in
@@ -22275,15 +22309,35 @@ class OperatorApp(App[None]):
                 not state.get("unseen")
                 or not token
                 or not anchor
-                or not getattr(self, "_attention_focus_observed", False)
                 or getattr(session, "is_streaming", False)
                 or not self._completion_anchor_visible(anchor)
+            ):
+                return
+            # FOCUS EVIDENCE, on a cadence as well as on an edge. `on_app_focus`
+            # is the terminal REPORTING that it gained focus, which a terminal
+            # that was ALREADY focused when Textual enabled focus reporting never
+            # sends -- so for those sessions this latch stayed unset for the life
+            # of the app and a completed result the operator was looking straight
+            # at was never acknowledged (the reported defect: the sidebar check
+            # mark never cleared in the TUI). Where the host probe MEASURES focus
+            # (macOS cmux: frontmost application, this socket's kernel peer PID,
+            # key visible window, focused surface) the same evidence can simply be
+            # re-learned, and `_attention_focus_refresh_due` bounds how often.
+            # Where it does not measure, the fence stays exactly as it was: a
+            # plain terminal's optimistic startup focus is not evidence, so the
+            # receipt still waits for a real focus report.
+            if not getattr(self, "_attention_focus_observed", False) and not (
+                focus_is_measurable() and self._attention_focus_refresh_due()
             ):
                 return
             # Twenty open sessions need no twenty-process focus poll: only a
             # positively focused surface with a still-unread rendered result
             # reaches this bounded off-loop host probe.
             focused = await asyncio.to_thread(terminal_is_foreground)
+            if focused and not getattr(self, "_attention_focus_observed", False):
+                # Measured, not assumed: this is the same fact the focus edge
+                # carries, learned by asking instead of by being told.
+                self._attention_focus_observed = True
             if (
                 focused
                 and self._session is session
@@ -22300,6 +22354,19 @@ class OperatorApp(App[None]):
                     and self._completion_anchor_visible(anchor)
                 ):
                     await cast(Any, acknowledge)(token)
+                    # VERIFY, never assume. A resolved acknowledgement is not
+                    # proof the receipt moved: `unseen` is computed against the
+                    # NEWEST sequence, so a completion published under us leaves
+                    # the conversation unread, and the follower's op reply carries
+                    # no state at all. Nothing here latches -- the next tick
+                    # re-reads the state and re-attempts with whatever token it
+                    # names -- so trusting the call is how a client ends up
+                    # certain it has read something it never did.
+                    settled = await cast(Any, refresh)()
+                    if settled.get("unseen") is not False:
+                        logger.debug(
+                            "completion receipt did not land on the rendered token; re-arming"
+                        )
         except Exception:
             logger.debug("completion receipt deferred", exc_info=True)
         finally:

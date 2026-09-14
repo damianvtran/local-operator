@@ -69,6 +69,207 @@ async def test_default_focus_is_not_proof_and_rendered_focus_acknowledges(
         assert len(probes) == count
 
 
+class FencedReceiptSession(ReceiptSession):
+    """A surface stuck on a SUPERSEDED completion, on a backend that no-ops.
+
+    The live shape from the findings file: the receipt is pinned to an older
+    completion while a newer one is unseen, and the surface still renders the
+    OLDER one (its owner's projection has not caught up), so the token it holds
+    is stale. `acknowledge_attention` answers the way the shipped 0.54.43 daemon
+    did -- a resolved call whose state still says `unseen` -- which is the answer
+    a client must not believe.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.stale = self.token
+        self.newer = Message(role="assistant", content=[TextContent(text="The newer result.")])
+        self.fresh = str(uuid.uuid4())
+        self._history = [self.result, self.newer]
+        self.store.publish("session/sess", self.fresh, self.newer.id, "complete")
+        self.acked: list[str] = []
+        self.serve_stale = True
+
+    async def refresh_attention(self) -> dict[str, Any]:
+        state = await asyncio.to_thread(self.store.state, "session/sess")
+        if self.serve_stale:
+            # The projection behind the surface has not caught up: it still
+            # renders the older completion, which is how a real client came to
+            # send a superseded token at all.
+            return {
+                **state,
+                "completion_token": self.stale,
+                "anchor_id": self.result.id,
+                "unseen": True,
+            }
+        return state
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        self.acked.append(token)
+        if token == self.stale:
+            return {
+                **(await asyncio.to_thread(self.store.state, "session/sess")),
+                "completion_token": self.stale,
+                "anchor_id": self.result.id,
+                "unseen": True,
+            }
+        return await asyncio.to_thread(self.store.acknowledge, "session/sess", token)
+
+
+async def _settle(app: Any, pilot: Any, anchor: str) -> None:
+    """Pump until the anchored block is laid out and hit-testable."""
+    for _ in range(50):
+        await pilot.pause()
+        if app._completion_anchor_visible(anchor):
+            return
+
+
+@pytest.mark.asyncio
+async def test_a_rendered_result_is_receipted_without_a_focus_report(tmp_path, monkeypatch) -> None:
+    """The reported TUI defect: a terminal that never tells us it has focus.
+
+    Textual learns focus from the terminal's own focus REPORTS, and a terminal
+    that was already focused when those reports were enabled sends none -- so an
+    app that starts focused never sets the latch `on_app_focus` owns, and the
+    honest attempt (`_completion_anchor_visible` says every guard passes) was
+    refused by a gate nothing could open. Where the host probe actually MEASURES
+    focus, the same evidence may be re-taken on a cadence instead of an edge.
+    """
+    session = ReceiptSession(tmp_path / "attention.db")
+    probes: list[bool] = []
+    monkeypatch.setattr(
+        "local_operator.tui.attention.focus_is_measurable", lambda *a, **k: True, raising=False
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.attention.terminal_is_foreground",
+        lambda *a, **k: probes.append(True) or True,
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot, session.result.id)
+        assert app._completion_anchor_visible(session.result.id), "the result is not on screen"
+        assert not getattr(app, "_attention_focus_observed", False), "no report has arrived"
+
+        assert session.store.state("session/sess")["unseen"]
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        assert probes, "the poll refused without asking the host for evidence"
+        assert not session.store.state("session/sess")[
+            "unseen"
+        ], "a rendered result on a foreground terminal was not receipted"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_that_cannot_measure_focus_still_waits_for_a_report(
+    tmp_path, monkeypatch
+) -> None:
+    """The fence, where the probe is not a measurement (a plain terminal).
+
+    There the probe's True says only that no `CMUX_*` variable is set, so it
+    carries no information about what the user is looking at. Startup's
+    optimistic Textual focus is not evidence either, so the receipt still waits
+    for a real focus report -- and still takes it when one arrives.
+    """
+    session = ReceiptSession(tmp_path / "attention.db")
+    probes: list[bool] = []
+    monkeypatch.setattr(
+        "local_operator.tui.attention.focus_is_measurable", lambda *a, **k: False, raising=False
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.attention.terminal_is_foreground",
+        lambda *a, **k: probes.append(True) or True,
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot, session.result.id)
+        assert app._completion_anchor_visible(session.result.id)
+        for _ in range(3):
+            await app._poll_completion_attention()
+            await pilot.pause()
+        assert session.store.state("session/sess")[
+            "unseen"
+        ], "an unmeasurable terminal was receipted without any focus report"
+        assert not probes, "an unmeasurable probe was asked for focus evidence"
+
+        app.on_app_focus(AppFocus())
+        await app._poll_completion_attention()
+        await pilot.pause()
+        assert not session.store.state("session/sess")["unseen"]
+
+
+@pytest.mark.asyncio
+async def test_a_background_terminal_is_never_receipted(tmp_path, monkeypatch) -> None:
+    """Measured and NOT in front: nothing is read, however long the poll runs."""
+    session = ReceiptSession(tmp_path / "attention.db")
+    monkeypatch.setattr(
+        "local_operator.tui.attention.focus_is_measurable", lambda *a, **k: True, raising=False
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.attention.terminal_is_foreground", lambda *a, **k: False
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot, session.result.id)
+        assert app._completion_anchor_visible(session.result.id)
+        for _ in range(3):
+            await app._poll_completion_attention()
+            await pilot.pause()
+        # Even a real focus report does not override the host's own answer that
+        # this terminal is not the frontmost one.
+        app.on_app_focus(AppFocus())
+        for _ in range(3):
+            await app._poll_completion_attention()
+            await pilot.pause()
+        assert session.store.state("session/sess")["unseen"]
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_acknowledgement_that_did_not_land_is_rearmed(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Both client halves, against an OLD backend's answer.
+
+    The shipped daemon answered a superseded acknowledgement with a resolved call
+    whose state still said `unseen`, and the TUI ignored the state. It must
+    believe the state, say so, and keep going: nothing is latched, so the next
+    poll takes whatever token the refresh it trusts names -- which is the token
+    that actually clears the mark.
+    """
+    session = FencedReceiptSession(tmp_path / "attention.db")
+    monkeypatch.setattr(
+        "local_operator.tui.attention.focus_is_measurable", lambda *a, **k: True, raising=False
+    )
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda *a, **k: True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(app, pilot, session.result.id)
+        assert app._completion_anchor_visible(session.result.id)
+        # The focus edge, deliberately: this test is about the VERIFICATION of
+        # what an acknowledgement returns, so the focus path must not be what it
+        # depends on.
+        app.on_app_focus(AppFocus())
+        await pilot.pause()
+
+        with caplog.at_level("DEBUG", logger="local_operator.tui.app"):
+            await app._poll_completion_attention()
+            await pilot.pause()
+
+        assert session.acked == [session.stale], "the stale token was not the one attempted"
+        assert session.store.state("session/sess")[
+            "unseen"
+        ], "a no-op acknowledgement was taken as a read"
+        assert "did not land" in caplog.text, "a no-op acknowledgement passed silently"
+
+        # The projection catches up. The receipt advances on the token it now
+        # names, without any new focus evidence and without a restart.
+        session.serve_stale = False
+        await app._poll_completion_attention()
+        await pilot.pause()
+        assert session.acked[-1] == session.fresh
+        assert not session.store.state("session/sess")["unseen"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("follow", [False, True])
 @pytest.mark.parametrize("already_read", [False, True])
