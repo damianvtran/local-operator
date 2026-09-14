@@ -292,6 +292,37 @@ async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sigil", ["?", "#"])
+async def test_the_read_only_probe_never_clips_the_truncated_path(tmp_path, sigil):
+    """A config root is arbitrary user data, and ``?``/``#`` must stay DATA (R11).
+
+    The probe hands its path to SQLite through a ``file:`` URI, where both of those
+    characters are delimiters. Interpolated raw they truncate the filename — so the
+    open landed on the path up to the sigil, CREATED a 0-byte file there, and then
+    answered ``False`` for a key the store does hold. Both halves are asserted
+    below because either alone passes on the defect: the absent key answering
+    ``False`` is also the broken probe's answer, and only the recorded key can tell
+    a genuine read from one that opened the wrong file.
+    """
+    root = tmp_path / f"root{sigil}odd"
+    receipts = DesktopReceipts(root)
+
+    async def op():
+        return {"result": "real receipt"}
+
+    assert receipts.recorded("s:id") is False, "an absent store records nothing"
+    assert not receipts.path.exists(), "the probe created the store it only reads"
+
+    await receipts.run("s:id", {"op": "create"}, op)
+    assert receipts.path.exists()
+    assert receipts.recorded("s:id") is True, "the probe must read the INTENDED file"
+    assert receipts.recorded("other:id") is False
+    # Everything before the sigil is a different path, and the unescaped shape
+    # opened (and created) exactly that.
+    assert not (tmp_path / "root").exists(), "the probe wrote at a truncated path"
+
+
+@pytest.mark.asyncio
 async def test_a_waiting_control_does_not_block_another_sessions_admission(tmp_path):
     receipts = DesktopReceipts(tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -1540,20 +1571,18 @@ async def test_a_draft_preview_resolves_the_requested_selection(draft_api) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_preview_that_omits_the_selection_is_byte_for_byte_todays_answer(draft_api) -> None:
-    """``model`` is OPTIONAL: omitting it changes nothing a client can observe.
+async def test_a_preview_that_omits_the_selection_answers_an_explicit_null(draft_api) -> None:
+    """``model`` is OPTIONAL: omitting the field answers exactly the explicit ``null``.
 
-    The frozen contract is that a body without the field behaves as it always
-    did — the same identity, no new refusal, nothing durable — and this pins it
-    against the same body with an explicit ``null``, which is the spelling a
-    client that always sends the key would produce.
-
-    What DID change, deliberately and in one direction only: the SPEC the pane
-    publishes is now the configured pair resolved through its own metadata, so the
-    effort LADDER and LEVEL are answered instead of being left empty. That is the
-    operator's own report (an empty ladder hides the strip's effort chip and makes
-    the picker unreachable on every new conversation), and the frame the UI swaps
-    in at send answers the same fields — see
+    The invariant pinned is *omitted ≡ explicit ``null``* — the spelling a client
+    that always sends the key would produce. It is NOT byte-identity with the
+    pre-feature payload, and does not claim to be: what DID change, deliberately
+    and in one direction only, is the SPEC the pane publishes, which is now the
+    configured pair resolved through its own metadata so the effort LADDER and
+    LEVEL are answered instead of being left empty. That is the operator's own
+    report (an empty ladder hides the strip's effort chip and makes the picker
+    unreachable on every new conversation), and the frame the UI swaps in at send
+    answers the same fields — see
     ``test_an_unpicked_draft_answers_the_ladder_and_level_it_will_run_at``.
     """
     client, root = draft_api
@@ -2054,8 +2083,9 @@ async def test_a_refusal_at_the_model_admission_writes_nothing(draft_api) -> Non
 
 
 def test_the_previews_model_read_does_not_materialise_a_config_directory(tmp_path) -> None:
-    """``birth_effort_for`` reads the config WITHOUT creating it (round 2, Q-R2-3).
+    """``_configured_effort_without_writing`` reads the config WITHOUT writing it.
 
+    The reader is named for the constraint it carries (round 2, Q-R2-3):
     ``ConfigManager``'s loader mkdirs the directory it is pointed at, and the
     preview is documented as side-effect free. Through HTTP the directory always
     exists, so the write was unreachable by accident rather than by construction;

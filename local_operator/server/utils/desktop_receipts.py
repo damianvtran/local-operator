@@ -61,27 +61,53 @@ class DesktopReceipts:
     def recorded(self, key: str) -> bool:
         """Has ``key`` already been claimed, WITHOUT claiming it or writing.
 
-        WHY a separate read: the create route's pre-flight admissions have to be
-        skipped for a request whose first attempt already succeeded, or a retry
-        would be REFUSED (a directory that has since vanished, a model that has
-        since been retired) instead of answered from its receipt — turning a
+        WHY THE PROBE EXISTS AT ALL, and why it must stay a read rather than
+        becoming a pre-emptive claim: the two answers it has to satisfy cannot be
+        served by one write. A RECORDED key has to be REPLAYED, not re-executed —
+        the create operation behind it migrates, leases and starts things, so
+        running it a second time is precisely the duplicated side effect the
+        at-most-once contract exists to prevent. A FRESH key has to be claimed by
+        the request that OWNS it rather than by a mere reading — a claim is a
+        durable row, and a row left behind here would make the request's own first
+        attempt an "indeterminate" conflict with itself. Answering both at once is
+        what makes this a read that neither claims nor executes; a caller that
+        "simplifies" it into ``run`` gets one of those two wrong every time.
+
+        WHY a separate read, concretely: the create route's pre-flight admissions
+        have to be skipped for a request whose first attempt already succeeded, or
+        a retry would be REFUSED (a directory that has since vanished, a model that
+        has since been retired) instead of answered from its receipt — turning a
         success into a failure for the client the at-most-once contract exists for
         (review round 2, R7).
 
         It opens the store READ-ONLY on purpose: ``_db`` creates the file and
         chmods it, and a probe that runs before a refusal must write nothing. An
         absent store, and a store with no receipts table yet, both record nothing.
+
+        The path reaches SQLite as a proper ``file:`` URI rather than interpolated
+        raw, because a config root is arbitrary user data and two of its legal
+        characters are URI delimiters. Interpolated raw, a root containing ``?`` or
+        ``#`` truncates the filename there and takes ``?mode=ro`` with it, so the
+        open lands on the truncated path — CREATING a 0-byte file there, on the
+        very path whose docstring promises a probe writes nothing — and then
+        answers ``False`` for a key the store does hold (review round 3, R11).
+        ``Path.as_uri`` percent-encodes, so those characters survive as data.
         """
         if not self.path.exists():
             return False
-        with closing(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=10)) as db:
-            try:
+        try:
+            # The connect is INSIDE the try because a read-only open of a file
+            # that vanished since the check above raises at connect, not at the
+            # first statement.
+            with closing(
+                sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
+            ) as db:
                 row = db.execute("SELECT 1 FROM receipts WHERE id = ?", (key,)).fetchone()
-            except sqlite3.OperationalError:
-                # No table yet, or a write lock held elsewhere: "nothing recorded"
-                # is the safe answer — the caller then runs the admissions and
-                # ``run`` owns the claim, including its conflict semantics.
-                return False
+        except sqlite3.OperationalError:
+            # No table yet, or a write lock held elsewhere: "nothing recorded"
+            # is the safe answer — the caller then runs the admissions and
+            # ``run`` owns the claim, including its conflict semantics.
+            return False
         return row is not None
 
     def _finish(self, key: str, result: dict[str, Any]) -> None:

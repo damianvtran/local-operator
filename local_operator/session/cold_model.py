@@ -67,11 +67,29 @@ def resolve_birth_effort(spec: ModelSpec, chosen: str | None, config_dir: Path) 
     marker stores (``_draft_model_spec``'s null-level answer) makes the third case
     unreachable, which is how the preview and the plane came to disagree whenever
     no ``model_effort`` was configured (review round 2, R6) — pass
-    ``build_model_spec``'s result, not the marker's value.
+    ``build_model_spec``'s result, not the marker's value. That is now ENFORCED
+    rather than merely documented: the mistake is detectable, because clearing the
+    seed is the only thing that produces ``reasoning_effort is None`` beside a
+    non-``None`` default, so the guard below refuses such a spec loudly instead of
+    answering "no level" for a birth that will run a rung (review round 3, R12 /
+    Q-R3-1).
 
     Every return is a rung this spec's ladder accepts, or ``None`` (nothing to
     send) — the membership contract ``resolve_effort_in`` documents.
     """
+    if spec.reasoning_effort is None and spec.reasoning_default_effort is not None:
+        # The shape only a seed-CLEARED spec has: ``build_model_spec`` sets the
+        # default to the seed it computed, so the two are equal in every spec it
+        # returns and a ``None`` effort beside a stated default cannot come from
+        # it. Fail loudly rather than fall through to the third case, which would
+        # report "no level" while the launch runs the seed.
+        raise ValueError(
+            "resolve_birth_effort needs a spec that still carries its seed, but "
+            f"this one has reasoning_effort=None beside reasoning_default_effort="
+            f"{spec.reasoning_default_effort!r} — the shape a seed-cleared spec "
+            "has. Pass build_model_spec's result, not the marker's null-level "
+            "value (see this function's docstring)."
+        )
     from local_operator.model.effort import resolve_effort_in
 
     if chosen:
