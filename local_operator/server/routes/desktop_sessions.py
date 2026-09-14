@@ -41,6 +41,7 @@ from local_operator.server.models.desktop_sessions import (
     WatchReceipt,
 )
 from local_operator.server.models.schemas import CRUDResponse
+from local_operator.server.retire import RETIRING_STATE_ATTR, DaemonRetiring
 from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
 from local_operator.server.utils.desktop_receipts import (
     DesktopReceipts,
@@ -222,7 +223,14 @@ class Warm(Input):
 def host(request: Request) -> DesktopSessions:
     pool = getattr(request.app.state, "desktop_sessions", None)
     if pool is None:
-        pool = DesktopSessions(request.app.state.config_manager.config_dir)
+        pool = DesktopSessions(
+            request.app.state.config_manager.config_dir,
+            # The DAEMON's retirement, asked of app state rather than of the pool:
+            # the pool is built lazily by the first request that needs it, and a
+            # pool built after the announcement must refuse for the same reason
+            # (and with the same 503) as one built before it.
+            retiring=lambda: bool(getattr(request.app.state, RETIRING_STATE_ATTR, False)),
+        )
         request.app.state.desktop_sessions = pool
     return pool
 
@@ -243,6 +251,13 @@ def reply(result: Any) -> CRUDResponse[Any]:
 async def errors() -> AsyncIterator[None]:
     try:
         yield
+    except DaemonRetiring as error:
+        # The daemon has announced its retirement and refuses to start work it
+        # would not finish. 503, not 500: the process is alive and deliberately
+        # not admitting, so the client's move is to rediscover the successor
+        # through the record (design §7) — a message and a code it can key on,
+        # never a traceback.
+        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
     except SubagentChildUnavailable as error:
         # The child read route's containment refusal (design § 9.1). Not folded
         # into the generic 404 below because the code is part of the contract:
@@ -362,6 +377,14 @@ async def create_session(body: CreateSession, request: Request):
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
     async with errors():
+        # REFUSED BEFORE THE RECEIPT IS CLAIMED, not merely before the create
+        # runs: a refused request must leave no pending receipt behind, or the
+        # client's retry against the SUCCESSOR would meet the indeterminate 409
+        # the receipts layer reserves for a crashed attempt
+        # (``desktop_receipts``). ``DesktopSessions.create`` re-asks the same
+        # question as its first statement, so a caller that reaches the adapter
+        # another way gets the same refusal.
+        host(request).assert_admitting()
         return reply(
             await receipts(request).run("create:" + body.request_id, body.model_dump(), create)
         )
@@ -846,8 +869,11 @@ async def warm(session_id: str, body: Warm, request: Request):
     "an engage was started"; what becomes of it is not this request's to
     report, and the send that follows reports it properly through its own
     ladder. The non-2xx answers that remain are the ones that mean the call
-    itself was not admissible at all: an unknown session (404) and a full
-    bridge table (409), both from ``errors()``.
+    itself was not admissible at all: an unknown session (404), a full
+    bridge table (409), and a daemon that has announced its retirement (503,
+    ``daemon-retiring``) — the last is the one refusal that says "this process is
+    leaving", not "this call is wrong", so a client reconnects to the successor
+    rather than retrying here, both from ``errors()``.
 
     ``body`` is declared and never read: it exists so FastAPI validates the
     request against a closed model. Dropping the parameter would make the route

@@ -272,6 +272,26 @@ class ServeRecord:
     #: pid's record ``wedged`` rather than ``live``.
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
+    #: Set only while this daemon is LEAVING, to the build it loaded
+    #: (``retiring_from``) and the build now on disk that it is making room for
+    #: (``retiring_to``); both ``""`` for the whole of a normal life. See
+    #: :mod:`local_operator.server.retire`.
+    #:
+    #: WHY THE DAEMON ANNOUNCES RATHER THAN JUST DISAPPEARING. A reader that
+    #: finds no record cannot tell a retire from a crash, a ``kill -9``, or a
+    #: machine that is coming back — so a daemon that vanished on an update
+    #: would look broken exactly when it is working correctly. These make the
+    #: handover legible: the record is still there, still heartbeating, and it
+    #: says which build is coming. Nothing else about the record changes, so
+    #: ``live`` stays the truthful classification until the clean exit removes
+    #: the file (see the lifespan's ``finally``).
+    #:
+    #: Additive, like every field here: a reader built before them drops the
+    #: keys and sees the daemon it always saw, and this changes no protocol
+    #: version (see ``session/runtime/types.py``'s record section — the daemon
+    #: record is not the attach protocol).
+    retiring_from: str = ""
+    retiring_to: str = ""
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for

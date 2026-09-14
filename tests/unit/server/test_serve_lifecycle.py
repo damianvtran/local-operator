@@ -171,3 +171,70 @@ async def test_a_boot_that_only_INHERITED_an_announcement_publishes_nothing(
             "the inherited announcement is consumed, so nothing this process "
             "spawns can re-publish it"
         )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_runs_the_retirement_poll_beside_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
+) -> None:
+    """The poll is started with the publisher and stopped by the shutdown half.
+
+    Driven against the REAL lifespan with the poll itself replaced, because what
+    is under test here is the wiring: a poll that a shutdown forgets to stop
+    would keep the event loop alive after the listener closed, and one started
+    without a record has no announcement channel at all (the next test).
+    """
+    import asyncio
+
+    from local_operator.server import retire as serve_retire
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    serve_registry.announce_address(app, "127.0.0.1", 58474)
+
+    stops: list[asyncio.Event] = []
+
+    async def poll(application, publisher, *, stop, exit_process=None):  # noqa: ANN001
+        stops.append(stop)
+        await stop.wait()
+
+    monkeypatch.setattr(serve_retire, "retirement_poll", poll)
+
+    async with lifespan(app):
+        # One turn of the loop: ``create_task`` schedules the poll, and this is
+        # what lets it reach its first line before the assertions read it.
+        await asyncio.sleep(0)
+        assert len(stops) == 1, "started once, beside the record publisher"
+        assert app.state.serve_retire is not None
+        assert not stops[0].is_set()
+
+    assert stops[0].is_set(), "the shutdown half ends the poll"
+    assert app.state.serve_retire is None
+    assert app.state.serve_retire_stop is None
+    assert (
+        app.state.serve_retiring is False
+    ), "the one-way latch is cleared for the next boot in this process"
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_no_retirement_poll_without_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
+) -> None:
+    """No record, no poll: a daemon nobody can discover has nobody to tell."""
+    import asyncio
+
+    from local_operator.server import retire as serve_retire
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    started: list[asyncio.Event] = []
+
+    async def poll(application, publisher, *, stop, exit_process=None):  # noqa: ANN001
+        started.append(stop)
+
+    monkeypatch.setattr(serve_retire, "retirement_poll", poll)
+
+    # No announcement, so no record is published (see the inherited-announcement
+    # test above for the whole rule).
+    async with lifespan(app):
+        await asyncio.sleep(0)
+        assert started == []
+        assert getattr(app.state, "serve_retire", None) is None
