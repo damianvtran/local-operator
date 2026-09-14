@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 import pytest
 import pytest_asyncio
@@ -4327,3 +4327,171 @@ async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path
 
     assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
     assert remote.is_cold
+
+
+@pytest.mark.asyncio
+async def test_concurrent_move_waits_for_refusal_rollback(move_api) -> None:
+    client, app, root = move_api
+    before, refused, accepted = (root / name for name in ("before", "refused", "accepted"))
+    for directory in (before, refused, accepted):
+        directory.mkdir()
+    sid = await app.state.desktop_sessions.create(str(before))
+    entered, release, queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self) -> Literal[True]:
+            if self.locked():
+                queued.set()
+            return await super().acquire()
+
+    class RefuseFirst(MoveClient):
+        async def retire_now(self) -> str:
+            self.ops.append("retire_now")
+            if len(self.ops) == 1:
+                entered.set()
+                await release.wait()
+                return "kept: busy"
+            return "retiring"
+
+    async with app.state.desktop_sessions.session(sid) as bridge:
+        bridge.move_lock = ObservedLock()
+        _bind_move_client(bridge, RefuseFirst())
+        # Both requests may acquire the bridge before either starts retiring.
+        # Enter the shared transaction directly to pin that admitted ordering.
+        first = asyncio.create_task(module.move_session(bridge, str(refused)))
+        await asyncio.wait_for(entered.wait(), 5)
+        second = asyncio.create_task(module.move_session(bridge, str(accepted)))
+        try:
+            await asyncio.wait_for(queued.wait(), 5)
+            # The second request has reached the transaction lock, but cannot
+            # write its marker until the first request has restored its own.
+            assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(refused)
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="could not move: busy"):
+            await first
+        second_response = await second
+        assert second_response.cwd == str(accepted)
+        assert bridge.remote is not None
+        assert bridge.cwd == bridge.remote.cwd == str(accepted)
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(accepted)
+        assert await _published_cwd(client, sid) == str(accepted)
+
+
+async def _published_cwd(client: Any, session_id: str) -> str:
+    """The ``cwd`` a renderer reads out of the session's published state."""
+    payload = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]["payload"]
+    return payload["frontend"]["snapshot"]["cwd"]
+
+
+@pytest.mark.asyncio
+async def test_a_move_is_published_in_the_state_the_chip_reads(move_api) -> None:
+    """The STREAM is what the chip shows, so the published state must move too.
+
+    Asserting the marker and the receipt alone is what let the stale-stream
+    defect through: both named the new directory while the published
+    ``frontend.cwd`` still named the old one, and the renderer's own rule is
+    that the stream is authoritative — so it kept showing a directory the
+    session had left.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    # Keep the viewer acquired, as an open desktop event stream does. Releasing
+    # it between requests rebuilds a cold snapshot from the already-correct
+    # marker and would conceal the stale in-memory publication this tests.
+    async with pool.session(sid):
+        assert await _published_cwd(client, sid) == str(before)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["cwd"] == str(after)
+        assert await _published_cwd(client, sid) == str(
+            after
+        ), "the receipt moved but the stream the chip reads did not"
+
+
+@pytest.mark.asyncio
+async def test_a_move_through_a_symlink_to_the_same_directory_is_a_no_op(move_api) -> None:
+    """``/tmp/x`` and ``/private/tmp/x`` are ONE directory.
+
+    Comparing spellings alone missed it (macOS's ``/tmp`` is the ordinary case),
+    so a user typing the other name of the directory they were already in paid a
+    full retire-and-respawn for a move that went nowhere — and got the rebuild
+    notice on screen for it. The receipt answers with the SESSION's own spelling,
+    which is what the frontend state stream reports, so the renderer's
+    reconciliation has nothing to disagree with.
+    """
+    client, app, root = move_api
+    real, link = root / "real", root / "link"
+    real.mkdir()
+    link.symlink_to(real)
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(real))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(link))
+        )
+        result = response.json()["result"]
+
+        assert response.status_code == 200, response.text
+        assert (
+            result["outcome"] == "unchanged"
+        ), "the same directory through a symlink retired the runtime"
+        assert result["cwd"] == str(real)
+        assert double.ops == [], "a no-op retired the runtime"
+    assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(real)
+
+
+@pytest.mark.asyncio
+async def test_a_bound_move_publishes_the_moved_directory_at_once(move_api) -> None:
+    """The window between the retire and the successor's bind is the chip's whole world.
+
+    A bound move returns after the OLD runtime has been asked to leave and before
+    any successor has published: for those seconds (and for as long as the engage
+    takes, or for good if it fails) the only state any surface can read is the one
+    the viewer holds. Left alone it named the directory the session had LEFT —
+    the receipt, the marker and a real `bash pwd` all named the new one, and the
+    stream the renderer trusts named the old one (QA Q1 on the desktop move).
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        _bind_move_client(bridge, MoveClient())
+        assert await _published_cwd(client, sid) == str(before)
+        outgoing = bridge.remote.frontend_state
+
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["outcome"] == "rebound"
+        assert await _published_cwd(client, sid) == str(
+            after
+        ), "the move retired the runtime and left the stream naming the old directory"
+        # A final owner delta can already be in flight when retire is accepted.
+        # Local publication must not consume the sequence reserved for that delta.
+        bridge.remote._on_frontend_update(
+            {
+                "epoch": outgoing.epoch,
+                "sequence": outgoing.sequence + 1,
+                "changes": {"conversation_title": "Final owner update"},
+            }
+        )
+        assert bridge.remote.frontend_state.cwd == str(after)
+        assert bridge.remote.frontend_state.conversation_title == "Final owner update"
