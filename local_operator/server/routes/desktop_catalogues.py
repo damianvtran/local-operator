@@ -190,17 +190,80 @@ async def analytics(
             # itself. Absent (an older ledger without ``parent_session_id``, or a
             # store that predates the attributes) is ``{}``, which is a true
             # "no edges known" rather than a failure.
+            #
+            # ``session_names`` is filtered to NAMED sessions. The store's map is
+            # COMPLETE over ``by_session`` with ``""`` wherever no name is
+            # recorded, and an empty string is not the same fact as an unknown
+            # one — it defeats the documented fallback rather than triggering it.
+            # A client reads this as ``names?.[id] ?? id``, and ``"" ?? id`` is
+            # ``""``, so a session with no title would paint a blank cell while
+            # being styled as though it were showing an id. Absence is what
+            # makes ``?? id`` fire, so absence is what we emit.
             return {
                 "aggregate": dataclasses.asdict(aggregate),
                 "daily": [dataclasses.asdict(row) for row in store.daily_series(days)],
                 "daily_scope": "all_sessions",
-                "session_names": dict(getattr(aggregate, "session_names", None) or {}),
+                "session_names": {
+                    sid: name
+                    for sid, name in (getattr(aggregate, "session_names", None) or {}).items()
+                    if name
+                },
                 "session_parents": dict(getattr(aggregate, "session_parents", None) or {}),
             }
         finally:
             store.close()
 
     return reply({"data": await asyncio.to_thread(read_report)})
+
+
+#: The `info.get` fields `LiveState()` leaves at a dataclass DEFAULT and this
+#: read therefore never measured — the session-attached half of the snapshot.
+#: Each is a `0`/`False`/`[]` that is indistinguishable from a reading, and the
+#: contract this route implements names that indistinguishability as its
+#: riskiest assumption: a host whose backend never attached a session would
+#: otherwise paint "MCP 0 connected" and "no subagents" as facts about the
+#: machine, on the one screen whose job is to be believed.
+#:
+#: Nulled HERE rather than in `collect_snapshot` because it is a statement about
+#: this SURFACE: the desktop's host view has no session by construction, while
+#: the TUI's `/info` renders these same fields from the live session it is
+#: attached to, where `0` is a real reading. `collect_snapshot`'s shared output
+#: is deliberately left alone.
+#:
+#: The host half is NOT touched: `agents.profiles`/`teams`, the session-registry
+#: tallies, `env.guides`/`credential_keys` and the terminal/browser/mobile
+#: probes are all real probes of this machine.
+_UNMEASURED_ON_THE_HOST_VIEW: dict[str, tuple[str, ...]] = {
+    "agents": (
+        "tree",
+        "running",
+        "queued",
+        "settled",
+        "max_running",
+        "at_capacity",
+        "max_depth",
+        "deeper",
+        "roster_unread",
+        "cross_session_known",
+    ),
+    "env": (
+        "mcp_configured",
+        "mcp_connected",
+        "mcp_failed",
+        "mcp_settling",
+        "mcp_failures",
+        "approval_mode",
+        "skills",
+    ),
+}
+
+
+def _unmeasure_live_half(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """``None`` — the unknown spelling — for every field no session measured."""
+    for block, fields in _UNMEASURED_ON_THE_HOST_VIEW.items():
+        for field in fields:
+            snapshot[block][field] = None
+    return snapshot
 
 
 @router.get("/v1/desktop/info", response_model=CRUDResponse[Report])
@@ -221,13 +284,13 @@ async def info():
     the desktop already holds those live in ``canonical.frontend`` for the
     conversation on screen; filling them here would give one live fact two
     sources of truth. The host half (install, process, session registry, env)
-    is what this panel renders.
+    is what this panel renders, and `_unmeasure_live_half` nulls the fields that
+    belong to the other half so they cannot read as measurements nobody took.
     """
     from local_operator.info.collect import LiveState, collect_snapshot
 
-    return reply(
-        {"data": dataclasses.asdict(await asyncio.to_thread(collect_snapshot, LiveState()))}
-    )
+    snapshot = await asyncio.to_thread(collect_snapshot, LiveState())
+    return reply({"data": _unmeasure_live_half(dataclasses.asdict(snapshot))})
 
 
 @router.get("/v1/desktop/sessions/{session_id}/report", response_model=CRUDResponse[Report])
@@ -271,7 +334,13 @@ async def session_report(
             report = store.session_report(session_id, recent_limit=recent_limit)
         finally:
             store.close()
-        payload = dataclasses.asdict(report)
+        # The two tuple-keyed maps are blanked BEFORE the dump rather than
+        # overwritten after it: ``asdict`` would otherwise build both of them
+        # only for the rebuild below to discard them, and those are the only
+        # parts of this report that cannot be serialised at all.
+        payload = dataclasses.asdict(
+            dataclasses.replace(report, by_model={}, by_purpose={}, by_purpose_outcome={})
+        )
         payload["by_model"] = [
             {
                 "provider": provider,

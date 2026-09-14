@@ -148,19 +148,25 @@ rather than automatically spending more tokens.
   The response also carries `session_names` (id -> human name) and `session_parents`
   (child id -> parent id), the store's two side attributes that a dataclass dump
   drops; a client uses them to label a per-session row and to indent a child under
-  its root. They are `{}` when the ledger carries no parent column, and the
-  per-session figures stay OWN-scope — the payload hands over the edges so a client
+  its root. `session_names` holds **only named sessions**: an unnamed one is ABSENT,
+  not present-with-`""`, which is what makes a client's `name ?? id` fallback fire
+  instead of painting a blank cell. Both are `{}` when the ledger carries no parent
+  column, and the per-session figures stay OWN-scope — the payload hands over the
+  edges so a client
   can re-partition, and never rolls a child's spend into its parent's column.
 - GET `/v1/desktop/info`: the `/info` host read — `collect_snapshot(LiveState())`
   from `local_operator/info/`, run on a worker thread because the session probe
   blocks (~880 ms on macOS). It takes no parameters: there is one answer per host,
   which is why the command takes no argument at all. The snapshot is taken with **no
-  session attached**, so its live half (subagent tree, job counts, MCP probes,
-  approval mode) is empty by construction — those are facts about a SESSION and a
-  client renders them from its own canonical frontend snapshot. This payload
+  session attached**, so its session-attached half (the agent counters, the subagent
+  tree, the MCP probes, approval mode, skills) is reported as `null` — the unknown
+  spelling, never `0`, because a host whose backend never attached a session must
+  not paint "MCP 0 connected" as a fact. Those fields are facts about a SESSION and
+  a client renders them from its own canonical frontend snapshot. This payload
   describes the MACHINE, which is why the panel labels it as the machine the app is
   connected to. `env.credential_keys` carries credential key NAMES only: never a
-  value, length, prefix or environment value. Gated on `features.diagnostics >= 1`.
+  value, length, prefix or environment value, and the read does not create the store
+  it reads. Gated on `features.diagnostics >= 1`.
 - GET `.../sessions/{id}/report?recent_limit=...`: one exact session's ledger report
   (`AnalyticsStore.session_report`) read in a single explicit transaction, so every
   figure comes from one WAL snapshot while the recorder may be committing behind it.
