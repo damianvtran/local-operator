@@ -49,7 +49,7 @@ class _Launcher:
             class _Process:
                 def wait(self, timeout: float | None = None) -> int:
                     if outcome is None:
-                        raise subprocess.TimeoutExpired(argv, timeout)
+                        raise subprocess.TimeoutExpired(argv, timeout or 0.0)
                     return outcome
 
             return _Process()
