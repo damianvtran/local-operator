@@ -211,9 +211,11 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
     """
 
     class SlowTranscript(Transcript):
-        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+        async def append_custom(
+            self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        ):
             await asyncio.sleep(0.15)  # the payload was read BEFORE this
-            return await super().append_custom(custom_type, details)
+            return await super().append_custom(custom_type, details, preserve_mtime=preserve_mtime)
 
     session = Session(
         model=MODEL,
@@ -249,7 +251,9 @@ async def test_teardown_costs_one_budget_not_two(tmp_path, monkeypatch, caplog) 
     monkeypatch.setattr(session_mod, "_NAME_FLUSH_TIMEOUT_S", 0.4)
 
     class WedgedTranscript(Transcript):
-        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+        async def append_custom(
+            self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        ):
             await asyncio.sleep(3600)
             raise AssertionError("unreachable: the sleep outlives the test")
 
@@ -298,9 +302,11 @@ async def test_a_slow_but_real_write_keeps_its_title(tmp_path, monkeypatch) -> N
     assert delay > 2.0, "the delay must exceed the old per-half budget to discriminate"
 
     class SlowTranscript(Transcript):
-        async def append_custom(self, custom_type: str, details: dict[str, Any]):
+        async def append_custom(
+            self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        ):
             await asyncio.sleep(delay)
-            return await super().append_custom(custom_type, details)
+            return await super().append_custom(custom_type, details, preserve_mtime=preserve_mtime)
 
     session = Session(
         model=MODEL,

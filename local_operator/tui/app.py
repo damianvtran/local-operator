@@ -126,6 +126,7 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
+from local_operator.session.frontend_state import CostKnowledge
 
 # Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
@@ -152,6 +153,8 @@ from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
     SearchSpendSnapshot,
     job_cost,
     search_spend_is_floor,
@@ -397,7 +400,12 @@ LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
 #: figure only becomes exactly known for a session whose spend was accrued
 #: entirely in this process, so the mark is sticky for the life of the
 #: conversation and clears when the ledger it qualifies does.
-RESTORED_COST_PREFIX = "≥"
+#:
+#: ALIASED to ``costs.LOWER_BOUND_MARK`` rather than restated, because the band
+#: and ``/session`` both draw this mark and review R2-1 found them disagreeing
+#: about the same money: the panel printed an unmarked figure for a state the
+#: band marked. One literal, two readers.
+RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 
 #: The states of a mid-turn message, as one set so they cannot drift apart.
 #:
@@ -8894,7 +8902,7 @@ class OperatorApp(App[None]):
                     # ``_spend_text``'s docstring calls the more expensive one.
                     self._spend_text(search_usd, floor=True)
                     if search_usd
-                    else ("$—" if billed_unknown else None)
+                    else (UNKNOWN_COST_CELL if billed_unknown else None)
                 )
             ),
             # A local opener label is DISPLAY state until a generated title is
@@ -9539,6 +9547,46 @@ class OperatorApp(App[None]):
                 context_window=_context_window(session),
             )
 
+        # Cost: the durable RECORD when the session has one, recalled in O(1) —
+        # that is the whole point of the ledger. Only a session with no record
+        # falls back to pricing the one restored reading, and that fallback is
+        # marked FLOOR exactly as before.
+        #
+        # The context figure above stays independent of this: ``restored_usage``
+        # keeps meaning the NEWEST provider reading, because the compaction gate
+        # consumes it and a sum there would be the same lie in the other
+        # direction (design R1).
+        restored_spend = getattr(session, "restored_spend", None)
+        spend: Any = restored_spend() if callable(restored_spend) else None
+        if spend is not None:
+            # The RECORD is the authority for the money, whatever its counts say
+            # (QA round 2, Q3): a record can hold a turn-end remainder with
+            # ``calls == 0``, and gating on ``calls`` kept that money off the
+            # cell and let the one-receipt fallback below paint a floor ABOVE it.
+            figure = spend.published_usd()
+            # ``_total_cost`` is a plain float the app ARITHMETICALLY adds to
+            # (``_spend_total`` on the 1 Hz poll, the subagent harvest), so the
+            # "cannot state" answer must not be stored in it: ``None`` here made
+            # the next poll raise ``TypeError: ... 'NoneType' and 'int'`` (review
+            # R4-1). The unknown is expressed by the CELL below, not by this
+            # field, which keeps its contract "money we have added up so far".
+            self._total_cost = figure if figure is not None else 0.0
+            self._spend_is_floor = figure is not None and spend.knowledge() in {
+                CostKnowledge.FLOOR,
+                CostKnowledge.PARTIAL,
+            }
+            if figure is None:
+                # Money we cannot state (nothing was priceable): ``$—``, and the
+                # mark is impossible because there is no figure to qualify. This
+                # path never passes through ``_apply_frontend_state``, so its
+                # branch cannot reach the cell from there.
+                billed = bool(
+                    getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0)
+                )
+                self._status.update(cost=UNKNOWN_COST_CELL if billed else None)
+            else:
+                self._status.update(cost=self._spend_text())
+            return
         # Priced through the same `_cost_for` every live turn uses, so a
         # restored figure and an accrued one cannot disagree about what the same
         # usage was worth. `_total_cost` is ASSIGNED rather than added to: this
@@ -39576,7 +39624,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 112
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 113
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
