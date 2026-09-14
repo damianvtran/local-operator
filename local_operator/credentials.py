@@ -8,6 +8,7 @@ for accessing them when needed.
 import errno
 import getpass
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -39,6 +40,29 @@ def _reject_control_chars(key: str, value: str) -> None:
     """
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         raise ValueError(f"{key} contains control characters, which are not allowed.")
+
+
+def _open_regular_store(path: str, flags: int) -> int:
+    """Validate the opened object before a buffered reader can consume it.
+
+    A path probe races replacement and hides diagnostic errnos on newer Python.
+    Opening nonblocking first also avoids waiting for a FIFO writer; checking
+    that SAME descriptor rejects devices such as /dev/zero before an unbounded
+    read. Regular-file symlinks remain supported. The opener owns the descriptor
+    until it returns it to ``open``, including every validation failure.
+    """
+    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            code = errno.EISDIR if stat.S_ISDIR(mode) else errno.EINVAL
+            raise OSError(code, "Credential store must be a regular file", path)
+        if hasattr(os, "O_NONBLOCK"):
+            os.set_blocking(fd, True)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 class CredentialManager:
@@ -127,7 +151,7 @@ class CredentialManager:
         """Load credentials from the config file."""
         self.credentials = {}
 
-        with open(self.config_file, "r") as f:
+        with open(self.config_file, "r", opener=_open_regular_store) as f:
             for line in f:
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
