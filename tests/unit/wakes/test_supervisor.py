@@ -1138,20 +1138,38 @@ async def test_serve_keeps_running_for_a_live_watch_beside_a_stale_one(
     (tmp_path / "wakes" / "mixedentry01.json").write_text(json.dumps(_mixed_entry(now_ms)))
 
     engaged: list[str] = []
+    first_engage = asyncio.Event()
 
     async def _fake_engage(session_id: str, *_args: object, **_kwargs: object) -> object:
         engaged.append(session_id)
+        first_engage.set()
         return object()
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _fake_engage)
     monkeypatch.setattr(mod, "SLICE_S", 0.05)
 
     task = asyncio.create_task(mod.serve(tmp_path))
-    await asyncio.sleep(0.6)
-    still_running = not task.done()
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    try:
+        # WAIT ON THE EVENT, NOT ON THE CLOCK (AGENTS.md, "Timing, flakes"). This
+        # used to be `await asyncio.sleep(0.6)` and then assert — a statement
+        # about the HOST rather than about the loop, because the engage forks two
+        # `ps` probes (`_has_live_runtime`, then `wedged_runtime`'s
+        # `registry.scan`) that a loaded box can stretch past any fixed budget,
+        # and this file has since grown to forty tests sharing the same workers.
+        # The property under test is structural — the loop kept running AND
+        # engaged the live watch — so the wait is on the engage, with the bound
+        # as a hang backstop rather than as the assertion.
+        await asyncio.wait_for(first_engage.wait(), timeout=30)
+    except TimeoutError:
+        # Swallowed so the two assertions below report WHY nothing engaged (the
+        # loop retired, or it kept running and never fired) instead of surfacing
+        # a bare timeout from the wait that stood in for the old sleep.
+        pass
+    finally:
+        still_running = not task.done()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     assert still_running, "serve() retired on an entry that holds a live recurring watch"
     # The fake engage does not advance the schedule (the real session owns that
