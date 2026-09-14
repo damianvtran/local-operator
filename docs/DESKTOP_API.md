@@ -741,6 +741,30 @@ identically — which is the whole reason this is server-side.
   conversation it was showing; treating that as "on screen" would suppress the
   banner for the one conversation the user cannot see.
 
+### The producer contract: which fields buy which rung
+
+THIS IS A CROSS-REPO CONTRACT AND NEITHER SIDE'S OWN TEST SUITE CAN SEE IT BREAK.
+The backend derives rung 1 and rung 2 from the beat, so a producer that sends
+only `{subscription_id, can_notify}` gets no rung at all — not an error, not a
+fallback, just a quiet machine. The app's first implementation did exactly that,
+and the observable result was the one defect this whole feature exists to fix:
+rung 2 never engaged, the RUNTIME's rung 4 fired early and claimed the delivery,
+and the feed then composed nothing for it — so a completion in the conversation
+the user was LOOKING AT raised a banner.
+
+| Field | What it buys | If omitted or false |
+|---|---|---|
+| `subscription_id` | binds the lease to a live feed socket | 404; nothing is published at all |
+| `can_notify` | the app can ATTEMPT a banner (rung 2's eligibility) | rung 2 ineligible, rung 4 speaks |
+| `can_notify_kinds` containing the kind | rung 2 eligible **for that kind** | **claims NOTHING** — a missing or empty list is not "all kinds". The feed carries `complete`/`error`, so the app must send `["complete","error"]`; a kind it does not send stays with the runtime, which is what keeps a parked gate's per-session toast alive |
+| `window.exists:true` | there is a window that could be displaying something | `session_id` is discarded, and no session reads as attended |
+| `window.focused` AND `visible` AND NOT `minimized` | rung 1's desktop arm: somebody is actually looking at this window | the session is not "watching", so a completion for it still banners (correct for an occluded window) |
+| `session_id` | WHICH session that window displays | the desktop contributes no visibility for any session |
+
+The beat must be renewed (`FEED_PRESENCE_BEAT_S`, 15 s) and the socket kept
+open: the lease is revoked on disconnect, so a beat that stops is a machine
+that believes nobody can deliver.
+
 ## The notification eligibility ladder
 
 First match wins. It is a decision, not a race; the loser is never eligible
