@@ -39,6 +39,7 @@ import pytest
 
 import local_operator
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_WAKE
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
 from tests.e2e.harness import transcript_text, wait_for_adoption
@@ -606,7 +607,7 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     timeout=60,
                 )
                 assert sent.returncode == 0, sent.stdout + sent.stderr
-                assert "spooled" in (sent.stdout + sent.stderr), sent.stdout + sent.stderr
+                assert SPOOL_RECEIPT_WAKE in (sent.stdout + sent.stderr), sent.stdout + sent.stderr
 
                 # (ii) the turn finishes rather than being aborted, and the
                 # runtime leaves once it has.

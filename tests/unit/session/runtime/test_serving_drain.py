@@ -25,7 +25,12 @@ from typing import Any
 import pytest
 
 from local_operator.harness.wake import WakeSchedule
-from local_operator.session.runtime.inbox import INBOX_NAME, peek_inbox
+from local_operator.session.errors import RuntimeRetiring
+from local_operator.session.runtime.inbox import (
+    INBOX_NAME,
+    SPOOL_RECEIPT_WAKE,
+    peek_inbox,
+)
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
 
@@ -65,7 +70,7 @@ class DrainHost:
 
     begin_drain = ServingSessionHandle.begin_drain
     begin_retire = ServingSessionHandle.begin_retire
-    _retiring_refusal = ServingSessionHandle._retiring_refusal
+    _retiring_refusal = staticmethod(ServingSessionHandle._retiring_refusal)
     _spool_for_successor = ServingSessionHandle._spool_for_successor
     receive_peer_message = ServingSessionHandle.receive_peer_message
     _note_deliberate_stop = ServingSessionHandle._note_deliberate_stop
@@ -188,7 +193,13 @@ def test_begin_drain_latches_while_a_turn_is_running(tmp_path: Path) -> None:
     assert host._retiring_cause == "runtime-retired"
     assert host._draining is True
     assert host._exit_committed is False, "the exit has not been taken yet"
-    assert "runtime-retired" in host._retiring_refusal()
+    # The refusal is a TYPED admission category carrying the shared sentence,
+    # and that sentence deliberately does NOT name the internal cause token any
+    # more — the token was the complaint (design round 1, D2). The cause is
+    # still on the handle, which the assertion above pins.
+    refusal = host._retiring_refusal()
+    assert isinstance(refusal, RuntimeRetiring)
+    assert "runtime-retired" not in str(refusal)
     assert session.notes == [], "no turn is being cut off, so no cut-off may be recorded"
 
 
@@ -222,7 +233,7 @@ async def test_a_peer_wake_during_the_drain_is_spooled_for_the_successor(
     receipt = await host.receive_peer_message(
         "the build is moving", mode="steer", wake=True, sender={"name": "peer"}
     )
-    assert "spooled" in receipt, receipt
+    assert receipt == SPOOL_RECEIPT_WAKE, receipt
     assert session.peer_calls == [], "a turn must not be started on a build that is leaving"
 
     directory = session.transcript.directory

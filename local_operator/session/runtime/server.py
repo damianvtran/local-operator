@@ -2840,10 +2840,13 @@ class RuntimeServer:
             from local_operator.session.errors import (
                 AttachmentUnavailable,
                 ProfileRegistryUnavailable,
+                RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
-            if isinstance(exc, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            if isinstance(
+                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+            ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code

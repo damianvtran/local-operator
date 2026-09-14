@@ -120,6 +120,7 @@ from local_operator.model.effort import (
 )
 from local_operator.providers.catalogue import picker_rows
 from local_operator.session import naming
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
     ACTIVITY_PHASE_QUEUED,
@@ -634,6 +635,26 @@ UNSENT_RUNTIME_NOTICE = (
     "send it again to start a new one"
 )
 
+#: The drain notice: what the viewer says the moment a BUSY runtime commits to
+#: leaving for a newer build.
+#:
+#: THE IDLE REFRESH STAYS SILENT AND THIS ONE MAY NOT, and the difference is
+#: what the window can cost. An idle runtime hands over in about a second, so
+#: the ``retiring`` frame's own re-engage is invisible and the silence there is
+#: right. A runtime that is still finishing work drains first — measured at
+#: ~26 s of ordinary reachable state (UX round 1, U1) — and for all of it the
+#: composer accepts text that will then be refused, which used to be how the
+#: user DISCOVERED the handover. One ``note`` on the frame the viewer already
+#: handles makes it announced instead.
+#:
+#: ``note``, not ``warning``: this is the answer to "why is my session behaving
+#: differently", and the matching build-skew notice one seam over uses the same
+#: ink for the same reason. The refusal itself is the row that has to be read.
+DRAIN_NOTICE = (
+    "this session is switching to a newer build; it is finishing in-flight work "
+    "first, so a new message will not be admitted until the successor is up"
+)
+
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
 #: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
@@ -896,6 +917,32 @@ def _is_runtime_gone(error: BaseException) -> bool:
     if "stopped" in text or "reconnecting" in text:
         return False
     return any(marker in text for marker in _RUNTIME_GONE_MARKERS)
+
+
+#: The wording an OLDER runtime uses for the drain refusal it raises with no
+#: category attached — the pre-``RuntimeRetiring`` sentence, whose only stable
+#: part is this prefix (the cause token after it is the runtime's own).
+#:
+#: MATCHED AS WELL AS THE TYPE, because the two parties here are separate builds:
+#: a viewer that has just been updated still binds the runtime that was resident
+#: before it, and that runtime answers the refusal as a bare ``RuntimeError``. A
+#: type-only test would leave the operator's text dropped, and their row standing
+#: as if delivered, for exactly the mixed-build window this whole PR is about.
+_RETIRING_REFUSAL_MARKERS = ("the session runtime is retiring",)
+
+
+def _is_retiring_refusal(error: BaseException) -> bool:
+    """Whether this failure is a DRAINING runtime refusing the message.
+
+    The typed category is the authority wherever it survives the transport —
+    which is the whole reason it exists, and what the viewer branches on to
+    decide it owns the user's text. The marker above covers the older runtime
+    that cannot send it, so the recovery is not conditional on both ends being
+    this build.
+    """
+    if isinstance(error, RuntimeRetiring):
+        return True
+    return any(marker in str(error) for marker in _RETIRING_REFUSAL_MARKERS)
 
 
 #: How often the band re-counts running background jobs. Nothing emits an
@@ -17394,6 +17441,31 @@ class OperatorApp(App[None]):
             # name, and a half-stated change ("updated to X") reads as an
             # update that came from nowhere, so this one stays silent.
             self._refreshed_from = None
+        # A DRAIN IS ANNOUNCED, AN IDLE HANDOVER IS NOT. The silence above and
+        # through this class is deliberate and stays right for the refresh
+        # nobody can lose anything to: an idle runtime leaves in about a second.
+        # A runtime that retired while it was STILL WORKING drains first, and
+        # for that whole window — measured at ~26 s of ordinary reachable state
+        # (UX round 1, U1) — the composer takes text the runtime will refuse.
+        # The user used to discover the handover by being refused; one `note` on
+        # the frame the viewer is already handling makes it announced instead
+        # (UX round 1, U2).
+        #
+        # ``runtime_idle`` is the VIEWER's reading of the same predicate the
+        # runtime's own gate uses, and it is the product's existing instrument
+        # for exactly this branch (see the build-skew seam, which decides
+        # "ask it to retire" versus "paint the busy notice" off it). An
+        # unreadable probe stays silent: the wrong keep costs one unannounced
+        # handover, never a false claim about a session that is not draining.
+        idle_probe = getattr(session, "runtime_idle", None)
+        draining = False
+        if callable(idle_probe):
+            try:
+                draining = not bool(idle_probe())
+            except Exception:  # noqa: BLE001 — a failed probe keeps the silence
+                logger.debug("idle probe failed; not announcing the drain", exc_info=True)
+        if draining and self._interaction is not None:
+            self._notice_for(self._interaction, DRAIN_NOTICE, "note")
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
@@ -23960,6 +24032,42 @@ class OperatorApp(App[None]):
                     # D5). On the common branch it loads the composer directly
                     # and appends nothing, so this only reorders the case that
                     # has two rows to order.
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                elif _is_retiring_refusal(error):
+                    # THE DRAIN REFUSED A MESSAGE THAT WAS NEVER DELIVERED, and
+                    # that is the whole reason this branch exists rather than
+                    # falling through to the bare-error one below. The refusal
+                    # is real and the row for the message is not: the echo was
+                    # painted at submit, the prompt never reached the session,
+                    # and the text existed only in this worker's hands. Left as
+                    # it was, the user read a refusal that told them to send
+                    # their message again while their message was gone and its
+                    # row stood there looking sent — twice over for a second
+                    # attempt inside the same drain (design round 1, D1; UX
+                    # round 1, U1). With the text back in the composer, "send it
+                    # again" is one keystroke rather than a retype.
+                    #
+                    # THE TWO SIBLING BRANCHES ABOVE DO EXACTLY THIS for their
+                    # own refusals; this case is the one that fell past them
+                    # because the runtime is neither gone nor oversize — it is
+                    # mid-handover. The predicate and not a bare `isinstance`,
+                    # because the runtime on the other end can be the build that
+                    # was resident before this viewer: an older one raises the
+                    # same refusal uncategorised (see `_is_retiring_refusal`).
+                    self._withdraw_user_echo_for(source)
+                    # The reason is painted BEFORE the restore, because
+                    # `_restore_unsent_for` can append a `DraftRecoveryNotice`
+                    # and that offer must not read as the cause of the refusal
+                    # — the ordering the sibling branch above documents for its
+                    # own restore. The refusal sentence itself says nothing
+                    # about where the draft went — the owner builds it for the
+                    # peer-send path too — so the viewer adds the claim only
+                    # where it is true.
+                    self._notice_for(
+                        source,
+                        f"{error} — your message is back in the composer",
+                        "warning",
+                    )
                     self._restore_unsent_for(source, text, images, accepted=accepted)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What

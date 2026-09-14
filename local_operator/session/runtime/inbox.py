@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)
 #: The spool file inside ``sessions/<id>/``.
 INBOX_NAME = "inbox.jsonl"
 
+#: The two sender-facing receipts for a spooled message, ONE definition each for
+#: the two writers (``serving._spool_for_successor`` for a draining runtime, and
+#: ``peer_send._spool_quiet_note`` for a cold session). They led with the
+#: mechanism verb ("spooled …") in both, which told the sender about our
+#: plumbing before telling them what they had bought; the effect leads now and
+#: the parenthetical that distinguishes the pair — a wake WILL be run by the
+#: next runtime, a quiet note is only read — is the part they can act on
+#: (design round 1, D4).
+SPOOL_RECEIPT_WAKE = "held for the next runtime to open the session — it runs it"
+SPOOL_RECEIPT_NOTE = "held for the next runtime to open the session — read when it next opens"
+
 #: Non-blocking lock retries, and the pause between them. Deliberately small:
 #: the critical section is one ``write()`` of a few hundred bytes, so a
 #: contender that cannot get in within ~50 ms is not merely slow, and waiting
