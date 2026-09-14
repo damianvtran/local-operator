@@ -524,6 +524,31 @@ class TestWakePanelOwedState:
             await pilot.pause()
             return str(panel._body.content)
 
+    @pytest.mark.parametrize("state", ["retrying", "undelivered"])
+    @pytest.mark.parametrize(
+        ("age_ms", "labels"),
+        [
+            (1_234, ("1s", "2s", "3s")),
+            (61_234, ("1m", "1m", "1m")),
+            (3_661_234, ("1h", "1h", "1h")),
+            (9 * 86_400_000 + 61_234, ("9d", "9d", "9d")),
+        ],
+    )
+    def test_owed_age_stays_human_across_two_ticks(
+        self, state: str, age_ms: int, labels: tuple[str, str, str]
+    ) -> None:
+        """Status age is approximate, unlike round-trippable schedule syntax.
+
+        A whole-second compound age can still need three terms; that previously
+        collapsed into raw milliseconds on the very next poll after a capture.
+        """
+        from local_operator.tui.widgets.wake_panel import WakePanel
+
+        first = 1_700_000_000_000
+        owed = {"state": state, "first_attempt_ms": first}
+        for tick, label in zip((0, 1_200, 2_400), labels, strict=True):
+            assert WakePanel._owed_label(owed, first + age_ms + tick) == f"{state} · owed {label}"
+
     @pytest.mark.asyncio
     async def test_an_owed_fire_carries_its_state_and_age_and_a_healthy_one_does_not(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -539,7 +564,7 @@ class TestWakePanelOwedState:
 
         owed_row = next(line for line in out.splitlines() if line.startswith("- w1"))
         healthy_row = next(line for line in out.splitlines() if line.startswith("- w2"))
-        assert "retrying · owed 1w2d" in owed_row, owed_row
+        assert "retrying · owed 9d" in owed_row, owed_row
         assert "retrying" not in healthy_row and "owed" not in healthy_row, healthy_row
         # One row per schedule, and the band keeps its height: the state word and
         # the age replace the due label rather than adding a row.

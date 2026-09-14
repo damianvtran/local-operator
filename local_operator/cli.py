@@ -3601,7 +3601,11 @@ def wake_command(args: argparse.Namespace) -> int:
     # BOTH branches render a wake's delivery state — `list` as the DUE-column
     # word, `status` as prose — so the two words are named once, here, rather
     # than imported into one branch and silently unbound in the other.
-    from local_operator.wakes.deliveries import STATE_RETRYING, STATE_UNDELIVERED
+    from local_operator.wakes.deliveries import (
+        STATE_RETRYING,
+        STATE_UNDELIVERED,
+        UNDELIVERED_AFTER_ATTEMPTS,
+    )
 
     command = getattr(args, "wake_command", None) or "status"
 
@@ -3833,13 +3837,19 @@ def wake_command(args: argparse.Namespace) -> int:
             # EACH WORD GETS ONE SHORT CLAUSE AND THE REST IS SAID ONCE (D5).
             # The two legends used to repeat ~100 characters of the same
             # sentence three lines apart, and the clause that actually separates
-            # them — one failed attempt vs repeated failures — was buried
+            # them — below vs at the stalled-fire threshold — was buried
             # mid-sentence in each; at 60 columns that was 21 rows of legend
             # under a 6-row table, past a standard screen.
+            # Classification owns this boundary: retries 2–4 are not "one
+            # failed attempt", and copy must follow future threshold changes.
             if _owed_state(STATE_RETRYING):
-                legend_rows.append(("retrying", "one failed attempt so far."))
+                legend_rows.append(
+                    ("retrying", f"fewer than {UNDELIVERED_AFTER_ATTEMPTS} failed attempts.")
+                )
             if _owed_state(STATE_UNDELIVERED):
-                legend_rows.append(("undelivered", "repeated failures."))
+                legend_rows.append(
+                    ("undelivered", f"{UNDELIVERED_AFTER_ATTEMPTS}+ failed attempts.")
+                )
             legend_rows.append(
                 (
                     "",
@@ -4634,17 +4644,10 @@ def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) 
 
 
 def _format_duration(seconds: float) -> str:
-    """Compact duration for the sessions table: 45s, 12m, 3h, 2d."""
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h"
-    return f"{hours // 24}d"
+    """Compact duration shared with the wake panel: 45s, 12m, 3h, 2d."""
+    from local_operator.wakes.display import format_age
+
+    return format_age(seconds)
 
 
 def mobile_command(args: argparse.Namespace) -> int:
