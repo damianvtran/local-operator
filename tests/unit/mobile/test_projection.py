@@ -1509,6 +1509,76 @@ def test_a_never_run_verdict_fails_the_phone_row_with_the_reason() -> None:
     assert row.summary == "Tool not found: wake"
 
 
+def test_a_verdict_for_a_call_that_already_started_is_not_applied() -> None:
+    """The phone's own guard, matching the TUI's running registry.
+
+    A relayed or replayed terminal frame can reach a surface after its call's
+    start — a seed folded out of order, an attach re-reading the relay — and the
+    verdict describes a row that has outgrown it. Without the guard the row of a
+    call the user is watching execute was relabelled ``failed`` on the phone,
+    and because the terminal frame also carries ``dictation_complete``, the next
+    arm would have walked it back to ``queued``: two lies instead of one.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_x", tool_name="wake", args={"text": "30m"})
+    )
+    running = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert running.tool_state == "running"
+    was_summary = running.summary
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_x' skipped",
+        )
+    )
+
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running", "a started call is not relabelled never-run"
+    assert row.summary == was_summary
+    assert row.error == ""
+
+
+def test_a_duplicate_id_winner_clears_the_losers_failure_text() -> None:
+    """The revive path drops the failure TEXT with the failure STATE.
+
+    Two calls can share an id: the loser settles the row with the harness's
+    reason and the winner then executes it through this same row. The renderer
+    draws ``error`` as a red danger line inside the expansion for ANY state, so
+    the phone kept ``Duplicate call id … skipped.`` over a call that had just
+    succeeded — and ``hasDetails`` true because of it.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_dup",
+            tool_name="wait",
+            argument_bytes=20,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_dup' skipped",
+        )
+    )
+    failed = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert failed.tool_state == "failed" and failed.error
+
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_dup", tool_name="wait", args={"text": "1"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+    assert row.error == "", "the reason goes with the state it described"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+
+
 def test_the_new_compose_fields_absent_on_the_wire_change_nothing() -> None:
     """BACKWARD COMPATIBILITY: an older runtime omits both new fields.
 

@@ -38770,7 +38770,17 @@ class OperatorApp(App[None]):
         if not_run:
             self._composing_cards.pop(event.tool_call_id, None)
             card.intent = clean_intent(getattr(event, "intent", None)) or card.intent
-            card.mark_not_run(str(not_run))
+            # The frame's own final size, passed THROUGH rather than left to be
+            # inherited: `mark_not_run` settles the row's record from
+            # `_compose_bytes`, and this frame is often the only one a surface
+            # ever sees (the live relay keeps one compose frame per call
+            # in place, and the reconnect seed keeps one entry), so a row built
+            # from it has never been through `set_composing` and would otherwise
+            # claim the model composed nothing over a frame carrying the size.
+            card.mark_not_run(
+                str(not_run),
+                argument_bytes=int(getattr(event, "argument_bytes", 0) or 0),
+            )
             self._refresh_working_activity()
             return
         card.set_composing(event.argument_bytes, event.tool_name)
@@ -38881,6 +38891,17 @@ class OperatorApp(App[None]):
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
         card = self._tool_cards.pop(event.tool_call_id, None)
+        if card is None:
+            # An END can reach a card that is still in the ANNOUNCEMENT
+            # registry: a queued row now legitimately sits in
+            # `_composing_cards` for a sibling's whole execution group (the
+            # reported half-hour), so the window for an end to arrive ahead of
+            # its start is no longer confined to the dictation. Falling
+            # straight through would settle a row this registry still owns, and
+            # `_retire_live_tool_cards` is deliberately UNCONDITIONAL — it
+            # would relabel that row `⊘ interrupted` at turn death over an
+            # outcome that really happened.
+            card = self._composing_cards.pop(event.tool_call_id, None)
         if card is None:
             card = self._painted_tool_card(event.tool_call_id)
         # Before the early return below: a batch that just lost one of three

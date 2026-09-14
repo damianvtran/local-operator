@@ -142,10 +142,15 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 #: The frame rides the live relay and the reconnect seed, and the seed measures
 #: every row it retains against ``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``; the
 #: synthetic result it is drawn from can hold an invalid-arguments dump of any
-#: size. 200 characters is the first line of a diagnostic and nothing more —
-#: enough for `Tool not found: <name>` or a JSON-validation complaint, far
-#: inside a 60 KB row budget, and clipped rather than dropped so the row can
-#: never say "something went wrong" where it could name the thing.
+#: size. The unit is CODEPOINTS — ``len()`` on a ``str``, the clip below — and
+#: it is the one bound on this wire NOT measured in terminal cells or serialized
+#: bytes, so the worst case is worth stating rather than assuming: a CJK reason
+#: is ~2 cells and ~3 UTF-8 bytes per code point, i.e. ~600 cells / ~800 bytes
+#: at this cap. 200 code points is the first line of a diagnostic and nothing
+#: more — enough for `Tool not found: <name>` or a JSON-validation complaint,
+#: two orders of magnitude inside that 60 KB budget, and clipped rather than
+#: dropped so the row can never say "something went wrong" where it could name
+#: the thing.
 NOT_RUN_REASON_MAX_CHARS = 200
 
 # Why a tool call did not run cleanly, classified WHERE THE REASON IS KNOWN and
@@ -1686,7 +1691,6 @@ class AgentLoop:
                             # once its real id has replaced it. Retained for
                             # the rest of the stream — see the emission below.
                             "supersedes": None,
-                            "reported": -1,
                             # Bounded copy of the head of the argument stream,
                             # kept only until the intent scrape resolves. `None`
                             # means scanning is over — see below.
@@ -1792,7 +1796,6 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1810,7 +1813,6 @@ class AgentLoop:
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
                             state["announced"] = now
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1897,14 +1899,11 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                        # The size is stamped as reported even though the
-                        # emission below no longer tests it, because this is
-                        # the frame both consumers compare against: a later
-                        # frame for the same call can only be a NEWER step's
-                        # announcement (`tool_states` is per model call), and
-                        # leaving the throttle's bookkeeping consistent here
-                        # keeps that comparison honest.
-                        state["reported"] = state["bytes"]
+                        # No throttle bookkeeping to stamp here: the emission
+                        # below is not gated on ``bytes != reported`` any more
+                        # (a dictation that ends without another delta must still
+                        # be told it ended), and this block is the call's last
+                        # word in this stream, so nothing reads a stamp from it.
                         yield ToolCallComposeEvent(
                             tool_call_id=state["key"] or "compose:0",
                             tool_name=state["name"],
