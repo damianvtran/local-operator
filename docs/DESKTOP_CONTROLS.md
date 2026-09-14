@@ -198,7 +198,8 @@ POST the same path accepts the closed `MCPControl` schema:
   resolved at connect time from the credential store (`<config dir>/credentials.env`,
   the store the Settings > API credentials screen writes — see `docs/mcp.md`).
   A reference that cannot be resolved fails the connect naming the key; it never
-  reaches the server as text. URLs reject inline credentials, query and fragment.
+  reaches the server as text. A doubled `$` (`$${HOME}`) escapes one to literal
+  text. URLs reject inline credentials, query and fragment.
   Command arguments remain an array; no shell evaluation or whitespace splitting.
   Store secrets separately.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver

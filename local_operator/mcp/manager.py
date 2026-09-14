@@ -1507,7 +1507,12 @@ class ServerConnection:
     """One live MCP connection: session plus the resources that own it."""
 
     name: str
-    config: MCPServerConfig
+    # ``repr=False``: the config is not a secret in itself, but six registration
+    # paths install one on a live connection and a dataclass repr prints every
+    # field, so a future ``logger.debug("%r", conn)`` would be one edit away
+    # from a header value in the log. See ``_connect_server`` for which config
+    # a connection carries.
+    config: MCPServerConfig = field(repr=False)
     # ``None`` only during the window in which the transport callbacks close
     # over this object while its session is still being constructed; use
     # :attr:`live_session` everywhere else.
@@ -1833,8 +1838,12 @@ class McpManager:
             cfg.model_copy(update={"timeout": timeout_ms}) if timeout_ms is not None else cfg
         )
         conn = await self._connect_server(name, connect_cfg, interactive=interactive)
-        # The live connection must carry the pristine config too — tool calls
-        # read their timeout from conn.config, not from _configs.
+        # ``_connect_server`` installs the PRISTINE config it was handed — the
+        # reference form, no resolved values — but for a login that config is the
+        # widened copy above, and tool calls read their timeout from
+        # ``conn.config``, not from ``_configs``. So this restores the budget for
+        # the connection's whole life; the secret-reference half is already
+        # guaranteed by the connect seam.
         conn.config = cfg
         # The widened budget also became the SESSION's default read timeout
         # (ClientSession(read_timeout_seconds=...) baked in at connect), which
@@ -2225,12 +2234,13 @@ class McpManager:
         so the child process and the HTTP client are never handed the reference
         text. The resolution is per connect ATTEMPT on purpose — a credential
         added while the session is running is picked up by a reconnect — and the
-        pristine config stays in ``self._configs``, which is what
-        ``config_digest`` hashes for the tool cache.
+        reference form is what both ``self._configs`` (which ``config_digest``
+        hashes for the tool cache) and the live :class:`ServerConnection` keep, so
+        no resolved value outlives the transport that needed it.
         """
-        cfg = resolve_config_secrets(name, cfg)
-        timeout_s = resolve_mcp_timeout_s(cfg)
-        await self._ensure_oauth_fresh(name, cfg)
+        transport_cfg = resolve_config_secrets(name, cfg)
+        timeout_s = resolve_mcp_timeout_s(transport_cfg)
+        await self._ensure_oauth_fresh(name, transport_cfg)
         stack = AsyncExitStack()
         # One collector per connect ATTEMPT, so a retry never quotes the
         # previous attempt's stderr as this one's reason. Made unconditionally:
@@ -2249,12 +2259,21 @@ class McpManager:
             conn = await self._open_transport_and_session(
                 stack,
                 name,
-                cfg,
+                transport_cfg,
                 timeout_s,
                 stderr_log,
                 interactive=interactive,
                 challenge_watcher=challenge_watcher,
             )
+            # The live connection carries the PRISTINE config, never the resolved
+            # one: ``ServerConnection`` is a plain dataclass, six registration
+            # paths install it, and the only things that read ``conn.config`` are
+            # the timeout resolver and the command/args security log — neither of
+            # which needs a value. Holding the reference form here keeps resolved
+            # secrets off an object whose repr and lifetime are not this seam's to
+            # control, and it is what the interactive login path already restores
+            # for the same reason (see ``connect_configured_server``).
+            conn.config = cfg
             tools = await self._list_all_tools(conn.live_session)
         except BaseException as exc:
             # Tear down FIRST: for a stdio child this stops the process and
@@ -2498,6 +2517,10 @@ class McpManager:
         challenge_watcher: "_AuthChallengeWatcher | None" = None,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
+
+        ``cfg`` is the TRANSPORT config: the resolved one from
+        ``_connect_server``, whose references have already been substituted, so
+        this helper never sees a ``${NAME}`` and never touches the store.
 
         ``stderr_log`` is what the stdio transport writes the child's stderr to
         instead of the terminal. The remote transports spawn nothing and leave

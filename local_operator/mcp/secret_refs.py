@@ -7,11 +7,13 @@ must be secret references such as ${TOKEN}". Nothing used to read that reference
 back, so a server added through the UI was handed the literal text
 ``${HUBSPOT_TOKEN}`` as its environment variable or sent it as an HTTP header,
 and could never authenticate. This module is the reader half of that contract,
-applied where the transport is built (:meth:`McpManager._connect_server`), so the
-child process and the HTTP client are given the secret and never the reference.
+applied at the top of :meth:`McpManager._connect_server` — before anything is
+spawned or sent, so a refusal leaves nothing to unwind (an OAuth server's
+proactive refresh, :func:`~local_operator.mcp.auth.ensure_mcp_oauth_fresh`, runs
+after this and is therefore skipped entirely for a server that cannot start).
 
 **The store is the one the desktop Settings surface writes.**
-``<config_dir>/credentials.env`` through
+``<config dir>/credentials.env`` through
 :class:`~local_operator.credentials.CredentialManager`, because the UI's
 ``credentials.update``/``credentials.list`` ops are ``PATCH``/``GET
 /v1/credentials`` (``src/shared/desktop-contract.ts`` in local-operator-ui) and
@@ -32,51 +34,66 @@ project-scoped ``.mcp.json`` — untrusted input, see the trust model in
 remote server's headers, which the allowlisted stdio child environment
 (``get_default_environment``) exists to prevent.
 
-**The reference rule**, deliberately the same rule the writer enforces so that
-writer and reader cannot drift apart again. A reference is ``${NAME}`` with NAME
-``[A-Za-z_][A-Za-z0-9_]*``, and a value is read one of four ways:
+**The reference rule.** A reference is ``${NAME}`` with NAME
+``[A-Za-z_][A-Za-z0-9_]*``, and a value is read one of five ways:
 
 * No ``${`` anywhere: passed through untouched, and the store is never read.
-* No WELL-FORMED reference anywhere — ``${1BAD}``, ``${{x}}``, ``${a b}``, an
-  unterminated ``${NAME``: also passed through untouched. It is not a reference,
-  the desktop writer cannot produce one (its pattern is anchored to a whole
-  value of ``${NAME}``), and refusing it would make a literal ``${`` impossible
-  to express in a config that was written by hand.
+* A ``${`` that is neither a well-formed reference nor a fragment naming a key
+  the store holds — ``${1BAD}``, ``${{x}}``, ``${a b}``, an unterminated
+  ``${NAME``, ``${HOME}``: passed through untouched. It is not a reference, the
+  desktop writer cannot produce one (its pattern is anchored to a whole value of
+  ``${NAME}``), and refusing it would break a project ``.mcp.json`` or an
+  imported foreign config whose child expands ``${HOME}`` itself. **The escape
+  is ``$${``**: ``$${HOME}`` passes the literal text ``${HOME}`` through, which
+  is what a value meaning a reference literally should be written as.
+* A fragment whose inner text — before shell/compose decorations (see
+  :func:`_candidate_keys`) — IS a key the store holds: REFUSED, never handed
+  over. The store accepts any key (``CredentialManager.set_credential`` checks
+  only control characters), so ``${hubspot-token}`` and ``${TOKEN:-}` can name
+  real credentials while sitting outside the reference's name class; a fragment
+  naming a stored key cannot be a legitimate literal, and passing it through is
+  the silent-unauthenticated-server failure this module exists to remove.
 * ``"${NAME}"`` as the whole value: the value is the secret. This is the only
   shape the desktop writer accepts.
 * ``"Bearer ${NAME}"``: one or more well-formed references with literal text
   around them, each substituted. The writer never produces this shape, but a
-  hand-written ``mcp.json`` needs it and a reader that refused to substitute it
-  would hand the server a literal reference again.
-* A value that holds a well-formed reference AND a malformed ``${`` fragment is
-  REFUSED rather than substituted in part: ``"${TOKEN}${1BAD}"`` half-applied
-  still leaves the server unable to authenticate, which is the failure this
-  module exists to make loud.
+  hand-written ``mcp.json`` needs it.
+* A value that holds a well-formed reference AND a ``${`` that is a fragment
+  (unless escaped) is REFUSED rather than substituted in part: ``"${TOKEN}${1BAD}"``
+  half-applied still leaves the server unable to authenticate.
 
 A well-formed reference whose NAME is absent from the store, or present with an
 empty value, is REFUSED with :class:`McpSecretRefError` naming the server, the
 entry and the key — never resolved to the literal, and never downgraded to a
 warning. A bare ``$NAME`` without braces is not a reference and is untouched.
 
-Server ``args`` are not resolved at all: a secret in argv is world-readable
-through ``ps``, which is why the writer's reference requirement covers exactly
-``env`` and ``headers``.
+**Not resolved, deliberately:** server ``args`` (a secret in argv is
+world-readable through ``ps``, which is why the writer's reference requirement
+covers exactly ``env`` and ``headers``) and the OAuth block's ``client_secret``
+(``auth.auth``/``oauth.client_secret``), which reaches the token endpoint
+verbatim.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TypeVar
+from typing import TYPE_CHECKING, Mapping, TypeVar
 
 from local_operator.mcp.config import MCPServerConfig
 from local_operator.paths import config_dir
 
-#: ``${NAME}`` — group 1 is whatever sits between the braces, valid or not, so a
-#: malformed reference is RECOGNISED and can be refused rather than half-applied.
-_REFERENCE_RE = re.compile(r"\$\{([^}]*)\}")
+if TYPE_CHECKING:
+    from pydantic import SecretStr
 
 #: The name form both sides accept — the writer's own character class.
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: Decorations a fragment may wrap a key name in. ``env:NAME`` is the compose
+#: "from the environment" form; a shell parameter operator (``${NAME:-default}``,
+#: ``${NAME-default}``, ``${NAME:?err}``, …) puts the key first and the operator
+#: and its operand after it. Both are stripped to find the key the author meant.
+_DECORATION_PREFIXES = ("env:", "dotenv:")
+_OPERATOR_RE = re.compile(r":-|:=|:\?|:\+|-|\?|\+|:")
 
 #: The concrete config subtype, preserved through resolution so a caller that
 #: knows it holds a stdio config keeps the ``env`` attribute in view.
@@ -95,21 +112,79 @@ class McpSecretRefError(RuntimeError):
     """
 
 
+def _missing(server: str, field: str, entry: str, key: str) -> McpSecretRefError:
+    """The refusal for a reference whose key the store does not hold.
+
+    The escape is offered here because this message is what the user reads: a
+    well-formed reference to a key that is not in the store is also how a config
+    written for another tool (``${HOME}``, a shell ``${VAR}``) looks, and the
+    remedy for that case is to keep the text literal.
+    """
+    return McpSecretRefError(
+        f"MCP server {server!r} needs {key} from the credential store for {field} "
+        f"{entry} — add it in Settings > API credentials, then reconnect "
+        f"(or double the $ to pass it through literally)"
+    )
+
+
 def _malformed(server: str, field: str, entry: str) -> McpSecretRefError:
     """The refusal for a value that holds a reference AND something that is not one.
 
     Names the field and the entry but never quotes the value: a value that got
     this far may contain literal credential text, and every message here reaches
-    the log.
+    the log. The escape is described rather than shown, for the same reason.
     """
     return McpSecretRefError(
         f"MCP server {server!r} has a malformed secret reference in {field} "
-        f"{entry} — a reference is written ${{NAME}}"
+        f"{entry} — a reference is written ${{NAME}} (double the $ to keep a literal)"
     )
 
 
-def _store_values() -> dict[str, str]:
-    """Every value in the credential store the Settings surface writes.
+def _unusable(server: str, field: str, entry: str, key: str) -> McpSecretRefError:
+    """The refusal for a fragment that names a key the store DOES hold.
+
+    The distinction from :func:`_missing` is the whole point of this message: the
+    key exists, so telling the user to add it would send them to look at a store
+    entry they already have. What is wrong is the fragment's form, and the two
+    remedies are a reference-shaped key or the escape.
+    """
+    return McpSecretRefError(
+        f"MCP server {server!r} has an unusable secret reference in {field} {entry} — "
+        f"{key} is in the credential store, so write ${{NAME}} or double the $ to keep "
+        f"the literal"
+    )
+
+
+def _candidate_keys(inner: str) -> list[str]:
+    """The key names ``inner`` may have meant, most specific first.
+
+    Only used to decide whether a fragment is intent-to-reference at all, so a
+    merely plausible candidate is enough to refuse: a value that names a stored
+    credential cannot have meant it as literal text, and the escape is always
+    available for a value that genuinely did.
+    """
+    candidates = [inner]
+    body = inner
+    for prefix in _DECORATION_PREFIXES:
+        if body.startswith(prefix):
+            body = body[len(prefix) :]
+            candidates.append(body)
+    head = _OPERATOR_RE.split(body, maxsplit=1)[0]
+    if head != body:
+        candidates.append(head)
+    stripped = body.strip()
+    if stripped != body:
+        candidates.append(stripped)
+    return [candidate for candidate in candidates if candidate]
+
+
+def _store_values() -> dict[str, SecretStr]:
+    """The credential store's values, as ``SecretStr``, keyed by name.
+
+    Values stay WRAPPED: the mapping is built on every connect that has a
+    reference, and unwrapping here would copy every credential in the file —
+    unrelated providers' keys included — into plaintext ``str`` for no benefit.
+    :func:`_resolve_value` unwraps the one key it actually substitutes.
 
     Read fresh on each call rather than cached: the store is written by the API
     server process (``PATCH /v1/credentials``) while a session that already
@@ -126,48 +201,88 @@ def _store_values() -> dict[str, str]:
         # an empty credentials file: a connect must not write to the config dir
         # as a side effect of reading a reference.
         return {}
-    return {
-        key: value.get_secret_value()
-        for key, value in CredentialManager(base).get_credentials().items()
-    }
+    # ``dict(...)`` is a shallow copy: the manager hands back its own live dict.
+    return dict(CredentialManager(base).get_credentials())
 
 
 def _resolve_value(
-    value: str, *, server: str, field: str, entry: str, store: dict[str, str]
+    value: str, *, server: str, field: str, entry: str, store: Mapping[str, SecretStr]
 ) -> str | None:
-    """``value`` with its references substituted, or ``None`` when it has none."""
+    """``value`` with its references substituted, or ``None`` when nothing changes.
+
+    One left-to-right scan, because the escape (``$${``) and the reference
+    opener are the same two characters: a pass that looked for ``${`` first
+    would see the escaped form as a reference and could not tell them apart
+    afterwards.
+    """
     if "${" not in value:
         return None
-    complete = list(_REFERENCE_RE.finditer(value))
-    well_formed = [match for match in complete if _NAME_RE.fullmatch(match.group(1))]
-    # ``sub`` removes every COMPLETE ``${...}``, so anything left holding ``${``
-    # is an unterminated fragment (``${NAME`` and friends).
-    unterminated = "${" in _REFERENCE_RE.sub("", value)
-    if not well_formed:
-        # Nothing here IS a reference — a literal ``${`` in a hand-written config,
-        # unterminated or not. Refusing it would make one inexpressible.
-        return None
-    if len(well_formed) != len(complete) or unterminated:
-        raise _malformed(server, field, entry)
     pieces: list[str] = []
     cursor = 0
-    for match in well_formed:
-        secret = store.get(match.group(1), "")
-        if not secret:
-            # An empty value counts as missing, the way the credentials surface
-            # lists only non-empty keys: substituting "" would send an empty
-            # credential and re-create the failure this module removes.
-            raise McpSecretRefError(
-                f"MCP server {server!r} needs {match.group(1)} from the credential store for "
-                f"{field} {entry} — add it in Settings > API credentials, then reconnect"
-            )
-        # The literal text BETWEEN references is kept verbatim, which is what
-        # makes ``Bearer ${NAME}`` a usable header value.
-        pieces.append(value[cursor : match.start()])
-        pieces.append(secret)
-        cursor = match.end()
+    index = 0
+    resolved = 0
+    fragments = 0
+    escapes = 0
+    unusable_key: str | None = None
+    while index < len(value):
+        if value[index] != "$":
+            index += 1
+            continue
+        if value.startswith("$${", index):
+            # The escape: a literal ``${``, never a reference. Consumed as one
+            # unit, so the ``{…}`` behind it stays ordinary text.
+            pieces.append(value[cursor:index])
+            pieces.append("${")
+            index += 3
+            cursor = index
+            escapes += 1
+            continue
+        if not value.startswith("${", index):
+            index += 1
+            continue
+        close = value.find("}", index + 2)
+        inner = None if close == -1 else value[index + 2 : close]
+        if inner is not None and _NAME_RE.fullmatch(inner):
+            secret = _substitute_value(store, inner)
+            if secret is None:
+                raise _missing(server, field, entry, inner)
+            pieces.append(value[cursor:index])
+            pieces.append(secret)
+            index = close + 1
+            cursor = index
+            resolved += 1
+            continue
+        fragments += 1
+        if inner is not None and unusable_key is None:
+            unusable_key = next((key for key in _candidate_keys(inner) if key in store), None)
+        # An unterminated fragment consumes the rest of the value: there is no
+        # closing brace to resume from, and ``find`` found none.
+        index = len(value) if inner is None else close + 1
+    if unusable_key is not None:
+        raise _unusable(server, field, entry, unusable_key)
+    if fragments and resolved:
+        raise _malformed(server, field, entry)
+    if not resolved and not escapes:
+        # Nothing here is a reference and there is nothing to unescape, so the
+        # value is literal text and the caller must keep it byte-identical.
+        return None
     pieces.append(value[cursor:])
     return "".join(pieces)
+
+
+def _substitute_value(store: Mapping[str, SecretStr], name: str) -> str | None:
+    """``name``'s value, unwrapped, or ``None`` when it is absent or empty.
+
+    An empty value counts as missing, the way the credentials surface lists only
+    non-empty keys: substituting ``""`` would send an empty credential and
+    re-create the failure this module removes.
+    """
+    from pydantic import SecretStr
+
+    entry = store.get(name)
+    if not isinstance(entry, SecretStr):
+        return None
+    return entry.get_secret_value() or None
 
 
 def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:
@@ -178,8 +293,8 @@ def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:
     no store read, no copy, nothing new for the transports to see.
 
     Raises :class:`McpSecretRefError` for a reference that cannot be resolved,
-    including a value that mixes one with a malformed fragment. Never a warning,
-    and never the literal.
+    for a fragment that names a stored key, and for a value that mixes one with
+    the other. Never a warning, and never the literal.
     """
     fields = (
         ("env", getattr(cfg, "env", None) or {}),

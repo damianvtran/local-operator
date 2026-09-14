@@ -14,11 +14,15 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from local_operator.mcp.config import MCPHttpServerConfig, MCPStdioServerConfig
+from local_operator.mcp.config import (
+    MCPHttpServerConfig,
+    MCPServerConfig,
+    MCPStdioServerConfig,
+)
 from local_operator.mcp.manager import McpManager
 from local_operator.mcp.secret_refs import McpSecretRefError, resolve_config_secrets
 
@@ -99,6 +103,9 @@ class TestReferenceRule:
         message = str(caught.value)
         assert "HUBSPOT_TOKEN" in message
         assert "hubspot" in message
+        # The escape is what a config that meant the reference literally has to
+        # be written with, so the message names it (finding Q1).
+        assert "double the $" in message
         # Never the reference text passed through as if it were a value, and
         # never the store's location for the reader to wander into.
         assert "${HUBSPOT_TOKEN}" not in message
@@ -135,8 +142,11 @@ class TestReferenceRule:
             "${1BAD}",  # name does not start with a letter or underscore
             "${a b}",  # a space is not a name character
             "${}",  # empty name
+            "${{x}}",  # nested braces
             "${unterminated",  # no closing brace
             "${",
+            "${MISSING:-x}",  # decorated, but the candidate names nothing stored
+            "cost $$5",  # no ${ anywhere, so the escape is not even a token
         ],
     )
     def test_a_value_that_is_not_a_reference_is_passed_through_untouched(
@@ -147,8 +157,9 @@ class TestReferenceRule:
         resolved = resolve_config_secrets("handwritten", _http({"X-Literal": value}))
 
         assert resolved.headers == {"X-Literal": value}
-        # Untouched also means unlooked-up: a config with no reference must not
-        # even open the store.
+        # Untouched also means the store is not CREATED: the read is a stat and
+        # an early return on a missing file, never a ``CredentialManager`` (whose
+        # constructor writes an empty credentials file).
         assert not (config / "credentials.env").exists()
 
     def test_a_mixed_value_is_refused_rather_than_half_applied(
@@ -175,6 +186,149 @@ class TestReferenceRule:
 
         assert resolve_config_secrets("plain", cfg) is cfg
         assert not (config / "credentials.env").exists()
+
+    def test_the_store_mapping_stays_wrapped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        # Finding R2: the mapping is built on every referenced connect, so it
+        # keeps ``SecretStr`` and the one substituted key is what gets unwrapped.
+        from pydantic import SecretStr
+
+        from local_operator.mcp.secret_refs import _store_values
+
+        _store(_isolate(monkeypatch, tmp_path), {"T": SENTINEL, "OTHER": f"{SENTINEL}-2"})
+
+        store = _store_values()
+
+        assert all(isinstance(value, SecretStr) for value in store.values())
+        # A repr of the mapping is what a stray log line would print, and a
+        # wrapped value redacts itself there.
+        assert SENTINEL not in repr(store)
+
+
+class TestEscape:
+    """``$${`` is the escape (finding Q1): a literal ``${``, never a reference.
+
+    Without it a value that means a reference literally has no expression at
+    all, which is what a config written for another tool (``${HOME}``) or for a
+    child that expands its own ``$VAR`` needs.
+    """
+
+    def test_a_doubled_dollar_passes_a_reference_through_literally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {"T": SENTINEL})
+
+        resolved = resolve_config_secrets("foreign", _stdio({"T": "$${T}"}))
+
+        assert resolved.env == {"T": "${T}"}
+
+    def test_the_escape_works_inside_a_header_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {"T": SENTINEL})
+
+        resolved = resolve_config_secrets("foreign", _http({"Authorization": "Bearer $${T}"}))
+
+        assert resolved.headers == {"Authorization": "Bearer ${T}"}
+
+    def test_the_escape_and_a_real_reference_coexist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {"T": SENTINEL})
+
+        resolved = resolve_config_secrets("foreign", _stdio({"T": "${T}:$${T}"}))
+
+        assert resolved.env == {"T": f"{SENTINEL}:${{T}}"}
+
+    def test_a_foreign_config_reference_is_refused_then_escapable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The project-config case from QA cell 23: ``${HOME}/data`` in a
+        # checked-in `.mcp.json`. The refusal is loud and names HOME (a key the
+        # store does not hold), and ``$${HOME}`` is the documented way to keep it.
+        _store(_isolate(monkeypatch, tmp_path), {"OTHER": SENTINEL})
+
+        with pytest.raises(McpSecretRefError) as caught:
+            resolve_config_secrets("project", _stdio({"PATHVAR": "${HOME}/data"}))
+        assert "HOME" in str(caught.value)
+
+        escaped = resolve_config_secrets("project", _stdio({"PATHVAR": "$${HOME}/data"}))
+        assert escaped.env == {"PATHVAR": "${HOME}/data"}
+
+
+class TestDecoratedFragments:
+    """Finding Q3/R1: a fragment that names a stored key is refused, not handed on.
+
+    The store accepts ANY key (``set_credential`` checks only control
+    characters), so a real credential can sit at a name the reference class
+    cannot spell — ``hubspot-token``, or a key behind shell/compose decoration.
+    Passing those through starts the server with the literal as its credential,
+    which is the failure this module exists to remove.
+    """
+
+    @pytest.mark.parametrize(
+        ("store_key", "fragment"),
+        [
+            ("hubspot-token", "${hubspot-token}"),  # the key itself, out of class
+            ("TOKEN", "${TOKEN:-}"),  # compose/shell default form, no default
+            ("TOKEN", "${TOKEN:-fallback}"),  # …with a default
+            ("TOKEN", "${TOKEN-SUB}"),  # shell "use SUB if unset"
+            ("TOKEN", "${TOKEN:?must be set}"),  # shell error form
+            ("TOKEN", "${env:TOKEN}"),  # compose "from the environment"
+            ("TOKEN", "${ TOKEN }"),  # stray whitespace
+        ],
+    )
+    def test_a_fragment_naming_a_stored_key_is_refused(
+        self,
+        store_key: str,
+        fragment: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {store_key: SENTINEL})
+
+        with pytest.raises(McpSecretRefError) as caught:
+            resolve_config_secrets("handwritten", _stdio({"VALUE": fragment}))
+
+        message = str(caught.value)
+        assert store_key in message
+        assert "unusable secret reference" in message
+        # Names the key, never the value, and never the fragment as written.
+        assert SENTINEL not in message
+        assert fragment not in message
+
+    def test_a_fragment_naming_nothing_stored_is_still_literal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {"OTHER": SENTINEL})
+
+        for fragment in ("${1BAD}", "${MISSING:-x}", "${}", "${unterminated", "${{x}}"):
+            resolved = resolve_config_secrets("handwritten", _stdio({"VALUE": fragment}))
+            assert resolved.env == {"VALUE": fragment}
+
+    def test_an_escaped_decorated_fragment_is_literal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The escape wins over the candidate check, which is how a value that
+        # genuinely means the text literally is written.
+        _store(_isolate(monkeypatch, tmp_path), {"TOKEN": SENTINEL})
+
+        resolved = resolve_config_secrets("handwritten", _stdio({"VALUE": "$${TOKEN:-}"}))
+
+        assert resolved.env == {"VALUE": "${TOKEN:-}"}
+
+    def test_the_decorated_refusal_outranks_the_mixed_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Both halves are wrong; the fragment that names a real credential is
+        # the actionable one, so it is the one that gets named.
+        _store(_isolate(monkeypatch, tmp_path), {"TOKEN": SENTINEL, "next-token": SENTINEL})
+
+        with pytest.raises(McpSecretRefError) as caught:
+            resolve_config_secrets("handwritten", _stdio({"VALUE": "${TOKEN}${next-token}"}))
+
+        message = str(caught.value)
+        assert "unusable secret reference" in message
+        assert "next-token" in message
 
 
 class TestManagerSeam:
@@ -343,6 +497,41 @@ class TestManagerSeam:
             await manager.connect_configured_server("hubspot", interactive=False)
 
         assert resolved_env == [{"T": SENTINEL}]
+
+    @pytest.mark.asyncio
+    async def test_the_live_connection_carries_the_reference_form_not_the_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Finding R5: six registration paths install a ``ServerConnection``, which
+        # is a plain dataclass whose repr prints every field, so the resolved
+        # value must not outlive the transport that needed it.
+        from local_operator.mcp.manager import ServerConnection
+
+        _store(_isolate(monkeypatch, tmp_path), {"T": SENTINEL})
+        manager = McpManager(str(tmp_path))
+        cfg = MCPStdioServerConfig(command="probe-cmd", env={"T": "${T}"})
+        conn_sent: list[Any] = []
+        handed_env: list[dict[str, str]] = []
+
+        async def fake_open(stack: Any, name: str, handed_cfg: Any, *args: Any, **_: Any) -> Any:
+            conn_sent.append(handed_cfg)
+            handed_env.append(dict(handed_cfg.env))
+            return ServerConnection(
+                name=name, config=handed_cfg, session=cast(Any, object()), stack=stack
+            )
+
+        async def no_tools(session: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", fake_open)
+        monkeypatch.setattr(manager, "_list_all_tools", no_tools)
+
+        conn = await manager._connect_server("hubspot", cfg)
+
+        assert handed_env == [{"T": SENTINEL}]  # the transport was handed the value
+        assert conn_sent[0] is not cfg
+        assert conn.config is cfg  # the connection keeps the reference form
+        assert SENTINEL not in repr(conn)
 
     @pytest.mark.asyncio
     async def test_the_value_never_reaches_a_message_or_a_log_line(

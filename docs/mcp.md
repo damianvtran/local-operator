@@ -33,9 +33,10 @@ in a build script.
 
 A server config is a file: committed, shared, and imported from other tools'
 configs. It therefore carries secret **references**, never secrets. A value in a
-stdio server's `env` or a remote server's `headers` is resolved when the
-transport is built, immediately before the child process is spawned or the HTTP
-request is sent:
+stdio server's `env` or a remote server's `headers` is resolved at the top of
+the connect, **before anything is spawned or sent** — an OAuth server's
+proactive token refresh runs after that point, so a server whose reference
+cannot resolve never spends one:
 
 ```json
 {
@@ -72,19 +73,43 @@ server's reconnect).
 | no `${` at all (`plain-value`, `$NAME`) | passed through untouched; the store is not read |
 | `${NAME}` as the whole value | the stored value (the only shape the desktop UI's add form accepts) |
 | `Bearer ${NAME}` | each reference substituted, surrounding text kept |
-| a `${` that is not a reference at all (`${1BAD}`, `${a b}`, an unclosed `${NAME`) | passed through untouched — it is literal text in a hand-written config |
-| a well-formed reference mixed with a malformed one (`${A}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
+| `$${NAME}` | the escape: the literal text `${NAME}`, never a reference (no lookup, no refusal) |
+| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`, `${HOME}`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
+| a `${` whose inner text names a key the store holds, once shell/compose decoration is stripped (`${hubspot-token}`, `${NAME:-}`, `${NAME-SUB}`, `${env:NAME}`, `${ NAME }`) | refused: the key exists, so the fragment cannot be a literal, and passing it through would start the server with the reference as its credential |
+| a well-formed reference mixed with a fragment (`${TOKEN}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
 
 **An unresolvable reference is a refusal, never the literal.** A server whose
 reference names a key the store does not hold (or holds empty) fails to start
-with `MCP server 'crm' needs CRM_API_KEY from the credential store — add it in
-Settings > API credentials, then reconnect`; no tool from it is registered, and
-the reference text is never passed to the process or the remote server. Values
-are never logged, so the message names the key and the entry, not the secret.
+with, verbatim:
 
-`args` is deliberately not resolved: a secret in a command line is readable by
-any other process on the machine through `ps`, which is why the UI's add form
-refuses a literal in `env`/`headers` only.
+```
+MCP server 'crm' needs CRM_API_KEY from the credential store for headers Authorization — add it in Settings > API credentials, then reconnect (or double the $ to pass it through literally)
+```
+
+(`for <field> <entry>` names the `env` variable or header the reference sits in;
+the `env` form reads `for env SOME_API_KEY`.) No tool from that server is
+registered, the reference text is never passed to the process or the remote
+server, and values are never logged — the message names the key and the entry,
+not the secret. A config that means the reference **literally** — a project
+`.mcp.json` with `${HOME}`, a Claude Code import relying on the child's own
+variable expansion — carries it through with the escape, `$${HOME}`.
+
+**The escape is `$${`, and only there.** A `$$` that is not followed by `{` is
+ordinary text, so no existing value is rewritten. A `$${` always wins over every
+rule above: it is never looked up and never refused, which is what makes a
+literal expressible at all.
+
+**Three things are deliberately not resolved.** Server `args`: a secret in a
+command line is readable by any other process on the machine through `ps`, which
+is why the UI's add form refuses a literal in `env`/`headers` only. The OAuth
+block's `client_secret` (`auth.client_secret` / `oauth.client_secret`) is **not
+resolved** in this version either — a reference there reaches the token endpoint
+verbatim and the grant fails as an OAuth error (it does not leak the value, it
+simply does not work); it is recorded as deferred in the pull request that
+introduced this rule. And the credential **key** itself must be name-shaped for
+a reference to spell it: the store accepts any key, so `hubspot-token` can be
+stored through the Settings screen but cannot be referenced — rename it to
+`HUBSPOT_TOKEN`, or escape the literal.
 
 ## Runtime behavior
 
