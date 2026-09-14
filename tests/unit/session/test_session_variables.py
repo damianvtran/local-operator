@@ -174,7 +174,10 @@ async def test_the_in_process_shape_forwards_its_own_session_and_store(monkeypat
     recorder = _Recorder()
     monkeypatch.setattr(eval_module, "complete_session_variables", recorder)
     store = SimpleNamespace(redact=lambda text: text.replace("shh", "[redacted]"))
-    stub = SimpleNamespace(_session_id="8fd6c6a40934", _variables=store)
+    # ``Any`` for the same reason the docstring gives: this is not a Session,
+    # and annotating it as one would have pyright check the ~110 members the
+    # two lines under test never reach.
+    stub: Any = SimpleNamespace(_session_id="8fd6c6a40934", _variables=store)
 
     answer = await Session.variables_op(stub, "list")
 
@@ -195,6 +198,7 @@ async def test_the_runtime_shape_forwards_the_session_it_serves(monkeypatch) -> 
         variables=SimpleNamespace(redact=lambda text: text),
     )
 
-    await ServingSessionHandle.variables_op(SimpleNamespace(_session=session), "list")
+    handle: Any = SimpleNamespace(_session=session)
+    await ServingSessionHandle.variables_op(handle, "list")
 
     assert recorder.calls[0][0][0] == "000471114995"

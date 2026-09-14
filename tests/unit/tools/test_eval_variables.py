@@ -22,6 +22,8 @@ explicitly because losing any of them is silent:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import pytest_asyncio
 
@@ -65,11 +67,11 @@ async def _verb(session_id: str, action: str, key: str = "", value: str = "", va
     )
 
 
-def _keys(answer: dict) -> list[str]:
+def _keys(answer: dict[str, Any]) -> list[str]:
     return [entry["key"] for entry in answer["variables"]]
 
 
-def _entry(answer: dict, key: str) -> dict:
+def _entry(answer: dict[str, Any], key: str) -> dict[str, Any]:
     return next(entry for entry in answer["variables"] if entry["key"] == key)
 
 

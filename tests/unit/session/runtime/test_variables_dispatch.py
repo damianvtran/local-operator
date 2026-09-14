@@ -104,7 +104,11 @@ async def test_the_viewer_reports_an_old_owner_as_unsupported() -> None:
         async def variables(self, *args: Any):
             raise RuntimeError("unknown op: 'variables'")
 
-    stub = SimpleNamespace(_client=OldClient(), _recovering=False)
+    # Annotated ``Any`` on purpose: the double is deliberately NOT a real
+    # ``AttachedSession`` (these two attributes are the whole contract the
+    # method reads), and a structural annotation would make pyright police
+    # ~110 members the method never touches.
+    stub: Any = SimpleNamespace(_client=OldClient(), _recovering=False)
 
     assert await AttachedSession.variables_op(stub, "list") == {"state": "unsupported"}
 
@@ -119,7 +123,7 @@ async def test_the_viewer_does_not_swallow_a_real_owner_failure() -> None:
         async def variables(self, *args: Any):
             raise ValueError("the owner's store is unreadable")
 
-    stub = SimpleNamespace(_client=BrokenClient(), _recovering=False)
+    stub: Any = SimpleNamespace(_client=BrokenClient(), _recovering=False)
 
     with pytest.raises(ValueError, match="unreadable"):
         await AttachedSession.variables_op(stub, "list")
