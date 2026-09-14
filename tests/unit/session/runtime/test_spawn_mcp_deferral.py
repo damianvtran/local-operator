@@ -29,6 +29,12 @@ from tests.unit.test_session_factory import FakeMcpManager
 #: Upper bound on an awaited event, never a budget to sleep through.
 GUARD_S = 20.0
 
+#: Loop TURNS used to assert something has NOT happened yet. A turn count rather
+#: than a sleep for the reason ``AGENTS.md`` gives: a silent window measured in
+#: seconds is a bet on machine load, and on this project's hosts the work being
+#: waited out is exactly the work that stretches under load.
+NEGATIVE_TURNS = 200
+
 BROKEN_SERVER = "broken"
 BROKEN_ERROR = "command not found: definitely-not-installed"
 
@@ -338,4 +344,205 @@ async def test_a_degradation_arm_also_pushes_the_outcome_to_a_subscriber(
         assert reported[-1]["failures"] == {"discovery": "discovery exploded"}
     finally:
         await await_store_maintenance_for_tests()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_path_wires_mcp_without_any_publisher(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The TUI's own Session never publishes a record, and must still wire MCP.
+
+    This is the failure mode a publication gate invites, and it is not
+    hypothetical: the TUI builds an in-process Session with
+    ``defer_mcp_wiring=True`` and there is no ``RuntimeServer`` anywhere in that
+    process to open a latch. The gate is therefore OPT-IN — ``None`` means "no
+    publisher", and the deferred task is dispatched ungated exactly as it was
+    before the parameter existed — which this pins by settling
+    ``session.mcp_startup`` with no gate and no server in sight.
+    """
+    from local_operator.session_factory import (
+        await_store_maintenance_for_tests,
+        create_session,
+    )
+
+    async def fake_discover(cwd: str, auth_store: Any = None) -> Any:
+        return (
+            FakeMcpManager(configured=[BROKEN_SERVER], connected=[]),
+            [],
+            [{"path": f"mcp:{BROKEN_SERVER}", "error": BROKEN_ERROR}],
+        )
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    import argparse
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    args = argparse.Namespace(
+        hosting="test",
+        model="mock",
+        agent_name=None,
+        agent_id=None,
+        yolo=True,
+        train=False,
+    )
+    session = await create_session(
+        args,
+        ConfigManager(isolated_config),
+        CredentialManager(isolated_config),
+        AgentRegistry(isolated_config),
+        has_ui=False,
+        cwd=str(isolated_config),
+        defer_mcp_wiring=True,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + GUARD_S
+        while loop.time() < deadline:
+            if getattr(session, "mcp_startup", None) is not None:
+                break
+            await asyncio.sleep(0.02)
+        startup = getattr(session, "mcp_startup", None)
+        assert startup is not None, (
+            "an ungated deferred session never settled its MCP outcome: the "
+            "in-process/TUI path has no publisher to open a gate, so a gate that "
+            "applied to it would mean MCP was never wired at all"
+        )
+        assert startup.failures == {BROKEN_SERVER: BROKEN_ERROR}
+    finally:
+        await await_store_maintenance_for_tests()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_gated_wiring_parks_until_the_latch_is_set(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate means the wiring WAITS, it does not merely get dispatched early.
+
+    Deterministic, not timed: the loop is given many turns with the latch closed
+    and the wiring must still not have run, which is the ordering the whole
+    change rests on — the task's first instruction is a synchronous SDK import
+    that would otherwise take the loop during ``process.amain``'s inbox drain,
+    before the record exists.
+    """
+    from local_operator import session_factory
+    from local_operator.session_factory import (
+        await_store_maintenance_for_tests,
+        create_session,
+    )
+
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def spy(session: Any, tools: Any, cwd: str, **kwargs: Any) -> Any:
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", spy)
+
+    import argparse
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    args = argparse.Namespace(
+        hosting="test",
+        model="mock",
+        agent_name=None,
+        agent_id=None,
+        yolo=True,
+        train=False,
+    )
+    session = await create_session(
+        args,
+        ConfigManager(isolated_config),
+        CredentialManager(isolated_config),
+        AgentRegistry(isolated_config),
+        has_ui=False,
+        cwd=str(isolated_config),
+        defer_mcp_wiring=True,
+        mcp_publication_gate=gate,
+    )
+    try:
+        for _ in range(NEGATIVE_TURNS):
+            await asyncio.sleep(0)
+        assert not entered.is_set(), (
+            "the deferred wiring ran while its publication latch was closed — a "
+            "gated session would then pay the MCP SDK import in front of its own "
+            "record, which is the defect the latch exists to prevent"
+        )
+
+        gate.set()
+        assert await asyncio.wait_for(
+            entered.wait(), timeout=GUARD_S
+        ), "setting the latch must release the wiring"
+    finally:
+        await await_store_maintenance_for_tests()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_child_gates_its_wiring_on_publication(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child's wiring starts AFTER its record exists, in the real spawn path.
+
+    ``spawn_owned_session`` is the only spawn site whose runtime publishes, so it
+    is the only one that hands out a latch. The ordering is asserted across the
+    same boundary production uses: the engine's boot (here: just loop turns)
+    runs with the record not yet published, then ``start_in_process`` publishes
+    and the wiring starts.
+    """
+    from local_operator import session_factory
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import spawn_owned_session
+
+    entered = asyncio.Event()
+
+    async def spy(session: Any, tools: Any, cwd: str, **kwargs: Any) -> Any:
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", spy)
+
+    handle = await asyncio.wait_for(
+        spawn_owned_session(
+            asyncio.get_running_loop(),
+            cwd=str(isolated_config),
+            provider="test",
+            model_id="mock",
+        ),
+        timeout=GUARD_S,
+    )
+    session = handle._session
+    server = RuntimeServer(handle, kind="daemon")
+    try:
+        gate = handle.mcp_publication_gate
+        assert gate is not None, (
+            "the runtime child did not pass a publication latch, so its deferred "
+            "wiring is ungated and can run inside its pre-publication window"
+        )
+        assert not gate.is_set()
+
+        # The production boot between construction and publication: the drain
+        # and async_init. Those awaits are where the task used to start.
+        for _ in range(NEGATIVE_TURNS):
+            await asyncio.sleep(0)
+        assert not entered.is_set(), (
+            "the wiring started before the record was published, so its SDK "
+            "import is inside the window the user is waiting through"
+        )
+
+        await server.start_in_process()
+        assert gate.is_set(), "publication must open the latch"
+        assert await asyncio.wait_for(
+            entered.wait(), timeout=GUARD_S
+        ), "the published record must release the wiring"
+    finally:
+        server.close()
         await session.dispose()

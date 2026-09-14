@@ -1445,6 +1445,31 @@ class RuntimeServer:
         except RuntimeError:
             return False
 
+    def _open_mcp_wiring_gate(self) -> None:
+        """Tell the session's deferred MCP wiring that the record is published.
+
+        The latch lives on the HANDLE (``ServingSessionHandle.
+        mcp_publication_gate``), read the same way this class reads every other
+        optional handle capability — ``subscribe_events``, ``refresh_attention``,
+        ``is_busy`` — so a handle that has none is inert rather than an error.
+        That covers every registrant constructed for a viewer or a test, and it
+        is why the gate is a handle attribute rather than a RuntimeServer
+        parameter: the runtime did not create the session and has no other
+        business naming its wiring.
+
+        WHY IT EXISTS: the deferred wiring task's first instruction is a
+        synchronous import of the MCP SDK. A task starts at the loop's next free
+        instant, which in ``process.amain`` is the inbox drain BEFORE this
+        publisher runs, so on a machine with a server declared the import took
+        the loop for its full duration inside the pre-publication window and the
+        record waited behind it (measured +2.3 s, 14 of 14 runs). Setting the
+        latch here moves the wiring to the far side of publication, which is
+        what ``serving.spawn_owned_session`` states the design already promised.
+        """
+        gate = getattr(self._handle, "mcp_publication_gate", None)
+        if gate is not None:
+            gate.set()
+
     # -- the runtime's own loop -----------------------------------------------
 
     def _run(self) -> None:
@@ -1465,7 +1490,17 @@ class RuntimeServer:
         )
         port = self._server.sockets[0].getsockname()[1]
         self._record.control_port = port
-        self._publisher = RecordPublisher(self._record, self._config_root)
+        try:
+            self._publisher = RecordPublisher(self._record, self._config_root)
+        finally:
+            # THE RECORD EXISTS AS OF HERE (or could not be written at all).
+            # Both cases must release the deferred MCP wiring: on the happy
+            # path that is what makes the wiring ride the record instead of
+            # racing it, and on the failure path it is the difference between
+            # late MCP tools and none ever (the exception itself still
+            # propagates and takes the child down, so this is insurance rather
+            # than a recovery path). See ``RuntimeServer._open_mcp_wiring_gate``.
+            self._open_mcp_wiring_gate()
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.
         # Probed, not required — a handle without the capability leaves attach
