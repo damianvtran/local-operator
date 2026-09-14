@@ -526,37 +526,66 @@ def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root)
 
     ``close()`` joins the endpoint thread, and that thread used to decide
     whether it had been asked to stop by re-checking the latch on a 200 ms
-    ``sleep``. Measured on the poll (n=15, isolated): median 214 ms, min 202 ms,
-    max 236 ms. It is on the app's unmount path, so EVERY TUI boot in the unit
+    ``sleep``. Measured on the poll (n=15, isolated, the close landing at an
+    arbitrary phase): median 214 ms, min 202 ms, max 236 ms — of which ~150 ms
+    remains when the close is aimed 50 ms into the wait, which is the shape
+    below. It is on the app's unmount path, so EVERY TUI boot in the unit
     suite paid it — which is what this repository's 8,000-boot TUI suite was
     buying.
 
     WALL time, deliberately, and not ``time.thread_time()``: the old cost was
     blocked in a sleep, which consumes no CPU at all, so a CPU-time instrument
-    reports ~0 ms for exactly the code this test exists to reject. The ceiling is
-    half the poll interval, so no scheduling luck can let a poll through, and it
-    is ~12x the measured signal cost (~8 ms median), so it cannot flake.
+    reports ~0 ms for exactly the code this test exists to reject.
+
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. The 50 ms settle that aims each
+    close at the middle of the loop's wait is a phase GUESS, not a
+    synchronisation: a descheduled serve thread can still be short of its park
+    when the close lands, and then the latch is already set, the loop never
+    waits, and even the POLLED code returns in ~1 ms — a silent false negative,
+    not a flake. That is why the bound is the MINIMUM of five closes, each
+    against a fresh server: one starved round cannot carry the verdict, and five
+    consecutive starved rounds would be needed for a false pass. The ceiling is
+    half the poll interval, so a parked poll cannot meet it, but its margin to
+    the FIXED code is scheduling-dependent rather than generous: measured on a
+    loaded dev host (load 162-212, n=15) the signalled close was 1.0 ms median
+    with a 27.0 ms worst sample, i.e. ~3.7x headroom at worst. CI's dedicated
+    runner is the safer environment for that bound.
     """
-    server = _started(_Host(), viewer_root)
+    samples: list[float] = []
+    for _ in range(5):
+        # start()/ready.wait()/close() inline rather than through ``_started()``:
+        # a round whose bind fails must still close its OWN server, and the
+        # ready assertion inside ``_started`` raises before this loop's
+        # ``finally`` could reach the leaked object.
+        server = ViewerServer(_Host(), root=viewer_root)
+        try:
+            server.start()
+            assert server.ready.wait(timeout=5.0), "viewer endpoint never bound"
+            # Let the serve loop REACH its wait before timing the close, so the
+            # close lands MID-INTERVAL. Without this settle the assertion races
+            # the loop's phase: ``ready`` is set microseconds before the loop
+            # parks, so on a run where the thread is descheduled in between,
+            # ``close()`` sets the latch first, the loop's ``while not
+            # self._closed.is_set()`` is already false, it exits at once — and
+            # the POLLED code returns in ~1 ms too. Parked, the poll owes the
+            # rest of a 200 ms interval (~150 ms) and cannot meet the ceiling.
+            time.sleep(0.05)
 
-    # Let the serve loop REACH its wait before timing the close, so the close lands
-    # MID-INTERVAL. Without this settle the assertion races the loop's phase:
-    # ``ready`` is set microseconds before the loop parks, so on a run where the
-    # thread is descheduled in between, ``close()`` sets the latch first, the
-    # loop's ``while not self._closed.is_set()`` is already false, it exits at
-    # once — and the OLD polling code returns in ~1 ms too. The test would then
-    # PASS against the bug it exists to reject: a silent false negative rather
-    # than a flake. Parked, the old poll deterministically still owes the rest of
-    # its 200 ms interval (~150 ms) and cannot meet the ceiling.
-    time.sleep(0.05)
+            started = time.monotonic()
+            server.close()
+            samples.append(time.monotonic() - started)
+        finally:
+            server.close()
 
-    started = time.monotonic()
-    server.close()
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 0.1, (
-        f"close() took {elapsed * 1000:.0f} ms — it is waiting out the serve loop's "
-        "wait instead of waking it (the old poll here measured 202-236 ms)"
+    fastest = min(samples)
+    assert fastest < 0.1, (
+        f"the fastest of {len(samples)} parked closes took {fastest * 1000:.0f} ms "
+        f"(round {samples.index(fastest)}) — close() is waiting out the serve "
+        "loop's wait instead of waking it. Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, even "
+        "the pre-fix poll is expected near 145-153 ms measured through this "
+        "test's own 50 ms settle, so no round here was woken early "
+        "(viewer_server.close -> _wake_close_wait -> ViewerServer._serve's park)."
     )
 
 

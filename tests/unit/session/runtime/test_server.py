@@ -635,60 +635,85 @@ async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its
 
     This is the same defect the viewer endpoint had: ``close()`` joins the serve
     thread, and that thread decided it had been asked to stop by re-checking the
-    latch on a 200 ms ``sleep``. Measured on the poll (n=15, isolated): median
-    206 ms, min 192 ms, max 215 ms — pure latency borrowed from whichever
-    interval the close landed in, paid by every teardown.
+    latch on a 200 ms ``sleep``. Measured on the poll (n=15, isolated, the close
+    landing at an arbitrary phase): median 206 ms, min 192 ms, max 215 ms — of
+    which ~150 ms remains when the close is aimed 50 ms into the wait, which is
+    the shape below.
 
     WALL time, deliberately, and not ``time.thread_time()``: the old cost was
     blocked in a sleep, which consumes no CPU, so a CPU-time instrument would
-    report ~0 ms for exactly the code this test exists to reject. Half the poll
-    interval is the bound — a poll cannot meet it, and the signalled close
-    measured ~18 ms median, so 100 ms leaves ~5x headroom rather than a flake.
+    report ~0 ms for exactly the code this test exists to reject.
+
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. The 50 ms settle that aims each
+    close at the middle of the loop's wait is a phase GUESS, not a
+    synchronisation: a descheduled serve thread can still be short of its park
+    when the close lands, and then the latch is already set, the loop never
+    waits, and even the POLLED code returns in ~1 ms — a silent false negative,
+    not a flake. That is why the bound is the MINIMUM of five closes, each
+    against a fresh runtime: one starved round cannot carry the verdict, and
+    five consecutive starved rounds would be needed for a false pass. The
+    ceiling is half the poll interval, so a parked poll cannot meet it, but its
+    margin to the FIXED code is scheduling-dependent rather than generous:
+    measured on a loaded dev host (load 162-212, n=15) the signalled close was
+    1.0 ms median with a 9.3 ms worst sample, i.e. ~10x headroom at worst. CI's
+    dedicated runner is the safer environment for that bound.
 
     Thread mode specifically, because the in-process path never parks in
     ``_closed_wait``: it schedules its teardown on the owning loop and has no
     poll to remove.
     """
-    runtime = RuntimeServer(FakeHandle(), kind="tui")
-    runtime.start()
-    try:
-        # Tight-poll the record rather than using ``_wait_record()``, which waits
-        # in 50 ms steps. The overshoot matters HERE and nowhere else: the poll's
-        # cost is the REMAINDER of the loop's wait interval, so every 50 ms of
-        # overshoot moves the close toward the end of that interval and shrinks
-        # the margin this test has over its ceiling. Measured with the 50 ms
-        # cadence, the old code came in at 101-103 ms against a 100 ms ceiling —
-        # one scheduling nudge away from a false pass. Polling at 5 ms keeps any
-        # overshoot inside the noise.
-        deadline = asyncio.get_running_loop().time() + 5.0
-        while True:
-            found = registry.scan()
-            if found and found[0][1] == "live":
-                break
-            if asyncio.get_running_loop().time() > deadline:
-                raise AssertionError("runtime never published a live record")
-            await asyncio.sleep(0.005)
+    samples: list[float] = []
+    for _ in range(5):
+        runtime = RuntimeServer(FakeHandle(), kind="tui")
+        try:
+            # start() inside the try: a runtime that fails to start must still
+            # be closed by this round's ``finally``.
+            runtime.start()
+            # Tight-poll the record rather than using ``_wait_record()``, which
+            # waits in 50 ms steps. The overshoot matters HERE and nowhere else:
+            # the polled code's cost is the REMAINDER of the loop's wait
+            # interval, so every 50 ms of overshoot before the settle below
+            # moves the close toward the end of that interval and shrinks the
+            # floor the base arm owes — measured with the 50 ms cadence, the old
+            # code came in at 101-103 ms against the 100 ms ceiling, one
+            # scheduling nudge away from the false pass this test exists to
+            # prevent. Polling at 5 ms keeps the base arm at ~145-153 ms.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while True:
+                found = registry.scan()
+                if found and found[0][1] == "live":
+                    break
+                if asyncio.get_running_loop().time() > deadline:
+                    raise AssertionError("runtime never published a live record")
+                await asyncio.sleep(0.005)
 
-        # `_wait_record()` proves the listener is PUBLISHED, not that the loop has
-        # parked in ``_closed_wait()`` — ``_serve`` publishes first and parks
-        # after — so the loop's phase must still be settled before timing or the
-        # close can land before it parks: the latch is then already set when the
-        # loop gets there, it never waits, and the OLD polling code returns in
-        # ~1 ms too (the test would pass against the bug it exists to reject).
-        # Parked, the old poll owes the rest of a 200 ms interval and cannot meet
-        # the ceiling. Awaited, not ``sleep``: the runtime owns its own thread and
-        # loop, and the test has no reason to block its own.
-        await asyncio.sleep(0.05)
+            # The record proves the listener is PUBLISHED, not that the loop has
+            # parked in ``_closed_wait()`` — ``_serve`` publishes first and parks
+            # after — so the loop's phase must still be settled before timing or
+            # the close can land before it parks: the latch is then already set
+            # when the loop gets there, it never waits, and the POLLED code
+            # returns in ~1 ms too (the false negative the minimum below exists
+            # to average out). Parked, the poll owes the rest of a 200 ms
+            # interval and cannot meet the ceiling. Awaited, not ``sleep``: the
+            # runtime owns its own thread and loop, and the test has no reason to
+            # block its own.
+            await asyncio.sleep(0.05)
 
-        started = time.monotonic()
-        runtime.close()
-        elapsed = time.monotonic() - started
-    finally:
-        runtime.close()
+            started = time.monotonic()
+            runtime.close()
+            samples.append(time.monotonic() - started)
+        finally:
+            runtime.close()
 
-    assert elapsed < 0.1, (
-        f"close() took {elapsed * 1000:.0f} ms — it is waiting out the serve loop's "
-        "wait instead of waking it (the old poll here measured 192-215 ms)"
+    fastest = min(samples)
+    assert fastest < 0.1, (
+        f"the fastest of {len(samples)} parked closes took {fastest * 1000:.0f} ms "
+        f"(round {samples.index(fastest)}) — close() is waiting out the serve "
+        "loop's wait instead of waking it. Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, even "
+        "the pre-fix poll is expected near 145-153 ms measured through this "
+        "test's own 50 ms settle, so no round here was woken early "
+        "(server.close -> _request_close -> _wake_close_wait -> _closed_wait)."
     )
 
 

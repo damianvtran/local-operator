@@ -75,14 +75,12 @@ _AUTH_TIMEOUT_S = 5.0
 #: magnitude against any real frame.
 _MAX_LINE_BYTES = 64 * 1024
 
-#: Serve-loop wait between close-latch re-checks. ``close()`` wakes the loop
-#: directly (``_wake_close_wait``), so this is a BACKSTOP rather than the
-#: mechanism: work is signalled, not polled — the same choice
-#: ``analytics/recorder.py`` makes when it wakes its writer with a queue
-#: sentinel instead of sleeping on a flag. A signal can still be missed (a
-#: close that lands before ``_serve`` published the event, or a loop that has
-#: already stopped), and a serve loop that parks forever would hang the join in
-#: ``close()`` and leak the listener, so the wait keeps a timeout.
+#: Serve-loop wait between close-latch re-checks: the backstop, not the
+#: mechanism (``close()`` wakes the loop through ``_wake_close_wait``). A second
+#: copy of the rationale would drift, so it lives with the runtime loop's
+#: identical constant — see ``_CLOSE_WAIT_BACKSTOP_S`` in ``server.py``. The two
+#: stay separate rather than importing across the modules because the loops are
+#: independent classes and neither owns the other's timeout.
 _CLOSE_WAIT_BACKSTOP_S = 0.2
 
 #: ``FOCUS_WINDOW_CAPABILITY`` is listed here so it stays importable from this
@@ -245,9 +243,10 @@ class ViewerServer:
             # anyway: the heartbeat retries the publish, and a transient ENOSPC
             # should not permanently cost the user click-through.
             logger.debug("viewer record publish failed", exc_info=True)
-        # Bound to a local as well as the attribute: the attribute is what
-        # ``close()`` signals, the local is what this loop waits on, so the wait
-        # cannot race a re-assignment of the attribute.
+        # The local is what this loop parks on below; ``self._close_event`` is
+        # the same object, so the one writer that can only reach the attribute
+        # (``close()``) signals exactly this wait. Assigned once — ``_serve``
+        # runs once per server.
         close_event = asyncio.Event()
         # Published BEFORE ``ready`` so a ``close()`` that lands the instant a
         # waiter sees the flag already has something to signal.
@@ -290,6 +289,10 @@ class ViewerServer:
     def close(self) -> None:
         """Stop serving and remove the record. Idempotent, safe from any thread.
 
+        The one thread it must special-case is the endpoint's own: that close
+        skips the self-join and lets the loop's ``finally`` finish the teardown,
+        so the port is released and the record unpublished either way.
+
         The record is removed HERE as well as in ``_shutdown`` because a loop
         that never started (a failed bind) has no ``_shutdown`` to run, and a
         record left behind advertises a port nothing is listening on — which
@@ -300,7 +303,14 @@ class ViewerServer:
         self._closed.set()
         self._wake_close_wait()
         thread = self._thread
-        if thread is not None and thread.is_alive():
+        # A close issued from the loop's OWN thread must not join itself: `join`
+        # raises ``RuntimeError: cannot join current thread`` and would abandon
+        # the ``unpublish_viewer`` below. Nothing is lost by skipping it —
+        # close() returns into the loop, whose wait is already satisfied by the
+        # latch and whose ``finally`` runs ``_shutdown``, so the port is
+        # released and the record removed there. ``RuntimeServer.close`` carries
+        # the same guard for the same reason.
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             # The serve loop runs `_shutdown` itself. `_wake_close_wait` above
             # is what makes that immediate: without it this join waits out the
             # rest of the loop's wait interval, which is the latency every TUI
