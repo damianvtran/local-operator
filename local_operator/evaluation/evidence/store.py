@@ -322,10 +322,16 @@ class _RedactionScanner:
         self._percent_pending.clear()
         index = 0
         while index < len(data):
-            if data[index] != 37:  # %
-                output.append(data[index])
-                index += 1
-                continue
+            # Artifact blocks are mostly ordinary bytes. Keep that scan/copy in
+            # C: per-byte Python work dominates 64 MiB publishes under coverage
+            # and tracemalloc. Only skip bytes before the next %, leaving the
+            # escape handling and its at-most-two pending bytes unchanged.
+            percent = data.find(b"%", index)
+            if percent < 0:
+                output.extend(data[index:])
+                break
+            output.extend(data[index:percent])
+            index = percent
             if index + 2 >= len(data):
                 self._percent_pending.extend(data[index:])
                 break
