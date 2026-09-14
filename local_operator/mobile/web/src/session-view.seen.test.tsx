@@ -222,3 +222,29 @@ describe("SessionScreen seen handshake", () => {
 		expect(clearSessionUnseen).not.toHaveBeenCalled();
 	});
 });
+
+
+describe("unresolved receipt budget", () => {
+ for (const outcome of ["unread", "wrong-token", "alternating"] as const) {
+  it(`bounds ${outcome} replies and resets only for a new token`, async () => {
+   const p = focusedResult();
+   const seen = vi.mocked(markSessionSeen);
+   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+   let calls = 0;
+   seen.mockImplementation(async () => {
+    calls += 1;
+    if (outcome === "alternating" && calls % 2) throw new Error("refused");
+    return { ok:true, attention: { ...p.attention!, unseen:outcome !== "wrong-token", completion_token:outcome === "wrong-token" ? "other" : "token-a" } };
+   });
+   const view = render(<SessionScreen sessionId="s1" />);
+   for (let tick = 0; tick < 240; tick++) await act(async () => { vi.advanceTimersByTime(500); });
+   expect(calls).toBeLessThanOrEqual(10);
+   expect(warn).toHaveBeenCalledTimes(1);
+   const previous = calls;
+   slot = { ...slot, projection: { ...p, attention:{...p.attention!,completion_token:"token-b"} } };
+   view.rerender(<SessionScreen sessionId="s1" />);
+   await sample();
+   expect(calls).toBe(previous + 1);
+  });
+ }
+});

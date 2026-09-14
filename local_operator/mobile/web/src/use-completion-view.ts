@@ -35,6 +35,16 @@ export function useCompletionView(
 		/** Consecutive refusals, and the earliest time the next attempt may run. */
 		let refusals = 0;
 		let nextAttempt = 0;
+		// Count refusals AND unresolved 2xx together; version skew or alternating
+		// outcomes must not buy a fresh budget for the same rendered token.
+		const unresolved = (reason: unknown) => {
+			refusals += 1;
+			if (refusals === FAILURES_BEFORE_BACKOFF) console.warn(
+				`[attention] could not mark ${sessionId} read after ${refusals} attempts; backing off`, reason,
+			);
+			if (refusals >= FAILURES_BEFORE_BACKOFF) nextAttempt = Date.now() +
+				Math.min(MAX_BACKOFF_MS, CHECK_MS * 2 ** (refusals - FAILURES_BEFORE_BACKOFF + 1));
+		};
 		const check = () => {
 			if (cancelled || pending || acknowledged ||
 				document.visibilityState !== "visible" || !document.hasFocus() ||
@@ -61,36 +71,13 @@ export function useCompletionView(
 					// effect and is acknowledged on its own. Identity is part of the
 					// verdict rather than assumed, exactly as in the desktop twin: an
 					// answer about another conversation settles nothing here.
-					refusals = 0;
 					const settled = answer?.attention;
 					if (settled?.unseen === false &&
-						settled.conversation_id === `session/${sessionId}`) acknowledged = true;
+						settled.conversation_id === `session/${sessionId}` &&
+						settled.completion_token === token) acknowledged = true;
+					else unresolved("answer did not settle the rendered completion");
 				})
-				.catch((error: unknown) => {
-					// No optimistic clear, and no latch: a refused receipt (a token the
-					// daemon has superseded, which it now answers with 409) leaves the
-					// authoritative list state intact and the poll running.
-					//
-					// BOUNDED, because "keep polling" is only right while the reason can
-					// still resolve. A superseded refusal cannot resolve by itself -- the
-					// remedy is a projection that names the current token -- so without
-					// this a stale client would re-attempt at the flat cadence for as
-					// long as the tab is open, saying nothing about it. After
-					// FAILURES_BEFORE_BACKOFF consecutive refusals the cadence backs off
-					// and one line says so; a fresh token re-runs this effect with the
-					// counter at zero, so the healthy path pays nothing for the bound.
-					refusals += 1;
-					if (refusals === FAILURES_BEFORE_BACKOFF) {
-						console.warn(
-							`[attention] could not mark ${sessionId} read after ${refusals} attempts; backing off`,
-							error,
-						);
-					}
-					if (refusals >= FAILURES_BEFORE_BACKOFF) {
-						nextAttempt = Date.now() +
-							Math.min(MAX_BACKOFF_MS, CHECK_MS * 2 ** (refusals - FAILURES_BEFORE_BACKOFF + 1));
-					}
-				})
+				.catch((error: unknown) => unresolved(error))
 				.finally(() => { pending = false; });
 		};
 		const timer = window.setInterval(check, CHECK_MS);

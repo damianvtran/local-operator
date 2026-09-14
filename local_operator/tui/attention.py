@@ -124,27 +124,14 @@ def focus_is_measurable(env: Mapping[str, str] | None = None) -> bool:
     return bool(env.get("CMUX_SURFACE_ID")) and sys.platform == "darwin"
 
 
-#: How long an observed INPUT edge stands as evidence that this terminal is in
-#: front of the user. The portable half of the same question
-#: :func:`focus_is_measurable` answers for cmux.
-#:
-#: A key or mouse-down this app RECEIVES is proof the terminal held OS focus
-#: when it was produced: a backgrounded terminal cannot deliver one. That is the
-#: class of evidence Textual itself acts on (``App.on_event`` sets ``app_focus``
-#: for exactly these two event types when it believes the app is blurred) and
-#: the class ``on_app_focus`` carries for a host that reports focus at all. It is
-#: strictly stronger than the OPTIMISTIC ``app_focus=True`` an app starts with,
-#: which says only that startup happened, not that anyone is looking now.
-#:
-#: What such a terminal cannot do is report that the operator LEFT, and that is
-#: why the window is bounded rather than a latch: with no focus reports there is
-#: no blur either, so an unbounded stamp would keep marking later completions
-#: read for the rest of the day with nobody at the screen. Bounded, the cost of
-#: being wrong is one keystroke or click — the same act the operator performs
-#: when they come back to a conversation — while the receipt still cannot be
-#: taken from a terminal that has shown no sign of life. Long enough to cover
-#: the ordinary "asked a question, waited, read the answer" gap; short enough
-#: that a terminal parked in the background stops counting as watched.
+#: Maximum time to finish viewing the EXACT completion witnessed at a key or
+#: mouse-down edge. This is an expiry of token-bound evidence, not a foreground
+#: grace period: an input for A must never authorize B, even a millisecond later.
+#: A catalogue click may carry the already-observed token through asynchronous
+#: transcript loading, but the result must still be visibly rendered at receipt.
+#: Explicit blur and session switches revoke evidence; a measurable host retains
+#: its independent foreground check. Quiet future results on unmeasurable hosts
+#: require a fresh input or a genuine terminal focus report.
 ATTENTION_INPUT_EVIDENCE_S = 120.0
 
 
@@ -153,6 +140,6 @@ def input_evidence_is_fresh(observed_at: float) -> bool:
 
     Its own function because the caller re-asks the question across ``await``
     boundaries and after other evidence may have arrived, and because the window
-    is the whole content of the decision: a stale edge is not evidence.
+    is only an additional fence: freshness cannot replace token identity.
     """
     return bool(observed_at) and (time.monotonic() - observed_at) <= ATTENTION_INPUT_EVIDENCE_S
