@@ -854,6 +854,57 @@ async def _journal_with_record(directory: Path, details: dict[str, Any]) -> None
 
 
 @pytest.mark.asyncio
+async def test_an_unknown_record_keeps_the_cost_field_arithmetic_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1: the field the app adds to must never hold the "cannot state" answer.
+
+    ``published_usd()`` answers ``None`` for a record whose money cannot be
+    stated, and ``_restore_reported_usage`` — the path a host takes whose session
+    offers no ``subscribe_frontend`` — was assigning that ``None`` into
+    ``_total_cost``, a plain ``float`` every reader does arithmetic on. The app's
+    own 1 Hz poll then raised ``TypeError: unsupported operand type(s) for +:
+    'NoneType' and 'int'`` from ``_spend_total``. The unknown is expressed by the
+    CELL (``$—``), never by this field, so a host that takes this path stays safe
+    whether or not any session class today can reach it.
+    """
+    from local_operator.session.spend import SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    directory = tmp_path / "sessions" / "unknown-arm"
+    directory.mkdir(parents=True, exist_ok=True)
+    await _journal_with_record(
+        directory,
+        SessionSpend(micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="w:4").to_details(),
+    )
+    session = await _session_over(directory, [])
+    # The branch under test: a host whose session cannot take a frontend
+    # subscription restores its money through `_restore_reported_usage`.
+    monkeypatch.setattr(session, "subscribe_frontend", None, raising=False)
+
+    async def factory() -> Any:
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 18)) as pilot:
+        await _settled(app, pilot)
+        assert app._status is not None
+        assert app._status._cost == "$—", "nothing priceable is a dash"
+        assert app._total_cost == 0.0, "the cost field is a float, not the unknown"
+        # The reader the reviewer reproduced this through: arithmetic on the
+        # field, reached from the 1 Hz poll.
+        assert isinstance(app._spend_total(), float)
+
+
+@pytest.mark.asyncio
 async def test_one_journal_spells_the_same_cold_and_in_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

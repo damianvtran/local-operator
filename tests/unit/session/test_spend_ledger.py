@@ -1119,6 +1119,55 @@ def _cold_open(
     return asyncio.run(open_cold())
 
 
+def test_the_panel_row_gate_reads_the_money_through_capture(tmp_path: Path) -> None:
+    """R4-2: the row gate is pinned through ``SessionDiagnostics.capture``.
+
+    The round-2 policy tests left this uncovered: one asserted the cold STATE and
+    the other hand-built its diagnostics, so ``capture``'s gate could silently
+    regress to the round-1 ``calls`` gate with the suite green (review R4-2). This
+    drives the real record path — ``adjust_spend``, the turn-end remainder, money
+    with ``calls == 0`` — through the real capture and the real renderer.
+    """
+    from local_operator.analytics.model import SessionReport, UsageAggregate
+    from local_operator.tui.widgets.session_panel import (
+        SessionDiagnostics,
+        build_session_report,
+    )
+
+    session = make_session(tmp_path)
+
+    async def seed() -> None:
+        await session._transcript.append_message(Message.user("hello"))
+        session.adjust_spend(500_000)
+        # Wait on the PUBLICATION the record makes, not on the task handle: the
+        # write is coalesced, so the handle can still be None on the tick after
+        # the accrual. A deadline only so a genuine hang fails the run.
+        async with asyncio.timeout(30):
+            while not session._spend_recorded:
+                await asyncio.sleep(0.01)
+
+    asyncio.run(seed())
+    diagnostics = SessionDiagnostics.capture(session)
+    assert diagnostics.spend_micro == 500_000, "money with no counted calls is money"
+    assert diagnostics.spend_knowledge == "exact"
+    # A ledger with at least one call: the money rows live under the recorded
+    # section, which an empty report renders as "No recorded requests".
+    report = SessionReport(
+        "sess", aggregate=UsageAggregate(calls=1, cost_micro=100_000, cost_known_calls=1)
+    )
+    row = next(
+        line
+        for line in build_session_report(report, diagnostics, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    # The exact row prints the record's own integer with trailing zeros trimmed
+    # (500_000 µ$ = $0.50) — the band's 3dp rung is the BAND's spelling, and the
+    # two surfaces are allowed to differ in digits as long as they agree on the
+    # money (the exact figure is what this row is for).
+    assert "$0.50" in row, row
+    assert "500,000 μ$" in row, row
+
+
 def test_money_decides_and_the_counts_only_describe_provenance() -> None:
     """The policy behind QA round 2's Q1/Q3 and review R3-1.
 

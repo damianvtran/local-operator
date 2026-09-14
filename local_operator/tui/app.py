@@ -9513,7 +9513,13 @@ class OperatorApp(App[None]):
             # ``calls == 0``, and gating on ``calls`` kept that money off the
             # cell and let the one-receipt fallback below paint a floor ABOVE it.
             figure = spend.published_usd()
-            self._total_cost = figure
+            # ``_total_cost`` is a plain float the app ARITHMETICALLY adds to
+            # (``_spend_total`` on the 1 Hz poll, the subagent harvest), so the
+            # "cannot state" answer must not be stored in it: ``None`` here made
+            # the next poll raise ``TypeError: ... 'NoneType' and 'int'`` (review
+            # R4-1). The unknown is expressed by the CELL below, not by this
+            # field, which keeps its contract "money we have added up so far".
+            self._total_cost = figure if figure is not None else 0.0
             self._spend_is_floor = figure is not None and spend.knowledge() in {
                 CostKnowledge.FLOOR,
                 CostKnowledge.PARTIAL,
