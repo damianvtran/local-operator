@@ -136,11 +136,18 @@ stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
   watchdog would kill a worker carrying unrelated tests and report them as an
   infrastructure error rather than as the freeze they are.
 
-It is fully headless (Textual's `run_test()` pilot, no window, no display, no
-TTY) and uses no API key, so its CI job carries **no fork gate** — unlike
-`cli-sanity`/`server-sanity`, whose live-LLM secrets force one. That is
-deliberate: the resume-liveness assertion is the regression guard, so it has to
-run on every PR including forks.
+Most of it is headless (Textual's `run_test()` pilot, no window, no display),
+but not all of it, and the exception is load-bearing: a few members drive the
+real console script in a real **pty** — `test_terminal_close_survives_e2e.py`,
+and `test_tui_boot_e2e.py`, which feeds the raw bytes a legacy X10 mouse
+terminal sends. The pilot paints into an in-memory compositor and never reads
+stdin, so a failure in the terminal INPUT path is invisible to a pilot-only
+test; 0.54.37's production crash was exactly that (a strict UTF-8 decode on the
+driver's input thread, raised by three raw coordinate bytes), and those pty
+members are what makes it observable. It uses no API key, so its CI job
+carries **no fork gate** — unlike `cli-sanity`/`server-sanity`, whose live-LLM
+secrets force one. That is deliberate: the resume-liveness assertion is the
+regression guard, so it has to run on every PR including forks.
 
 **It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
 one that makes it a regression guard.** The deadlock is a macOS/BSD property —
