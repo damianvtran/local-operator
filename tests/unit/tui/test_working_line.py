@@ -609,7 +609,17 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         # thing — the failure mode the whole design round guards.
         session.phase = ("responding", time.time() - aged)
         app._refresh_working_activity()
-        assert _clock_seconds(line._clock_text()) < 5, line._clock_text()
+        # RELATIVE to the seed, not an absolute second count. The row has fallen
+        # back to its OWN zero, so this reading IS the wall time the test has
+        # spent since that switch — which a contended suite stretches to seconds
+        # and which an absolute bound therefore turns into a red gate on a busy
+        # machine (this assertion read 5.0s inside a full-suite run on a loaded
+        # host and passed 8/8 in isolation). Half the 27 s seed keeps the
+        # discrimination this assertion exists for: the defect it guards reports
+        # the FOREIGN phase's age, ~27 s, twice this bound, so a row that did not
+        # fall back still fails. Still a bound, not an equality — the reading
+        # keeps growing while the test runs.
+        assert _clock_seconds(line._clock_text()) < aged / 2, line._clock_text()
 
 
 @pytest.mark.asyncio
@@ -633,7 +643,7 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
     so a fix cannot pass by withholding every fallback.
     """
     aged = 27.0  # the reviewer's probe used 10m to make the number unmissable;
-    # any seed older than the 5s bound below fails the same way, and `27s`
+    # any seed older than the relative bound below fails the same way, and `27s`
     # keeps `_clock_seconds` reading the row's own grammar (a 10m reading is
     # `10m`, not `600s`).
     session = _PhaseSession("thinking", time.time() - aged)
@@ -658,7 +668,12 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
         await pilot.pause()
         assert _activity(app) == "compacting context"
         shown = _clock_seconds(line._clock_text())
-        assert shown < 5, (
+        # `aged / 2`, not `5`: this reading is the test's own elapsed wall time
+        # since the pass began (see the sibling clock assertions above), so an
+        # absolute second bound measures the machine rather than the product.
+        # The number it must be distinct from is the 27 s seed, so half of it
+        # still separates the two by 2x while tolerating seconds of contention.
+        assert shown < aged / 2, (
             f"a freshly started `compacting context` row reads {shown}s: the fold's "
             "thinking zero was supplied for a label the fold does not derive"
         )
@@ -669,7 +684,11 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
         await pilot.pause()
         assert _activity(app) == "retrying (attempt 2)"
         shown = _clock_seconds(line._clock_text())
-        assert shown < 5, (
+        # Same relative bound, same reason: this row counts from the retry's own
+        # start, which is inside this test body, so an absolute second bound
+        # would be measuring the suite's load. Half the seed still separates the
+        # retry's zero from the failed attempt's age by 2x.
+        assert shown < aged / 2, (
             f"a freshly started retry row reads {shown}s: the previous attempt's "
             "zero was supplied for a label the fold does not derive"
         )
