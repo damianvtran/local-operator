@@ -35,6 +35,40 @@ logger = logging.getLogger(__name__)
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
 
+#: The machine token a surface reads to tell "your token is stale, re-arm from
+#: the state I just returned" apart from a failure worth backing off on. Part of
+#: the wire contract because the clients must act DIFFERENTLY on the two, and
+#: message text is not a contract (the desktop error object carries it as
+#: `code`, the mobile body as `code`).
+SUPERSEDED_TOKEN_CODE = "superseded_completion_token"
+
+
+class SupersededCompletionToken(ValueError):
+    """A real token for this conversation that is no longer the current one.
+
+    SUBCLASSES ``ValueError`` so every surface that already maps "unknown
+    completion token" to 409 -- the desktop route's error ladder, the mobile
+    `/seen` route, the runtime op -- keeps that mapping without a per-surface
+    change, and a caller that catches ``ValueError`` cannot miss this one. The
+    separate TYPE is what lets a surface that cares name the remedy instead of
+    the generic sentence.
+
+    RAISED INSTEAD OF ANSWERED, and that is the whole point (see
+    :meth:`AttentionStore.acknowledge`). A superseded acknowledgement used to
+    return a 200 whose body said `unseen: true` and whose receipt had not moved:
+    a client that treats any resolved call as "read" (both shipped clients did)
+    latched forever, and the operator's completion checkmark never cleared.
+    """
+
+    code = SUPERSEDED_TOKEN_CODE
+
+    def __init__(self) -> None:
+        super().__init__(
+            "completion token superseded by a newer completion; "
+            "acknowledge the conversation's current token"
+        )
+
+
 #: Named once because BOTH the minting side (`provisional_anchor`) and the
 #: recognising side (`_supersedes_provisional`, on the stored AND the incoming
 #: anchor) key on this exact shape; a literal in one of them drifting from the
@@ -965,7 +999,33 @@ class AttentionStore:
             return (row[0], row[1], supersedes)
 
     def acknowledge(self, conversation: str, token: str) -> dict[str, Any]:
-        """Advance only through the observed token, never through server 'now'."""
+        """Advance only through the observed token, never through server 'now'.
+
+        THE TOKEN MUST BE THE CONVERSATION'S CURRENT COMPLETION, or the
+        conversation must already be read. Anything else raises
+        :class:`SupersededCompletionToken`, so a 200 from this method means one
+        thing and only one: *this conversation is read now* (`unseen` false).
+
+        WHY THE OLDER TOKEN IS REFUSED RATHER THAN RECORDED. The watermark is
+        monotonic, so acknowledging an older token could only ever move the
+        receipt to that token's sequence -- which, while a newer completion is
+        still unseen, is a movement no surface can observe: `unseen` is computed
+        against the NEWEST sequence, so the conversation stays unread either way.
+        Returning 200 for it is what made the no-op indistinguishable from a read
+        (the operator's defect: the desktop app sent a superseded token, got a
+        200, latched, and its checkmark never cleared). The honest answer is that
+        the caller is looking at a result the conversation has moved past: refuse
+        it, hand back the state, and let the caller re-read the token that is
+        current. A DELAYED OR DUPLICATE RECEIPT STILL CONVERGES -- that is the
+        case where the conversation is already read, and there this method answers
+        with the read state exactly as before, which is what out-of-order
+        delivery of a buffered receipt needs.
+
+        The whole decision is made inside the write transaction: ``BEGIN
+        IMMEDIATE`` serialises it against a concurrent :meth:`publish`, so the
+        current sequence this compares against cannot be advanced under it, and
+        the state returned was computed from the same snapshot.
+        """
         if not isinstance(token, str) or len(token) != 36 or not self.path.exists():
             raise ValueError("unknown completion token")
         with closing(self._connect()) as conn, conn:
@@ -976,6 +1036,18 @@ class AttentionStore:
             ).fetchone()
             if row is None:
                 raise ValueError("unknown completion token")
+            current = conn.execute(
+                "SELECT COALESCE(MAX(sequence),0), "
+                "COALESCE((SELECT acknowledged FROM receipts WHERE conversation=?),0)"
+                " FROM completions WHERE conversation=?",
+                (conversation, conversation),
+            ).fetchone()
+            # `current[0] == 0` is a conversation with no completions at all,
+            # which cannot happen for a token that was just found. Acknowledged
+            # past the newest sequence is the already-read case: a reordered or
+            # duplicate receipt lands here and must keep converging.
+            if row[0] != current[0] and current[1] < current[0]:
+                raise SupersededCompletionToken
             conn.execute(
                 "INSERT INTO receipts(conversation,acknowledged) VALUES(?,?) "
                 "ON CONFLICT(conversation) DO UPDATE SET acknowledged="
