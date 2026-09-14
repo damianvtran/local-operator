@@ -858,40 +858,46 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     of a loose file it finds). On this path that is a WRITE on a read: ``/info``
     exists to describe a host — including a broken one — and leaving new state
     on it is the same fault class as ``check_latest()`` rewriting the cache,
-    which this module's docstring bans outright. ``_UNREADABLE_ROOT`` covers only
-    the unresolvable-root case, and the desktop route is what made this probe
-    reachable from another process without a human opening the screen.
+    which this module's docstring bans outright. The read-only construction and
+    the "a missing store is no credentials, an unreadable one raises" policy
+    both live on the class now (``CredentialManager.read_key_names``); what is
+    left here is the collector's own policy about the ROOT.
 
-    So the manager is built through ``__new__``, which skips the ensure step, and
-    only its OWN ``load_from_file`` parser runs: one reader of the store's format
-    in the tree rather than two, which a hand-rolled parser here would cost. A
-    missing file is "no credentials recorded", not an error to create one for,
-    and an unreadable one still raises into ``_safe`` and is reported as
-    degraded. ``config_dir`` is set beside ``config_file`` so the instance stays
-    coherent for any further read method reached from here later.
+    ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
+    previous form short-circuited on ``is_file()``, which is False on the
+    unresolvable-root sentinel, so the probe returned ``()`` — indistinguishable
+    to ``_safe`` from a genuinely empty store. ``env.credentials`` therefore
+    dropped out of the degraded block and the panel stated "no credentials"
+    about a host it had never managed to look at (review round 2, F2). Raising
+    here is the disclosure ``profiles`` and ``teams`` already get.
     """
-    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
+    from local_operator.credentials import CredentialManager
 
-    path = root / CREDENTIALS_FILE_NAME
-    if not path.is_file():
-        return ()
-    manager = CredentialManager.__new__(CredentialManager)
-    manager.config_dir = root
-    manager.config_file = path
-    manager.load_from_file()
-    return tuple(manager.list_credential_keys())
+    return tuple(CredentialManager.read_key_names(_require_root(root)))
 
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
 #: Deliberately a path that cannot exist and cannot be created, so a probe whose
 #: constructor would otherwise MATERIALISE a store (``CredentialManager`` writes
 #: a ``credentials.env``) fails into `_safe` and is reported as degraded,
-#: instead of silently writing into the process's current directory. `/info`
-#: reads; it must never leave anything behind on the host it is describing.
-#: The credential probe no longer needs the sentinel for that (see
-#: :func:`_credential_key_names`, which cannot create a store at all), but
-#: ``AgentRegistry`` and the other probes still construct their stores here, so
-#: the sentinel keeps its job for them.
+#: instead of silently writing into the process's current directory.
+#:
+#: What `/info` may leave behind on the host it describes is the credential
+#: store: it is neither created nor re-tightened, because the probe reads
+#: through ``CredentialManager.read_key_names`` (review round 2, F3). The
+#: registry scan this same snapshot runs is a different case and is accepted as
+#: it stands — ``registry.scan`` is the ONE implementation ``lop sessions`` also
+#: calls, and reading a shared registry means doing its housekeeping: it creates
+#: ``<config>/run/mobile/`` (0700, idempotent) and reaps records whose pid is
+#: gone. The claim here is only that this read does not write the things it
+#: reads, not that an absolute no-touch of the host is achievable.
+#:
+#: The credential probe still needs this sentinel even though it can no longer
+#: CREATE a store: on an unresolvable root it must RAISE (see
+#: :func:`_credential_key_names`) so ``_safe`` names it in the degraded block,
+#: rather than reporting an authoritative empty list about a host it never
+#: looked at. ``AgentRegistry`` and the other probes still construct their
+#: stores here, so the sentinel keeps its original job for them.
 _UNREADABLE_ROOT = Path("/nonexistent/local-operator-info-unreadable-config-root")
 
 

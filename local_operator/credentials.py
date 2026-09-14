@@ -58,10 +58,52 @@ class CredentialManager:
     credentials: Dict[str, SecretStr]
 
     def __init__(self, config_dir: Path) -> None:
-        self.config_dir = config_dir
-        self.config_file = self.config_dir / CREDENTIALS_FILE_NAME
+        self._bind(config_dir)
         self._ensure_config_exists()
         self.load_from_file()
+
+    def _bind(self, config_dir: Path) -> None:
+        """Point this instance at ``config_dir``. The ONE place the paths are set.
+
+        Both construction paths come through here — ``__init__`` and
+        :meth:`read_key_names` — so state a reader needs cannot be added to one
+        of them and silently missing from the other. Anything that WRITES
+        (creating the store, tightening its mode) goes in ``__init__`` after
+        this call, because ``read_key_names`` deliberately runs none of
+        ``__init__``'s body past this method.
+        """
+        self.config_dir = config_dir
+        self.config_file = config_dir / CREDENTIALS_FILE_NAME
+
+    @classmethod
+    def read_key_names(cls, config_dir: Path, *, non_empty: bool = True) -> List[str]:
+        """Credential KEY NAMES from the store at ``config_dir``, read WITHOUT creating it.
+
+        ``__init__`` calls ``_ensure_config_exists()``, which creates the config
+        directory and an empty ``credentials.env`` and re-tightens the mode of a
+        loose file it finds. That is correct for a writer and wrong for a
+        READ-ONLY consumer: ``/info`` exists to describe a host — including a
+        broken one — and a diagnostic that leaves new state (or new permissions)
+        on the machine it is describing is the fault class that bans
+        ``update.check_latest()`` from that path. The class therefore owns the
+        read-only construction rather than letting callers reach past
+        ``__init__`` with ``__new__`` from a sibling module: the post-conditions
+        of construction stay in one file, and an edit to :meth:`_bind` or to the
+        parser has one place to keep true.
+
+        A store that does not exist is an ANSWER — "no credentials recorded" —
+        and returns ``[]``; it is not a reason to create one. A store that IS
+        there but cannot be read (``EACCES`` on the file or on its directory, a
+        symlink loop) still raises: "none set" and "could not look" are
+        different answers, and the caller reports the raise as degraded instead
+        of as an authoritative empty list.
+        """
+        if not (config_dir / CREDENTIALS_FILE_NAME).is_file():
+            return []
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        manager.load_from_file()
+        return manager.list_credential_keys(non_empty=non_empty)
 
     def load_from_file(self) -> Dict[str, SecretStr]:
         """Load credentials from the config file."""

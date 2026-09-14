@@ -760,13 +760,20 @@ def test_a_degraded_collect_writes_nothing_into_the_current_directory(tmp_path: 
 
 
 def test_a_registry_that_returns_zero_on_a_missing_root_is_still_degraded() -> None:
-    """Q8: a count read from an unresolvable config root is not a measurement.
+    """Q8 + F2: a count or a list read from an unresolvable root is not a measurement.
 
-    `AgentRegistry.list_agents` and `CredentialManager.list_credential_keys`
-    both RAISE on the unreadable sentinel and were correctly caught. But
-    `TeamRegistry.list_teams` walks a missing directory and returns 0, so on an
-    unresolvable home `teams` rendered a plausible `0` with NO degraded entry
-    naming it anywhere — the one field on the screen with no honest marker.
+    `AgentRegistry.list_agents` RAISES on the unreadable sentinel and was
+    correctly caught. But `TeamRegistry.list_teams` walks a missing directory and
+    returns 0, so on an unresolvable home `teams` rendered a plausible `0` with
+    NO degraded entry naming it anywhere — the one field on the screen with no
+    honest marker.
+
+    The credential probe failed the same way one round later (review round 2,
+    F2) and failed INVISIBLY: its `is_file()` short-circuit returned `()`, which
+    is also `_safe`'s fallback, so `env.credential_keys` was `[]` with and
+    without the disclosure and only the degraded ROW told "no credentials
+    recorded" apart from "could not look". Both halves are asserted here so a
+    refactor around the shared sentinel cannot quietly lose either one.
 
     Keyed on the sentinel rather than on the value, because 0 is a legitimate
     answer on a machine that genuinely has no teams; suppressing every zero
@@ -783,15 +790,18 @@ def test_a_registry_that_returns_zero_on_a_missing_root_is_still_degraded() -> N
     try:
         errors: list[tuple[str, str]] = []
         agents = collect_agents(LiveState(), errors)
+        env = collect_env(LiveState(), errors)
     finally:
         paths.config_dir = original  # type: ignore[assignment]
 
     named = {name for name, _ in errors}
     assert "agents.teams" in named, f"teams must be named as unreadable, got {named}"
     assert "agents.profiles" in named
-    # The value is still the dataclass default; it is the DEGRADED entry that
-    # makes the screen render `—` instead of that default.
+    assert "env.credentials" in named, f"credentials must be named as unreadable, got {named}"
+    # The values are still the dataclass defaults; it is the DEGRADED entries
+    # that make the screen render `—` instead of those defaults.
     assert agents.teams == 0
+    assert env.credential_keys == ()
 
 
 # -- the fleet tally ----------------------------------------------------------
