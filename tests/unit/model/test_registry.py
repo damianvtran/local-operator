@@ -1,5 +1,6 @@
 import pytest
 
+from local_operator.model import configure
 from local_operator.model.configure import build_model_spec
 from local_operator.model.registry import (
     ModelInfo,
@@ -12,6 +13,7 @@ from local_operator.model.registry import (
     get_model_info,
     qwencloud_token_plan_models,
     static_models,
+    unknown_model_info,
 )
 
 
@@ -582,6 +584,335 @@ def test_an_arbitrary_aggregator_model_keeps_the_unknown_sentinels(provider: str
     info = get_model_info(provider, "some-vendor/never-heard-of-it")
     assert info.context_window == -1
     assert info.supports_images is False
+
+
+# -- provider-QUALIFIED ids resolve as their bare id -------------------------
+#
+# The defect these pin: a session whose model is spelled with its PROVIDER —
+# ``deepseek/deepseek-flash``, which is the shape a user-supplied ``model_name``,
+# a ``--model`` flag, a ``retry.fallbackChains`` hop and a session's own saved
+# selection all hand to ``configure.build_model_spec`` — missed the shipped row
+# exactly. ``get_model_info`` fell to ``unknown_model_info`` (-1), which
+# ``build_model_spec`` normalises into the 128k unknown default, so a 1M-context
+# model resumed as 128k with ``max_output_tokens`` dropping 393216 -> 8192 and a
+# compaction threshold eight times too small. Observed on this machine: session
+# ``de71e4dbcbff`` (titled ``ds-route-smoke``) journalled the selector
+# ``deepseek/deepseek/deepseek-flash`` and DeepSeek answered ``400 ... The
+# supported API model names are deepseek-flash, deepseek-v4-pro, but you passed
+# deepseek/deepseek-flash.``
+
+
+@pytest.mark.parametrize(
+    "hosting, bare_id",
+    [
+        ("deepseek", "deepseek-flash"),
+        ("deepseek", "deepseek-v4-pro"),
+        ("deepseek", "deepseek-chat"),
+        ("anthropic", "claude-opus-5"),
+        ("openai", "gpt-4o"),
+        ("google", "gemini-2.0-flash-001"),
+        ("xai", "grok-4.6"),
+        ("zai", "glm-5.3"),
+        ("kimi", "moonshot-v1-8k"),
+        ("mistral", "mistral-large-2411"),
+        ("alibaba", "qwen2.5-coder-32b-instruct"),
+    ],
+)
+def test_a_qualified_id_resolves_to_the_same_row_as_its_bare_id(hosting: str, bare_id: str) -> None:
+    """``<hosting>/<id>`` and ``<id>`` must be one model, on every hosting.
+
+    Field-by-field rather than by identity so the assertion still means
+    "the same model" if the lookup ever starts copying rows instead of handing
+    out the shipped singletons.
+    """
+    bare = get_model_info(hosting, bare_id)
+    qualified = get_model_info(hosting, f"{hosting}/{bare_id}")
+
+    assert bare is not unknown_model_info, "the bare id must be a real row for this test to bite"
+    assert qualified is not unknown_model_info
+    assert qualified.id == bare.id
+    assert qualified.name == bare.name
+    assert qualified.context_window == bare.context_window
+    assert qualified.max_tokens == bare.max_tokens
+    assert qualified.input_price == bare.input_price
+    assert qualified.output_price == bare.output_price
+
+
+def test_the_deepseek_qualified_id_carries_its_real_1m_window() -> None:
+    """The reported symptom, with the operator's own numbers.
+
+    Named separately from the parametrized agreement test because agreeing on
+    ``-1`` would satisfy that one: these are the two numbers the operator saw
+    wrong (128k and 8192) against the row's real ones.
+    """
+    qualified = get_model_info("deepseek", "deepseek/deepseek-flash")
+
+    assert qualified.context_window == 1_000_000
+    assert qualified.max_tokens == 393_216
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "radient"])
+def test_an_aggregator_vendor_namespace_is_never_stripped(provider: str) -> None:
+    """The trap: an aggregator's ``vendor/id`` is the API's id, not a prefix.
+
+    ``deepseek/deepseek-v4.1-flash`` under ``openrouter`` names OpenRouter's
+    route to a DeepSeek model, and the harness passes it through whole (the
+    failover selector splits on the FIRST slash, so ``provider='openrouter'``
+    and ``model_id='deepseek/deepseek-v4.1-flash'``). A retry that stripped any
+    leading ``vendor/`` would answer with DeepSeek's DIRECT-route row: a 1M
+    window and direct-route prices for a model served over a reseller, which is
+    the silent-wrong-answer shape this retry must not introduce.
+    """
+    direct = get_model_info("deepseek", "deepseek-flash")
+    vendor = configure._registry_fallback(provider, "deepseek/deepseek-v4.1-flash")
+
+    assert direct.context_window == 1_000_000
+    assert vendor.context_window == -1, "the aggregator placeholder, not DeepSeek's row"
+    assert vendor.supports_images is False
+    assert vendor is not direct
+
+    # The route id also has to travel WHOLE to the wire: the reseller bills and
+    # routes by it, so a rewrite here would be a request for a model this
+    # provider's endpoint does not serve.
+    spec = build_model_spec(provider, "deepseek/deepseek-v4.1-flash", vendor)
+    assert spec.model_id == "deepseek/deepseek-v4.1-flash"
+
+
+@pytest.mark.parametrize("hosting", ["xai", "zai", "kimi", "anthropic", "google"])
+def test_only_the_hosting_that_names_itself_is_stripped(hosting: str) -> None:
+    """A prefix naming ANOTHER provider must not resolve to that provider's row.
+
+    ``deepseek/deepseek-flash`` asked of ``xai`` is not an xAI model, and the
+    honest answer is the unknown sentinel rather than DeepSeek's 1M row.
+    """
+    info = get_model_info(hosting, "deepseek/deepseek-flash")
+
+    assert info.context_window == -1
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "totally-unknown-xyz",
+        "deepseek/totally-unknown-xyz",
+        # A bare ``deepseek/`` is a malformed id, not a qualified one: the
+        # trailing id is empty, so there is nothing to retry and the unknown
+        # sentinel must stand rather than resolving to something by accident.
+        "deepseek/",
+        "deepseek/deepseek/",
+    ],
+)
+def test_an_unknown_id_still_takes_the_unknown_sentinel(model: str) -> None:
+    """The 128k fallback must stay reachable rather than weakened into a lie.
+
+    The retry is bounded by the dispatch chain's own answer, so an id nothing
+    knows — however it is spelled — keeps returning ``unknown_model_info`` and
+    its -1 sentinels; ``build_model_spec``'s 128k normalisation is the honest
+    answer there.
+    """
+    assert get_model_info("deepseek", model) is unknown_model_info
+
+
+def test_the_openai_branchs_miss_shape_is_preserved() -> None:
+    """``openai`` indexes its map directly, so its miss is a ``KeyError``.
+
+    That shape is a contract: ``configure._registry_fallback`` catches it, and a
+    bare unshipped openai id must keep failing exactly as it did before the
+    qualified-id retry existed — while the QUALIFIED spelling of a shipped id
+    must resolve like the bare one rather than raising.
+    """
+    assert get_model_info("openai", "gpt-4o").id == "gpt-4o"
+    assert get_model_info("openai", "openai/gpt-4o").id == "gpt-4o"
+
+    with pytest.raises(KeyError):
+        get_model_info("openai", "no-such-openai-model")
+    with pytest.raises(KeyError):
+        get_model_info("openai", "openai/no-such-openai-model")
+
+
+def test_the_oauth_spelling_of_the_token_plan_hosting_resolves_too() -> None:
+    """R2: the retry must not be gated on a table that omits a supported alias.
+
+    ``alibaba-token-plan-oauth`` is answered by the dispatch chain under the
+    CANONICAL ``alibaba-token-plan`` rows, so the qualified spelling used to miss
+    while the bare id resolved — the same defect one supported hosting over.
+    Gating the retry on the chain's own answer (the unknown sentinel) rather than
+    on ``_STATIC_MODEL_MAPS`` is what closes it, without adding the alias key to
+    a map that is documented walk-safe for ``static_models``.
+    """
+    bare = get_model_info("alibaba-token-plan-oauth", "deepseek-v4-flash-0731")
+    qualified = get_model_info(
+        "alibaba-token-plan-oauth", "alibaba-token-plan-oauth/deepseek-v4-flash-0731"
+    )
+
+    assert bare.context_window == 1_000_000
+    assert bare is not unknown_model_info
+    assert qualified.context_window == bare.context_window
+    assert qualified.id == bare.id
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lmstudio"])
+def test_a_local_models_own_name_is_never_stripped(provider: str) -> None:
+    """A local runtime's ids are the SERVER's names, not a provider namespace.
+
+    Both Ollama and LM Studio will serve an owner-prefixed HuggingFace name, so
+    stripping a leading ``<hosting>/`` there would ask the endpoint for a
+    different model.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    for model_id in (f"{provider}/hf.co/owner/model:Q4", "hf.co/owner/model:Q4"):
+        assert build_model_spec(provider, model_id).model_id == model_id
+
+
+#: OpenRouter's own namespaced ids — real rows in its public catalogue, none of
+#: which has a bare counterpart (there is no `auto`/`free`/`fusion` model).
+#: F1: the spec-boundary strip treated the aggregator's own name as a PROVIDER
+#: prefix, rewrote each of these to its tail, and put a name no provider serves
+#: into the request body — a working model failing its first turn.
+_OPENROUTER_NAMESPACED_IDS = (
+    "openrouter/auto",
+    "openrouter/auto-beta",
+    "openrouter/fusion",
+    "openrouter/pareto-code",
+    "openrouter/free",
+    "openrouter/bodybuilder",
+)
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "radient"])
+@pytest.mark.parametrize("model_id", _OPENROUTER_NAMESPACED_IDS)
+def test_an_aggregators_own_namespace_survives_the_spec_boundary(
+    provider: str, model_id: str
+) -> None:
+    """An aggregator's ids travel WHOLE, asserted on the RENDERED body.
+
+    ``spec.model_id`` is not a label — ``providers/clients.py::_build_body`` sets
+    ``"model": request.model.model_id`` — so an id-equality assertion alone is
+    the reason F1 had no test that could fail. This renders the body through the
+    real client, for each of the six published ids on both aggregator hostings.
+
+    ``radient-key`` is deliberately not a case: it sits in
+    ``AGGREGATOR_PROVIDERS`` but is not a hosting ``configure_model`` accepts at
+    all (it raises ``Unsupported hosting provider``), so its membership only
+    matters to the exclusion set, not to a spec build.
+    """
+    from local_operator.harness.types import ChatRequest, Message, TextContent
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import OpenAICompatClient
+
+    info = get_model_info(provider, model_id)
+    spec = build_model_spec(provider, model_id, info)
+    body = OpenAICompatClient("https://example.invalid")._build_body(
+        ChatRequest(model=spec, messages=[Message(role="user", content=[TextContent(text="hi")])])
+    )
+
+    assert spec.model_id == model_id
+    assert body["model"] == model_id
+
+
+def test_the_aggregator_exclusion_does_not_loosen_the_vendor_trap() -> None:
+    """The exclusion is by HOSTING, so the vendor-namespace rule still holds.
+
+    An id whose prefix names another provider under an aggregator hosting is
+    still never rewritten, and a direct hosting whose model name carries its own
+    prefix is still canonicalised (the deepseek case this PR exists for).
+    """
+    from local_operator.model.configure import build_model_spec
+
+    assert (
+        build_model_spec(
+            "openrouter", "deepseek/deepseek-v4.1-flash", get_model_info("openrouter", "x")
+        ).model_id
+        == "deepseek/deepseek-v4.1-flash"
+    )
+    assert build_model_spec("deepseek", "deepseek/deepseek-flash").model_id == "deepseek-flash"
+    assert build_model_spec("deepseek", "deepseek-flash").model_id == "deepseek-flash"
+
+
+def test_the_anthropic_family_resolver_and_template_still_answer() -> None:
+    """The two answers that exist for ids the registry does not ship.
+
+    Neither may be reached differently now: the family resolver owns a dated
+    snapshot's real window (Opus 5 serves 1M), and the template owns the floor
+    for an id whose tier cannot be parsed at all — the global unknown sentinel
+    would put 128k/8192 on a Claude, numbers no Claude generation has had.
+    """
+    family = anthropic_family_model_info("claude-opus-5-20260112")
+    assert family is not None
+    assert family.context_window == 1_000_000
+
+    templated = configure._registry_fallback("anthropic", "claude-unheard-of-6")
+    assert templated is not unknown_model_info
+    assert templated.context_window == 200_000
+    assert templated.id == "claude-unheard-of-6"
+
+
+@pytest.fixture
+def offline_resolution(monkeypatch, tmp_path):
+    """Resolve metadata with neither a network nor a shared disk cache.
+
+    The enrichment legs are held at the registry's own answer, so a window that
+    moves here can only have moved in the registry — which is the layer this
+    change touches.
+    """
+    configure.invalidate_model_info_cache()
+    monkeypatch.setattr(configure, "_from_price_catalogue", lambda p, m, info, **kw: info)
+    monkeypatch.setattr(configure, "_from_aggregator_catalogue", lambda p, m, info, **kw: info)
+    from local_operator.model import discovery as discovery_mod
+
+    monkeypatch.setattr(discovery_mod, "available_models", lambda provider_id, **kw: ([], "ok"))
+    yield
+    configure.invalidate_model_info_cache()
+
+
+def test_the_spec_built_from_a_qualified_id_carries_the_real_window(
+    offline_resolution,
+) -> None:
+    """The user-visible half: the SPEC the session runs on, not the registry row.
+
+    Compaction thresholds derive from ``ModelSpec.context_window`` and the wire
+    from ``max_output_tokens``, so this is the assertion that matches what the
+    operator saw (128k) and what the fix must produce (1M / 393216).
+    """
+    bare = build_model_spec("deepseek", "deepseek-flash")
+    qualified = build_model_spec("deepseek", "deepseek/deepseek-flash")
+
+    assert bare.context_window == 1_000_000
+    assert qualified.context_window == bare.context_window
+    assert bare.max_output_tokens == 393_216
+    assert qualified.max_output_tokens == bare.max_output_tokens
+
+
+def test_the_spec_canonicalises_a_qualified_model_name_for_the_wire(
+    offline_resolution,
+) -> None:
+    """R1: the wire's model field must be the id the provider actually serves.
+
+    ``build_model_spec`` is the ONE boundary every path builds a spec through, so
+    it is where the ``provider/model`` selector spelling is canonicalised. The
+    body is rendered through the real client, because ``spec.model_id`` is not a
+    label — it is literally what the request carries. Measured live against
+    ``api.deepseek.com``: the bare spelling answers HTTP 200 and the qualified
+    one HTTP 400 ("The supported API model names are deepseek-flash,
+    deepseek-v4-pro, but you passed deepseek/deepseek-flash.").
+    """
+    from local_operator.harness.types import ChatRequest, Message, TextContent
+    from local_operator.providers.clients import OpenAICompatClient
+
+    client = OpenAICompatClient("https://api.deepseek.com")
+    seen = []
+    for model_id in ("deepseek-flash", "deepseek/deepseek-flash"):
+        spec = build_model_spec("deepseek", model_id)
+        body = client._build_body(
+            ChatRequest(
+                model=spec, messages=[Message(role="user", content=[TextContent(text="hi")])]
+            )
+        )
+        seen.append(body["model"])
+        assert spec.model_id == "deepseek-flash"
+
+    assert seen == ["deepseek-flash", "deepseek-flash"]
 
 
 @pytest.mark.parametrize("provider", ["radient", "openrouter"])

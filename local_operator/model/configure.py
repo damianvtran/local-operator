@@ -50,6 +50,7 @@ from local_operator.model.effort import (
 from local_operator.model.ids import normalised_id as _normalised_id
 from local_operator.model.registry import (
     ModelInfo,
+    _hosting_qualified_bare_id,
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
@@ -596,7 +597,30 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     are derived from ``context_window``, so an under-reported window compacts a
     conversation that had eight times the room, and an absent one disables
     compaction until the provider rejects the request.
+
+    The model NAME is canonicalised here, at the one boundary every path builds a
+    spec through — the resume of a stored selection, a fallback hop, ``/model``,
+    a tier, the server, ``ModelConfiguration`` — because ``model_id`` is not a
+    label: it is what the request body carries (``providers/clients.py
+    ::_build_body``, ``"model": request.model.model_id``). A caller that spells
+    the name ``<hosting>/<id>``, which is this harness's own ``provider/model``
+    selector spelling, would otherwise put a name the provider has never heard of
+    on the wire. Measured against ``api.deepseek.com``: ``deepseek-flash`` → HTTP
+    200, ``deepseek/deepseek-flash`` → HTTP 400 "The supported API model names are
+    deepseek-flash, deepseek-v4-pro, but you passed deepseek/deepseek-flash."
+    Canonicalising here also lets every rule below read the real id — the family
+    and thinking-mode matches, the effort ladder, ``direct_deepseek``.
+
+    The strip is ONE leading ``<hosting>/`` and only when that prefix names THIS
+    hosting (see :func:`~local_operator.model.registry
+    ._hosting_qualified_bare_id`), so an aggregator's genuine vendor namespace is
+    never rewritten; aggregator and local hostings are excluded outright there,
+    because both serve ids that legitimately begin with their own name
+    (``openrouter/auto``; ``ollama/hf.co/...``).
     """
+    bare_name = _hosting_qualified_bare_id(hosting, model_name)
+    if bare_name is not None:
+        model_name = bare_name
     from local_operator.providers.registry import (
         AGGREGATOR_PROVIDERS,
         get_provider_definition,
