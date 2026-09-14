@@ -4391,12 +4391,28 @@ class AttachedSession:
             and not self._model_selection_override
             and (
                 self._birth_model is None
-                or (self._birth_model.provider, self._birth_model.model_id)
-                != (selected.provider, selected.model_id)
+                # Compared as the TRIPLE: the level is part of the sample. A
+                # successor seeded from a pair-only record is constructed with no
+                # ``LOP_MOBILE_CHILD_EFFORT`` and silently drops to its own
+                # resolved level (review round 1, R2) — so a level-only change on
+                # an attached owner refreshes the sample too.
+                or (
+                    self._birth_model.provider,
+                    self._birth_model.model_id,
+                    self._birth_model.reasoning_effort,
+                )
+                != (selected.provider, selected.model_id, selected.reasoning_effort)
             )
             and get_provider_definition(selected.provider) is not None
         ):
-            self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
+            # Carry the level the owner actually reported: the sample exists so a
+            # successor can be constructed on what this conversation was running,
+            # and "which model" without "at which effort" is half of that.
+            self._birth_model = ModelSpec(
+                provider=selected.provider,
+                model_id=selected.model_id,
+                reasoning_effort=selected.reasoning_effort,
+            )
         if changed_fields is None or "jobs" in changed_fields:
             self.jobs.replace(state.jobs)
             self._subagent_comms.replace(state.jobs)

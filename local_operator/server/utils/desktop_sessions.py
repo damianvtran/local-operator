@@ -199,6 +199,48 @@ def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] |
     }
 
 
+def birth_effort_for(spec: ModelSpec, chosen: str | None, root: Path) -> str | None:
+    """The level a birth on ``chosen`` will RUN at, from a spec and the machine.
+
+    TWO callers need this answer and must not answer it twice: the desktop plane,
+    which seeds a real session out of its marker (:func:`draft_birth_selection`),
+    and the DRAFT PREVIEW, which reports the readings the first turn will get
+    before any session exists. A second policy would show the pane's effort chip
+    flicker at ``finishDraft`` — the same defect class ``session.cold_model``
+    exists to remove.
+
+    Three cases, in order:
+
+    * a level was CHOSEN: clamped against this spec's ladder (``resolve_effort_in``)
+      rather than refused. The marker is a durable record and the catalogue moves
+      under it, so a level the route can no longer express must land on the nearest
+      rung it can rather than reach the child as one it would 400 on; the route
+      refuses such a level at the moment it is CHOSEN (422).
+    * no level was chosen and the machine CONFIGURES one (``model_effort``): that
+      level, clamped into the picked model's ladder — i.e. exactly what a launch
+      that named no model resolves for itself, so picking a model alone never
+      silently replaces the configured level with the model's seeded rung.
+    * no level was chosen and the config expresses no opinion: the spec's own
+      seeded rung, which is what the child would construct for itself anyway, and
+      which the caller must therefore carry explicitly — the birth sample travels
+      the owner's model RPC as well as the spawn environment, and that RPC rebuilds
+      the spec from the model's metadata, reseating the conversation on the seed.
+      Carrying the seed is what makes it a no-op instead of a reseat.
+
+    Every return is a rung THIS spec's ladder accepts, or ``None`` (nothing to
+    send) — the membership contract ``resolve_effort_in`` documents.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.model.effort import configured_effort, resolve_effort_in
+
+    if chosen:
+        return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, chosen)
+    configured = configured_effort(ConfigManager(config_dir=root))
+    if configured:
+        return resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, configured)
+    return spec.reasoning_effort
+
+
 def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     """The selection a session was CREATED on, or ``None`` to use today's answer.
 
@@ -220,6 +262,12 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
       the configured default, never fail a resume or 400 the first turn;
     * the pair cannot be resolved into a spec at all (metadata is best-effort by
       contract, and a missing window is not worth a failed open).
+
+    A stored level of ``null`` is the one case that seeds the PAIR and the
+    machine's CONFIGURED level: the marker records a model the user picked and no
+    choice about its reasoning effort, so the level is the one every launch that
+    named no level resolves (R1). The marker itself keeps the ``null`` — the
+    reading here is what the first turn will RUN at, not a choice that was made.
 
     Runs OFF the event loop: it reads the marker, the journal and — for an
     unshipped model — the provider's cached listing. The journal scan is guarded
@@ -247,28 +295,20 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     if read_model_selection(root / "sessions" / session_id) is not None:
         return None
     from local_operator.model.configure import build_model_spec
-    from local_operator.model.effort import resolve_effort_in
 
     try:
         spec = build_model_spec(provider, model_id)
     except Exception:  # noqa: BLE001 — metadata is never worth a failed open
         logger.debug("draft birth model could not be resolved", exc_info=True)
         return None
-    effort = choice["reasoning_effort"]
-    if effort:
-        # CLAMPED against the ladder this model's route offers NOW, not refused:
-        # the marker is a durable record and the catalogue moves under it, so a
-        # level the route can no longer express must land on its nearest rung
-        # rather than reach the child as a level it would 400 on. The route
-        # refuses such a level at the moment it is CHOSEN (422); this is the
-        # degradation for a choice that was legal when it was made.
-        spec = spec.model_copy(
-            update={
-                "reasoning_effort": resolve_effort_in(
-                    spec.reasoning_efforts, spec.reasoning_default_effort, effort
-                )
-            }
-        )
+    # The level the first turn will RUN at: the stored choice clipped to today's
+    # ladder, or — for a marker that stored ``null`` ("this model, no level") — the
+    # machine's configured level, and the model's own seed only when the config has
+    # no opinion. See :func:`birth_effort_for`, which the preview route calls too so
+    # the pane and the first cold frame cannot disagree.
+    resolved = birth_effort_for(spec, choice["reasoning_effort"], root)
+    if resolved != spec.reasoning_effort:
+        spec = spec.model_copy(update={"reasoning_effort": resolved})
     return spec
 
 
@@ -1820,9 +1860,18 @@ class DesktopSessions:
                 def locate() -> str:
                     if not path.is_dir() or not is_user_session(path):
                         raise KeyError("Unknown session")
-                    marker = path / DESKTOP_MARKER_NAME
-                    if marker.exists():
-                        return str(json.loads(marker.read_text())["cwd"])
+                    # Through the TOLERANT reader, not ``json.loads``: a marker this
+                    # code cannot parse (a hand edit, an interrupted write, a
+                    # directory where the document should be) is a document with no
+                    # cwd, and a session whose marker has no readable cwd still opens
+                    # here — on the checkpoint fallback below — instead of failing the
+                    # open with a 409/404 raised out of a parse error. Round 1 of
+                    # #1110 wrote the coverage for a malformed marker and found the
+                    # strict read behind it (R3).
+                    stored = read_desktop_marker(path)
+                    marker_cwd = (stored or {}).get("cwd")
+                    if isinstance(marker_cwd, str) and marker_cwd:
+                        return marker_cwd
                     # The cold facade restores cwd from the durable canonical
                     # checkpoint. This fallback is only used by pre-checkpoint
                     # transcripts, whose historical launch directory is unknown.

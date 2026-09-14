@@ -297,25 +297,45 @@ falling back to the parent of the config root when no cwd was retained.
 and its `preview` twin, carrying the same three fields the canonical frontend
 state publishes for a conversation's model — `{provider, model_id,
 reasoning_effort}` — so a picker row can be handed back unmodified.
-`reasoning_effort: null` means "no level chosen" (the model's own default), not
-"this model has no ladder".
+`reasoning_effort: null` means "no level chosen", not "this model has no
+ladder": the conversation is then born on the configured `model_effort` (clamped
+to the model's ladder), so a level nobody picked is never stored and never
+replaces the machine's configured one.
 
 - **Omitted or null ⇒ unchanged.** The body, the `desktop.json` marker (still
 exactly `{version, cwd}`) and the launch are byte-for-byte what an earlier
 client produced.
+- **A pick of a model with no level is not a pick of a level.** The marker
+records `reasoning_effort: null`, and the pane, the child's construction and the
+first turn's admission row all resolve the machine's configured `model_effort`
+(clamped into the picked model's ladder) — exactly what a launch that named no
+model resolves. The model's own default rung is a seed, not a choice: it is never
+stored, and it is never what the birth sample carries, because that sample rides
+the owner's model RPC as well as the spawn environment — and a pair-only RPC
+reseats the conversation on the seed.
 - **Rendered before it is refused, never after.** An unknown provider, a model
-id the provider's catalogue does not serve, or a level the model's ladder does
-not offer is refused with `422` (`detail.code` ∈ `provider_unknown`,
-`model_unknown`, `effort_unsupported`) on **both** routes, before anything
-durable is written — including the create route's receipt claim, so a corrected
-retry of the same `request_id` still creates. A catalogue that cannot be
-enumerated offline (an aggregator on a cold cache, a local endpoint) is not a
-refusal: an unserved pair then surfaces at the first turn, exactly as it does
-today.
-- **Preview answers what the first turn will get** — the same identity *and* the
-same spec (context window, effort ladder), from the same synthesis a cold open
-uses — while staying session-less and side-effect free: no directory, no marker,
-no receipt row.
+id the provider's catalogue does not serve, a pair that cannot be resolved into
+a spec, or a level the model's ladder does not offer is refused with `422`
+(`detail.code` ∈ `provider_unknown`, `model_unknown`, `model_unavailable`,
+`effort_unsupported`) on **both** routes, which apply the same admissions in the
+same order (working directory, target, model) and so answer the same refusal for
+the same body — before anything durable is written, including the create route's
+receipt claim, so a corrected retry of the same `request_id` still creates. A
+catalogue that cannot be enumerated offline (an aggregator on a cold cache, a
+local endpoint) is not a refusal: an unserved pair then surfaces at the first
+turn, exactly as it does today.
+- **Preview answers the readings for the selection it was GIVEN** — that
+selection's identity *and* the spec it will run on (context window, effort
+ladder), from the same synthesis a cold open uses — while staying session-less
+and side-effect free: no directory, no marker, no receipt row. An omitted
+`model` answers what a cold frame answers for a session that has made no choice
+at all: the configured pair out of the configured resolution (window 128000, no
+ladder, no level for the default `claude-sonnet-5`, against the same model id's
+own metadata of window 1000000 and a five-rung ladder). That the FIRST TURN then
+resolves the same identity through the model's own metadata is a pre-existing
+divergence between the cold path and the launch path — a cold open of a session
+with no choice shows the same reading today, with or without a `model` field —
+so it is recorded as a known limitation rather than fixed in this change.
 - **Create stores the choice in the marker** (additively, under `model`), and
 the FIRST turn is born on it: the plane seeds the cold viewer from the marker,
 which carries it into the spawn (`LOP_MOBILE_CHILD_PROVIDER`/`_MODEL`/`_EFFORT`

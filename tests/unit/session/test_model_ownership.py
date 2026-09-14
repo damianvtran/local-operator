@@ -493,11 +493,29 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
             cold.frontend_state.model_copy(
                 update={
                     "epoch": "owner-epoch",
-                    "selected_model": FrontendModelSpec(provider="test", model_id="owner-picked"),
+                    "selected_model": FrontendModelSpec(
+                        provider="test", model_id="owner-picked", reasoning_effort="max"
+                    ),
                 }
             )
         )
         assert cold._birth_model.model_id == "owner-picked"
+        # The LEVEL belongs in the sample too: a successor seeded from the pair
+        # alone is constructed with no ``LOP_MOBILE_CHILD_EFFORT`` and silently
+        # drops to its own resolution (review round 1, R2). Same pair at a new
+        # level is a new sample, not the same one.
+        assert cold._birth_model.reasoning_effort == "max"
+        cold._install_frontend(
+            cold.frontend_state.model_copy(
+                update={
+                    "epoch": "owner-epoch-2",
+                    "selected_model": FrontendModelSpec(
+                        provider="test", model_id="owner-picked", reasoning_effort="low"
+                    ),
+                }
+            )
+        )
+        assert cold._birth_model.reasoning_effort == "low"
         newer = await AttachedSession.cold(
             "newer", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=takeover
         )
