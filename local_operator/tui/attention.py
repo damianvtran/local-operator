@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -121,3 +122,37 @@ def focus_is_measurable(env: Mapping[str, str] | None = None) -> bool:
     """
     env = os.environ if env is None else env
     return bool(env.get("CMUX_SURFACE_ID")) and sys.platform == "darwin"
+
+
+#: How long an observed INPUT edge stands as evidence that this terminal is in
+#: front of the user. The portable half of the same question
+#: :func:`focus_is_measurable` answers for cmux.
+#:
+#: A key or mouse-down this app RECEIVES is proof the terminal held OS focus
+#: when it was produced: a backgrounded terminal cannot deliver one. That is the
+#: class of evidence Textual itself acts on (``App.on_event`` sets ``app_focus``
+#: for exactly these two event types when it believes the app is blurred) and
+#: the class ``on_app_focus`` carries for a host that reports focus at all. It is
+#: strictly stronger than the OPTIMISTIC ``app_focus=True`` an app starts with,
+#: which says only that startup happened, not that anyone is looking now.
+#:
+#: What such a terminal cannot do is report that the operator LEFT, and that is
+#: why the window is bounded rather than a latch: with no focus reports there is
+#: no blur either, so an unbounded stamp would keep marking later completions
+#: read for the rest of the day with nobody at the screen. Bounded, the cost of
+#: being wrong is one keystroke or click — the same act the operator performs
+#: when they come back to a conversation — while the receipt still cannot be
+#: taken from a terminal that has shown no sign of life. Long enough to cover
+#: the ordinary "asked a question, waited, read the answer" gap; short enough
+#: that a terminal parked in the background stops counting as watched.
+ATTENTION_INPUT_EVIDENCE_S = 120.0
+
+
+def input_evidence_is_fresh(observed_at: float) -> bool:
+    """Whether an input edge observed at ``observed_at`` still counts.
+
+    Its own function because the caller re-asks the question across ``await``
+    boundaries and after other evidence may have arrived, and because the window
+    is the whole content of the decision: a stale edge is not evidence.
+    """
+    return bool(observed_at) and (time.monotonic() - observed_at) <= ATTENTION_INPUT_EVIDENCE_S

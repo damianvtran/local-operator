@@ -2,6 +2,13 @@ import { useEffect, type RefObject } from "react";
 import { markSessionSeen } from "./api";
 import type { SessionProjection } from "./types";
 
+/** Poll cadence while the completion has not been acknowledged. */
+const CHECK_MS = 500;
+/** Consecutive refusals before the retry cadence starts backing off. */
+const FAILURES_BEFORE_BACKOFF = 3;
+/** Ceiling on the backed-off cadence: ~1 attempt/minute, not ~7,200/hour. */
+const MAX_BACKOFF_MS = 60_000;
+
 /** Mounting, subscribing and rendering offscreen history are not evidence of a
  * read. Sample the committed result while it is uncovered in the focused tab.
  * The effect captures identity and token together; navigation cancels its work.
@@ -25,9 +32,13 @@ export function useCompletionView(
 		let cancelled = false;
 		let pending = false;
 		let acknowledged = false;
+		/** Consecutive refusals, and the earliest time the next attempt may run. */
+		let refusals = 0;
+		let nextAttempt = 0;
 		const check = () => {
 			if (cancelled || pending || acknowledged ||
-				document.visibilityState !== "visible" || !document.hasFocus()) return;
+				document.visibilityState !== "visible" || !document.hasFocus() ||
+				Date.now() < nextAttempt) return;
 			const element = root.current?.querySelector<HTMLElement>(
 				`[data-completion-anchor="${CSS.escape(anchor)}"][data-completion-complete="true"]`,
 			);
@@ -47,17 +58,42 @@ export function useCompletionView(
 					// token with a 200 whose state still said `unseen` -- latching here
 					// on the resolution is what left the "new" mark on for good.
 					// Anything else keeps polling, so a fresh token re-runs this
-					// effect and is acknowledged on its own.
-					if (answer?.attention?.unseen === false) acknowledged = true;
+					// effect and is acknowledged on its own. Identity is part of the
+					// verdict rather than assumed, exactly as in the desktop twin: an
+					// answer about another conversation settles nothing here.
+					refusals = 0;
+					const settled = answer?.attention;
+					if (settled?.unseen === false &&
+						settled.conversation_id === `session/${sessionId}`) acknowledged = true;
 				})
-				.catch(() => {
+				.catch((error: unknown) => {
 					// No optimistic clear, and no latch: a refused receipt (a token the
-					// backend has superseded, which it now answers with 409) leaves the
+					// daemon has superseded, which it now answers with 409) leaves the
 					// authoritative list state intact and the poll running.
+					//
+					// BOUNDED, because "keep polling" is only right while the reason can
+					// still resolve. A superseded refusal cannot resolve by itself -- the
+					// remedy is a projection that names the current token -- so without
+					// this a stale client would re-attempt at the flat cadence for as
+					// long as the tab is open, saying nothing about it. After
+					// FAILURES_BEFORE_BACKOFF consecutive refusals the cadence backs off
+					// and one line says so; a fresh token re-runs this effect with the
+					// counter at zero, so the healthy path pays nothing for the bound.
+					refusals += 1;
+					if (refusals === FAILURES_BEFORE_BACKOFF) {
+						console.warn(
+							`[attention] could not mark ${sessionId} read after ${refusals} attempts; backing off`,
+							error,
+						);
+					}
+					if (refusals >= FAILURES_BEFORE_BACKOFF) {
+						nextAttempt = Date.now() +
+							Math.min(MAX_BACKOFF_MS, CHECK_MS * 2 ** (refusals - FAILURES_BEFORE_BACKOFF + 1));
+					}
 				})
 				.finally(() => { pending = false; });
 		};
-		const timer = window.setInterval(check, 500);
+		const timer = window.setInterval(check, CHECK_MS);
 		const frame = requestAnimationFrame(check);
 		return () => {
 			cancelled = true;

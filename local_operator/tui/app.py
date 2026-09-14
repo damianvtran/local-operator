@@ -22237,6 +22237,59 @@ class OperatorApp(App[None]):
         self._attention_focus_probe_at = now
         return True
 
+    def _attention_focus_evidenced(self) -> bool:
+        """Whether this app holds POSITIVE evidence of a terminal in front of the user.
+
+        The question the receipt gate and every re-check after an ``await`` have
+        to ask, which is why it is one function rather than a stored flag: an
+        input edge is evidence of the same fact a focus report carries, but it
+        has a shelf life (:data:`ATTENTION_INPUT_EVIDENCE_S`), so the answer
+        changes as time passes while ``_attention_focus_observed`` — set by a
+        reported focus or a MEASURED probe — does not.
+        """
+        if getattr(self, "_attention_focus_observed", False):
+            return True
+        from local_operator.tui.attention import input_evidence_is_fresh
+
+        return input_evidence_is_fresh(getattr(self, "_attention_input_at", 0.0))
+
+    @staticmethod
+    def _acknowledgement_raced_a_newer_completion(settled: Any, token: str) -> bool:
+        """Whether an acknowledgement's ANSWER proves a newer completion took over.
+
+        The one reading that is evidence rather than ambiguity on a followed
+        session (see the poll's verification comment): the state has to
+        positively name a DIFFERENT token. An answer that still names the token
+        we sent says nothing -- one tick of push lag looks exactly like an owner
+        that did nothing -- and a missing or unreadable answer says nothing at
+        all, so neither may produce a verdict.
+        """
+        if not isinstance(settled, dict):
+            return False
+        named = settled.get("completion_token")
+        return settled.get("unseen") is not False and isinstance(named, str) and named != token
+
+    async def on_event(self, event: events.Event) -> None:
+        """Note input as focus evidence, then hand the event to Textual.
+
+        A `Key` or `MouseDown` this app RECEIVES can only have been produced
+        while this terminal held OS focus: a backgrounded terminal delivers
+        neither. That makes it the portable form of the proof `on_app_focus`
+        carries for a host that reports focus and the host probe MEASURES on
+        macOS cmux. Textual draws the same conclusion in this very method
+        (`app_focus = True` for exactly these two types when it believes the app
+        is blurred), but only in the blurred case — an app that starts focused,
+        which is the reported defect's case (a terminal already focused when
+        focus reporting was enabled), sees the reactive stay `True`, posts no
+        event, calls no watcher, and so leaves no trace at all that input ever
+        arrived. Stamping EVERY input edge is what makes the evidence exist for
+        those terminals; `_attention_focus_evidenced` bounds its shelf life.
+        """
+        if isinstance(event, events.InputEvent) and not event.is_forwarded:
+            if isinstance(event, (events.Key, events.MouseDown)):
+                self._attention_input_at = time.monotonic()
+        await super().on_event(event)
+
     async def _poll_completion_attention(self) -> None:
         from local_operator.harness.rows import completion_notice
         from local_operator.tui.attention import (
@@ -22313,35 +22366,47 @@ class OperatorApp(App[None]):
                 or not self._completion_anchor_visible(anchor)
             ):
                 return
-            # FOCUS EVIDENCE, on a cadence as well as on an edge. `on_app_focus`
-            # is the terminal REPORTING that it gained focus, which a terminal
-            # that was ALREADY focused when Textual enabled focus reporting never
-            # sends -- so for those sessions this latch stayed unset for the life
-            # of the app and a completed result the operator was looking straight
-            # at was never acknowledged (the reported defect: the sidebar check
-            # mark never cleared in the TUI). Where the host probe MEASURES focus
-            # (macOS cmux: frontmost application, this socket's kernel peer PID,
-            # key visible window, focused surface) the same evidence can simply be
-            # re-learned, and `_attention_focus_refresh_due` bounds how often.
-            # Where it does not measure, the fence stays exactly as it was: a
-            # plain terminal's optimistic startup focus is not evidence, so the
-            # receipt still waits for a real focus report.
-            if not getattr(self, "_attention_focus_observed", False) and not (
-                focus_is_measurable() and self._attention_focus_refresh_due()
-            ):
+            # FOCUS EVIDENCE. Three cases, stated rather than implied, because
+            # the receipt behaves differently in each:
+            #
+            #  * a host that MEASURES focus (macOS cmux: frontmost application,
+            #    this socket's kernel peer PID, key visible window, focused
+            #    surface) can simply re-learn the same fact, and
+            #    `_attention_focus_refresh_due` bounds how often it asks;
+            #  * a terminal whose focus cannot be measured, WITH input observed:
+            #    a key or mouse-down this app receives could only have been
+            #    delivered to a focused terminal, so the input edge proves the
+            #    same thing portably (`on_event` stamps it, on a shelf life);
+            #  * a terminal whose focus cannot be measured and which has shown
+            #    nothing at all: no evidence, so the receipt waits. Textual's
+            #    initial `app_focus=True` describes startup, not the present, and
+            #    the probe's `True` there means only "no `CMUX_*` is set".
+            #
+            # The reported defect lived in case two: a terminal already focused
+            # when Textual enabled focus reporting never sends an edge, so the
+            # receipt waited forever for a report that could not come, and the
+            # sidebar's check mark never cleared.
+            measurable = focus_is_measurable()
+            evidenced = self._attention_focus_evidenced() or (
+                measurable and self._attention_focus_refresh_due()
+            )
+            if not evidenced:
                 return
             # Twenty open sessions need no twenty-process focus poll: only a
             # positively focused surface with a still-unread rendered result
-            # reaches this bounded off-loop host probe.
-            focused = await asyncio.to_thread(terminal_is_foreground)
-            if focused and not getattr(self, "_attention_focus_observed", False):
+            # reaches this bounded off-loop host probe. A terminal the probe
+            # cannot measure is never asked — there it answers from the
+            # environment (`terminal_is_foreground` returns True whenever no
+            # `CMUX_*` is set), and the input edge above is the real evidence.
+            focused = await asyncio.to_thread(terminal_is_foreground) if measurable else True
+            if measurable and focused:
                 # Measured, not assumed: this is the same fact the focus edge
                 # carries, learned by asking instead of by being told.
                 self._attention_focus_observed = True
             if (
                 focused
                 and self._session is session
-                and getattr(self, "_attention_focus_observed", False)
+                and self._attention_focus_evidenced()
                 and not getattr(session, "is_streaming", False)
                 and self._completion_anchor_visible(anchor)
             ):
@@ -22349,23 +22414,41 @@ class OperatorApp(App[None]):
                 if (
                     self._session is session
                     and current.get("completion_token") == token
-                    and getattr(self, "_attention_focus_observed", False)
+                    and self._attention_focus_evidenced()
                     and not getattr(session, "is_streaming", False)
                     and self._completion_anchor_visible(anchor)
                 ):
-                    await cast(Any, acknowledge)(token)
-                    # VERIFY, never assume. A resolved acknowledgement is not
-                    # proof the receipt moved: `unseen` is computed against the
-                    # NEWEST sequence, so a completion published under us leaves
-                    # the conversation unread, and the follower's op reply carries
-                    # no state at all. Nothing here latches -- the next tick
-                    # re-reads the state and re-attempts with whatever token it
-                    # names -- so trusting the call is how a client ends up
-                    # certain it has read something it never did.
-                    settled = await cast(Any, refresh)()
-                    if settled.get("unseen") is not False:
+                    settled = await cast(Any, acknowledge)(token)
+                    # VERIFY, never assume — and never invent a verdict the
+                    # transport cannot support. A resolved acknowledgement is not
+                    # proof the receipt moved: an owner older than this contract
+                    # answers a no-op with success, and `unseen` is computed
+                    # against the NEWEST sequence, so a completion published
+                    # under us leaves the conversation unread. Nothing here
+                    # latches, so the next tick re-reads the state and
+                    # re-attempts with whatever token it names.
+                    #
+                    # What the answer CAN prove depends on the transport, and
+                    # the difference is not cosmetic. For a session this app
+                    # OWNS, `acknowledge_attention` returns the state its store
+                    # computed in the same transaction, so `unseen: false` is
+                    # authoritative there. For a FOLLOWED session the owner hands
+                    # its own state back ON the ack (`AckDetail`), because the
+                    # follower's projection arrives on the event queue — a
+                    # different writer — and would read stale by construction. An
+                    # owner OLDER than that field sends none, and then all this app
+                    # has is its own last-applied state, where "still unseen, still
+                    # my token" is equally consistent with one tick of push lag
+                    # (the honest path) and with an owner that did nothing:
+                    # INCONCLUSIVE, and a line claiming the receipt "did not land"
+                    # would be a false accusation on an honest path. Only a state
+                    # that has moved PAST the token we sent is evidence of
+                    # anything, and what it evidences is narrow: the completion
+                    # receipted is no longer the one this conversation asks about,
+                    # so the projection re-arms.
+                    if self._acknowledgement_raced_a_newer_completion(settled, token):
                         logger.debug(
-                            "completion receipt did not land on the rendered token; re-arming"
+                            "completion receipt raced a newer completion; the state re-arms"
                         )
         except Exception:
             logger.debug("completion receipt deferred", exc_info=True)

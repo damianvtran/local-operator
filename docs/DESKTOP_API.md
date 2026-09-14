@@ -309,6 +309,20 @@ falling back to the parent of the config root when no cwd was retained.
 | GET `.../{id}/events` | optional `epoch`, `after_seq` | authenticated SSE, `data: <DesktopSessionFrame>` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
+| POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
+
+`POST .../{id}/seen` is the read receipt, and **a 2xx from it means this
+conversation is read**: `unseen: false`, the receipt advanced through the token's
+sequence, both computed inside the same write transaction that admitted the call.
+Two 409s are refusals that move nothing, and both mean the caller is looking at a
+result the conversation has moved past: `unknown completion token` for a token
+this conversation never published, and `superseded_completion_token` (a machine
+`code` in the body, see `local_operator.session.attention.SUPERSEDED_TOKEN_CODE`)
+for a real but no-longer-current one. Neither refusal carries state — the remedy
+is for the caller to re-read its own attention state and acknowledge the token
+that names, which is the projection it is already subscribed to. The receipt
+contract itself, including the anchors and the mobile parity, is in
+[ATTENTION.md](ATTENTION.md).
 
 Create/message/command `request_id` is a canonical lowercase UUID string, reused
 for a retry of the **same** operation. Answer `request_id` is instead the pending
