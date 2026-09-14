@@ -1,0 +1,190 @@
+
+========== 1. an unsupervised daemon announces its handover, then exits ==========
+started daemon pid=83582 tag=unsupervised
+record at /tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/83582.json:
+{"pid": 83582, "host": "127.0.0.1", "port": 65022, "instance_id": "T0pubuag1VCcaldscy8qzBf2JSCbwVVzsNhxEmk3fcA", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "AJjPgYVQwwt5vXpaKNTAzH0Zm7OPb042pSIaqY-zkhA", "started_at": 1789361647.0889118, "heartbeat_at": 1789361647.08911, "retiring_from": "", "retiring_to": ""}
+daemon: pid=83582 port=65022 record=/tmp/lo-serve-retire-evidence/cfg-unsupervised/run/serve/83582.json
+boot record: version=0.54.39 source_ref=
+record retiring fields at boot: retiring_from='' retiring_to=''
+flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
+
+--- t=14.462s: the record announces the handover ---
+{
+  "claim_key": "AJjPgYVQwwt5vXpaKNTAzH0Zm7OPb042pSIaqY-zkhA",
+  "desktop": false,
+  "heartbeat_at": 1789361662.1287308,
+  "host": "127.0.0.1",
+  "install_kind": "editable",
+  "instance_id": "T0pubuag1VCcaldscy8qzBf2JSCbwVVzsNhxEmk3fcA",
+  "pid": 83582,
+  "port": 65022,
+  "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
+  "retiring_from": "0.54.39@1111111",
+  "retiring_to": "0.54.39@2222222",
+  "source_ref": "",
+  "started_at": 1789361647.0889118,
+  "version": "0.54.39"
+}
+
+--- t=34.676s: the record is removed (clean exit) ---
+record present after exit: False
+process alive after exit: False (gone at t=34.697s, i.e. 0.021s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
+timings: announce at 14.462s, exit at 34.676s, notice window 20.214s
+--- daemon log (tail) ---
+2026-09-14 00:54:22,129 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+2026-09-14 00:54:22,130 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+--- record after exit ---
+total 0
+
+========== 2. a claimed daemon refuses a new session while retiring ==========
+started daemon pid=86524 tag=governed
+record at /tmp/lo-serve-retire-evidence/cfg-governed/run/serve/86524.json:
+{"pid": 86524, "host": "127.0.0.1", "port": 49702, "instance_id": "nlsZxPDCzXQKgYC-BIRDbVPOq-CZ0iN8umDaOc1iB4c", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": true, "claim_key": "", "started_at": 1789361692.735004, "heartbeat_at": 1789361692.735211, "retiring_from": "", "retiring_to": ""}
+daemon: pid=86524 port=49702 record=/tmp/lo-serve-retire-evidence/cfg-governed/run/serve/86524.json
+boot record: version=0.54.39 source_ref=
+record retiring fields at boot: retiring_from='' retiring_to=''
+flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
+
+--- t=14.843s: the record announces the handover ---
+{
+  "claim_key": "",
+  "desktop": true,
+  "heartbeat_at": 1789361707.7540438,
+  "host": "127.0.0.1",
+  "install_kind": "editable",
+  "instance_id": "nlsZxPDCzXQKgYC-BIRDbVPOq-CZ0iN8umDaOc1iB4c",
+  "pid": 86524,
+  "port": 49702,
+  "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
+  "retiring_from": "0.54.39@1111111",
+  "retiring_to": "0.54.39@2222222",
+  "source_ref": "",
+  "started_at": 1789361692.735004,
+  "version": "0.54.39"
+}
+
+--- new-session request while retiring: HTTP 503 ---
+{"detail":{"code":"daemon-retiring","message":"This backend is restarting onto a new build and is not accepting new sessions. Reconnect to the new backend and retry."}}
+
+--- t=23.465s: the record is removed (clean exit) ---
+record present after exit: False
+process alive after exit: False (gone at t=23.465s, i.e. 0.000s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
+timings: announce at 14.843s, exit at 23.465s, notice window 8.622s
+create-while-retiring answered 503
+--- daemon log (tail) ---
+2026-09-14 00:55:07,754 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+INFO:     127.0.0.1:50023 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+--- record after exit ---
+total 0
+
+========== 3. a daemon holding a live SSE stream does not retire, then does ==========
+started daemon pid=88789 tag=held
+record at /tmp/lo-serve-retire-evidence/cfg-held/run/serve/88789.json:
+{"pid": 88789, "host": "127.0.0.1", "port": 50208, "instance_id": "UgVj-e4ScZz-17vjF3kVeFfNcelrleWJ9UHM6Wle_E8", "version": "0.54.39", "source_ref": "", "prefix": "/Users/damian/lo-wt-serve-retire/.venv", "install_kind": "editable", "desktop": false, "claim_key": "v-I_XJS1GlYSrqoysZm7evj8mtSUgxNystqUkDqC_o8", "started_at": 1789361721.86382, "heartbeat_at": 1789361721.867195, "retiring_from": "", "retiring_to": ""}
+daemon: pid=88789 port=50208 record=/tmp/lo-serve-retire-evidence/cfg-held/run/serve/88789.json
+boot record: version=0.54.39 source_ref=
+record retiring fields at boot: retiring_from='' retiring_to=''
+held SSE stream: http://127.0.0.1:50208/v1/sse/jobs/00000000-0000-0000-0000-000000000001
+  first frames: [': connected']
+flipping /tmp/lo-serve-retire-evidence/prefix/.lop-source to 2222222222222222222222222222222222222222 at t=0.000s
+t= 1.003s check 1: pid_alive=True retiring_from='' retiring_to=''
+t= 2.009s check 2: pid_alive=True retiring_from='' retiring_to=''
+t= 3.010s check 3: pid_alive=True retiring_from='' retiring_to=''
+t= 4.032s check 4: pid_alive=True retiring_from='' retiring_to=''
+t= 5.041s check 5: pid_alive=True retiring_from='' retiring_to=''
+t= 6.049s check 6: pid_alive=True retiring_from='' retiring_to=''
+t= 7.056s check 7: pid_alive=True retiring_from='' retiring_to=''
+t= 8.060s check 8: pid_alive=True retiring_from='' retiring_to=''
+t= 9.062s check 9: pid_alive=True retiring_from='' retiring_to=''
+t=10.066s check 10: pid_alive=True retiring_from='' retiring_to=''
+t=11.085s check 11: pid_alive=True retiring_from='' retiring_to=''
+t=12.095s check 12: pid_alive=True retiring_from='' retiring_to=''
+t=13.102s check 13: pid_alive=True retiring_from='' retiring_to=''
+t=14.117s check 14: pid_alive=True retiring_from='' retiring_to=''
+  verdict: 14 samples across a held stream, no retirement
+releasing the SSE stream at t=14.118s
+
+--- t=18.787s: the record announces the handover ---
+{
+  "claim_key": "v-I_XJS1GlYSrqoysZm7evj8mtSUgxNystqUkDqC_o8",
+  "desktop": false,
+  "heartbeat_at": 1789361741.899029,
+  "host": "127.0.0.1",
+  "install_kind": "editable",
+  "instance_id": "UgVj-e4ScZz-17vjF3kVeFfNcelrleWJ9UHM6Wle_E8",
+  "pid": 88789,
+  "port": 50208,
+  "prefix": "/Users/damian/lo-wt-serve-retire/.venv",
+  "retiring_from": "0.54.39@1111111",
+  "retiring_to": "0.54.39@2222222",
+  "source_ref": "",
+  "started_at": 1789361721.86382,
+  "version": "0.54.39"
+}
+
+--- t=30.589s: the record is removed (clean exit) ---
+record present after exit: False
+process alive after exit: False (gone at t=30.589s, i.e. 0.000s after the record was removed — the lifespan removes it LAST, one step before uvicorn returns from serve())
+timings: announce at 18.787s, exit at 30.589s, notice window 11.802s
+--- daemon log (tail) ---
+2026-09-14 00:55:26,879 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but 1 SSE subscription(s) is in flight; retiring when it completes
+2026-09-14 00:55:41,899 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+2026-09-14 00:55:41,900 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+--- record after exit ---
+total 0
+
+========== full daemon logs ==========
+--- unsupervised.log ---
+Starting server at http://127.0.0.1:65022
+INFO:     Started server process [83582]
+INFO:     Waiting for application startup.
+2026-09-14 00:54:07,084 [INFO] apscheduler.scheduler: Scheduler started
+INFO:     Application startup complete.
+2026-09-14 00:54:22,129 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+2026-09-14 00:54:22,130 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-09-14 00:54:42,335 [INFO] apscheduler.scheduler: Scheduler has been shut down
+INFO:     Application shutdown complete.
+INFO:     Finished server process [83582]
+--- governed.log ---
+Starting server at http://127.0.0.1:49702
+INFO:     Started server process [86524]
+INFO:     Waiting for application startup.
+2026-09-14 00:54:52,731 [INFO] apscheduler.scheduler: Scheduler started
+INFO:     Application startup complete.
+2026-09-14 00:55:07,754 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+INFO:     127.0.0.1:50023 - "POST /v1/desktop/sessions HTTP/1.1" 503 Service Unavailable
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-09-14 00:55:16,377 [INFO] apscheduler.scheduler: Scheduler has been shut down
+INFO:     Application shutdown complete.
+INFO:     Finished server process [86524]
+--- held.log ---
+Starting server at http://127.0.0.1:50208
+INFO:     Started server process [88789]
+INFO:     Waiting for application startup.
+2026-09-14 00:55:21,860 [INFO] apscheduler.scheduler: Scheduler started
+INFO:     Application startup complete.
+INFO:     127.0.0.1:50284 - "GET /v1/sse/jobs/00000000-0000-0000-0000-000000000001 HTTP/1.1" 200 OK
+2026-09-14 00:55:26,879 [INFO] local_operator.server.retire: serve daemon: build 0.54.39@2222222 is on disk but 1 SSE subscription(s) is in flight; retiring when it completes
+2026-09-14 00:55:41,899 [INFO] local_operator.server.retire: serve daemon: the install on disk is 0.54.39@2222222 but this process loaded 0.54.39@1111111; retiring and refusing new session spawns
+2026-09-14 00:55:41,900 [WARNING] local_operator.server.retire: serve daemon: nothing supervises this daemon and it will not restart itself; the new build is already on disk, so start it again with `lop serve` (or `lop update` first if the install needs finishing)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-09-14 00:55:53,698 [INFO] apscheduler.scheduler: Scheduler has been shut down
+INFO:     Application shutdown complete.
+INFO:     Finished server process [88789]
+
+========== raw artifacts under /tmp/lo-serve-retire-evidence ==========
+total 48
+drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:54 cfg-governed
+drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:55 cfg-held
+drwxr-xr-x@ 5 damian  wheel   160 Sep 14 00:54 cfg-unsupervised
+-rw-r--r--@ 1 damian  wheel   757 Sep 14 00:55 governed.log
+-rw-r--r--@ 1 damian  wheel  1208 Sep 14 00:55 held.log
+drwxr-xr-x@ 3 damian  wheel    96 Sep 14 00:53 prefix
+-rw-r--r--@ 1 damian  wheel  1188 Sep 14 00:54 run1.txt
+-rw-r--r--@ 1 damian  wheel  1396 Sep 14 00:55 run2.txt
+-rw-r--r--@ 1 damian  wheel  2323 Sep 14 00:55 run3.txt
+-rw-r--r--@ 1 damian  wheel   933 Sep 14 00:54 unsupervised.log

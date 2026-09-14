@@ -32,6 +32,7 @@ from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import registry as serve_registry
+from local_operator.server import retire as serve_retire
 from local_operator.server.desktop import desktop_posture, require_desktop
 from local_operator.server.routes import (
     agents,
@@ -177,6 +178,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     announced = serve_registry.advertised_address(app)
     serve_publisher: session_registry.RecordPublisher | None = None
     serve_heartbeat: asyncio.Task[None] | None = None
+    # The retirement poll and the Event that ends it: both None on a boot that
+    # published no record, because a daemon with no record has no announcement
+    # channel and therefore nothing to retire into (see the branch below).
+    retire_task: asyncio.Task[None] | None = None
+    retire_stop: asyncio.Event | None = None
     if announced is not None:
         serve_record = serve_registry.build_record(
             instance_id=app.state.instance_id, announced=announced
@@ -200,6 +206,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # are the session registry's, not re-implemented here.
         serve_heartbeat = asyncio.create_task(serve_registry.heartbeat_loop(serve_publisher))
         app.state.serve_heartbeat = serve_heartbeat
+
+        # And the build watch: poll the install on disk and, when the build has
+        # moved under this process and nothing is in flight, announce the
+        # handover in the record and leave (`server/retire.py`). Started HERE,
+        # beside the publisher, because the announcement it writes IS this
+        # record — and only when a record was published, for the same reason:
+        # no record, no way to say where the daemon went.
+        #
+        # It samples the boot stamp itself, in its first statement: a stamp read
+        # after the install moved would compare equal to the moved install, and
+        # the handover could never be seen.
+        retire_stop = asyncio.Event()
+        retire_task = asyncio.create_task(
+            serve_retire.retirement_poll(app, serve_publisher, stop=retire_stop)
+        )
+        app.state.serve_retire = retire_task
+        app.state.serve_retire_stop = retire_stop
 
     yield
     try:
@@ -241,6 +264,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # over a file that a reader already reaped for us.
         # Both only exist when a record was published; a boot that was not
         # announced has neither a task to cancel nor a file to remove.
+        #
+        # The retirement poll goes FIRST: a teardown is already an exit, and a
+        # poll that announced a retirement mid-teardown would rewrite the record
+        # on the way out with a handover that the shutdown then makes. `stop`
+        # ends a poll parked in its notice wait; the cancel covers one parked in
+        # its check sleep, where the event is not what it awaits.
+        if retire_stop is not None:
+            retire_stop.set()
+        if retire_task is not None:
+            retire_task.cancel()
+            await asyncio.gather(retire_task, return_exceptions=True)
+        # Clear the one-way latch, unconditionally: `app` is a module-level
+        # singleton, and a lifecycle that left it set would make the NEXT boot in
+        # this process refuse every desktop session (the tests' lifespan reuse is
+        # the case that matters, and production's single boot is unaffected).
+        app.state.serve_retiring = False
+        app.state.serve_retire = None
+        app.state.serve_retire_stop = None
         if serve_heartbeat is not None and serve_publisher is not None:
             serve_heartbeat.cancel()
             await asyncio.gather(serve_heartbeat, return_exceptions=True)

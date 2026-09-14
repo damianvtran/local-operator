@@ -18,7 +18,7 @@ import sqlite3
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
+from local_operator.server.retire import DaemonRetiring
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
@@ -124,6 +125,17 @@ async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
 
 
+def _never_retiring() -> bool:
+    """The default admission probe: a host with no retirement watching it.
+
+    Returning False is the whole of the contract — a ``DesktopSessions`` built
+    by a test or a reduced app (there are many) must behave exactly as it did
+    before this probe existed, and only the daemon's lifespan wires the real
+    one (``routes/desktop_sessions.py::host``).
+    """
+    return False
+
+
 def resolve_working_directory(cwd: str) -> Path:
     """The directory ``cwd`` names, or ``ValueError`` (→ 409) if it is not one.
 
@@ -153,8 +165,21 @@ class DesktopSubscription:
 
 
 class DesktopSessionBridge:
-    def __init__(self, root: Path, session_id: str, cwd: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        session_id: str,
+        cwd: str,
+        *,
+        retiring: Callable[[], bool] | None = None,
+    ) -> None:
         self.root, self.session_id, self.cwd = root, session_id, cwd
+        # Why this bridge must not start a runtime, asked of the daemon's own
+        # state rather than cached: the flag flips ONCE, mid-life, when the
+        # retirement poll runs (``server/retire.py``), and a bridge built before
+        # that must see it too. Defaulted so every direct construction — the
+        # tests', a reduced app's — is an ordinary admitting bridge.
+        self.retiring_probe = retiring or _never_retiring
         self.remote: AttachedSession | None = None
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
@@ -977,7 +1002,16 @@ class DesktopSessionBridge:
                 # is what carries the intent across a recovery window.
                 await asyncio.sleep(_LEASE_WARM_POLL_S)
                 continue
-            await self.warm()
+            try:
+                await self.warm()
+            except DaemonRetiring:
+                # The daemon announced its retirement while this lease was live.
+                # A warm is not admissible any more and the refusal is one-way,
+                # so the intent ENDS here: looping would spin a spawn attempt a
+                # beat against a refusal that cannot resolve, and the retry
+                # exists to serve a viewer, not to keep a dying daemon busy.
+                self._clear_warm_backoff()
+                return
             task = self.warm_task
             if task is not None:
                 # Cancellation is deliberately NOT suppressed: `_detach` cancels
@@ -1015,6 +1049,14 @@ class DesktopSessionBridge:
 
     async def warm(self) -> str:
         """Start a runtime for this session without submitting any work.
+
+        REFUSED WHILE RETIRING, before anything else: this is the one path that
+        SPAWNS a session runtime from this process (``warm_runtime`` below), and
+        a daemon that is about to exit must not start a runtime whose viewer
+        would follow it onto a dead address. The refusal is typed so the route
+        answers a named 503 rather than a 500 (see ``DaemonRetiring``), and it
+        is checked before the ``remote is None``/cold branches so a retiring
+        daemon refuses uniformly rather than only when it happens to be cold.
 
         Returns the state at RETURN TIME — ``"warm"``, ``"warming"`` — never the
         eventual outcome, because every caller fires this speculatively (a
@@ -1073,6 +1115,11 @@ class DesktopSessionBridge:
         whenever the client is None, which is precisely the state a bridge in
         the middle of a warm is in.
         """
+        if self.retiring_probe():
+            raise DaemonRetiring(
+                "This backend is restarting onto a new build and no longer starts "
+                "session runtimes. Reconnect to the new backend and retry."
+            )
         remote = self.remote
         assert remote is not None
         if not remote.is_cold:
@@ -1351,10 +1398,73 @@ def _absent_child_page(state: str, *, before_id: str | None = None) -> dict[str,
 class DesktopSessions:
     """Bounded adapter cache; canonical identity lives in the session directory."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, retiring: Callable[[], bool] | None = None) -> None:
         self.root = root
         self.bridges: dict[str, DesktopSessionBridge] = {}
         self.lock = asyncio.Lock()
+        # Whether the DAEMON this pool serves has announced a retirement, asked
+        # rather than cached: the answer changes once, mid-life, and both the
+        # refusal (``assert_admitting``) and every bridge this pool hands out
+        # must see it. Defaulted so the many reduced ``DesktopSessions(root)``
+        # constructions (tests, embedded apps) behave exactly as before.
+        self.retiring_probe = retiring or _never_retiring
+
+    def assert_admitting(self) -> None:
+        """Raise ``DaemonRetiring`` when this daemon has announced its exit.
+
+        THE ADMISSION PATH, and the only one: everything that starts new work
+        here — ``create`` (a new session) and ``DesktopSessionBridge.warm`` (a
+        new runtime for one) — asks this question, so "what does a retiring
+        daemon refuse" has exactly one answer. Reads are deliberately NOT
+        refused: the record keeps heartbeating and the daemon keeps answering
+        until the clean exit removes it, which is what lets a reader observe the
+        handover and drain against a daemon that is still live.
+        """
+        if self.retiring_probe():
+            raise DaemonRetiring(
+                "This backend is restarting onto a new build and is not accepting "
+                "new sessions. Reconnect to the new backend and retry."
+            )
+
+    def in_flight_reason(self) -> str | None:
+        """Why the DESKTOP plane is still using this daemon, or ``None``.
+
+        Three terms, all things an exit would CUT rather than pause, all read
+        off the live bridges:
+
+        * **An in-flight HTTP operation** — any bridge with ``users > 0``. Every
+          desktop route runs inside ``session()``, which brackets the request
+          with ``acquire()``/``release()`` (``DesktopSessionBridge.acquire``),
+          so a non-zero count means a response is being built right now.
+        * **An open attach** — a bridge with a LIVE watch lease
+          (``DesktopSessionBridge._live_leases``, renewed by ``watch`` and
+          expiring after ``WATCH_TTL``): a window is looking at this session,
+          which is the operator's "a viewer is never pulled out from under"
+          rule applied to the process that serves it.
+        * **A runtime being started** — a bridge with a warm task still
+          running (``DesktopSessionBridge.warm_task``, set by ``warm`` and by
+          the lease-driven retry loop). A spawn is a handshake with a child
+          process that takes ~1.2 s; exiting in the middle of one leaves the
+          engage unfinished against a successor that has no idea it was
+          running. Bounded by the engage's own attempt budget, and not covered
+          by ``users`` — ``warm`` is fire-and-forget and answers the request
+          before the handshake completes.
+
+        Read WITHOUT ``watch_lock`` on purpose, and that is safe: this is a
+        synchronous filter over an in-process dict on the event loop, so it
+        cannot interleave with a mutation. The lock ``_live_leases``'s other
+        callers take guards the ACTIONS they then take on the result, not the
+        read itself — and taking it here would let a busy warm hold up the
+        retirement poll.
+        """
+        for bridge in list(self.bridges.values()):
+            if bridge.users:
+                return f"{bridge.users} in-flight desktop request(s) on {bridge.session_id}"
+            if bridge._live_leases():
+                return f"a desktop window watching session {bridge.session_id}"
+            if bridge.warm_task is not None and not bridge.warm_task.done():
+                return f"a runtime being started for session {bridge.session_id}"
+        return None
 
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
         """A read receipt never admits work, binds a viewer, or starts a runtime.
@@ -1559,6 +1669,7 @@ class DesktopSessions:
         return await asyncio.to_thread(read)
 
     async def create(self, cwd: str, *, target: dict[str, str] | None = None) -> str:
+        self.assert_admitting()
         directory = resolve_working_directory(cwd)
         binding = {"agent": "", "team": ""}
         if target:
@@ -1673,7 +1784,9 @@ class DesktopSessions:
                         raise ValueError("Too many active desktop sessions")
                     oldest = min(idle, key=lambda b: b.touched)
                     del self.bridges[oldest.session_id]
-                bridge = DesktopSessionBridge(self.root, session_id, cwd)
+                bridge = DesktopSessionBridge(
+                    self.root, session_id, cwd, retiring=self.retiring_probe
+                )
                 self.bridges[session_id] = bridge
             # Reserve under the pool lock; eviction must not remove a bridge
             # between lookup and its first acquire.
