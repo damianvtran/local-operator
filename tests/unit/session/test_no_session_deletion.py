@@ -494,15 +494,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/wakes/store.py::write_entry", "os.replace", "temp FILE -> wakes/<id>.json"),
     ("local_operator/wakes/store.py::write_entry", "os.unlink", "temp FILE -> wakes/<id>.json"),
+    # The registry's staged write is now ONE helper shared by the discovery
+    # record and the durable stop marker, and the reaper MOVES a dead record
+    # into the run namespace's `reaped/` sidecar instead of unlinking it (a
+    # deleted record was the evidence the death classifier reads). These four
+    # rows replace the two the old inline `publish` carried: same shape — a
+    # `.tmp` FILE renamed onto a FILE, never a directory. `_staged_write`'s
+    # target is `<config>/run/<ns>/<pid>.json` or `<session>/runtime-stop.json`,
+    # i.e. a file INSIDE a directory that already exists (the same shape as
+    # `resume.py::write_session_title`'s row below), and it never creates or
+    # moves that directory; `_reap_dead_record`'s receiver is the run
+    # directory's own `reaped/` subdirectory, built from `run_dir()` and the
+    # record's pid — nothing here is derived from a session id or a transcript.
     (
-        "local_operator/session/runtime/registry.py::publish",
+        "local_operator/session/runtime/registry.py::_staged_write",
         "os.replace",
-        "temp FILE -> runtime/<pid>.json",
+        "temp FILE -> runtime/<pid>.json, or <session>/runtime-stop.json FILE",
     ),
     (
-        "local_operator/session/runtime/registry.py::publish",
+        "local_operator/session/runtime/registry.py::_staged_write",
         "os.unlink",
-        "temp FILE -> runtime/<pid>.json",
+        "clears the .tmp FILE this same call just created, when the write failed",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::_unlink_quietly",
+        "<path>.unlink",
+        "best-effort delete of a run-namespace FILE (a record, a reaped entry)",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::_reap_dead_record",
+        "os.replace",
+        "runtime/<pid>.json -> runtime/reaped/<pid>.json; both run_dir()-derived",
     ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
@@ -717,8 +739,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
-        "stale runtime/<pid>.json FILE",
-        2,
+        "torn runtime/<pid>.json FILE; a DEAD record is moved to reaped/, not unlinked",
     ),
     (
         "local_operator/session/runtime/registry.py::unpublish",
@@ -1134,7 +1155,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
-        "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
+        "local_operator/session/runtime/registry.py::_staged_write",  # tmp -> record FILE
+        "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
