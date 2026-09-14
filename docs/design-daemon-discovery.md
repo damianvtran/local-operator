@@ -353,6 +353,26 @@ record (live pid, stale heartbeat) is degraded-and-named, never reaped.
     client can act on within its own timing; refusing work at that instant instead
     would break the app for an unbounded period, and refusing nothing until the
     client had already let go is the circularity above.
+  - **The refusal is the DOOR, not the routes, and it covers reads.**
+    `DesktopSessions.session()` is the one place a desktop route obtains a bridge
+    (and the one place a bridge is constructed), so the latch check lives there:
+    every present route, and every route added later, is covered by construction,
+    and the enumeration of admission paths survives only as the test that keeps
+    it honest. Once latched it refuses session-scoped READS as well as writes — a
+    request answered by the build the daemon has already told its readers to
+    leave can only keep a client on a dying process — while the record plane
+    (`GET /v1/desktop/sessions`, `/health`, the record file) keeps answering
+    until the clean exit removes it, which is what lets any reader observe the
+    handover.
+  - **The announcement is re-read, and can be withdrawn.** The daemon re-asks
+    whether the install still proves the move it announced on every check
+    interval. A `lop-update` that failed, was rolled back, or was superseded by
+    the running build clears the record fields and the daemon carries on serving
+    — it is the right build after all; an install that moved on again re-announces
+    onto the newer build; and a stamp that cannot be read as a build at all means
+    STAY, because leaving a process behind for a build it could not read is the
+    one direction this watch must never take. The *latch* remains one-way: only a
+    record field is withdrawn, and only before the refusal runs.
   - **What the UI PR must implement, stated as a specification.** On observing
     non-empty `retiring_from`/`retiring_to` in a discovered daemon's record, the
     app must (1) **drop the session relay** for that daemon — the
@@ -365,10 +385,18 @@ record (live pid, stale heartbeat) is degraded-and-named, never reaped.
     `/health`'s `instance_id`). No new channel is needed for either half: the
     relay already reconnects from its retained receipt cursor, and a lease is a
     view rather than work, so dropping both costs the client a rebind and nothing
-    else. Until this ships, an app-attached daemon announces and keeps serving —
-    strictly better than the silence it replaces (the record is readable by any
-    reader, and `lop stop` remains the manual release), but NOT yet a completed
-    update path for the app-attached case.
+    else. **The drop needs no turn condition, and dropping mid-turn is expected
+    rather than tolerated:** a turn is owned by the detached
+    `session/runtime/process.py` runtime, which this daemon neither holds nor
+    cancels, so what the drop ends is the client's *view* of it — the turn keeps
+    running and its output stays in the transcript, and (3)'s rebind replays it
+    from the retained cursor. Gating the drop on a turn's stream ending would put
+    the rollout behind an unbounded wait for exactly the case the valve exists to
+    unblock, since a streaming turn is when a viewer is most likely to be
+    attached. Until this ships, an app-attached daemon announces and keeps
+    serving — strictly better than the silence it replaces (the record is
+    readable by any reader, and `lop stop` remains the manual release), but NOT
+    yet a completed update path for the app-attached case.
 - **Bundled venv**: keep the code path, demote its role. It exists so a fresh
   machine has *a* backend; once a global daemon is discoverable it must not be
   started, must not be updated, and must not be what the version banner describes.

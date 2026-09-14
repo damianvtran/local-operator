@@ -1050,14 +1050,19 @@ class DesktopSessionBridge:
     def assert_admitting(self) -> None:
         """Raise ``DaemonRetiring`` when the daemon serving this bridge has LATCHED.
 
-        THE ADMISSION CHECK FOR EVERY PATH THAT CAN ADMIT OR START WORK ON THIS
-        BRIDGE, and one method rather than one per route on purpose: the routes
-        that reach the spawn seam (``/messages``, ``/commands``) and the one that
-        only delivers into a live runtime (``/answers``) all ask the same
-        question here, so a route added later reaches the same answer by calling
-        the same thing — where a copy per route is exactly how one of them comes
-        to be missed (review round 1, MAJOR-2: ``/messages`` returned 200 and
-        reached ``admit_prompt`` on a latched daemon).
+        THE SAME QUESTION the pool's door asks (``DesktopSessions.session``, which
+        every route comes through), kept as a bridge method for the callers that
+        never arrive through a route: ``warm``'s own speculation, the lease-warm
+        loop, and anything else this process starts on its own behalf. Those may
+        not delegate to a route's refusals, so the question has to be askable
+        here.
+
+        The per-route history is why the DOOR, not this method, is now the
+        enforcement: this check reached the three routes that called it
+        (``/messages``, ``/commands``, ``/answers``) and the routes that did not
+        (``/mcp``, ``/credentials``, ``/fork``, ``/asides``, ``/adopt``) reached
+        ``bind_runtime()`` on a latched daemon instead (review round 2, MAJOR-1).
+        The bridge-level call is a second pair of eyes, not the mechanism.
 
         Delegates the QUESTION to the pool's probe rather than reading a flag of
         its own, for the reason the probe exists: the answer changes once, mid-
@@ -1076,8 +1081,9 @@ class DesktopSessionBridge:
         answers a named 503 rather than a 500 (see ``DaemonRetiring``), and it
         is checked before the ``remote is None``/cold branches so a latched
         daemon refuses uniformly rather than only when it happens to be cold.
-        The decision itself lives in :meth:`assert_admitting`, which every other
-        path that can admit or start work calls too.
+        The decision itself lives in :meth:`assert_admitting`, which this bridge
+        shares with the pool's door (``DesktopSessions.session``) — the routes
+        reach that door, this loop reaches this method, and both read one probe.
 
         Returns the state at RETURN TIME — ``"warm"``, ``"warming"`` — never the
         eventual outcome, because every caller fires this speculatively (a
@@ -1429,11 +1435,13 @@ class DesktopSessions:
     def assert_admitting(self) -> None:
         """Raise ``DaemonRetiring`` when this daemon has LATCHED against new work.
 
-        THE ADMISSION PATH for everything session-scoped, and the only one:
-        ``create`` (a new session) and ``DesktopSessionBridge.assert_admitting``
-        (a new runtime for one, and every route that can reach the spawn seam)
-        ask this question, so "what does a retiring daemon refuse" has exactly
-        one answer.
+        THE ADMISSION PATH for everything session-scoped, and the only one: this
+        pool's ``session()`` — the door EVERY desktop route obtains its bridge
+        through, so the whole plane is covered by construction (review round 2,
+        MAJOR-1) — and ``create`` (a new session, which needs no bridge) ask this
+        question, so "what does a retiring daemon refuse" has exactly one answer.
+        ``DesktopSessionBridge.assert_admitting`` is the same question for the
+        callers that never come through a route (``warm``'s lease loop).
 
         NOT raised while the daemon is merely ANNOUNCED: the announcement's only
         job is to tell an attached client to let go, and a daemon that refused
@@ -1441,10 +1449,12 @@ class DesktopSessions:
         client took to react. The latch follows the empty drain
         (``server/retire.py``).
 
-        Reads are deliberately NOT refused either: the record keeps heartbeating
-        and the daemon keeps answering until the clean exit removes it, which is
-        what lets a reader observe the handover and drain against a daemon that
-        is still live.
+        ONCE LATCHED IT REFUSES READS AS WELL, because a session-scoped request
+        handed to a process that has told its readers to leave can only be served
+        by the build it is leaving; the record plane (``GET /v1/desktop/sessions``,
+        ``GET /health``, the record file) is a different surface and keeps
+        answering until the clean exit removes it, which is what lets a reader
+        observe the handover.
         """
         if self.retiring_probe():
             raise DaemonRetiring(RETIRING_MESSAGE)
@@ -1789,6 +1799,43 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(self, session_id: str) -> AsyncIterator[DesktopSessionBridge]:
+        """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        THE GATE IS HERE, AT THE DOOR, AND THAT IS THE WHOLE MECHANISM (review
+        round 2, MAJOR-1). Every desktop route obtains its bridge here and this
+        method builds every bridge the process hands out (the only
+        ``DesktopSessionBridge(...)`` construction in the tree — pinned by
+        ``test_serve_retire.py``'s walk), so one refusal covers every path that
+        can admit or start work: the five round 1 gated, the five
+        ``routes/desktop_lifecycle.py`` handlers review round 2 measured reaching
+        ``bind_runtime()`` unrefused (``/mcp``, ``/credentials``, ``/fork`` and
+        its child admission, ``/asides``, ``/adopt``), and every route a later
+        edit adds.
+
+        WHY THE DOOR RATHER THAN THE ROUTES. A list of gated routes is the defect
+        this replaces, not the fix: ``/messages`` was gated, ``/commands`` was
+        gated, and ``/mcp`` was not — three answers to one question, drifting
+        apart exactly as fast as routes are added. The route-by-route
+        enumeration survives only as a TEST (the refusal matrix and the walk in
+        ``tests/unit/server/test_serve_retire.py``), where a new route shows up
+        as a missing row instead of as a silently ungated path.
+
+        READS ARE REFUSED TOO, and that is a deliberate narrowing of what this
+        module used to claim. A session-scoped request handed to a process that
+        has already told its readers to leave can only be served by the build it
+        is leaving, and the typed refusal is the one answer that moves the client
+        on (``DaemonRetiring``'s message says to reconnect to the successor).
+        What stays readable is the RECORD plane, which is not this method and not
+        this pool: ``GET /v1/desktop/sessions``, ``GET /health`` and the record
+        file itself keep answering until the clean exit removes them, which is
+        what lets any reader observe the handover.
+
+        THE 404 BELONGS TO THE LOOKUP, NOT TO THE REFUSAL, so it is decided
+        first: an unknown session is unknown whether or not this daemon is
+        leaving, and keeping that answer stable is what makes "the 503 is the
+        LATCH answering" a readable control in the evidence rather than an
+        artefact of routing.
+        """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         async with self.lock:
@@ -1813,7 +1860,12 @@ class DesktopSessions:
                     checkpoint = Transcript(path).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
                     return str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent)
 
+                # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
+                # daemon too: that is what lets "the 503 is the LATCH answering" be
+                # read as a control in the evidence rather than as an artefact of
+                # routing.
                 cwd = await asyncio.to_thread(locate)
+                self.assert_admitting()  # THE REFUSAL, before anything is built
                 if len(self.bridges) >= BRIDGE_COUNT:
                     idle = [b for b in self.bridges.values() if b.users == 0]
                     if not idle:
@@ -1824,6 +1876,11 @@ class DesktopSessions:
                     self.root, session_id, cwd, retiring=self.retiring_probe
                 )
                 self.bridges[session_id] = bridge
+            else:
+                # Asked on the WARM path too, and that is not redundancy: the cache
+                # is a cache of the same door, so without this a refusal would be
+                # one a client could walk past by never having gone cold.
+                self.assert_admitting()
             # Reserve under the pool lock; eviction must not remove a bridge
             # between lookup and its first acquire.
             await bridge.acquire()

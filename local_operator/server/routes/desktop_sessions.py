@@ -642,22 +642,25 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
 async def prompt(session_id: str, body: Prompt, request: Request):
     """Admit ONE user turn, or refuse because this process is leaving.
 
-    The refusal is the FIRST thing the handler does, before the receipt is
-    claimed, and it is deliberate that it is not only about the turn: this
-    callback reaches ``admit_prompt``, which binds a viewer through
+    The refusal is the pool's door (``DesktopSessions.session``), which this
+    route enters before it claims anything: it is the FIRST thing the handler
+    does, before the receipt is claimed, and it covers ``admit_prompt``'s
     ``_ensure_bound`` (``session/attached.py``) — the one path in the desktop
-    plane that can also START a session runtime. That is precisely what
-    ``warm``'s own gate exists to prevent, and review round 1 measured this
-    route answering 200 on a latched daemon while ``/warm`` answered 503 against
-    the same process (MAJOR-2). ``bridge.assert_admitting`` is the same question
-    ``warm`` asks, asked at the same seam.
+    plane that can also START a session runtime, which is what ``warm``'s own
+    gate exists to prevent (review round 1, MAJOR-2 measured this route
+    answering 200 on a latched daemon while ``/warm`` answered 503 against the
+    same process).
+
+    The gate is at the DOOR rather than in this handler because this handler is
+    one of fourteen that obtain a bridge, not the admission path itself (review
+    round 2, MAJOR-1): see ``DesktopSessions.session`` for why the
+    route-by-route question was the defect.
 
     NOT refused while the daemon is merely ANNOUNCED, which is why the gate is
     on the latch and not on the record: an announced daemon is still the only
     place its client can work (``server/retire.py``).
     """
     async with errors(), host(request).session(session_id) as bridge:
-        bridge.assert_admitting()
 
         async def admit():
             assert bridge.remote is not None
@@ -693,12 +696,12 @@ async def prompt(session_id: str, body: Prompt, request: Request):
 async def command(session_id: str, body: Command, request: Request):
     """Run ONE slash command, or refuse because this process is leaving.
 
-    Refused for the same reason as ``prompt`` and at the same seam, and here it
-    matters twice: ``bridge.remote.bind_runtime()`` below is an explicit
-    ``_ensure_bound``, so a latched daemon would start a runtime for a command
-    alone. The gate is before the receipt is claimed, so a refused command
-    leaves no receipt row for the client's retry against the successor to
-    trip over.
+    Refused by the pool's door (``DesktopSessions.session``) for the same reason
+    as ``prompt`` and at the same seam, and here it matters twice:
+    ``bridge.remote.bind_runtime()`` below is an explicit ``_ensure_bound``, so a
+    latched daemon would start a runtime for a command alone. The door runs
+    before the receipt is claimed, so a refused command leaves no receipt row for
+    the client's retry against the successor to trip over.
     """
     spec = slash_command_for("/" + body.command.removeprefix("/"))
     if spec is None or not spec.desktop_destination:
@@ -726,7 +729,6 @@ async def command(session_id: str, body: Command, request: Request):
         if get_provider_definition(body.args.strip()) is None:
             raise HTTPException(422, "Choose a provider in the authentication panel")
     async with errors(), host(request).session(session_id) as bridge:
-        bridge.assert_admitting()
 
         async def execute():
             if (
@@ -804,22 +806,22 @@ async def decode_images(images: list[Image]):
 async def answer(session_id: str, body: Answer, request: Request):
     """Answer the pending gate, or refuse because this process is leaving.
 
-    Gated on the latch like the two routes above, and the reason is NOT that
-    this path can start a runtime — it cannot: ``answer_gate`` needs a connected
-    client and raises otherwise, so a cold daemon cannot be warmed into a spawn
-    from here. The reason is that a latched daemon is a process whose socket is
-    about to close, and an answer delivered through it is a delivery nobody can
-    confirm; the client's correct move is the same one every other refusal asks
-    for (rediscover the successor through the record) rather than the 409 its
-    own "no longer pending" check would produce, which reads like the question
-    expired.
+    Refused by the pool's door (``DesktopSessions.session``) like the two routes
+    above, and the reason is NOT that this path can start a runtime — it cannot:
+    ``answer_gate`` needs a connected client and raises otherwise, so a cold
+    daemon cannot be warmed into a spawn from here. The reason is that a latched
+    daemon is a process whose socket is about to close, and an answer delivered
+    through it is a delivery nobody can confirm; the client's correct move is the
+    same one every other refusal asks for (rediscover the successor through the
+    record) rather than the 409 its own "no longer pending" check would produce,
+    which reads like the question expired.
 
-    BEFORE the epoch comparison, deliberately: a stale-epoch answer on a latched
-    daemon must not get a refusal that suggests retrying against this process.
+    BEFORE the epoch comparison, deliberately — and the door runs before this
+    handler's first statement: a stale-epoch answer on a latched daemon must not
+    get a refusal that suggests retrying against this process.
     """
     async with errors(), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
-        bridge.assert_admitting()
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
         try:
