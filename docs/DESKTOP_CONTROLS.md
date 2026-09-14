@@ -194,9 +194,13 @@ transport does **not** prove Google Workspace account authorization.
 POST the same path accepts the closed `MCPControl` schema:
 
 - `add`: name, scope global/project, either command+args[] or url; optional env,
-  headers and oauth boolean. Env/header values must be `${NAME}` references.
-  URLs reject inline credentials, query and fragment. Command arguments remain an
-  array; no shell evaluation or whitespace splitting. Store secrets separately.
+  headers and oauth boolean. Env/header values must be `${NAME}` references,
+  resolved at connect time from the credential store (`<config dir>/credentials.env`,
+  the store the Settings > API credentials screen writes — see `docs/mcp.md`).
+  A reference that cannot be resolved fails the connect naming the key; it never
+  reaches the server as text. URLs reject inline credentials, query and fragment.
+  Command arguments remain an array; no shell evaluation or whitespace splitting.
+  Store secrets separately.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver
   refuses removal of foreign imported definitions and does not shadow them.
 - `reload`, `connect`, `disconnect` use the session's existing manager. Disconnect

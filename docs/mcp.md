@@ -29,6 +29,63 @@ opening that repo under a credentialed profile.** Treat an unexpected MCP
 server in a project config the same way you would an unexpected shell command
 in a build script.
 
+## Secrets in `env` and `headers`
+
+A server config is a file: committed, shared, and imported from other tools'
+configs. It therefore carries secret **references**, never secrets. A value in a
+stdio server's `env` or a remote server's `headers` is resolved when the
+transport is built, immediately before the child process is spawned or the HTTP
+request is sent:
+
+```json
+{
+  "mcpServers": {
+    "crm": {
+      "type": "http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${CRM_API_KEY}"}
+    },
+    "local": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "some-mcp-server"],
+      "env": {"SOME_API_KEY": "${SOME_API_KEY}"}
+    }
+  }
+}
+```
+
+The store is `<config dir>/credentials.env` (default
+`~/.local-operator/credentials.env`) — the same one the desktop Settings >
+API credentials screen and `local-operator credential update NAME` write, so a
+reference names a key the user can see and edit. It is the **only** source:
+the process environment is deliberately not consulted, so a project-scoped
+`.mcp.json` cannot use a reference to copy an unrelated variable out of the
+running app's environment. Nothing is cached, so a credential added while a
+session is running is picked up by the next connect (`/mcp reload`, or the
+server's reconnect).
+
+**The reference rule.** `NAME` is `[A-Za-z_][A-Za-z0-9_]*`.
+
+| value | result |
+|---|---|
+| no `${` at all (`plain-value`, `$NAME`) | passed through untouched; the store is not read |
+| `${NAME}` as the whole value | the stored value (the only shape the desktop UI's add form accepts) |
+| `Bearer ${NAME}` | each reference substituted, surrounding text kept |
+| a `${` that is not a reference at all (`${1BAD}`, `${a b}`, an unclosed `${NAME`) | passed through untouched — it is literal text in a hand-written config |
+| a well-formed reference mixed with a malformed one (`${A}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
+
+**An unresolvable reference is a refusal, never the literal.** A server whose
+reference names a key the store does not hold (or holds empty) fails to start
+with `MCP server 'crm' needs CRM_API_KEY from the credential store — add it in
+Settings > API credentials, then reconnect`; no tool from it is registered, and
+the reference text is never passed to the process or the remote server. Values
+are never logged, so the message names the key and the entry, not the secret.
+
+`args` is deliberately not resolved: a secret in a command line is readable by
+any other process on the machine through `ps`, which is why the UI's add form
+refuses a literal in `env`/`headers` only.
+
 ## Runtime behavior
 
 - **Startup gate:** discovery races all connects against a 250 ms gate.
