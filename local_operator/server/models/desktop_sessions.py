@@ -272,3 +272,29 @@ class AttentionState(BaseModel):
     revision: list[int]
     #: Absent on the cold list path; only a live runtime can answer it.
     supported: bool | None = None
+
+
+class PresenceReceipt(BaseModel):
+    """The acknowledgment of one delivery-presence beat.
+
+    A receipt rather than a boolean because the client has to know WHEN to beat
+    again, and deriving that from a value it hardcoded is how the two sides end
+    up disagreeing about the lease after one of them is tuned. The server owns
+    the TTL, so the server states it.
+    """
+
+    lease_seconds: int
+
+
+class PresenceKinds(BaseModel):
+    """Which notification kinds a connected desktop app claims it can deliver.
+
+    ITS OWN MODEL because it is its own promise, narrower than "the app is
+    reachable". The machine-wide feed carries COMPLETIONS ONLY, so a presence
+    that claimed every kind would silence a background session's parked `ask`
+    with nothing to replace it — the gate cards ride a per-session bridge the
+    app holds only for the session it is displaying. Naming the kinds makes that
+    limitation part of the wire rather than a property of today's feed.
+    """
+
+    can_notify_kinds: list[str]

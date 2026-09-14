@@ -990,6 +990,82 @@ class AttentionStore:
     def state(self, conversation: str) -> dict[str, Any]:
         return self.state_many([conversation])[conversation]
 
+    def published_since(self, sequence: int) -> list[dict[str, Any]]:
+        """Publications NEWER than ``sequence``, oldest first, as deltas.
+
+        THE MACHINE-WIDE FEED'S READ, and it exists for the same reason
+        ``revision()`` does: a poller that must notice a completion cannot pay
+        ``state_many`` over the whole store on every tick. ``sequence`` is the
+        AUTOINCREMENT primary key, so this is an index scan over exactly what
+        happened since the caller's cursor, not a per-conversation lookup.
+
+        Returns ``(conversation, sequence, token, kind)`` per row because that
+        is the whole of what "a completion was published" needs: the caller
+        keys its own per-session baseline on ``token`` (the durable identity)
+        and decides eligibility from ``kind`` (``BRIDGE_NOTIFIABLE_KINDS``).
+        The caller has to read ``state_many`` for the affected sessions
+        afterwards for the wire shape — this read answers "which sessions
+        moved", never "what does the card say".
+
+        Read-only and missing-store tolerant, exactly like its neighbours: a
+        store that does not exist yet has published nothing, and a poller that
+        raised here would lose cross-process completion sync for the life of
+        its loop. A pre-taxonomy database reads without ``reason``/``cause``
+        because neither is selected.
+        """
+        if not self.path.exists():
+            return []
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return []
+            return [
+                {
+                    "conversation": row["conversation"],
+                    "sequence": int(row["sequence"]),
+                    "token": row["token"],
+                    "kind": row["kind"],
+                }
+                for row in conn.execute(
+                    "SELECT conversation, sequence, token, kind FROM completions "
+                    "WHERE sequence > ? ORDER BY sequence",
+                    (int(sequence),),
+                )
+            ]
+
+    def acknowledgement_map(self) -> dict[str, int]:
+        """``{conversation: acknowledged}`` for every conversation with a receipt.
+
+        The second half of the feed's delta: a read is a durable change to the
+        same watermark the unseen mark is computed from (``sequence >
+        acknowledged``), so a session that is READ must be able to publish an
+        ``attention`` frame that clears its own mark without a full re-read of
+        the store. The caller diffs this against the map it held last tick and
+        re-reads state only for the sessions whose value moved.
+
+        Deliberately its own small read rather than a term of ``revision()``:
+        ``SUM(acknowledged)`` is enough to know *something* moved but not
+        *which*, and guessing the conversation is what would make a late frame
+        un-read a row.
+        """
+        if not self.path.exists():
+            return {}
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return {}
+            return {
+                str(row[0]): int(row[1])
+                for row in conn.execute(
+                    "SELECT conversation, MAX(acknowledged) FROM receipts GROUP BY conversation"
+                )
+            }
+
     def publish(
         self,
         conversation: str,

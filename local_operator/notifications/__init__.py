@@ -20,17 +20,23 @@ See ``docs/design/descriptive-notifications.md`` for the decision record.
 """
 
 from local_operator.notifications.compose import (
+    FOCUS_ALWAYS,
+    FOCUS_WHEN_UNFOCUSED,
     NOTIFICATION_CONTRACT_VERSION,
     ComposedNotification,
     NotificationKind,
     compose,
     gate_body,
+    notification_payload,
 )
 
 __all__ = [
+    "FOCUS_ALWAYS",
+    "FOCUS_WHEN_UNFOCUSED",
     "NOTIFICATION_CONTRACT_VERSION",
     "ComposedNotification",
     "NotificationKind",
     "compose",
     "gate_body",
+    "notification_payload",
 ]
