@@ -7,6 +7,15 @@ refuses without ``--yes``; ``--yes`` proceeds), the ``--json`` shape, and
 that the resolver is the same one ``lop send`` uses. The ladder is stubbed at
 ``control.stop_session`` / ``control.stop_all`` so no socket is dialled and
 no process is ever signalled from a test.
+
+THE STUBS MIRROR THE REAL SIGNATURES, keyword for keyword (``timeout_s``,
+``_root``, ``force``, and now ``_command``). A stub narrower than the function
+it replaces is a test that passes until a caller uses a keyword for real — which
+is exactly how this file failed when the CLI started naming ``_command`` (the
+front end threaded into every stop marker): the CLI was right and the stub was
+out of date, so the stub moved, not the call site. Each stub also records what it
+was handed, so the CLI's own contract for the front-end name is asserted here
+rather than inferred from the ladder's tests.
 """
 
 from __future__ import annotations
@@ -59,7 +68,15 @@ def _outcome(method: str, pid: int = 4242, line: str | None = None) -> StopOutco
     )
 
 
-async def _fake_stop(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
+#: What the stubs were handed, for the assertions that pin the CLI's own
+#: contract (today: the front-end name it puts in every stop marker).
+_SEEN: dict[str, Any] = {}
+
+
+async def _fake_stop(  # noqa: ANN001, ANN202
+    record, *, timeout_s, _root, force=False, _command=None
+):
+    _SEEN["stop_command"] = _command
     return _outcome("socket", pid=record.pid)
 
 
@@ -96,13 +113,18 @@ def test_one_target_stopped_exits_0_and_prints_the_receipt(capsys) -> None:
         rc = stop_command(_args(target="the agent"))
     assert rc == 0
     assert 'stopped "the agent"' in capsys.readouterr().out
+    # The marker's whole value is naming WHO stopped the runtime, so the CLI
+    # says what the user typed rather than the function it reached (MINOR-2).
+    assert _SEEN["stop_command"] == "lop stop"
 
 
 def test_refused_identity_exits_2(capsys) -> None:
     """A refusal is a PARTIAL result, not a no-match: the target existed and
     was not stopped, which a script must be able to tell from 'wrong name'."""
 
-    async def refuse(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
+    async def refuse(  # noqa: ANN001, ANN202
+        record, *, timeout_s, _root, force=False, _command=None
+    ):
         return _outcome("refused", line="refused to signal pid 4242 — identity mismatch")
 
     with (
@@ -118,7 +140,7 @@ def test_already_exited_is_clean(capsys) -> None:
     left for a human to do, so it exits 0 — decided from the method, never
     from the receipt text (R1-7)."""
 
-    async def gone(record, *, timeout_s, _root, force=False):  # noqa: ANN001, ANN202
+    async def gone(record, *, timeout_s, _root, force=False, _command=None):  # noqa: ANN001, ANN202
         return _outcome("gone", line='"the agent" already exited')
 
     with (
@@ -175,9 +197,9 @@ def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, 
     seen: dict[str, Any] = {}
 
     async def fake_all(  # noqa: ANN001, ANN202
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, force=False
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, force=False, _command=None
     ):  # noqa: ANN001, ANN202
-        seen.update(own_pid=own_pid, only_pids=only_pids, timeout_s=timeout_s)
+        seen.update(own_pid=own_pid, only_pids=only_pids, timeout_s=timeout_s, command=_command)
         return [
             _outcome("socket", pid=1),
             _outcome("refused", pid=2, line='refused "the agent" (pid 2) — did not answer'),
@@ -194,8 +216,14 @@ def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, 
     assert rc == 2
     out = capsys.readouterr().out
     assert "2 sessions: 1 stopped, 1 refused" in out
-    # --timeout reaches the ladder (R1-5); the run is scoped to the scan.
-    assert seen == {"own_pid": None, "only_pids": {1, 2}, "timeout_s": 4.0}
+    # --timeout reaches the ladder (R1-5); the run is scoped to the scan, and a
+    # sweep names itself rather than a single stop (MINOR-2).
+    assert seen == {
+        "own_pid": None,
+        "only_pids": {1, 2},
+        "timeout_s": 4.0,
+        "command": "lop stop --all",
+    }
 
 
 def test_all_with_nothing_running_says_so(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

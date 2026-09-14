@@ -498,11 +498,29 @@ def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]
 
     ``reason`` is optional because a pre-taxonomy record carries none, and an
     empty one must read exactly as it always has rather than leaving a dangling
-    em-dash.
+    em-dash. The INTERRUPTED arm reads it too, and only for the attribution an
+    escalated stop carries (design round 1, D1): a rung-3 kill and a rung-1
+    request used to render identically because this row was kind-gated and threw
+    the reason away, so the one surface the phone and the TUI poller share said
+    nothing about who killed what.
     """
     if kind == "error":
         text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
         return text, "error"
+    if kind == "interrupted":
+        # WHAT THE DELIBERATE ROW WAS MISSING (design round 1, D1). ``reason``
+        # reaches this helper as one composed sentence, and for a stop the
+        # operator's own case that sentence is "the session was stopped by the
+        # user" plus the attribution — the bit this row dropped, which made a
+        # rung-3 kill and a rung-1 request render the same 11 cells. Only the
+        # ESCALATED rung appends it (see
+        # ``incidents.stop_rung_phrase``): a plain request is what the word
+        # ``Interrupted`` already means, and appending its own sentence would
+        # say "Interrupted — the session was stopped by the user".
+        from local_operator.incidents import stop_rung_phrase
+
+        phrase = stop_rung_phrase(reason or "")
+        return (f"Interrupted — {phrase}" if phrase else "Interrupted"), "info"
     return "Interrupted", "info"
 
 

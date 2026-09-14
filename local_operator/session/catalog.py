@@ -262,6 +262,8 @@ class CatalogEntry:
         if self.shows_completion_mark:
             if self.completion_kind == "error":
                 return self._error_label("Unseen error")
+            if self.completion_kind == "interrupted":
+                return self._stop_label("Unseen interruption")
             return {"interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
             )
@@ -305,18 +307,50 @@ class CatalogEntry:
         if self.completion_token:
             if self.completion_kind == "error":
                 return self._error_label("Error")
+            if self.completion_kind == "interrupted":
+                return self._stop_label("Interrupted")
             return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
         return "Recent"
+
+    def _stop_label(self, base: str) -> str:
+        """``Interrupted``/``Unseen interruption`` plus the rung, when it escalated.
+
+        The half of design round 1's D1 that the classification change left
+        open. The kind was already right — a stop the operator asked for paints
+        ``⊘`` in the interrupted ink rather than ``✗`` — but the reason reached
+        no surface, so a rung-3 SIGKILL and a rung-1 request produced
+        byte-identical rows and the tooltip said nothing the operator could act
+        on. :func:`incidents.stop_rung_phrase` is the phrase and it is empty for
+        the plain request rung, deliberately: this row's own word already says
+        the user stopped it, and ``/stop`` is exactly what rung 1 is.
+
+        The same budget rule as :meth:`_error_label` — one logical line, no
+        parenthetical stack — and the same tolerance: an empty reason returns
+        the spelling BYTE-IDENTICAL to today's, so every pre-taxonomy record and
+        every plain stop renders exactly as it always has.
+        """
+        from local_operator.incidents import stop_rung_phrase
+
+        phrase = stop_rung_phrase(self.completion_reason or "")
+        return f"{base} — {phrase}" if phrase else base
 
     def _error_label(self, base: str) -> str:
         """``Error``/``Unseen error`` plus the reason, when there is one.
 
-        The tooltip is ONE line, so only the first line of the reason is used
-        and the parenthetical DETAIL is dropped (``runtime-retired`` carries a
-        build pair — ``(0.54.11@b133eba → 0.54.12@402af7f)`` — which is useful
-        in the incident card the model reads and noise in a sidebar row). An
-        empty reason leaves the spelling BYTE-IDENTICAL to today's, which is
-        what keeps every pre-taxonomy record and every completion unchanged.
+        The ONE-LINE BUDGET IS THE ROW, not the tooltip, and the earlier wording
+        here said the opposite (design round 1, D6, which measured it): the
+        ``Tooltip`` widget WRAPS — an error row renders 36×5 and 36×6 cells and
+        the longest sentence winds over four rows above the id line — so a
+        claim that the tooltip truncates was the justification for dropping a
+        parenthetical that would in fact fit. What the sidebar cannot afford is
+        the ROW's single description cell, and what the reason is trimmed to is
+        therefore its first SENTENCE: the parenthetical DETAIL
+        (``runtime-retired`` carries a build pair — ``(0.54.11@b133eba →
+        0.54.12@402af7f)`` — which is useful in the incident card the model
+        reads and noise in a list of sessions) is dropped for brevity, not for
+        clipping. An empty reason leaves the spelling BYTE-IDENTICAL to today's,
+        which is what keeps every pre-taxonomy record and every completion
+        unchanged.
         """
         reason = (
             self.completion_reason.strip().splitlines()[0].strip()
