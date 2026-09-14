@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -52,6 +53,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     SubagentChildUnavailable,
+    birth_effort_for,
     resolve_working_directory,
 )
 from local_operator.session.cold_model import synthesise_cold_state
@@ -190,6 +192,15 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
       resolver the owner constructs its spec with (``build_model_spec``), so the
       level accepted here is the level the first turn will send.
 
+    **A pick that named no level comes back carrying NONE**, never the model's
+    seeded default rung. ``build_model_spec`` seeds that rung ("the level this
+    model would use if nobody said"), and a seed is not a choice: letting it
+    through would store a level the user never picked, pin it in the marker and
+    have the first turn take it over the machine's configured ``model_effort``
+    (review round 1, R1). ``null`` therefore stays distinguishable from "the
+    level happened to equal the seed" all the way to the launch, where the
+    owner's own resolution supplies the configured level, clamped by the ladder.
+
     Runs OFF the event loop by its callers: it reads the catalogue cache and, for
     a model the registry does not describe, resolves metadata (memoised, and
     disk-cached in the common case the picker just filled it).
@@ -246,7 +257,31 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
                 },
             )
         spec = spec.model_copy(update={"reasoning_effort": effort})
+    elif spec.reasoning_effort is not None:
+        # The seed, not a choice — and the two must not become indistinguishable
+        # in the marker. See the docstring: this is R1's fix, and the pair it has
+        # to agree with is ``draft_birth_selection``, which clears the same seed
+        # on the way in.
+        spec = spec.model_copy(update={"reasoning_effort": None})
     return spec
+
+
+def _preview_birth_model(root: pathlib.Path, model: DraftModel) -> ModelSpec:
+    """The validated choice, resolved to the level the first turn will RUN at.
+
+    ``_draft_model_spec`` answers what the user CHOSE, which is also what
+    ``create`` stores in the marker — ``null`` for "this model, no level". The pane
+    cannot report that: it reports the readings the first turn gets, and for a pick
+    with no level the level is the machine's configured ``model_effort`` (or, when
+    the config has no opinion, the model's own seed). Both answers come from
+    :func:`birth_effort_for`, the same function the plane seeds a real session with,
+    so the chip cannot differ between this payload and the first cold frame the UI
+    swaps in at ``finishDraft``.
+    """
+    spec = _draft_model_spec(model)
+    return spec.model_copy(
+        update={"reasoning_effort": birth_effort_for(spec, spec.reasoning_effort, root)}
+    )
 
 
 class Image(Input):
@@ -466,20 +501,24 @@ async def search_sessions(
 async def create_session(body: CreateSession, request: Request):
     """Create a new conversation, optionally born on a chosen model and effort.
 
-    The selection is validated BEFORE the receipt is claimed, and the claim is a
-    durable write: a refusal has to leave the store exactly as it found it, and a
-    claimed-then-refused request would otherwise answer its own retry with
-    "outcome indeterminate" instead of the refusal. The chosen pair is then
-    passed to ``DesktopSessions.create``, which stores it in the session's own
-    marker — the record outlives this request, and the first engage reads it.
+    The body's admissions run BEFORE the receipt is claimed, in the same order
+    ``preview`` applies them (cwd, target, model), for two reasons. A refusal has
+    to leave the store exactly as it found it — the claim is a durable write, and
+    a claimed-then-refused request would otherwise answer its own retry with
+    "outcome indeterminate" instead of the refusal. And the two routes are
+    documented as answering the same refusals, which is only true if they also
+    agree on WHICH refusal a body that is bad in two ways gets (review round 1,
+    R4).
+
+    All three are the admissions ``DesktopSessions.create`` itself applies, so a
+    body that passes here passes there — and the pool runs them again rather than
+    trusting this pre-flight, because that is the callable's own contract and a
+    second caller must not be able to reach it unvalidated. Each is a read (a
+    stat, and the registries ``create`` would build anyway), so a retried request
+    replays them for a syscall and writes nothing.
 
     No ``model`` ⇒ the body, the marker and the launch are byte-for-byte today's.
     """
-    spec = None
-    if body.model is not None:
-        # Off the loop: the catalogue it reads is a disk document, and for an
-        # unshipped model the metadata resolver may consult the provider.
-        spec = await asyncio.to_thread(_draft_model_spec, body.model)
 
     async def create():
         pool = host(request)
@@ -503,6 +542,29 @@ async def create_session(body: CreateSession, request: Request):
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
     async with errors():
+        pool = host(request)
+        # The SAME admissions ``create`` applies, in the SAME order ``preview``
+        # applies them, so one body gets one answer from either route. See
+        # ``DesktopSessions.create`` / ``resolve_working_directory``.
+        await asyncio.to_thread(resolve_working_directory, body.cwd)
+        if body.target is not None:
+            target = body.target.model_dump()
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import validate_target
+            from local_operator.teams import TeamRegistry
+
+            await asyncio.to_thread(
+                validate_target,
+                AgentRegistry(pool.root),
+                TeamRegistry(pool.root),
+                target["kind"],
+                target["name"],
+            )
+        spec = None
+        if body.model is not None:
+            # Off the loop: the catalogue it reads is a disk document, and for an
+            # unshipped model the metadata resolver may consult the provider.
+            spec = await asyncio.to_thread(_draft_model_spec, body.model)
         return reply(
             await receipts(request).run("create:" + body.request_id, body.model_dump(), create)
         )
@@ -575,12 +637,12 @@ async def preview_session(body: DraftPreview, request: Request):
             # The chosen selection, when there is one, is synthesised exactly as
             # the first cold frame of the session it describes will be — same
             # resolver, same metadata — so the pane's identity AND its spec
-            # (context window, effort ladder) are the ones the first turn gets
-            # rather than the configured default's. Still session-less and
-            # side-effect free: this is an INPUT, and the state below writes
-            # nothing (see the docstring above).
+            # (context window, effort ladder, and the level the first turn runs at)
+            # are the ones the first turn gets rather than the configured
+            # default's. Still session-less and side-effect free: this is an
+            # INPUT, and the state below writes nothing (see the docstring above).
             birth_model=(
-                await asyncio.to_thread(_draft_model_spec, body.model)
+                await asyncio.to_thread(_preview_birth_model, pool.root, body.model)
                 if body.model is not None
                 else None
             ),

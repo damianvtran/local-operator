@@ -762,12 +762,30 @@ def test_spawn_runtime_carries_a_chosen_birth_effort_to_the_child(tmp_path, monk
     capture = getattr(plain, "lop_capture_path", None)
     if capture is not None:
         capture.unlink(missing_ok=True)
+    # A pick that named a MODEL and no LEVEL (review round 1, R1): the pair rides,
+    # the level does not — and the inherited ``stale-from-a-sibling`` above must
+    # not survive it either, or a conversation born on "this model, no level"
+    # silently inherits a sibling's reasoning level instead of resolving the
+    # machine's configured ``model_effort``.
+    pair_only = launch_module._spawn_runtime(
+        "sess-effort3",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=ModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        model_selection_override=True,
+    )
+    capture = getattr(pair_only, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
 
     assert recorded[0]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
     assert recorded[0]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
     assert recorded[0]["LOP_MOBILE_CHILD_EFFORT"] == "max"
     assert recorded[0]["LOP_MODEL_SELECTION_OVERRIDE"] == "1"
     assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[1]
+    assert recorded[2]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
+    assert recorded[2]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[2]
     assert "LOP_MOBILE_CHILD_PROVIDER" not in recorded[1]
     assert "LOP_MODEL_SELECTION_OVERRIDE" not in recorded[1]
 
