@@ -22,7 +22,7 @@ WHAT MAKES IT SAFE, and the property most likely to be broken by a later edit:
   absence directly (``DesktopSessions.bridges`` stays empty across a feed
   cycle).
 * **It mints no second semantics.** The payload is built by the SAME function
-  the bridge uses (``notifications.compose.notification_payload``), so
+  the bridge uses (``notifications.notification_payload``), so
   ``dedupe_key`` is byte-identical and the desktop's local claim map collapses
   the pair into one banner. The one field the feed derives differently is
   ``focus_policy`` — a ROUTING field, not content; see ``_focus_policy_for``.
@@ -433,14 +433,25 @@ class DesktopFeed:
             return
         candidates.sort(key=lambda item: item[4])
         for identity, token, kind, policy, sequence in candidates[:BURST_LIMIT]:
-            payload = await asyncio.to_thread(
-                notification_payload,
-                cast(NotificationKind, kind),
-                session_dir=self.sessions_dir / self._session_id(identity),
-                token=token,
-                session_id=self._session_id(identity),
-                focus_policy=policy,
-            )
+            try:
+                payload = await asyncio.to_thread(
+                    notification_payload,
+                    cast(NotificationKind, kind),
+                    session_dir=self.sessions_dir / self._session_id(identity),
+                    token=token,
+                    session_id=self._session_id(identity),
+                    focus_policy=policy,
+                )
+            except Exception:  # noqa: BLE001 — chrome must not stop the channel
+                # ONE UNREADABLE SESSION COSTS ONE BANNER, NEVER THE FEED. This
+                # loop is driven by the poller task, so an exception escaping
+                # here would end the tick that keeps every subscriber's attention
+                # frames flowing — a background completion would then be silent
+                # on every surface, which is the defect this module exists to
+                # close. The same rule the bridge applies at `_maybe_publish_
+                # notification` (T-B13), applied to the machine-wide channel.
+                logger.debug("feed compose failed for %s", identity, exc_info=True)
+                continue
             self._publish(
                 "notification",
                 payload,

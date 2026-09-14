@@ -178,13 +178,28 @@ def notification_payload(
     mirrored, and the only parameter the two callers may differ on is
     ``focus_policy`` — a ROUTING field, per :data:`FOCUS_ALWAYS`.
 
+    The composer is called THROUGH THE PACKAGE (``notifications.compose``),
+    not through this module's own global, and that indirection is load-bearing.
+    The public entry point is what a wrapper or a test patches, and the failure
+    contract T-B13 pins is stated against it: a composer that raises costs the
+    BANNER, never the receipt sync the frame rides on
+    (``test_a_compose_failure_costs_the_banner_not_the_attention_frame``). A
+    module-local call routes around that patch, so the guard stops being
+    exercised while the suite stays green — the one shape of bug this project
+    treats as worse than a failing test.
+
     ``token`` is the durable completion token, never a bridge sequence:
     ``acquire()`` mints a new epoch and resets its sequence after a detached
     interval, so a seq-keyed dedupe re-toasts the same completion on every
     reconnect. The key's prefix is the frame's own kind, so a dedupe-map dump
     cannot read an error banner as ``complete:``.
     """
-    composed = compose(kind, session_dir=session_dir, session_name=session_name)
+    # Imported here rather than at module scope: the package imports THIS
+    # module, so a top-level `from local_operator import notifications` would
+    # be a cycle.
+    from local_operator import notifications
+
+    composed = notifications.compose(kind, session_dir=session_dir, session_name=session_name)
     return {
         "contract": NOTIFICATION_CONTRACT_VERSION,
         "kind": composed.kind,
