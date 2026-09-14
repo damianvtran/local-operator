@@ -33,7 +33,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
-from local_operator.server.retire import DaemonRetiring
+from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
@@ -1047,16 +1047,37 @@ class DesktopSessionBridge:
                 self.warm_backoff_s,
             )
 
+    def assert_admitting(self) -> None:
+        """Raise ``DaemonRetiring`` when the daemon serving this bridge has LATCHED.
+
+        THE ADMISSION CHECK FOR EVERY PATH THAT CAN ADMIT OR START WORK ON THIS
+        BRIDGE, and one method rather than one per route on purpose: the routes
+        that reach the spawn seam (``/messages``, ``/commands``) and the one that
+        only delivers into a live runtime (``/answers``) all ask the same
+        question here, so a route added later reaches the same answer by calling
+        the same thing — where a copy per route is exactly how one of them comes
+        to be missed (review round 1, MAJOR-2: ``/messages`` returned 200 and
+        reached ``admit_prompt`` on a latched daemon).
+
+        Delegates the QUESTION to the pool's probe rather than reading a flag of
+        its own, for the reason the probe exists: the answer changes once, mid-
+        life, in the daemon rather than in any bridge.
+        """
+        if self.retiring_probe():
+            raise DaemonRetiring(RETIRING_MESSAGE)
+
     async def warm(self) -> str:
         """Start a runtime for this session without submitting any work.
 
-        REFUSED WHILE RETIRING, before anything else: this is the one path that
+        REFUSED WHILE LATCHED, before anything else: this is the one path that
         SPAWNS a session runtime from this process (``warm_runtime`` below), and
         a daemon that is about to exit must not start a runtime whose viewer
         would follow it onto a dead address. The refusal is typed so the route
         answers a named 503 rather than a 500 (see ``DaemonRetiring``), and it
-        is checked before the ``remote is None``/cold branches so a retiring
+        is checked before the ``remote is None``/cold branches so a latched
         daemon refuses uniformly rather than only when it happens to be cold.
+        The decision itself lives in :meth:`assert_admitting`, which every other
+        path that can admit or start work calls too.
 
         Returns the state at RETURN TIME — ``"warm"``, ``"warming"`` — never the
         eventual outcome, because every caller fires this speculatively (a
@@ -1115,11 +1136,7 @@ class DesktopSessionBridge:
         whenever the client is None, which is precisely the state a bridge in
         the middle of a warm is in.
         """
-        if self.retiring_probe():
-            raise DaemonRetiring(
-                "This backend is restarting onto a new build and no longer starts "
-                "session runtimes. Reconnect to the new backend and retry."
-            )
+        self.assert_admitting()
         remote = self.remote
         assert remote is not None
         if not remote.is_cold:
@@ -1402,7 +1419,7 @@ class DesktopSessions:
         self.root = root
         self.bridges: dict[str, DesktopSessionBridge] = {}
         self.lock = asyncio.Lock()
-        # Whether the DAEMON this pool serves has announced a retirement, asked
+        # Whether the DAEMON this pool serves has LATCHED against new work, asked
         # rather than cached: the answer changes once, mid-life, and both the
         # refusal (``assert_admitting``) and every bridge this pool hands out
         # must see it. Defaulted so the many reduced ``DesktopSessions(root)``
@@ -1410,37 +1427,56 @@ class DesktopSessions:
         self.retiring_probe = retiring or _never_retiring
 
     def assert_admitting(self) -> None:
-        """Raise ``DaemonRetiring`` when this daemon has announced its exit.
+        """Raise ``DaemonRetiring`` when this daemon has LATCHED against new work.
 
-        THE ADMISSION PATH, and the only one: everything that starts new work
-        here — ``create`` (a new session) and ``DesktopSessionBridge.warm`` (a
-        new runtime for one) — asks this question, so "what does a retiring
-        daemon refuse" has exactly one answer. Reads are deliberately NOT
-        refused: the record keeps heartbeating and the daemon keeps answering
-        until the clean exit removes it, which is what lets a reader observe the
-        handover and drain against a daemon that is still live.
+        THE ADMISSION PATH for everything session-scoped, and the only one:
+        ``create`` (a new session) and ``DesktopSessionBridge.assert_admitting``
+        (a new runtime for one, and every route that can reach the spawn seam)
+        ask this question, so "what does a retiring daemon refuse" has exactly
+        one answer.
+
+        NOT raised while the daemon is merely ANNOUNCED: the announcement's only
+        job is to tell an attached client to let go, and a daemon that refused
+        work the instant it announced would be unusable for however long that
+        client took to react. The latch follows the empty drain
+        (``server/retire.py``).
+
+        Reads are deliberately NOT refused either: the record keeps heartbeating
+        and the daemon keeps answering until the clean exit removes it, which is
+        what lets a reader observe the handover and drain against a daemon that
+        is still live.
         """
         if self.retiring_probe():
-            raise DaemonRetiring(
-                "This backend is restarting onto a new build and is not accepting "
-                "new sessions. Reconnect to the new backend and retry."
-            )
+            raise DaemonRetiring(RETIRING_MESSAGE)
 
     def in_flight_reason(self) -> str | None:
         """Why the DESKTOP plane is still using this daemon, or ``None``.
 
-        Three terms, all things an exit would CUT rather than pause, all read
+        Multiple terms, all things an exit would CUT rather than pause, all read
         off the live bridges:
 
         * **An in-flight HTTP operation** — any bridge with ``users > 0``. Every
           desktop route runs inside ``session()``, which brackets the request
           with ``acquire()``/``release()`` (``DesktopSessionBridge.acquire``),
-          so a non-zero count means a response is being built right now.
-        * **An open attach** — a bridge with a LIVE watch lease
-          (``DesktopSessionBridge._live_leases``, renewed by ``watch`` and
-          expiring after ``WATCH_TTL``): a window is looking at this session,
-          which is the operator's "a viewer is never pulled out from under"
-          rule applied to the process that serves it.
+          so a non-zero count means a client is holding this bridge open RIGHT
+          NOW. For a request that is building a response that is a few tens of
+          milliseconds; for the app's event stream it is the whole life of the
+          view (see below), and this docstring used to claim the first while
+          meaning only it.
+        * **A STANDING attachment** — the same ``users`` term, held by
+          ``GET /v1/desktop/sessions/{id}/events``, which acquires the bridge
+          before it returns response headers and releases it only when the
+          stream tears down: an unbounded, replayable relay with no turn
+          boundary and no TTL. This is the term that decides the SHAPE of the
+          daemon's retirement — the announcement has to precede the drain,
+          because this stream is only released when the client decides to
+          (``server/retire.py``'s module docstring).
+        * **An open attach with a LIVE watch lease** — a window is looking at
+          this session (``DesktopSessionBridge._live_leases``, renewed by
+          ``watch`` and expiring after ``WATCH_TTL``, which the app renews every
+          15 s): the operator's "a viewer is never pulled out from under" rule
+          applied to the process that serves it. Counts whether or not the
+          window is visible or focused.
         * **A runtime being started** — a bridge with a warm task still
           running (``DesktopSessionBridge.warm_task``, set by ``warm`` and by
           the lease-driven retry loop). A spawn is a handshake with a child

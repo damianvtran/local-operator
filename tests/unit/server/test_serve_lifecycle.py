@@ -15,6 +15,7 @@ import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -177,33 +178,52 @@ async def test_a_boot_that_only_INHERITED_an_announcement_publishes_nothing(
 async def test_lifespan_runs_the_retirement_poll_beside_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
 ) -> None:
-    """The poll is started with the publisher and stopped by the shutdown half.
+    """The poll is started with the publisher, based BEFORE the record, and stopped.
 
     Driven against the REAL lifespan with the poll itself replaced, because what
     is under test here is the wiring: a poll that a shutdown forgets to stop
-    would keep the event loop alive after the listener closed, and one started
-    without a record has no announcement channel at all (the next test).
+    would keep the event loop alive after the listener closed, one started
+    without a record has no announcement channel at all (the next test), and one
+    whose baseline is sampled AFTER the record is published misses the update
+    that lands in between — the record is what a reader waits for, so it flips
+    the marker the moment the file appears (QA round 1, Q2).
+
+    So the baseline's ORDER is asserted, not just its presence: the stamp is
+    read while the record does not exist yet.
     """
     import asyncio
 
+    from local_operator import buildwatch
     from local_operator.server import retire as serve_retire
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     serve_registry.announce_address(app, "127.0.0.1", 58474)
+    path = serve_registry.record_path(os.getpid(), tmp_path)
 
     stops: list[asyncio.Event] = []
+    baselines: list[Any] = []
 
-    async def poll(application, publisher, *, stop, exit_process=None):  # noqa: ANN001
+    async def poll(application, publisher, *, stop, exit_process=None, boot=None):  # noqa: ANN001
         stops.append(stop)
         await stop.wait()
 
     monkeypatch.setattr(serve_retire, "retirement_poll", poll)
+
+    sampled = buildwatch.boot_build
+
+    def _baseline() -> Any:
+        baselines.append(path.exists())
+        return sampled()
+
+    monkeypatch.setattr(buildwatch, "boot_build", _baseline)
 
     async with lifespan(app):
         # One turn of the loop: ``create_task`` schedules the poll, and this is
         # what lets it reach its first line before the assertions read it.
         await asyncio.sleep(0)
         assert len(stops) == 1, "started once, beside the record publisher"
+        assert baselines == [False], "the baseline is sampled BEFORE the record exists"
+        assert path.exists(), "and the record it is compared against follows it"
         assert app.state.serve_retire is not None
         assert not stops[0].is_set()
 
@@ -227,7 +247,7 @@ async def test_lifespan_starts_no_retirement_poll_without_a_record(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     started: list[asyncio.Event] = []
 
-    async def poll(application, publisher, *, stop, exit_process=None):  # noqa: ANN001
+    async def poll(application, publisher, *, stop, exit_process=None, boot=None):  # noqa: ANN001
         started.append(stop)
 
     monkeypatch.setattr(serve_retire, "retirement_poll", poll)
