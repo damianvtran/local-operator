@@ -978,7 +978,6 @@ def _write_stop_marker(
         "deliberate": True,
         "killer": {"pid": 61123, "argv0": "lop", "command": "control.stop_session"},
         "build": "0.54.39@dec7933",
-        "reason": "a deliberate stop was requested through the control plane",
     }
     payload.update(overrides)
     registry.write_stop_marker(root / "sessions" / session_id, payload)
@@ -1041,9 +1040,14 @@ def test_one_evidence_subset_reads_as_exactly_one_verdict(tmp_path: Path) -> Non
         AttentionStore(tmp_path / "killmarker-again.db"),
     )
     assert result is not None
-    assert "SIGKILL" in result[2], result[2]
+    # The rung in the RECEIPT's noun (``killed``, what ``_stopped_line`` prints
+    # for this rung) rather than the kernel's, and the pid LABELLED because the
+    # error row one below carries an unlabelled pid that names the runtime that
+    # died (design round 1, D2).
+    assert "killed by" in result[2], result[2]
+    assert "SIGKILL" not in result[2], result[2]
     assert "control.stop_session" in result[2], result[2]
-    assert "pid 61123" in result[2], result[2]
+    assert "killer pid 61123" in result[2], result[2]
 
 
 def test_a_marker_from_an_earlier_run_does_not_label_a_later_death(tmp_path: Path) -> None:
@@ -1071,6 +1075,60 @@ def test_a_marker_from_an_earlier_run_does_not_label_a_later_death(tmp_path: Pat
     assert result is not None
     assert (result[0], result[1]) == ("error", "runtime-killed"), result
     assert f"pid {2**22 + 42}" in result[2], result[2]
+
+
+def test_a_marker_that_predates_the_run_is_not_a_verdict_when_no_record_survives(
+    tmp_path: Path,
+) -> None:
+    """Q-1: the run key outlives the RECORD, not just the record's presence.
+
+    The rung-3 shape has no record at all — the ladder that stages the marker is
+    the one that unpublishes the record (``control._recover_record``), and a
+    sweep can move it on to the reaped sidecar's retention bound. The guard
+    above compares pid and start time, so with nothing to compare against it
+    used to pass UNCONDITIONALLY, and a marker left by an EARLIER deliberate
+    stop of the same session then narrated a later involuntary death as
+    ``interrupted``/``user-stop`` — naming the earlier run's killer. That is a
+    wrong verdict in the direction that HIDES a crash.
+
+    Both halves are here because the fix must not cost the attribution it
+    exists for: the stale marker falls through to the no-evidence rung, and a
+    marker staged DURING this run still classifies as the deliberate stop it
+    is. The bound is the marker's own ``at`` against the in-flight
+    ``attention_started`` entry's timestamp.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    stale_id = "stalepruned"
+    _seed_started(tmp_path, stale_id)
+    # An earlier run's marker: the stamp, the pid and the start time all belong
+    # to a stop that happened before this run began.
+    _write_stop_marker(
+        tmp_path,
+        stale_id,
+        pid=2**22 + 51,
+        started_at=time.time() - 2_000.0,
+        at=time.time() - 900.0,
+    )
+    stale = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / stale_id),
+        AttentionStore(tmp_path / "stalepruned.db"),
+    )
+    assert stale is not None
+    assert (stale[0], stale[1]) == ("error", ""), stale
+    assert "killer pid 61123" not in stale[2], stale[2]
+
+    fresh_id = "freshmarker"
+    _seed_started(tmp_path, fresh_id)
+    _write_stop_marker(tmp_path, fresh_id)
+    fresh = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / fresh_id),
+        AttentionStore(tmp_path / "freshmarker.db"),
+    )
+    assert fresh is not None
+    assert (fresh[0], fresh[1]) == ("interrupted", "user-stop"), fresh
+    assert "killer pid 61123" in fresh[2], fresh[2]
 
 
 @pytest.mark.asyncio

@@ -145,6 +145,13 @@ EXPECTED = [
         # so the published shape is stable — a consumer never branches on key
         # existence.
         "last_activity_s": None,
+        # THE LAST OUTCOME, from the attention store: the kind and the reason
+        # the harness recorded. Empty here because this fixture names no root,
+        # and the read is deliberately root-scoped (see
+        # ``collect._with_stored_outcomes``) rather than falling back to
+        # whatever store the machine happens to have.
+        "completion_kind": "",
+        "completion_reason": "",
     },
     {
         "state": "live",
@@ -166,6 +173,13 @@ EXPECTED = [
         "subagents_running": None,
         "subagents_queued": None,
         "last_activity_s": None,
+        # THE LAST OUTCOME, from the attention store: the kind and the reason
+        # the harness recorded. Empty here because this fixture names no root,
+        # and the read is deliberately root-scoped (see
+        # ``collect._with_stored_outcomes``) rather than falling back to
+        # whatever store the machine happens to have.
+        "completion_kind": "",
+        "completion_reason": "",
     },
     {
         "state": "stale",
@@ -190,6 +204,13 @@ EXPECTED = [
         "subagents_running": None,
         "subagents_queued": None,
         "last_activity_s": None,
+        # THE LAST OUTCOME, from the attention store: the kind and the reason
+        # the harness recorded. Empty here because this fixture names no root,
+        # and the read is deliberately root-scoped (see
+        # ``collect._with_stored_outcomes``) rather than falling back to
+        # whatever store the machine happens to have.
+        "completion_kind": "",
+        "completion_reason": "",
     },
 ]
 
@@ -358,3 +379,115 @@ def test_sessions_empty_copy_names_the_search_that_was_asked_for(
     )
     assert code == 0
     assert capsys.readouterr().out.strip() == "no active lop sessions"
+
+
+def _seed_outcome(root: Any, session_id: str, *, kind: str, reason: str, cause: str) -> None:
+    """One real attention-store row, written by the product's own publisher.
+
+    Through ``AttentionStore.publish`` rather than by hand, so the fixture is
+    the shape the runtime writes (identity, token, anchor and all) and cannot
+    drift from the reader it is here to exercise.
+    """
+    import uuid
+
+    from local_operator.session.attention import AttentionStore
+
+    token = str(uuid.uuid4())
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", token, f"completion-{token}", kind, reason=reason, cause=cause
+    )
+
+
+def _deliberate_stop_reason() -> str:
+    """The sentence a rung-3 deliberate stop's outcome carries, from the code."""
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    return render_cut_off_reason(
+        DELIBERATE_CUT_OFF_CAUSE,
+        detail=render_stop_attribution(rung="sigkill", command="/stop --all", killer_pid=40609),
+    )
+
+
+def test_a_stored_outcome_reaches_the_rows(monkeypatch: Any, tmp_path: Any) -> None:
+    """Design round 1, D1: `lop sessions` must be able to answer "why did this die".
+
+    The reason is the one fact that OUTLIVES a killed runtime — a SIGKILLed
+    process publishes nothing, its record is reaped, and the attention store is
+    all that is left — so the CLI's rows carry it under ``completion_kind`` /
+    ``completion_reason``, and a session with no recorded outcome carries empty
+    strings rather than missing keys.
+    """
+    _install_fixture(monkeypatch)
+    _seed_outcome(
+        tmp_path,
+        "a3f9c21b7e40",
+        kind="interrupted",
+        reason=_deliberate_stop_reason(),
+        cause="user-stop",
+    )
+
+    rows = {row["session_id"]: row for row in session_rows(tmp_path)}
+    stopped = rows["a3f9c21b7e40"]
+    assert stopped["completion_kind"] == "interrupted"
+    assert "killed by /stop --all" in stopped["completion_reason"]
+    assert "killer pid 40609" in stopped["completion_reason"]
+    quiet = rows["beef1234cafe"]
+    assert (quiet["completion_kind"], quiet["completion_reason"]) == ("", "")
+
+
+def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """The WHY column, and the reason it is CONDITIONAL.
+
+    Appended only when at least one row has an outcome, following the
+    LAST_ACTIVE column's precedent: a healthy listing has to parse exactly as it
+    did before, or every consumer of `lop sessions` pays a re-flow for a column
+    of blanks. The cell is the attributed phrase — the rung and the actor, which
+    is what a reader cannot get anywhere else on this surface.
+    """
+    import argparse
+    import json as _json
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    healthy = capsys.readouterr().out
+    assert "WHY" not in healthy, healthy
+
+    _seed_outcome(
+        tmp_path,
+        "a3f9c21b7e40",
+        kind="interrupted",
+        reason=_deliberate_stop_reason(),
+        cause="user-stop",
+    )
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    explained = capsys.readouterr().out
+    assert "WHY" in explained.splitlines()[0], explained
+    # The table names a row by its conversation, not by its id (that is the
+    # CONVERSATION column's own truncation), so the row is found by the name.
+    stopped_line = next(line for line in explained.splitlines() if "Investigate" in line)
+    assert "killed by /stop --all" in stopped_line, stopped_line
+
+    # `--json` carries the whole stored sentence, not the column's slice.
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    payload = _json.loads(capsys.readouterr().out)
+    row = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    assert "killer pid 40609" in row["completion_reason"]

@@ -739,6 +739,16 @@ def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -
       exactly what made one incident read as three different stories.
     * ``build`` — the TARGET's ``version@source_ref``, because the question
       this answers is which runtime died.
+
+    NO FREE-TEXT ``reason`` FIELD, and its absence is deliberate (design round
+    1, D7): a constant sentence ("a deliberate stop was requested through the
+    control plane") that no reader consumed sat in the artifact looking
+    load-bearing, and the next agent to touch this schema would have assumed
+    something rendered it. Every reader that needs a sentence renders one from
+    the fields above on the spot — ``incidents.render_stop_attribution`` takes
+    exactly the rung and the killer — so a stored copy could only drift from
+    them. ``deliberate`` is what says an act was asked for, and it does so
+    without prose.
     """
     if record.version and record.source_ref:
         build = f"{record.version}@{record.source_ref}"
@@ -754,19 +764,20 @@ def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -
         "deliberate": True,
         "killer": {"pid": os.getpid(), "argv0": argv0, "command": command},
         "build": build,
-        "reason": "a deliberate stop was requested through the control plane",
     }
 
 
-def _write_stop_marker(
-    record: SessionRecord, root: Path, rung: Method, *, command: str
-) -> dict[str, Any] | None:
+def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
     """Stage the durable stop marker BEFORE the step it attests to.
 
-    Returns the payload it staged, or ``None`` when the write failed — the
-    caller needs to know whether THIS ladder put a file there, because a rung
-    that stages and then does not act has to take its own marker back (see
-    :func:`_withdraw_staged_stop_marker`).
+    RETURNS NOTHING, because a return value here would be a second, weaker
+    answer to a question the FILE already answers (design round 2, NIT-1). What
+    the withdrawal needs to know is not "did this call write something" but
+    "is the file on disk MY OWN rung-1 statement for THIS run", and only a
+    re-read can answer that: a marker another ladder staged for the same run
+    must survive this ladder's refusal (see
+    :func:`_withdraw_staged_stop_marker`). So the failure it used to report —
+    ``None`` when the write raised — was never read by either caller.
 
     Best-effort, and the swallow is the decision rather than an oversight: a
     stop the user asked for must still happen when a sidecar cannot be
@@ -794,8 +805,10 @@ def _write_stop_marker(
     try:
         registry.write_stop_marker(session_dir(root, record.session_id), payload)
     except OSError:
-        return None
-    return payload
+        # The one failure this can have, swallowed on purpose: see the
+        # docstring — a missing attestation must never abort a stop the user
+        # asked for.
+        pass
 
 
 def _withdraw_staged_stop_marker(record: SessionRecord, root: Path) -> None:
@@ -1123,7 +1136,7 @@ async def stop_all(
     only_pids: "frozenset[int] | set[int] | None" = None,
     force: bool = False,
     _root: Path | None = None,
-    _command: str = "lop stop --all",
+    _command: str = "control.stop_all",
 ) -> list[StopOutcome]:
     """Stop every OTHER agent on this machine. Never raises.
 
@@ -1134,10 +1147,20 @@ async def stop_all(
     not be stopped on the strength of a listing it was never on.
 
     ``_command`` is the front end the sweep came from, forwarded to every
-    target's marker (see :func:`stop_session`): ``lop stop --all`` by default,
+    target's marker (see :func:`stop_session`): ``lop stop --all`` from the CLI,
     ``/stop --all`` from the TUI's kill switch. A sweep's marker has to name
     the sweep, not a single stop, or the artifact cannot tell the operator
     whether they pressed a key on one session or the whole machine.
+
+    THE DEFAULT IS THE IN-PROCESS NAME, matching :func:`stop_session`'s, and the
+    match is the point (review round 2, NIT-3). Both parameters exist for a
+    caller with no user behind it, and a default that named a front end made
+    this one's silent fallback a CLAIM about a keystroke nobody pressed —
+    ``lop stop --all`` — while its twin's said ``control.stop_session``. Two
+    defaults in two registers for one concept is a drift waiting to be read as
+    evidence, so both now say which function ran; every front end passes its
+    own token explicitly, and ``tests/unit/test_cli_stop.py`` pins that the CLI
+    does.
 
     Sequential, not concurrent: the graceful rung waits up to ``timeout_s``
     per uncooperative session, and a fan-out would hold every target's wait

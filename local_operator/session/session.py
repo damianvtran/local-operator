@@ -6216,6 +6216,22 @@ class Session:
         Cleared BEFORE the await, not after: a tick that arrives while the
         persist is in flight would otherwise start a second scan, and the second
         narration is the duplicate the token dedupe exists to prevent.
+
+        THE KIND IS DELIBERATELY NOT CONSULTED, and QA round 1 asked for that to
+        be an explicit decision rather than an accident (Q-2). It is: the two
+        rungs of one user action reach this seam by different routes, and only
+        the ORPHANED one needs narrating. A graceful stop is recorded by the
+        runtime it happened to — the target is alive, its turn published the
+        outcome, and the next boot finds a matching outcome and repairs nothing,
+        so no card exists to suppress. An escalated stop killed the target, so
+        the successor is the ONLY party that can tell the model the turn died
+        mid-work, and the deliberate cause is exactly what it must name: the
+        card is truthful and it is what keeps a resumed session from re-guessing
+        lost work. What is therefore pinned is not "a deliberate stop journals
+        nothing" but "a stop nobody had to repair journals nothing". The
+        graceful half is pinned by the e2e file ("a deliberate stop must not
+        journal an incident", ``tests/e2e/test_cut_off_turns_e2e.py``) and
+        rung 3's card is QA round 1's cell E, measured on a real runtime.
         """
         restored = self._restored_cut_off
         if restored is None:
