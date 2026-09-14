@@ -50,12 +50,62 @@ class FakeUiClient:
         return {}
 
 
+class FakeBridgeClient:
+    """The daemon's transport, faking the wire the same way `FakeUiClient` does.
+
+    Both hosts are faked rather than one, because the defect these tests pin is
+    the SELECTION between them: a test with only one fake cannot tell "the lane
+    went to the right host" from "there was only ever one host".
+    """
+
+    host = "extension"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((method, params))
+        if method == "open":
+            return {"tab": "bridge:5:ccccccccddddeeeeffff0000111111", "url": params["url"]}
+        if method == "read":
+            return {"url": "https://example.com/", "title": "Example Domain", "text": "body"}
+        if method == "tabs":
+            return {"tabs": [], "limit": 8}
+        if method == "owner_recover":
+            return {"ownership_version": 1, "state": "owned", "tab": "bridge:5:capability"}
+        if method == "owner_retain":
+            return {"state": "retained"}
+        if method == "owner_release":
+            return {"state": "closed"}
+        if method == "owner_finish":
+            return {"state": "closed"}
+        return {}
+
+
 @pytest.fixture
 def ui_client(monkeypatch: pytest.MonkeyPatch) -> FakeUiClient:
     fake = FakeUiClient()
     from local_operator.ui_browser import backend as ui_backend
 
     monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: fake)
+    return fake
+
+
+@pytest.fixture
+def bridge_client(monkeypatch: pytest.MonkeyPatch) -> FakeBridgeClient:
+    """Both the lane's and the dispatcher's daemon client, faked as one object.
+
+    They are resolved independently — the lane through `resources.BridgeClient`
+    (the module global the browser suite has always monkeypatched) and the
+    dispatcher through `builtin`'s lazy import of the same name — so a test that
+    patched only one would see an ownership verb on the fake and a real dial on
+    the action.
+    """
+    fake = FakeBridgeClient()
+    from local_operator.browser_bridge import backend as bridge_backend
+
+    monkeypatch.setattr(resources, "BridgeClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(bridge_backend, "BridgeClient", lambda *args, **kwargs: fake)
     return fake
 
 
@@ -74,6 +124,27 @@ def _ui_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: bool(False))
 
 
+def _hosts(monkeypatch: pytest.MonkeyPatch, *, ui: bool, bridge: bool) -> None:
+    """Availability, stated per host, for the two gates that consult it.
+
+    `_ownership_lane_host`'s probes and the dispatcher's own availability reads
+    are separate code paths over the same two questions, so both are supplied:
+    a test that set one and not the other would leave the decision half-faked.
+    """
+
+    def reachable(answer: bool) -> Any:
+        async def probe(classified: tuple[Any, Any] | None = None) -> bool:
+            return answer
+
+        return probe
+
+    monkeypatch.setattr(builtin, "ui_browser_reachable", reachable(ui))
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", reachable(bridge))
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: ui)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: bridge)
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+
+
 def _cmux_only(monkeypatch: pytest.MonkeyPatch) -> None:
     async def bridge_unreachable(classified: tuple[Any, Any] | None = None) -> bool:
         return False
@@ -89,6 +160,25 @@ def _context(tmp_path: Path, *, surface_id: str = "") -> tuple[ToolContext, Brow
     surface.surface_id = surface_id
     surface.resource = resource  # type: ignore[assignment]
     return ToolContext(browser=surface), resource
+
+
+def _resumed_context(
+    tmp_path: Path, *, surface_id: str, host: str
+) -> tuple[ToolContext, BrowserResource]:
+    """A session directory holding what a PREVIOUS run left behind, plus a fresh
+    resource — which is the state a resumed session is in when the gate runs:
+    `generation` empty, `record` unloaded, `state.surface_id` not yet adopted.
+
+    Written through the writer's own API (`initialize` + `remember`) rather than
+    as hand-written JSON, so the fixture cannot drift from the record the
+    product actually produces.
+    """
+    previous = BrowserResource(tmp_path, tmp_path.name)
+    previous.initialize()
+    previous.remember(surface_id, host=host)
+    context, resource = _context(tmp_path)
+    assert resource.generation == "" and resource.record == {}, "not a resumed session"
+    return context, resource
 
 
 @pytest.mark.asyncio
@@ -258,6 +348,96 @@ def test_a_legacy_record_without_a_host_falls_back_to_the_bridge(tmp_path: Path)
     resource.initialize()
     assert resource.host == ""
     assert resource._lane().name == resources.HOST_BRIDGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("ui_up", "bridge_up"), [(True, False), (True, True)])
+async def test_a_resumed_bridge_record_keeps_the_bridge_lane_with_the_app_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+    ui_up: bool,
+    bridge_up: bool,
+) -> None:
+    """R1, direction 1: the record wins over the availability order.
+
+    Asserted on the WIRE, not on the decision: the record names the bridge, the
+    app is the host a probe would pick, and the `owner_recover` that proves the
+    lane ran must arrive at the daemon. The old gate ran the probes first (UI
+    first), `select_host` set `self.host`, `_lane()` prefers `self.host` over
+    `record["host"]`, and a resumed `bridge` session was moved onto the app —
+    which does not own its tab — for the rest of its life.
+
+    Both availability shapes are covered because they fail for the same reason
+    and are tempting in different ways: with only the app up the daemon looks
+    unreachable, and with both up it looks like a free choice.
+    """
+    _hosts(monkeypatch, ui=ui_up, bridge=bridge_up)
+    context, resource = _resumed_context(tmp_path, surface_id="bridge:5:nonce", host="bridge")
+
+    result = await builtin.execute_browser("t", {"action": "read"}, None, None, context)
+
+    assert result.is_error is False, result.text
+    assert resource.host == "bridge", "the lane moved off the record's host"
+    assert [method for method, _p in bridge_client.calls][:1] == ["owner_recover"]
+    assert ui_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_ui_record_keeps_the_apps_lane_with_the_app_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """R1, direction 2 — §10.5's consequence 2, in mirror image.
+
+    The record names the app and the app is down, so this is the case where
+    "pick the host that is up" looks harmless and is not: the tab belongs to the
+    app, the daemon cannot reconcile it, and moving the session there is exactly
+    the defect the design's consequence 2 names (`owner_recover` going to the
+    bridge for a `ui:` surface). The honest answer is the app's own refusal,
+    which is what the pinned-handle path already does with the app down.
+    """
+    _hosts(monkeypatch, ui=False, bridge=True)
+    context, resource = _resumed_context(tmp_path, surface_id="ui:100:nonce", host="ui")
+
+    result = await builtin.execute_browser("t", {"action": "read"}, None, None, context)
+
+    assert result.is_error is False, result.text
+    assert resource.host == "ui", "the lane moved off the record's host"
+    assert [method for method, _p in ui_client.calls][:1] == ["owner_recover"]
+    assert bridge_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_legacy_record_keeps_the_bridge_lane_with_the_app_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """The same gate, for the record that names no host at all.
+
+    §10.5's fail-safe clause is about exactly this record ("an old record
+    behaves exactly as it does today"), and its host is spelled nowhere but its
+    handle. `_lane()` reads that as the bridge, so the gate has to as well —
+    otherwise the two disagree and the probe silently settles it in favour of
+    the app.
+    """
+    _hosts(monkeypatch, ui=True, bridge=False)
+    # `host=""` writes a handle and NO host field, which is byte-for-byte the
+    # record shape a pre-`host` run left behind.
+    context, resource = _resumed_context(tmp_path, surface_id="bridge:5:nonce", host="")
+    assert "host" not in json.loads(resource.path.read_text())
+
+    result = await builtin.execute_browser("t", {"action": "read"}, None, None, context)
+
+    assert result.is_error is False, result.text
+    assert resource.host == "bridge"
+    assert [method for method, _p in bridge_client.calls][:1] == ["owner_recover"]
+    assert ui_client.calls == []
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,9 @@
  *   2. a global object's property: `globalThis.chrome`, `window.chrome`,
  *      `self.chrome`, `global.chrome` (the dot form — the identifier is the
  *      property NAME, which is why a name-position scan misses it);
- *   3. an element access whose key is the string: `globalThis["chrome"]`;
+ *   3. an element access on a global object whose key is the string:
+ *      `globalThis["chrome"]`, `window["chrome"]` (the target decides, for the
+ *      same reason as the dot form: `m["chrome"]` is `m`'s own key);
  *   4. the shorthand `{ chrome }`, which is a value reference to whatever
  *      binding holds that name, never a property being declared;
  *   5. a `chrome` type reference (`chrome.tabs.Tab` names the GLOBAL namespace).
@@ -89,7 +91,8 @@ const EXPECTED_MODULES = [
 const ALLOWED_EXTERNAL_IMPORTS = new Set(["../protocol.gen"]);
 
 /** Objects whose `chrome` property IS the global, whichever spelling reaches it.
- * `obj.chrome` on anything else is that object's own field and is allowed — the
+ * `obj.chrome` on anything else is that object's own field and is allowed — and
+ * so is its indexed spelling `obj["chrome"]`, which is the same read — the
  * distinction is the whole reason this list exists rather than a rule like
  * "any property access named chrome". */
 const GLOBAL_OBJECTS = new Set(["globalThis", "window", "self", "global"]);
@@ -159,16 +162,23 @@ function isGlobalObjectAccess(node) {
   return ts.isIdentifier(target) && GLOBAL_OBJECTS.has(target.text);
 }
 
-/** `globalThis["chrome"]` / `chrome["tabs"]` — an element access is the one
- * route to the global that has no identifier to find. */
+/** `globalThis["chrome"]` / `window["chrome"]` — an element access is the one
+ * route to the global that has no identifier to find, so the TARGET is what
+ * separates it from an unrelated object's own key. Checking the key alone
+ * flagged `m["chrome"]`, the indexed spelling of the `obj.chrome` the dot rule
+ * deliberately allows, and reported it as a chrome dependency. */
 function isChromeStringIndex(node) {
-  return (
-    ts.isStringLiteral(node) &&
-    node.text === "chrome" &&
-    node.parent &&
-    ts.isElementAccessExpression(node.parent) &&
-    node.parent.argumentExpression === node
-  );
+  if (
+    !ts.isStringLiteral(node) ||
+    node.text !== "chrome" ||
+    !node.parent ||
+    !ts.isElementAccessExpression(node.parent) ||
+    node.parent.argumentExpression !== node
+  ) {
+    return false;
+  }
+  const target = node.parent.expression;
+  return ts.isIdentifier(target) && GLOBAL_OBJECTS.has(target.text);
 }
 
 /** The `chrome`-referencing nodes of one parsed vendored module. */
@@ -192,6 +202,12 @@ function chromeReferences(sf) {
     const { line, character } = sf.getLineAndCharacterOfPosition(hit.pos);
     return `${sf.fileName}:${line + 1}:${character + 1} references ${hit.what}`;
   });
+}
+
+/** The references one source snippet is reported as having — the same entry
+ * point the scan over the tree uses, for the case table in the tests. */
+function referencesIn(source) {
+  return chromeReferences(parse("snippet.ts", source));
 }
 
 /** Every STATIC and DYNAMIC module reference of one parsed vendored module.
@@ -300,6 +316,42 @@ test("no vendored module references the chrome global", async () => {
   );
 });
 
+test("the chrome rules fire on the spellings they claim, and on no others", () => {
+  // The list at the top of this file IS the claim, so it is exercised as one.
+  // A rule that never fires passes the tree scan above while checking nothing,
+  // and one that fires too widely fails correct driver code — the paired
+  // element-access cases are the reason the target check exists rather than a
+  // key-only rule.
+  const red = [
+    "export const c = chrome;",
+    "export const c = typeof chrome;",
+    "export const c = globalThis.chrome;",
+    "export const c = window.chrome;",
+    "export const c = self.chrome;",
+    "export const c = global.chrome;",
+    'export const c = globalThis["chrome"];',
+    'export const c = window["chrome"];',
+    "export const c = { chrome };",
+    "export function f(t: chrome.tabs.Tab): chrome.tabs.Tab { return t; }",
+  ];
+  const green = [
+    "// chrome.debugger.sendCommand is what the ceiling table explains.",
+    'export const url = "chrome://extensions";',
+    'export const own = { chrome: "mine" };',
+    "interface HasOwnField { chrome: string }",
+    "declare const own: { chrome: string }; export const v = own.chrome;",
+    'export function readOwn(m: Record<string, unknown>): unknown { return m["chrome"]; }',
+    'export function readKey(m: Record<string, unknown>, k: string) { return m[k]; }',
+  ];
+
+  for (const source of red) {
+    assert.notDeepEqual(referencesIn(source), [], `missed a chrome reference in: ${source}`);
+  }
+  for (const source of green) {
+    assert.deepEqual(referencesIn(source), [], `fired on host-free code: ${source}`);
+  }
+});
+
 test("the guard's scope is the whole vendored set, and it is not empty", async () => {
   // A walk that finds nothing passes both tests above while checking nothing,
   // which is worse than not having the guard. So the scope is asserted.
@@ -353,11 +405,26 @@ test("no vendored module imports its way back out to a host-coupled module", asy
       // only visible as "does this file resolve at all" — and that failure is
       // otherwise reported by `tsc` on whichever host compiles the tree, which
       // is exactly the feedback the vendored copy does not get.
-      const target = `${fileURLToPath(resolved)}.ts`;
-      const exists = await stat(target).then(
-        () => true,
-        () => false,
-      );
+      // AS WRITTEN first, then with the extension this tree's imports omit.
+      // Appending `.ts` unconditionally asked about `./errors.ts.ts` for an
+      // import that spelled its own extension, and about `<asset>.ts` for a
+      // non-TS asset: both were reported as "resolves to no file" although the
+      // import resolved. Extensionless is the convention here, so the fallback
+      // is the second attempt rather than the first.
+      const written = fileURLToPath(resolved);
+      const candidates = written.endsWith(".ts") ? [written] : [written, `${written}.ts`];
+      let exists = false;
+      for (const candidate of candidates) {
+        if (
+          await stat(candidate).then(
+            () => true,
+            () => false,
+          )
+        ) {
+          exists = true;
+          break;
+        }
+      }
       if (!exists) {
         offenders.push(
           `${label} imports ${specifier} (via ${reference.kind}), which resolves to no file`,

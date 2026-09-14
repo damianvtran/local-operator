@@ -644,7 +644,7 @@ def test_build_system_blocks_wires_the_browser_flags_it_renders_with(monkeypatch
     with a real tool list and asserts on what actually ships.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     # Browser present: usage prose, no playbook, no inventory note.
     with_browser = build_system_blocks(
@@ -681,7 +681,7 @@ def test_rendering_system_md_without_flags_still_ships_a_browser_section() -> No
     unreachable rather than merely unused.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     bare = render_template("system.md", {})
     assert (usage in bare) != (setup in bare), "neither section shipped"
@@ -697,7 +697,7 @@ def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> Non
     `{"has_browser": False, "no_browser": True}` under the caller's dict fixed
     the empty case but made a caller who supplied only `has_browser=True`
     inherit `no_browser=True`, so the prompt asserted "Browser work goes
-    through the `browser` tool" AND "the host has neither backend connected...
+    through the `browser` tool" AND "no browser host is connected...
     set it up with the user" — 686 characters contradicting the paragraph
     above them.
 
@@ -709,7 +709,7 @@ def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> Non
     single-case test cannot see.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     # Every representable input: absent, half-supplied either way, and both.
     values: list[dict[str, Any]] = [{}]
@@ -739,7 +739,7 @@ def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> 
     """`reviewer`, `scout`, `manager` and `architect` seeds omit `browser`.
 
     Their tool list therefore has no browser on a host that has one. Telling
-    such a child "the host has neither backend connected... do that setup with
+    such a child "no browser host is connected... do that setup with
     the user" is factually wrong and actionably wrong — it invites a read-only
     subagent to walk the operator through an install it cannot use. It is also
     the exact inversion of the principle stated for the no-browser note:
@@ -756,7 +756,7 @@ def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> 
     instructions, inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
 
     # The false claims must be absent.
-    assert "the host has neither backend" not in instructions
+    assert "no browser host is connected" not in instructions
     assert "NO browser tool" not in inventory
     assert "no cmux CLI is reachable" not in inventory
     # The prohibition must still be present, with the true diagnosis.

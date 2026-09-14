@@ -686,7 +686,7 @@ sites, re-derived:
 | `builtin.py:9921-9934` (`tabs`) | "use the Local Operator browser extension …" | same |
 | `builtin.py:9883-9892` (access actions) | "This action only exists for the Local Operator browser extension" | same |
 | `builtin.py:9862-9869` (no backend) | "neither cmux nor a connected Local Operator browser extension is reachable. Run 'lop browser status' and 'lop browser install' to set up the bridge." | three-way; add the app's browser tab, and stop recommending `install` on a host that has the app |
-| `builtin.py:8565-8602` `_bridge_absent_result` | "the bridge daemon … remembers this browser, but nothing is connected to it right now" | needs a UI sibling (the UI host has no such state — see §10.2) |
+| `builtin.py:8565-8602` `_bridge_absent_result` | "the bridge daemon … remembers this browser, but nothing is connected to it right now" | stays BRIDGE-ONLY, and no UI sibling is expected: the state it describes is a *paired* browser that is not attached, and the app's host has no equivalent — a tab is a child of the running app, so "remembered but not attached" cannot arise there (see §10.2). The daemon-only `extension_id` branch is bridge-only for the same reason. |
 | `builtin.py:8605-8634` `_bridge_demotion_hint` | names `lop browser status --repair` | needs a host argument; the UI hint names the app |
 | `builtin.py:7537-7541` docstring | "Actions that only the Local Operator browser extension can serve" | rewrite: cmux cannot serve them; both non-cmux hosts can |
 | `builtin.py:7629-7642` `BrowserParams.action` description | "on the extension backend a fresh open creates a NEW tab" | describe the general rule, not one host; add the `handle` param's semantics |
@@ -694,6 +694,9 @@ sites, re-derived:
 | `backend.py:28-73` `ERROR_MESSAGES` | extension-specific copy: "ask the user to open their browser", "toggle the … extension OFF then ON in chrome://extensions" | split into per-host tables; shared codes keep shared copy |
 | `backend.py:216-222` `origin_denied` / `format_error` | "ask the user to allow it from the extension popup" | parameterise the approval surface |
 | `docs/BROWSER.md:4-5` | cmux is "the only browser backend" | rewrite for three backends |
+| `guides/browser/GUIDE.md:15-32` | "The `browser` tool has three possible backends, in preference order: 1. **The Local Operator browser extension** (preferred) … This is what you should set up and use." (and the `description:` line above it) | three HOSTS with the app's browser tab first, the extension as the host for a session that lives only in the user's own profile, cmux below both and `bash`+curl last |
+| `prompts_md/system.md:258-270` (`has_browser`) | "The preferred backend is the **Local Operator browser extension** … a cmux browser panel is the fallback where the extension is not installed" | the app's browser tab is preferred; the extension is the real-profile host; cmux is the fallback where neither is connected |
+| `prompts_md/system.md:282-293` (`no_browser`) | "the host has neither backend connected … Only when the user declines the extension and no cmux panel exists" | three hosts, not two: name the app's browser tab as a setup path BESIDE the extension (`lop browser install` is not the only way in), and require declining both before falling back to `bash`+curl |
 
 I would **keep the constant name** `BRIDGE_ONLY_BROWSER_ACTIONS` only if the
 docstring is rewritten; the name is now actively misleading (the UI serves every
@@ -1569,7 +1572,11 @@ and the socket-confirming acquittal, mirroring `backend.py:145-194`:
 async def ui_browser_reachable(classified=None) -> bool:
     # FRESH -> True, no probe. ABSENT -> False, no probe.
     # STALE -> one bounded GET /health, ceiling 1.5 s, requiring
-    #          {"host": "ui", "proto": PROTO_VERSION, "pid": <same pid>}
+    #          {"host": "ui", "pid": <same pid>} — `proto` is REPORTED by
+    #          `/health` but deliberately NOT required here (backend.py:112-127):
+    #          a skewed host is a real host that can explain itself, so it stays
+    #          reachable and the per-action path returns the typed
+    #          `proto_mismatch` below (§10.6)
 ```
 
 The probe must check **the pid it answered for**, not just HTTP 200. The bridge's
@@ -2486,6 +2493,11 @@ Unit (`.venv/bin/python -m pytest tests/unit`, whole tree, exactly as CI):
   `resource.initialize()` having been called, not via the resulting text);
   `recover`/`retain`/`release` are refused rather than silently dispatched when no
   ownership host is available — the cmux fall-through repro belongs here too.
+  The selection claims are asserted THROUGH THE GATE (`execute_browser`), not
+  against `_lane()` in isolation, and with both hosts faked so the test can tell
+  "the right host" from "the only host": a resumed record naming the host the
+  availability order would not pick must reach that host's wire, in BOTH
+  directions, and a legacy record must reach the bridge with the app up.
 - `test_browser_tool.py` (existing, extended) — the `handle` param: accepted on
   `open`, refused on every other action by `_validate_browser_args`; adoption of an
   unhanded tab refused with the typed code.
