@@ -4449,6 +4449,9 @@ class FrontendStateStore:
                 restored = None
         epoch = uuid.uuid4().hex
         session_id = str(session.session_id)
+        # The one rule ``refresh_from_session`` uses for the live state, so the
+        # FIRST frame a runtime publishes and every frame after it agree.
+        session_cwd = str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or "")
         state = restored or FrontendSessionState(session_id=session_id, epoch=epoch)
         # A new runtime epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
@@ -4463,6 +4466,20 @@ class FrontendStateStore:
             update={
                 "epoch": epoch,
                 "sequence": 0,
+                # WHERE THIS RUNTIME WORKS IS NOT THE CHECKPOINT'S TO DECIDE.
+                # ``cwd`` describes the runtime that WROTE the row, and a
+                # session's directory can move after that row was written
+                # (``/move``, and the desktop's move route): a successor that
+                # restored the old value published a ``frontend.cwd`` naming
+                # the directory the session had LEFT, while its own tools, its
+                # system prompt and its skills all used the new one (QA on the
+                # desktop move: the receipt and the marker said one thing and
+                # the stream said another). The owner's own directory is
+                # authoritative for this, resolved exactly as
+                # ``refresh_from_session`` resolves it, and the checkpoint's
+                # value stays the fallback for a host that exposes neither
+                # attribute.
+                "cwd": session_cwd or state.cwd,
                 "usage_components": _capped_components(state.usage_components),
                 # The checkpoint describes a previous runtime, not a scheduler
                 # to restart. Keep its progress visible without claiming an

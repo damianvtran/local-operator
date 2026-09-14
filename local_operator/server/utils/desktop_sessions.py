@@ -337,7 +337,44 @@ def write_desktop_marker(
     marker.chmod(0o600)
 
 
+def _same_directory(left: str, right: str) -> bool:
+    """Whether two paths name the SAME DIRECTORY, symlinks and all.
+
+    A move to where the session already is must be a no-op, and comparing the
+    spellings alone misses the case that matters on macOS: ``/tmp/x`` and
+    ``/private/tmp/x`` are one directory, so a user who types the other spelling
+    got a full retire-and-respawn — a ~1-3 s rebuild of a runtime that had not
+    moved anywhere (QA round 1, Q3 on the shared move route). The fast path stays
+    a string compare because that is the common case and it costs nothing; the
+    identity check is ``os.path.samefile``, which is the filesystem's own answer
+    rather than a second path-normalisation rule to keep in step with
+    ``expand_path``'s deliberate symlink preservation.
+
+    Both paths are directories that exist by the time this is asked (the target
+    is validated first, the session's own is where it works), but ``samefile``
+    raises ``OSError`` when one of them has vanished underneath us — in which
+    case the honest answer is "not the same": the move proceeds and its own
+    validation decides.
+    """
+    if not left or not right:
+        return False
+    if os.path.normpath(left) == os.path.normpath(right):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
 async def move_session(bridge: DesktopSessionBridge, requested: str) -> MoveReceipt:
+    # The facade's bind lock does not cover the marker write or its rollback.
+    # Serialize the whole transaction so a refused request cannot restore its
+    # old marker over a different request's successful move.
+    async with bridge.move_lock:
+        return await _move_session(bridge, requested)
+
+
+async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveReceipt:
     """Point a desktop session at ``requested``; own every side effect of doing so.
 
     Validation, durability and the retire are ONE ordering, which is why this is
@@ -372,20 +409,36 @@ async def move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRece
         raise HTTPException(409, f"cannot move to {requested}: {error}") from None
 
     resolved = str(directory)
-    label = format_label(directory)
-    if os.path.normpath(resolved) == os.path.normpath(previous):
+    if _same_directory(resolved, previous):
         # NOTHING is written and nothing is retired. This is the TUI's "already in
         # ~/x", and it is also what makes a retried move idempotent: the receipt
         # journal admits a second POST with the same request id, and a move that
         # had already landed must not retire the runtime a second time.
         # ``will_wait`` is False rather than sampled: no transition is about to
         # happen, so there is no wait for it to have been a hint about.
-        return MoveReceipt(cwd=resolved, label=label, outcome="unchanged", will_wait=False)
+        #
+        # The receipt reports the SESSION's own spelling and label, not the
+        # typed one: for a no-op through a symlink those are two names for one
+        # directory, and the stream the renderer reconciles against reports the
+        # session's. The TUI's symlink-PRESERVING spelling is still what a real
+        # move is labelled with, below — this is only what "you are already
+        # here" answers with.
+        return MoveReceipt(
+            cwd=previous,
+            label=format_label(previous),
+            outcome="unchanged",
+            will_wait=False,
+        )
 
     # Sampled BEFORE the call, exactly as ``_apply_move`` does, because after it
     # the answer is about a transition that has already happened — and this is a
     # HINT for an operator reading a receipt, never a gate.
     will_wait = remote.move_will_wait()
+    # The TUI's own home-aware rendering of the directory being moved TO, kept
+    # symlink-preserving on purpose: a user who moved into `~/current-project`
+    # means the symlink, and printing its target back at them would read as the
+    # move having gone somewhere else.
+    label = format_label(directory)
 
     # DURABILITY FIRST, the marker before the bridge field, and both before the
     # retire. `locate()` prefers the marker over the canonical checkpoint when
@@ -501,6 +554,7 @@ class DesktopSessionBridge:
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
+        self.move_lock = asyncio.Lock()
         self.unsubscribers: list[Any] = []
         self.watch_task: asyncio.Task[None] | None = None
         #: The in-flight speculative engage started by :meth:`warm`, held so

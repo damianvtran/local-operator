@@ -2319,7 +2319,7 @@ class AttachedSession:
             # (120.03 s, review round 2 MAJOR-2). Publishing here closes the
             # race by construction rather than narrowing the window.
             async with self._bind_lock_for(foreground=True):
-                return await self._apply_working_directory(cwd, previous=previous)
+                outcome = await self._apply_working_directory(cwd, previous=previous)
         except BaseException:
             # ONE rollback for every non-return exit, here rather than at each
             # raise: the optimistic assignment above must not outlive a move
@@ -2338,6 +2338,22 @@ class AttachedSession:
             # the two windows, not the narrower one.
             self._cwd = previous
             raise
+        self._publish_working_directory(cwd)
+        return outcome
+
+    def _publish_working_directory(self, cwd: str) -> None:
+        """Publish the accepted directory while the successor is not yet bound.
+
+        Cold viewers have no owner to announce a move; bound viewers keep their
+        outgoing owner's snapshot until replacement. Both must show the accepted
+        directory immediately. Preserve the owner's sequence: a retiring runtime
+        can still send a final delta, so a viewer-local ``mutate`` would consume
+        its next sequence number and break synchronization. The successor restores
+        its own cwd rather than the previous runtime's checkpoint value.
+        """
+        store = self._frontend_store
+        if store is not None:
+            store.replace_and_notify(store.state.model_copy(update={"cwd": cwd}))
 
     async def _apply_working_directory(self, cwd: str, *, previous: str) -> str:
         """The move itself, with ``_bind_lock`` already held by the caller.
