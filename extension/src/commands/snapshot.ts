@@ -1,4 +1,4 @@
-import { compactAX, type AXNode } from "../ax-compact";
+import { compactAX, type AXNode } from "../driver/ax-compact";
 import { cdp, requireSurface } from "../cdp";
 import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
 import { setRefs, surfaceToken } from "../state";

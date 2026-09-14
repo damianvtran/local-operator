@@ -15,7 +15,7 @@ async function load(entry) {
 }
 
 test("origin policy preserves exact grants and scopes loopback all-port grants", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const exact = module.loaded.safeHttpUrl("https://example.com/path");
     assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, exact), true);
@@ -55,7 +55,7 @@ test("origin policy preserves exact grants and scopes loopback all-port grants",
 });
 
 test("registrable domain follows the bundled Public Suffix List and refuses unbounded keys", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const { registrableDomain, broadGrantFor } = module.loaded;
     const domain = (href) => registrableDomain(new URL(href));
@@ -93,7 +93,7 @@ test("registrable domain follows the bundled Public Suffix List and refuses unbo
     assert.deepEqual(broadGrantFor(new URL("https://qa-app.qa.gominerva.com")), { scope: "domain", key: "gominerva.com" });
     assert.equal(broadGrantFor(new URL("http://10.0.0.5")), null);
   } finally { await module.close(); }
-  const psl = await load("src/psl.gen.ts");
+  const psl = await load("src/driver/psl.gen.ts");
   try {
     assert.ok(psl.loaded.PSL_RULE_COUNT > 9000, `bundled list looks truncated: ${psl.loaded.PSL_RULE_COUNT}`);
     assert.equal(psl.loaded.PSL_RULES.split("\n").length, psl.loaded.PSL_RULE_COUNT);
@@ -102,7 +102,7 @@ test("registrable domain follows the bundled Public Suffix List and refuses unbo
 });
 
 test("site grants admit by domain or loopback host, in lookup order, and fail closed", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const { matchingGrantScope, storedOriginAllowed } = module.loaded;
     const siteGrants = {
@@ -148,7 +148,7 @@ test("site grants admit by domain or loopback host, in lookup order, and fail cl
 });
 
 test("policyCovers reconciles by domain and loopback host regardless of scheme", async () => {
-  const module = await load("src/access-queue.ts");
+  const module = await load("src/driver/access-queue.ts");
   try {
     const { policyCovers } = module.loaded;
     assert.equal(policyCovers("https://qa-app.qa.gominerva.com", "http://app.gominerva.com:8080", "domain"), true);
@@ -513,7 +513,7 @@ test("settings mutation helper reports negative acknowledgements and transport f
 });
 
 test("AX compaction assigns epoch-scoped click refs", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     const rendered = module.loaded.compactAX([
       { nodeId: "1", role: { value: "main" }, name: { value: "Content" }, childIds: ["2"] },
@@ -525,7 +525,7 @@ test("AX compaction assigns epoch-scoped click refs", async () => {
 });
 
 test("AX compaction walks through ignored wrapper nodes", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     // Real headful Chrome wraps every page's content in ignored generic
     // containers (html/body render as role "none", ignored: true) directly
@@ -550,7 +550,7 @@ test("AX compaction walks through ignored wrapper nodes", async () => {
 });
 
 test("AX compaction terminates on cyclic and duplicated childIds", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     // The walk trusts protocol data; a malformed payload with a cycle
     // (2 -> 3 -> 2) or the same child listed twice must neither hang the
@@ -569,7 +569,7 @@ test("AX compaction terminates on cyclic and duplicated childIds", async () => {
 });
 
 test("scroll expressions force instant behavior in every mode", async () => {
-  const module = await load("src/scroll-expressions.ts");
+  const module = await load("src/driver/scroll-expressions.ts");
   try {
     const { scrollExpressionFor, defaultScrollExpression, deltaScrollExpression, SCROLL_INTO_VIEW_FN } = module.loaded;
     // Pages can opt into CSS scroll-behavior:smooth, and Chrome throttles rAF
@@ -677,7 +677,7 @@ test("origin decision acks render per decision, deny staying neutral", async () 
 });
 
 test("access request verdicts: idempotent repeat, replace on new origin, deny cool-down", async () => {
-  const module = await load("src/access-flow.ts");
+  const module = await load("src/driver/access-flow.ts");
   try {
     const { requestVerdict, newRequest, ACCESS_REQUEST_TTL_MS } = module.loaded;
     const now = 1_000_000;
@@ -707,7 +707,7 @@ test("access request verdicts: idempotent repeat, replace on new origin, deny co
 });
 
 test("access state machine: pending, resolve paths, TTL expiry, grants, supersession", async () => {
-  const module = await load("src/access-flow.ts");
+  const module = await load("src/driver/access-flow.ts");
   try {
     const {
       accessState, activeRequest, newRequest, consumableGrant, tombstoneFor, receiptKey,
@@ -762,7 +762,7 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
 });
 
 test("approval queue selection, generation, expiry, and result bounds", async () => {
-  const module = await load("src/access-queue.ts");
+  const module = await load("src/driver/access-queue.ts");
   try {
     const {
       ACCESS_RESULT_CAP, adjacentEntryId, cleanResults, liveQueue, newEntry,
