@@ -355,10 +355,24 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
     """
     from local_operator.session.runtime.viewer_server import ViewerServer
     from local_operator.session.runtime.viewers import DESKTOP_SURFACE
+    from local_operator.tui import resume_click
     from local_operator.tui.resume_click import open_session
 
     root = headless_tui_env
     switched: list[str] = []
+    # RUNG 2 AND RUNG 3 ARE DOUBLED BEFORE THE LADDER EVEN STARTS, and that is a
+    # safety property rather than tidiness: an earlier revision of this test let
+    # the click fall through, and `_launch_desktop` found the operator's real
+    # `local-operator-ui` on PATH and launched it — a window on the maintainer's
+    # desktop, opened by a test. A click test must be incapable of reaching the
+    # machine it runs on.
+    launched: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: launched.append(session_id) or False
+    )
+    monkeypatch.setattr(
+        resume_click, "_spawn_terminal", lambda session_id: launched.append(session_id) or True
+    )
 
     class _Host:
         async def viewer_resume_session(self, session_id: str) -> str:
@@ -373,6 +387,10 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
         target = "b3b3b3b3b3b3"
         assert open_session(target) is True
         assert switched == [target], switched
+        # THE VIEWER RUNG WON, so nothing was launched and nothing was spawned:
+        # asserting the absence is what keeps a future fall-through from being
+        # silent here (it would have opened a real window on the host).
+        assert launched == [], launched
         # The record's surface is what the routing preference reads.
         records = _scan(root)
         assert any(record.surface == DESKTOP_SURFACE for record in records)
