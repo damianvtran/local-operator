@@ -12,7 +12,7 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -281,19 +281,33 @@ class BrowserResource:
         OVERRIDES the record and silently moves a resumed session onto whichever
         host happened to be up, including off the host that owns its tab.
 
-        Two spellings of one fact, and the order matters:
+        Two spellings of one fact, and the HANDLE is read first:
 
-        * `record["host"]` is written by `remember()` on the first successful
-          `open`. It survives a `close` (a `remember("")` cannot erase the lane
-          a resumed session still needs), so it pins a settled session too.
-        * The HANDLE covers the other direction: a record written before the
-          `host` field existed names its host only in `surface_id`. Defaulting
-          that to the bridge is the same fail-safe `ownership_host("")`
-          applies, and it is right for the same reason — every record that
-          predates the field belongs to a session that was talking to the
-          daemon. A record with NEITHER (no host, no surface) pins nothing: it
-          is a session that has not opened a tab yet, and it must stay free to
-          open one on whichever host answers.
+        * `surface_id` names its own host in its prefix, and it is the surface
+          the session is actually HOLDING, so it outranks the field beside it.
+          The two can disagree, because `remember("ui:…", host="ui")` passes
+          the truthful host while `select_host` keeps an established lane's
+          host: a session that has been talking to the daemon records
+          `host: "bridge"` beside a `ui:` handle. Reading the field first sends
+          `owner_recover` to the daemon for a tab that lives in the app, the
+          daemon answers `unresolved` with no tab, `recover()` moves the handle
+          into `unresolved_surface_id`, and the app's live tab is left
+          stranded — where the handle keeps the lane on the host that owns it.
+        * `record["host"]` is the fallback for a record with NO handle, and
+          only while that record owes a reconciliation (`OBLIGATION_FIELDS`).
+          That is the state `recover()` leaves behind when it cannot prove a
+          handle, and the session still owes `owner_*` an answer there: the
+          field is the only thing naming the host that holds it.
+        * A record with NEITHER an obligation nor a handle pins NOTHING. A
+          `close` clears `surface_id` and deliberately leaves `host` behind, so
+          a settled session goes on naming the host it used last; that is not a
+          transport to keep stable, because no surface is in flight, and it
+          must not govern the next `open` — pinning there is what makes a
+          resumed session whose app is down refuse to open at all instead of
+          using the host that answers. A record written before the `host` field
+          existed is still served by the first rule: its handle, defaulted
+          through `ownership_host("")`, names the bridge, which is where that
+          session was talking.
 
         Read from `self.record` when the lane has run and from the file
         otherwise, because the tool's gate asks this BEFORE `initialize()` —
@@ -309,13 +323,13 @@ class BrowserResource:
                 record = self._load()
             except (BrowserOwnershipError, OSError, ValueError):
                 return ""
-        host = str(record.get("host", ""))
-        if host:
-            return host
         surface = str(record.get("surface_id", ""))
         for name in (HOST_UI, HOST_BRIDGE):
             if surface.startswith(f"{name}:"):
                 return name
+        host = str(record.get("host", ""))
+        if host and self._record_owes_reconciliation(record):
+            return host
         return ""
 
     def client(self) -> Any:
@@ -495,6 +509,17 @@ class BrowserResource:
         "release_pause",
     )
 
+    @classmethod
+    def _record_owes_reconciliation(cls, record: Mapping[str, Any]) -> bool:
+        """Whether a RECORD — not necessarily this instance's — owes one.
+
+        Takes the record as an argument because `pinned_host()` runs before
+        `initialize()` has populated `self.record`: the gate asks it about the
+        record it just read from the file, and the answer has to be the same one
+        `has_durable_obligation()` gives once the lane has loaded that file.
+        """
+        return any(record.get(field) for field in cls.OBLIGATION_FIELDS)
+
     def has_durable_obligation(self) -> bool:
         """Whether the record carries something only `owner_*` can reconcile.
 
@@ -504,7 +529,7 @@ class BrowserResource:
         the session genuinely owes the extension a reconciliation it cannot
         perform, and the honest failure stays.
         """
-        return any(self.record.get(field) for field in self.OBLIGATION_FIELDS)
+        return self._record_owes_reconciliation(self.record)
 
     def _peer_identity(self) -> tuple[str, int] | None:
         """The peer's (version, proto), or None when it cannot be told.

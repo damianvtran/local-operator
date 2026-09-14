@@ -260,12 +260,11 @@ else. It drives the user's own browser, so logins and cookies persist between
 calls and between sessions and you can ask the user to sign in by hand and then
 carry on — which is why it reaches pages no throwaway browser can. The
 preferred host is the **Local Operator desktop app's browser tab**; the paired
-**Local Operator browser extension** (a real Chromium profile — Chrome, Edge,
-Arc, Brave — over a loopback bridge) is the host for a session that exists only
-in the user's own profile, and a cmux browser panel is the fallback where
-neither is connected. Every host opens its tab in the background and never
-steals focus, so you can browse while the user works in another window — keep
-it that way and never force-activate a tab or raise a window. Never install or
+**Local Operator browser extension** (a real Chromium profile over a loopback
+bridge) is the host for the user's real profile; a cmux browser panel is the
+fallback where neither is connected. All three open their tab in the background
+and never steal focus, so you can browse while the user works elsewhere — keep
+it that way: never force-activate a tab or raise a window. Never install or
 script a browser engine to load a page or take a screenshot: no
 `playwright install`, no puppeteer, no downloaded Chromium.
 
