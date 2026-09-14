@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.naming import ConversationName
+from local_operator.session.spend import SessionSpend
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Deferred: ``frontend_state`` imports ``tui.costs``, whose package
@@ -506,6 +507,26 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    # --- code memory (execution variables) --------------------------------
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one session code-memory verb (list/set/update/delete).
+
+        A SESSION capability for the same reason ``credential_op`` is: the thing
+        being read or written is the LIVE eval-kernel namespace, which only
+        exists in the process running the session's turn loop. A session that
+        runs its tools in this process answers from its own kernel registry; a
+        session that is a window onto a runtime routes it there, because a
+        namespace held anywhere else would be a copy no cell ever mutates.
+
+        The answer is the frozen envelope (``{ok, state, kernel, variables,
+        truncated}`` for a read, ``{ok, state, variable?}`` for a write,
+        ``{ok: False, code, message}`` for a refusal) — see
+        :mod:`local_operator.session.variable_ops`.
+        """
+        ...
+
     # --- events -----------------------------------------------------------
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable."""
@@ -560,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 112 public members and a POSITIVE
+    than stylistic. This protocol carries 114 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -573,8 +594,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     past it (106 before the warm members were added, 108 with them, 109 once
     ``restored_search_spend`` joined ``restored_usage``, 111 once
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
-    112 once the lease-warm retry needed ``recovering``), so recompute it rather
-    than adjusting it by the size of your own change.
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
+    112 once the lease-warm retry needed ``recovering``, 113 once
+    ``restored_spend`` joined the shared surface a viewer inherits, 114 once
+    session code memory joined the session contract with ``variables_op``), so
+    recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -890,13 +914,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
-        """Wall-clock start instant per call executing RIGHT NOW, keyed by id.
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        """Start instant per call executing RIGHT NOW, keyed by call id.
 
         The timestamped sibling of :meth:`executing_display_tool_ids`, and the
         one thing that makes a live row's elapsed clock survive a change of
         viewer. Both surfaces answer it off the SAME folded fact — the
-        ``tool_execution_start`` epochs the producer stamped (see
+        ``tool_execution_start`` events the producer emitted (see
         ``ToolExecutionStartEvent.started_at_epoch``) — so a sidebar switch
         seeds the replayed row and the band's phase from one anchor rather
         than from whenever each of them was painted.
@@ -904,12 +928,24 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Declared here beside the id accessors it accompanies, and implemented
         by BOTH session shapes: a local owner answers from its own fold (it is
         the producer, so the instants are its own), and an attached viewer
-        answers from the same fold applied to the events it received. A call
-        whose start carried no epoch — a legacy producer, an older runtime —
-        is deliberately ABSENT from the map rather than present with a
-        guessed value, so consumers withhold the clock instead of printing an
-        age nobody measured. An empty map is therefore a valid, supported
-        answer and not an error.
+        answers from the same fold applied to the events it received.
+
+        Read membership and value as two different answers, because a replay
+        has to ask both:
+
+        * MEMBERSHIP — has this call started? A call that has no entry at all
+          is one the tail scan merely cannot pair with a result yet: queued
+          behind a sibling's execution group, or never run. Its row must not be
+          painted as executing. Membership is what distinguishes that from the
+          far more common case below, and the distinction is why the map is not
+          simply a list of epochs.
+        * VALUE — when it started, or ``None`` when the start carried no epoch
+          (a legacy producer, an older runtime). An epoch-less start is present
+          with ``None`` rather than absent: the event DOES say the call began,
+          and the value is withheld instead of guessed, so consumers keep the
+          clock blank rather than printing an age nobody measured.
+
+        An empty map is therefore a valid, supported answer and not an error.
         """
         ...
 
@@ -1322,6 +1358,23 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         reason: the TUI reads it off the session to seed a resumed
         conversation's ledger, and a duck-typed ``getattr`` would make a rename
         degrade the band to a silently-short figure instead of an error.
+        """
+        ...
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable per-session spend this conversation carries, or ``None``.
+
+        DECLARED on the SHARED protocol rather than on
+        :class:`ViewerSessionProtocol`, and the distinction is the one that rule
+        is for: ``tui/app.py::_restore_reported_usage`` reads it through a
+        duck-typed binding that may hold EITHER kind of session (the band is
+        restored on adopt, for an owner runtime and for an attached facade
+        alike), and BOTH classes implement it -- the owner by recalling the
+        ``session_spend.v1`` row it writes, a viewer by recalling the same row
+        out of the journal suffix it already read on a cold open. Declaring it
+        on the viewer-only protocol would say a runtime lacks the member, which
+        is the opposite of the truth, and would let the owner-side read degrade
+        to a silent ``None`` (an unmarked total on screen) on a rename.
         """
         ...
 

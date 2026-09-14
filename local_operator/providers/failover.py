@@ -2665,9 +2665,15 @@ async def stream_with_failover(
             built = client_for(spec)
             client = await built if inspect.isawaitable(built) else built
             clients[route_key] = client
-        current_request = (
-            request if target == primary_target else request.model_copy(update={"model": spec})
-        )
+        # ``with_model`` rather than a bare ``model_copy``: the generation bound
+        # lives on the request and ``model_copy`` cannot re-run the validator, so
+        # a straight copy carried the primary's bound onto a fallback that
+        # publishes a smaller ceiling (34 shipped rows publish under 20K, e.g.
+        # ``gemini-2.0-flash-exp`` at 8,192 -- an ask above the target's own
+        # published maximum) and kept a small primary's ask on a large fallback.
+        # ``with_model`` re-derives a POLICY-filled bound against the new spec and
+        # carries a caller's named ask untouched (review M1 / QA Q5).
+        current_request = request if target == primary_target else request.with_model(spec)
         if (
             route_state is not None
             and getattr(current_request.model, "fast_mode", False)
@@ -2676,8 +2682,14 @@ async def stream_with_failover(
             # This route already refused fast mode for this session's account
             # (see `FailoverRouteState.fast_refused`). Ask at standard speed
             # from the start rather than paying the refused attempt again.
-            current_request = current_request.model_copy(
-                update={"model": current_request.model.model_copy(update={"fast_mode": False})}
+            #
+            # `with_model` even though this is the SAME model with the speed dial
+            # off: one rule for every re-aiming of a request, so no reader has to
+            # work out which of the `model_copy` calls beside it happen to be
+            # safe. The re-derivation is idempotent here -- the spec's published
+            # ceiling is untouched by `fast_mode`.
+            current_request = current_request.with_model(
+                current_request.model.model_copy(update={"fast_mode": False})
             )
         if route_state is not None and target != primary_target:
             cooldown_ms = max(60_000, reported.retry_after_ms or 0) if reported else 60_000
@@ -2907,7 +2919,10 @@ async def stream_with_failover(
                     for key in ("context_window", "default_context_window", "max_context_window")
                 )
                 spec = resolved
-                current_request = current_request.model_copy(update={"model": resolved})
+                # Same re-derivation as the fallback hop above: an OAuth-resolved
+                # spec can publish a different output ceiling than the one the
+                # bound was computed from, and ``model_copy`` would not notice.
+                current_request = current_request.with_model(resolved)
                 # An API request whose budget did not move remains a transparent
                 # stream. OAuth still publishes unknown-resolution provenance.
                 if changed_budget or access.kind == "oauth":
@@ -3004,10 +3019,9 @@ async def stream_with_failover(
                     # the route state is what stops later requests re-paying
                     # the refusal, and its handler is what tells the user.
                     # Guarded by the flag actually being on, so it cannot loop.
-                    current_request = current_request.model_copy(
-                        update={
-                            "model": current_request.model.model_copy(update={"fast_mode": False})
-                        }
+                    # `with_model` for the same reason as its twin above.
+                    current_request = current_request.with_model(
+                        current_request.model.model_copy(update={"fast_mode": False})
                     )
                     refused_selector = f"{spec.provider}/{spec.model_id}"
                     logger.info(

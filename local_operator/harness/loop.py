@@ -136,6 +136,35 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
+# What the model is told about a call the OUTPUT LIMIT cut in half, kept distinct
+# from ``ABORTED_RESULT_TEXT`` on purpose rather than for style: "aborted" says a
+# turn stopped and explains nothing about the argument fragment the model now
+# sees replayed in its own history. Measured on a real provider, a model handed
+# that bare "aborted" reported that its call "came through empty and was
+# aborted", declined to retry, and the large file it was asked to write was
+# never written and nothing said so (QA round 1, Q2: base wrote 110,703 chars,
+# the truncated branch produced ``tool_executions: []``). The remedy is the
+# model's to take, so the result has to name it.
+TRUNCATED_RESULT_TEXT = (
+    "cut off at the output limit before the arguments finished; nothing ran -- "
+    "re-emit this call with a smaller payload"
+)
+
+#: Cap on the reason carried by a never-run call's terminal compose frame.
+#:
+#: The frame rides the live relay and the reconnect seed, and the seed measures
+#: every row it retains against ``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``; the
+#: synthetic result it is drawn from can hold an invalid-arguments dump of any
+#: size. The unit is CODEPOINTS — ``len()`` on a ``str``, the clip below — and
+#: it is the one bound on this wire NOT measured in terminal cells or serialized
+#: bytes, so the worst case is worth stating rather than assuming: a CJK reason
+#: is ~2 cells and ~3 UTF-8 bytes per code point, i.e. ~600 cells / ~800 bytes
+#: at this cap. 200 code points is the first line of a diagnostic and nothing
+#: more — enough for `Tool not found: <name>` or a JSON-validation complaint,
+#: two orders of magnitude inside that 60 KB budget, and clipped rather than
+#: dropped so the row can never say "something went wrong" where it could name
+#: the thing.
+NOT_RUN_REASON_MAX_CHARS = 200
 
 # Why a tool call did not run cleanly, classified WHERE THE REASON IS KNOWN and
 # carried on ``ToolResult.details["__fault"]`` to the one place that reports it
@@ -346,9 +375,17 @@ def is_connectivity_continuation_instruction(text: str) -> bool:
 # name and the legacy rows' "unsupported field" 400 were both reported to the
 # user as our own recovery having failed.
 
-#: Turns this RUN has retried after such a refusal. One, not more: the retry
-#: changes the request's thinking mode, and a second attempt at the same body
-#: would only spend a call to be told the same thing.
+#: Turns this RUN has re-sent with the reasoning echo FILLED after such a
+#: refusal. One, not more: the fill is a property of the request shape, so a
+#: second identical attempt would spend a call to be told the same thing.
+MAX_REASONING_ECHO_FILL_RETRIES = 1
+
+#: Turns this RUN has retried after such a refusal with thinking turned OFF.
+#: One, not more, and SEPARATE from the fill budget above: a route can need the
+#: echo and still refuse (or refuse for a second reason), and the retreat is
+#: what recovers the ones where the echo alone was not the whole story. The
+#: separate counters are what keep "one of each" true without letting either
+#: alone loop.
 MAX_REASONING_ECHO_RETRIES = 1
 
 
@@ -604,7 +641,13 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
         return None
     digest = hashlib.sha256()
     for call, result in zip(calls, results):
-        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
+        # The two synthetic texts below are the loop's own statement that the
+        # call never ran, so they break the streak rather than counting as
+        # evidence of the model repeating itself. ``TRUNCATED_RESULT_TEXT``
+        # belongs here for exactly the same reason: a model re-emitting a call
+        # the output limit cut is not a model floundering, and without this it
+        # would be stopped by the no-progress guard on its second attempt.
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT, TRUNCATED_RESULT_TEXT):
             return None
         args = {key: value for key, value in call.arguments.items() if key != INTENT_FIELD}
         digest.update(
@@ -795,10 +838,22 @@ class AgentLoop:
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
         # Turns this run has retried with thinking turned OFF after DeepSeek
-        # refused a request for a missing reasoning echo. Run-scoped and topped
-        # up by nothing: the refusal is a property of what this run is sending,
-        # so a fresh allowance per turn would re-buy the same diagnosis.
+        # refused a request for a missing reasoning echo -- and, separately,
+        # turns it has re-sent with the echo FILLED. Run-scoped and topped up
+        # by nothing: the refusal is a property of what this run is sending, so
+        # a fresh allowance per turn would re-buy the same diagnosis.
         reasoning_echo_retries = 0
+        reasoning_echo_fill_retries = 0
+        # The provider/model pair a reasoning-echo FILL is in force for, set
+        # when the loop has evidence that this route's requests were reaching
+        # the provider without their echo. Applied to the spec of each later
+        # request in this run, because the host's ``get_model`` resolver hands
+        # back its OWN spec (the same reason ``effort_ceiling`` above exists) --
+        # without it the fill would reach one request and be undone on the
+        # next, which is a slower version of the bug. Scoped to the pair rather
+        # than a bare flag so a mid-run model switch re-derives its own
+        # answer instead of inheriting a decision made about another model.
+        echo_fill_route: tuple[str, str] | None = None
         # Turns this run has continued after the network cut them short. Run-
         # scoped, not per-turn: a laptop carried between networks can interrupt
         # the same run more than once, and the budget bounds the RUN's total
@@ -860,11 +915,16 @@ class AgentLoop:
 
                     assistant, stop_reason, stream_error = None, "stop", None
                     turn_connectivity_loss = False
+                    # The spec this call was BUILT with, which is not
+                    # ``config.model`` whenever the host resolves per call. The
+                    # echo fill below is gated on what was actually sent.
+                    turn_model: "ModelSpec | None" = None
                     async for event in self._model_turn(
                         context,
                         config,
                         signal,
                         effort_ceiling=effort_ceiling,
+                        echo_fill_route=echo_fill_route,
                         context_tokens_hint=(
                             run_context_tokens
                             if run_context_tokens is not None
@@ -877,6 +937,7 @@ class AgentLoop:
                                 event.stop_reason,
                                 event.error,
                             )
+                            turn_model = event.model
                             turn_connectivity_loss = event.connectivity_loss
                         else:
                             yield event
@@ -1148,9 +1209,92 @@ class AgentLoop:
                     new_messages.append(assistant)
 
                     if stop_reason in ("error", "aborted", "refusal"):
-                        # DeepSeek's thinking mode can refuse a request for a
-                        # missing reasoning echo even though the body echoes one
-                        # on every turn it has anything for (see
+                        # FIRST recovery for a refused reasoning echo: re-send the
+                        # SAME request with the echo filled.
+                        #
+                        # This is the BENIGN half of the pair and it is tried
+                        # first, before anything gives up a capability. Filling
+                        # the echo adds a short placeholder sentence per blank
+                        # assistant turn and changes nothing else -- same route,
+                        # same effort, same thinking mode, same tools -- while
+                        # the alternative below disables the model's reasoning
+                        # for the rest of the run. The asymmetry is why they are
+                        # ordered this way and why they are gated differently:
+                        # a refusal whose OWN WORDS say the echo is missing is
+                        # evidence the fill is what this request needs, so this
+                        # branch needs no capability bit at all.
+                        #
+                        # Capability-INDEPENDENT on purpose, and that is not a
+                        # hypothetical: the bit is a prediction about which
+                        # routes run this validator, derived from the model's
+                        # family (``model.configure.reasoning_echo_required``).
+                        # A family rule cannot know about a model it has never
+                        # seen -- the next generation id, the same weights behind
+                        # a rebranded or relayed host -- and a spec that never
+                        # went through the derivation can state the bit off
+                        # outright. The provider's own wording is direct evidence
+                        # about THIS request, so when the wording says the echo is
+                        # missing and the spec we SENT was not carrying one, the
+                        # fill is the measured answer (live: unfilled body 400,
+                        # filled body 200 on the same window).
+                        #
+                        # That gate is on ``turn_model`` rather than on
+                        # ``config.model`` because the two differ whenever a host
+                        # resolves per call: what matters is whether the request
+                        # the provider just refused carried an echo, and only the
+                        # resolved spec can answer that.
+                        #
+                        # Bounded like every other recovery in this loop, and
+                        # gated on nothing having been SHOWN: a 400 arrives
+                        # before the first byte, and a turn the user has already
+                        # read may not be replayed.
+                        #
+                        # ``not assistant.tool_calls`` is that gate, and it means
+                        # a refusal that arrives AFTER streamed tool-call deltas
+                        # gets no recovery at all -- inherited from the retreat
+                        # below, not introduced here, and recorded on the PR as
+                        # not addressed. A turn whose call is already on screen
+                        # (or executing) is no more replayable than one with text,
+                        # so lifting it is a design question about partial calls
+                        # rather than a line to change.
+                        if (
+                            stop_reason == "error"
+                            and reasoning_echo_fill_retries < MAX_REASONING_ECHO_FILL_RETRIES
+                            and not assistant.text.strip()
+                            and not assistant.tool_calls
+                            and turn_model is not None
+                            and not turn_model.requires_reasoning_echo
+                            and _is_reasoning_echo_rejection(stream_error)
+                        ):
+                            reasoning_echo_fill_retries += 1
+                            # The refused turn must not reach the retry's
+                            # history: it carries nothing the user saw, and the
+                            # next request has to re-send the same conversation
+                            # that was just refused.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            config.model = config.model.model_copy(
+                                update={"requires_reasoning_echo": True}
+                            )
+                            echo_fill_route = (turn_model.provider, turn_model.model_id)
+                            yield NoticeEvent(
+                                text=(
+                                    "the provider refused this request for a "
+                                    "missing reasoning echo — retrying with the "
+                                    "echo filled in at the same effort"
+                                ),
+                                kind="warning",
+                            )
+                            has_more_tool_calls = True
+                            continue
+                        # SECOND recovery, and the one that needs a gate: a
+                        # route that never sends the echo must not have a rung
+                        # of its own ladder disabled by a message that merely
+                        # resembles this one. DeepSeek's thinking mode can refuse
+                        # a request for a missing reasoning echo even though the
+                        # body echoes one on every turn it has anything for (see
                         # ``ModelSpec.requires_reasoning_echo``). That refusal is
                         # recoverable rather than fatal: the same request with
                         # thinking disabled answers 200 (measured live), so spend
@@ -1183,6 +1327,12 @@ class AgentLoop:
                         # aggregator, and the test that pins it must derive its
                         # spec rather than hand one a rung production never
                         # builds.
+                        #
+                        # Deliberately still reads the RUN's model for the
+                        # ladder, exactly as it shipped: the retreat is a
+                        # statement about the model this run is on, while the
+                        # fill above is a statement about the request that was
+                        # sent -- and only ``turn_model`` can answer the second.
                         if (
                             stop_reason == "error"
                             and reasoning_echo_retries < MAX_REASONING_ECHO_RETRIES
@@ -1253,7 +1403,15 @@ class AgentLoop:
 
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
-                        silent = not assistant.text and not assistant.tool_calls
+                        # Whitespace-only prose counts as NOTHING, which is how
+                        # ``rows.assistant_stop_notice`` reads the same turn:
+                        # it strips before deciding, so a bare truthiness test
+                        # on ``text`` here had the live notice announce a CUT
+                        # ANSWER over a fold that reported no answer at all
+                        # (review R2-n4). Both sides strip, so the two surfaces
+                        # cannot describe one event in two voices.
+                        has_text = bool(assistant.text and assistant.text.strip())
+                        silent = not has_text and not assistant.tool_calls
                         if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
                             lower = _lower_effort(config.model)
                             if lower is not None:
@@ -1305,9 +1463,74 @@ class AgentLoop:
                                 ),
                                 kind="warning",
                             )
+                        elif has_text:
+                            # A partial ANSWER, which is the case the missing
+                            # signal hid best: the prose that arrived reads as a
+                            # complete short reply, and neither the TUI nor the
+                            # phone folded the stop into a notice (review round 1,
+                            # B1; reproduced by QA Q1 against a live provider).
+                            #
+                            # This arm also owns the turn that streamed prose AND a
+                            # call in flight, which is why it is tested before
+                            # ``tool_calls`` below: ``rows.assistant_stop_notice``
+                            # reads that same turn text-first, so checking the call
+                            # first had the live row announce "mid tool call" over
+                            # a fold that said "answer cut off" -- one event in two
+                            # voices, the exact failure this family exists to
+                            # prevent, on a turn where there genuinely IS an answer
+                            # to cut off (design round 2, D7).
+                            #
+                            # The remedy clause is not decoration: with no call in
+                            # flight this is the one truncation the loop does NOT
+                            # auto-continue (above), so the reader is the only actor
+                            # left and every sibling row in the family names a move
+                            # (design round 1, D4). A cut call IS re-asked, but only
+                            # the call: the answer's remainder was never sent, and
+                            # only the reader can ask for it.
+                            yield NoticeEvent(
+                                text=(
+                                    "the model hit the output limit — this answer "
+                                    "is cut off, and the rest was never sent — "
+                                    "ask again to continue, or narrow the request"
+                                ),
+                                kind="warning",
+                            )
+                        elif assistant.tool_calls:
+                            # Visible truncation with a call in flight and no prose
+                            # to pronounce it: the call was cut mid-arguments and
+                            # will NOT be executed (the batch below pairs
+                            # placeholders instead). Nothing else said so -- the
+                            # loop's only length notice was the silent arm above,
+                            # no surface had a length arm at all, and the result
+                            # the model got back read just "aborted" -- so a model
+                            # asked to write a large file reported that the call
+                            # "came through empty", declined to retry, and the file
+                            # was never written (QA round 1, Q2). Say which limit
+                            # it was and that the loop is re-asking.
+                            #
+                            # Reachable only when the turn streamed NO prose (the
+                            # arm above takes that case). The reader still learns
+                            # the call never ran, from the placeholder result
+                            # appended below: ``TRUNCATED_RESULT_TEXT`` says so on
+                            # the call's own row.
+                            yield NoticeEvent(
+                                text=(
+                                    "the model hit the output limit mid tool call "
+                                    "— nothing was executed; re-asking it to "
+                                    "re-emit the call in smaller pieces"
+                                ),
+                                kind="warning",
+                            )
                         # Truncated: pair placeholders, do NOT execute.
+                        #
+                        # ``TRUNCATED_RESULT_TEXT`` rather than the bare
+                        # ``ABORTED_RESULT_TEXT``: the model sees this as the result
+                        # of the call it watched itself emit, and the actionable
+                        # fact is that the OUTPUT LIMIT cut it, not that some turn
+                        # ended. Same distinction, and same measured cost, as the
+                        # constant's own comment.
                         placeholders = [
-                            self._synthetic_result(call, ABORTED_RESULT_TEXT)
+                            self._synthetic_result(call, TRUNCATED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
                         self._append_results(
@@ -1551,6 +1774,7 @@ class AgentLoop:
         signal: AbortSignal | None,
         effort_ceiling: str | None = None,
         context_tokens_hint: int | None = None,
+        echo_fill_route: tuple[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events.
@@ -1560,6 +1784,13 @@ class AgentLoop:
         request by THIS loop, which owns the conversation the call belongs
         to — never remembered on the shared stream fn, where a subagent's
         registration would overwrite the parent's (review F8).
+
+        ``echo_fill_route`` is the run's standing decision that this route's
+        requests must carry the reasoning echo, taken after a provider REFUSED
+        one for missing it. It is applied to the RESOLVED spec for the same
+        reason ``effort_ceiling`` is: the host's resolver returns its own
+        model, so a capability set only on the run's snapshot would reach one
+        request and be undone on the next.
         """
         assistant = Message(role="assistant")
         text_parts: list[str] = []
@@ -1571,6 +1802,14 @@ class AgentLoop:
         # Set only by the except arm below, from the exception's own flag: the
         # harness cannot import ``providers`` to classify this itself.
         connectivity_loss = False
+        # The spec the request below is BUILT with, captured before the stream
+        # starts. Declared here rather than read after the ``try`` for two
+        # reasons: the resolved ``model`` is assigned inside it, so a reader
+        # after the block cannot be sure it exists; and a failover that serves
+        # the call reports ITSELF through ``StreamModelEvent``, which is not the
+        # spec we built the request from. The run loop's echo fill acts on what
+        # we SENT.
+        request_model: "ModelSpec | None" = None
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -1618,6 +1857,24 @@ class AgentLoop:
                     and ladder.index(current) > ladder.index(effort_ceiling)
                 ):
                     model = model.model_copy(update={"reasoning_effort": effort_ceiling})
+            if echo_fill_route is not None and (model.provider, model.model_id) == echo_fill_route:
+                # The same resolved-spec problem, for the other half of the
+                # refusal. Nothing else is touched: same route, same effort,
+                # same tools — the ONLY delta is that every blank assistant
+                # turn now carries its reasoning echo, which is the field the
+                # provider said was missing.
+                model = model.model_copy(update={"requires_reasoning_echo": True})
+            # ``max_tokens`` is deliberately NOT set here. The generation bound
+            # is part of the request contract (``harness/types.py``,
+            # ``DEFAULT_TURN_OUTPUT_TOKENS``) and every request is filled from
+            # that one policy as it is built, so a host cannot go out with a bound
+            # that no call site remembered to impose. The number this replaces was
+            # not an absent ask but the opposite one: a request that named nothing
+            # carried the model's ADVERTISED capability verbatim, which on a 1M
+            # aggregate model is 943,718 and is what let a single decision run to
+            # 97,189 output tokens (95,098 of them reasoning). A host that wants a
+            # different bound names ``max_tokens`` explicitly.
+            request_model = model
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
@@ -1675,7 +1932,6 @@ class AgentLoop:
                             # once its real id has replaced it. Retained for
                             # the rest of the stream — see the emission below.
                             "supersedes": None,
-                            "reported": -1,
                             # Bounded copy of the head of the argument stream,
                             # kept only until the intent scrape resolves. `None`
                             # means scanning is over — see below.
@@ -1781,7 +2037,6 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1799,7 +2054,6 @@ class AgentLoop:
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
                             state["announced"] = now
-                            state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"],
                                 tool_name=state["name"],
@@ -1810,12 +2064,44 @@ class AgentLoop:
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):
-                    # Flush what the throttle swallowed. Arguments commonly land
-                    # in one burst inside a single window, so without this the
-                    # row's size could report a fraction of the call — or, when
-                    # the whole payload arrives faster than one window, never
-                    # display a size at all. It matters most on an aborted turn,
-                    # where the frozen row is what the user is left reading.
+                    # Flush EVERY latched call here, and make the flush TERMINAL.
+                    #
+                    # The gate this loop used to carry (`bytes != reported`)
+                    # existed to flush what the throttle swallowed: arguments
+                    # commonly land in one burst inside a single window, so
+                    # without it a row could report a fraction of the call —
+                    # or, when the whole payload arrived faster than one
+                    # window, never display a size at all. That is still true
+                    # and it is now the smaller half of the job.
+                    #
+                    # This frame is also the ONE the composing row has been
+                    # waiting for since it was mounted. This is the instant the
+                    # model stopped writing the call, and nothing later in the
+                    # step says so: the batch has not run yet
+                    # (`_execute_tool_calls` follows the `MessageEndEvent`
+                    # yielded below), and the call may be queued behind a
+                    # sibling's execution group for that sibling's whole
+                    # duration — a `wait(wait_ms=1800000)` ahead of an
+                    # `exclusive` tool is the reported half-hour — or never run
+                    # at all. So it is emitted UNCONDITIONALLY, for every
+                    # latched call, rather than only when the size moved: a
+                    # consumer that reads it as "the dictation is over" must
+                    # not be able to miss it because the model happened to stop
+                    # mid-window with nothing new to report.
+                    #
+                    # `dictation_complete` is what says so, and it is additive
+                    # by design (see `ToolCallComposeEvent`): a viewer that
+                    # predates the field ignores it and keeps today's
+                    # behaviour, and a viewer meeting a producer that never
+                    # sets it sees no such frame and behaves exactly as before.
+                    #
+                    # `supersedes_tool_call_id` is REPEATED here for the reason
+                    # the promotion above already repeats it on every frame:
+                    # anything between this and a viewer may legitimately drop
+                    # frames, so the one frame that must not be lost is not the
+                    # only carrier of the identity hand-off. Applying it twice
+                    # stays idempotent — a consumer that already rekeyed finds
+                    # nothing to drop.
                     for state in tool_states.values():
                         if not state["name"]:
                             continue
@@ -1854,19 +2140,19 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            # Force the announcement below: the identity change
-                            # must reach consumers even when the size has not
-                            # moved since the last frame.
-                            state["reported"] = -1
-                        if state["bytes"] != state["reported"]:
-                            state["reported"] = state["bytes"]
-                            yield ToolCallComposeEvent(
-                                tool_call_id=state["key"] or "compose:0",
-                                tool_name=state["name"],
-                                argument_bytes=state["bytes"],
-                                intent=state["intent"],
-                                supersedes_tool_call_id=state["supersedes"],
-                            )
+                        # No throttle bookkeeping to stamp here: the emission
+                        # below is not gated on ``bytes != reported`` any more
+                        # (a dictation that ends without another delta must still
+                        # be told it ended), and this block is the call's last
+                        # word in this stream, so nothing reads a stamp from it.
+                        yield ToolCallComposeEvent(
+                            tool_call_id=state["key"] or "compose:0",
+                            tool_name=state["name"],
+                            argument_bytes=state["bytes"],
+                            intent=state["intent"],
+                            supersedes_tool_call_id=state["supersedes"],
+                            dictation_complete=True,
+                        )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
                         usage = event.usage
@@ -1998,6 +2284,7 @@ class AgentLoop:
             stop_reason=stop_reason,
             error=error,
             connectivity_loss=connectivity_loss,
+            model=request_model,
         )
 
     @staticmethod
@@ -2020,6 +2307,66 @@ class AgentLoop:
     # ------------------------------------------------------------------
     # Tool execution
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _not_run_compose_frame(call: ToolCall, reason: str) -> ToolCallComposeEvent:
+        """The terminal compose frame for a call that will never START.
+
+        A call parked at planning (an unknown tool, invalid arguments, a
+        duplicate id whose twin won the slot) or skipped by steering gets no
+        ``tool_execution_start`` and — deliberately — no ``tool_execution_end``
+        either: the API server matches tool records by id, and an end with no
+        start "either resurrects a record that was never opened or, when a
+        duplicate id collides, closes the REAL call's record early" (see
+        ``_execute_batch.park``). It also never ran, so a start would claim the
+        tool executed, moving approval, reporting and the analytics chokepoint
+        (``_report_tool_call``) with it.
+
+        That suppression is right, and it left the COMPOSE surface with no
+        ending at all: the row the model's dictation announced stayed
+        ``composing…``, with a ticking clock, until the TURN ended — settled
+        then as ``never sent · N composed`` under the word ``interrupted``,
+        which describes a call that was never interrupted. This frame is the
+        ending the compose surface was missing, and it says nothing to the API
+        server: it rides the same wire the announcement did.
+
+        ``reason`` is the synthetic result's own text, so the row states the
+        failure in the harness's words rather than in a second vocabulary this
+        path would have to keep in step. It is bounded to one clipped line,
+        because it rides the live relay and the reconnect seed, both of which
+        budget text (``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``) — the whole
+        synthetic result is the mistake this avoids.
+
+        Only an ANNOUNCED call gets one: the compose surface exists solely for
+        a call whose dictation reached a viewer, and a frame for a call nobody
+        was shown would mount a row for something that was never on screen.
+        Every call reaching here has a name (``_assemble_tool_call`` copies the
+        latched one), and the announcement is minted on the first name
+        fragment, so a truthy name is exactly "this call was announced".
+        """
+        text = " ".join((reason or "").split()) or "Tool call not run"
+        if len(text) > NOT_RUN_REASON_MAX_CHARS:
+            text = text[: NOT_RUN_REASON_MAX_CHARS - 1].rstrip() + "…"
+        return ToolCallComposeEvent(
+            tool_call_id=call.id or "compose:0",
+            tool_name=call.name,
+            # The assembled argument payload, which is the same measurement the
+            # streaming frames reported: their byte count is the sum of the
+            # argument deltas, and those are what ``raw_arguments`` joined.
+            argument_bytes=len(call.raw_arguments or ""),
+            dictation_complete=True,
+            not_run_reason=text,
+        )
+
+    def _not_run_frames(self, calls: list[ToolCall], reason: str) -> list[ToolCallComposeEvent]:
+        """Terminal frames for a set of calls that will never START, one reason.
+
+        The steering skip's shape: every call it drops after the batch's first
+        slot shares one verdict, so they share one reason. The planning-failure
+        path above carries a per-call reason and calls
+        :meth:`_not_run_compose_frame` directly for that reason.
+        """
+        return [self._not_run_compose_frame(call, reason) for call in calls if call.name]
 
     async def _execute_tool_calls(
         self,
@@ -2060,6 +2407,23 @@ class AgentLoop:
                 continue
             seen_ids.add(call.id)
             plan.append(await self._plan_call(call, context, config))
+        # Announce the batch's never-run verdicts BEFORE anything executes.
+        #
+        # A call with a `failure` here has been judged and will never start:
+        # the tool is unknown, the arguments did not validate, or a duplicate id
+        # lost to its twin (which parks up front in `_execute_batch`, after the
+        # group runs). The verdict exists NOW, and the row it belongs to is
+        # already on screen claiming the model is still writing the call — so
+        # the compose surface is told now rather than at turn end, when the
+        # retirement pass would settle it under the word `interrupted` for a
+        # call that was never interrupted.
+        #
+        # Emitted before the group runs, and that order is deliberate: these
+        # calls take no part in the execution that follows, so a viewer should
+        # be able to stop waiting for them at the moment the harness decided.
+        for failure in plan:
+            if failure.failure is not None:
+                yield self._not_run_compose_frame(failure.call, failure.failure.text)
         index = 0
         first_slot = True
         while index < len(plan):
@@ -2085,6 +2449,27 @@ class AgentLoop:
                             details={FAULT_KEY: FAULT_SKIPPED},
                         )
                     )
+                # ...and the SAME ending the batch's other never-run calls get,
+                # for the same reason and at the same instant: this site
+                # bypasses `_execute_batch` entirely (it is outside the
+                # per-call loop, and below it the remaining calls are never
+                # even scheduled), so without this their rows would sit
+                # `composing…` until the turn died and the user would have to
+                # infer the skip from the steering notice.
+                #
+                # After the loop rather than inside it: these frames describe
+                # the batch's whole remaining tail, and emitting one set per
+                # member would hand a viewer the same verdict twice per call.
+                #
+                # Only the calls that had NOT already failed planning: those
+                # were settled with their own verdict before the batch ran, and
+                # a second terminal frame would relabel a `Tool not found` row
+                # as a steering skip.
+                for frame in self._not_run_frames(
+                    [item.call for item in plan[index:] if item.failure is None],
+                    SKIPPED_RESULT_TEXT,
+                ):
+                    yield frame
                 break
 
             if not _batches_shared(plan[index]):
@@ -3412,6 +3797,12 @@ class _ModelTurnResult:
     message: Message
     stop_reason: str
     error: str | None = None
+    #: The spec the provider call was actually built with, resolved per call.
+    #: Carried out so the run loop can act on what it SENT rather than on the
+    #: run's snapshot -- the two differ whenever a host resolver is in play, and
+    #: a recovery gated on the wrong one of them is a recovery that does not
+    #: fire (see the reasoning-echo fill in ``run``).
+    model: "ModelSpec | None" = None
     #: The stream died because the MACHINE was offline, not because the provider
     #: answered badly. Carried out to the run loop, which continues such a turn
     #: instead of ending the run on it — see ``MAX_CONNECTIVITY_CONTINUATIONS``.

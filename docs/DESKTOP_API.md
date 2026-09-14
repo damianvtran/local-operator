@@ -11,7 +11,11 @@ which controls a client may offer.
 `desktop_contract`, `desktop_available`, `desktop_auth`, and a versioned `features`
 map. Version 1 advertises `auth`, `settings`, `commands`, `catalogues`, `lifecycle`,
 `mcp` and `radient`. These version backend HTTP subsystems, not renderer completion
-or third-party authorization. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for the
+or third-party authorization. Later keys join the same map as they are added —
+`diagnostics` (the `/info` host read and the `/session` ledger report) is one — and a
+key's presence is the whole negotiation: a control whose key is absent must show an
+update action rather than call a route the backend does not have. See
+[DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for the
 all-command acceptance matrix and the new control routes. A missing route means an older backend;
 show an update/setup action rather than falling back to an unprotected write.
 

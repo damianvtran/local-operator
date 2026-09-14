@@ -40,10 +40,10 @@ import logging
 import os
 import time
 import uuid
-from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -57,6 +57,7 @@ from local_operator.session.creation import (
     ensure_session_created_at,
     session_created_at,
 )
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -89,10 +90,24 @@ ENTRY_PRUNE = "prune"
 #: deletion. A deny-list cannot see a type that does not exist yet; this one
 #: excludes it by default.
 #:
-#: ``session_incident`` is the ONLY member. ``session_model_switch`` is a
-#: deliberate act whose consequences a user may want ranked, and every other
-#: custom type is a separate argument nobody has made yet.
-BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
+#: ``session_incident`` and ``session_spend.v1`` are the members.
+#: ``session_model_switch`` is a deliberate act whose consequences a user may
+#: want ranked, and every other custom type is a separate argument nobody has
+#: made yet.
+#:
+#: ``session_spend.v1`` is here for two reasons, and the second is the one that
+#: made it necessary. It is bookkeeping ABOUT the session (a running total the
+#: runtime maintains, never work a user asked for), and the ONE-TIME REBUILD for
+#: a pre-ledger session appends one to a transcript that may be months old —
+#: without this exemption, merely OPENING an old session would rank it as
+#: freshly worked on the picker and, worse, reset its age for
+#: ``session.cleanup``. The exemption is scoped to the TYPE (not to the rebuild's
+#: call site) because the type is what the allow-list names, so a live accrual
+#: during a real turn is exempt too — which costs nothing, since that turn's own
+#: messages move the clock in the same batch.
+BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
+    {SESSION_INCIDENT_MESSAGE_TYPE, SESSION_SPEND_CUSTOM_TYPE}
+)
 
 
 def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
@@ -107,9 +122,18 @@ def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
     write with nothing bookkeeping in it has earned no exemption.
     """
     return bool(entries) and all(
-        entry.type == ENTRY_MESSAGE
-        and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM
-        and entry.payload.get("custom_type") in BOOKKEEPING_CUSTOM_TYPES
+        # The type is checked FIRST and for both spellings: the exemption is a
+        # property of the TYPE, and the type is what the allow-list names.
+        # ``append_custom`` writes ``{custom_type, details}`` with NO ``kind``,
+        # so matching only the ``CustomMessage`` spelling (a ``message`` entry
+        # with ``kind: custom``) would let exactly the bookkeeping rows this
+        # allow-list exists to exempt advance the activity clock — including
+        # the spend record the pre-ledger rebuild appends to an old session.
+        entry.payload.get("custom_type") in BOOKKEEPING_CUSTOM_TYPES
+        and (
+            (entry.type == ENTRY_MESSAGE and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM)
+            or entry.type == ENTRY_CUSTOM
+        )
         for entry in entries
     )
 
@@ -187,7 +211,14 @@ SHRUNK_KEY = "context_shrunk_here"
 #: (``subagent_view`` folds the whole parent/child message log), so dropping its
 #: older entries would erase history; it is deliberately absent. Add a type here
 #: only after confirming nothing reads it by iteration.
-_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster"})
+#:
+#: ``session_spend.v1`` belongs here for exactly the reason its record carries a
+#: RUNNING TOTAL rather than a per-call delta list: the newest row is the whole
+#: answer, so the older ones are dead bytes. Without this it would accumulate one
+#: row per provider call forever — the failure mode that left
+#: ``frontend_state_checkpoint_v1`` holding 35.1% of all transcript bytes on the
+#: operator's store (design §2.3, §R9).
+_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster", SESSION_SPEND_CUSTOM_TYPE})
 
 
 @dataclass
@@ -358,6 +389,88 @@ class TranscriptPage:
     reconciled: bool = False
 
 
+#: Backward read granularity, shared by the two readers below. One MiB is large
+#: enough that a compaction's kept window (355-456 messages on the reference
+#: runtimes) and a 100-row display page (389 KB on a real long conversation)
+#: are inside the first chunk or two, and small enough that a whole-file
+#: fallback on a journal with no compaction costs no more than the forward
+#: parse it replaces.
+_BACKWARD_CHUNK_BYTES = 1 << 20
+
+
+def _iter_complete_lines_backward(
+    handle: BinaryIO, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
+) -> Iterator[tuple[int, list[bytes]]]:
+    """Yield ``(chunk_start, lines)`` pairs reading backward from ``end_of_file``.
+
+    ``lines`` are the rows whose terminating newline lies in the chunk that
+    starts at ``chunk_start`` (byte offset from the start of the file), newest
+    row first, and the final pair — ``chunk_start == 0`` — carries the file's
+    leading fragment, which is a complete row unless the file's head is torn.
+    Blank and malformed rows are the CALLER's to skip: this walker splits bytes
+    only, so both readers can share one copy of the byte handling and stay
+    byte-identical on boundaries.
+
+    WHY a generator over a plain helper that parses rows: the two readers want
+    the same bytes split the same way but disagree about what a row means (the
+    display page skips a cursor row, the replay suffix tracks compaction
+    boundaries) and about when to stop. Sharing the split keeps the one trap in
+    one place; sharing the loop would fuse two different stop conditions.
+
+    THE TRAP, and it is the same one twice: the bytes of a row larger than a
+    chunk must cost ONE pass, never one copy per chunk. So the fragments of a row
+    whose head is still unread are carried in a LIST and joined exactly once — in
+    the chunk that turns out to hold the row's terminating newline (``chunk[:b]``
+    is the head, the carried fragments are the contiguous tail behind it).
+
+    Both halves of that were wrong at first, in this function and in the suffix
+    reader it was extracted from: the first version re-SPLIT the carried tail on
+    every step (quadratic in the row's size), and the fix for that still
+    re-COPIED it on every step via ``pending = chunk + pending`` — measured by
+    review on a single row at EOF, 32 MiB 0.036 s -> 64 MiB 0.289 s -> 128 MiB
+    1.654 s against a 0.024 s single-read floor, i.e. the quadratic survived as
+    an extra copy per chunk and the page path was 2.6x SLOWER than the forward
+    reader it replaces once a row reached tens of MB. Accumulating the fragments
+    and joining once restores the O(R) this docstring claims: one pass over the
+    row's bytes, however many chunks it spans.
+    """
+    position = end_of_file
+    # Fragments of one row, in READ order (newest first), each piece contiguous
+    # with the next. Never joined until the boundary that ends the row arrives.
+    carried: list[bytes] = []
+    while True:
+        chunk_start = max(0, position - chunk_bytes)
+        handle.seek(chunk_start)
+        chunk = handle.read(position - chunk_start)
+        position = chunk_start
+        if position > 0:
+            boundary = chunk.find(b"\n")
+            if boundary < 0:
+                # No row ends in this chunk: all of it is row tail, and it is
+                # contiguous with what is already carried. Keep it WITHOUT
+                # copying the fragments held so far.
+                carried.append(chunk)
+                continue
+            # Everything before the first newline is the tail of a row whose
+            # head is still unread; keep it for the next chunk. Everything
+            # after it are complete rows, except the last one, which continues
+            # into the carried fragments (a newline is one byte and cannot
+            # straddle a boundary, so searching this chunk alone is exact).
+            complete = chunk[boundary + 1 :].split(b"\n")
+            if carried:
+                complete[-1] += b"".join(reversed(carried))
+            carried = [chunk[:boundary]]
+        else:
+            complete = chunk.split(b"\n")
+            if carried:
+                complete[-1] += b"".join(reversed(carried))
+            carried = []
+        complete.reverse()
+        yield position, complete
+        if position == 0:
+            return
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -367,17 +480,63 @@ def read_transcript_page(
 ) -> TranscriptPage:
     """Read a tail page, or the page immediately before ``before_id``.
 
-    The scan is streaming and retains at most ``limit + 1`` parsed rows. This
-    costs a sequential disk pass for older pages, which is intentional: the UI
-    runs it in a thread, transcripts are append-mostly, and permanent offsets
-    cannot survive ``compact_file`` replacing the file. Malformed rows are
-    skipped independently, matching normal replay. If a requested ID vanished
-    during replacement, return the current tail with ``reconciled=True`` so a
-    reader can dedupe by stable ID instead of getting stuck on a stale cursor.
+    The read runs BACKWARD from EOF in chunks, one
+    :func:`_iter_complete_lines_backward` pair at a time, so its cost is the page
+    plus the distance from EOF to a requested cursor. It used to scan forward
+    from byte 0 and JSON-decode every row: on a real 243 MB conversation the
+    desktop open path spent 1.7 s and read the whole file to produce the same
+    100 rows this returns in milliseconds, and every ``loadOlder`` page re-paid
+    the scan from byte 0. The cursor stays an ID rather than a byte offset
+    because ``compact_file`` replaces the file atomically and old offsets become
+    lies, so the read stays stateless — only its direction changed.
+
+    WHICH PAGES THAT MAKES CHEAP, stated so this cannot read as a promise the
+    code does not keep. The tail page — no cursor, which is what an open asks
+    for — costs the chunk that carries it. A ``before_id`` page costs the bytes
+    between its cursor and EOF, because locating an id without an index means
+    walking to it, and the walk starts at the end. So a cursor near the file's
+    HEAD costs the whole journal read backward, which is exactly the read the
+    forward scan performed (0.011 s -> 4.05 s on the 70 MB copy in the PR's own
+    table, and a reviewer's 20 000-row journal: 0.000 s -> 0.453 s). That is the
+    mirror image of the reader this replaces, per-page worst case for per-page
+    worst case: paging from the tail to the top costs the same bytes in total
+    either way (Σ(EOF − cursor) ≈ Σ(cursor) over symmetric page positions).
+    What changed is WHICH pages are cheap, and the ones a reader pays are the
+    tail and the first scrolls back. A bounded walk with a forward fallback, or
+    a cursor->offset index, would fix the deep case; the index would have to be
+    maintained across ``compact_file`` rewriting the file, so it is deliberately
+    not built here and the worst case is named instead.
+
+    Contract, unchanged from the forward implementation: ``before_id`` is
+    EXCLUDED and the page is the one immediately before it; ``through_id`` is
+    INCLUDED and is the page's newest row, and rows appended after it are
+    skipped because they are newer than the frontend state this page is paired
+    with. Neither id means the tail page, and ``has_more`` reports that a
+    ``limit + 1``-th row exists. Malformed rows are skipped independently,
+    matching normal replay. If a requested ID vanished during replacement, a
+    ``before_id`` returns the current tail with ``reconciled=True`` so a reader
+    can dedupe by stable ID instead of getting stuck on a stale cursor, while a
+    missing ``through_id`` returns an empty reconciled page: a replaced file
+    cannot satisfy that snapshot, and serving a newer tail under an older state
+    cursor would silently fold unseen rows into the paired watermark.
+
+    TWO DELIBERATE, NAMED DIFFERENCES from the forward reader, both about inputs
+    that are already anomalous:
+
+    - A cursor id that appears MORE THAN ONCE resolves to the NEWEST occurrence,
+      not the oldest. Entry ids are ``uuid4().hex`` on the append path, so a
+      repeat means a corrupted or concatenated journal; the forward reader
+      stopped at whichever occurrence it met first — the oldest — and
+      reproducing that answer would mean walking to the file's start whenever an
+      id repeats, discarding the whole optimisation for the corrupt case that is
+      the only way to reach it. Row order is unaffected and the cursor row is
+      still never in the page, so nothing can loop on a duplicate.
+    - Rows are decoded with ``errors="replace"``, like
+      :func:`read_replay_suffix` already did. A byte-corrupt line is now dropped
+      as malformed instead of raising ``UnicodeDecodeError`` out of a display
+      read (a 500 on the desktop open). Robustness, not an accidental change:
+      the two readers of the same file no longer disagree about a damaged row.
     """
-    # An inclusive upper boundary pairs a durable page with a previously
-    # captured frontend snapshot. Reading an unbounded tail here would fold
-    # messages from AFTER that snapshot into its replay watermark.
     if before_id is not None and through_id is not None:
         raise ValueError("choose before_id or through_id, not both")
     if limit < 1:
@@ -385,31 +544,47 @@ def read_transcript_page(
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
-    retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
+    # Newest-first, holding at most ``limit + 1`` rows: the extra row is the
+    # forward reader's lookahead, kept here only so ``has_more`` can be answered
+    # without reading further back, and dropped when the page is assembled.
+    retained: list[TranscriptEntry] = []
     found = before_id is None and through_id is None
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            entry = TranscriptEntry.from_json(line)
-            if entry is None:
-                continue
-            if before_id is not None and entry.id == before_id:
-                found = True
-                break
-            retained.append(entry)
-            if through_id is not None and entry.id == through_id:
-                found = True
+    # Rows above a cursor are NEWER than the page's window and must be
+    # discarded until the cursor is reached. ``through_id`` is inclusive, so its
+    # row is kept the moment it matches; ``before_id`` is exclusive, so its row
+    # only ends the skip.
+    skipping = before_id is not None or through_id is not None
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None:
+                    continue
+                if entry.id == before_id:
+                    found = True
+                    skipping = False
+                    continue
+                if skipping:
+                    if entry.id == through_id:
+                        found = True
+                        skipping = False
+                        retained.append(entry)
+                    continue
+                retained.append(entry)
+                if len(retained) > limit:
+                    break
+            if len(retained) > limit:
                 break
     if through_id is not None and not found:
-        # A replaced file cannot satisfy this snapshot. Do not silently return
-        # a newer tail under an older state cursor; the caller must reconcile.
         return TranscriptPage((), False, True)
     if before_id is not None and not found:
         tail = read_transcript_page(directory, limit=limit)
         return TranscriptPage(tail.entries, tail.has_more, True)
-    rows = tuple(retained)
-    return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
+    rows = tuple(reversed(retained[:limit]))
+    return TranscriptPage(entries=rows, has_more=len(retained) > limit)
 
 
 @dataclass(frozen=True)
@@ -420,29 +595,38 @@ class ReplaySuffix:
     :meth:`Transcript.build_llm_history` exactly (see the reader for why a
     suffix is sufficient). ``through_present`` tells a caller whose cursor was
     NOT found whether it should trust the whole-file fallback semantics or
-    treat the cursor as unknown; ``checkpoint`` is the durable frontend
-    checkpoint when it was requested and is inside the suffix.
+    treat the cursor as unknown; ``checkpoint`` is the newest row of the FIRST
+    requested type, so a single-type caller reads exactly what it always did,
+    and ``checkpoints`` maps every requested type to its newest details — the
+    cold money reader needs two types out of one pass and must not pay a second
+    read for the second (§4 of the design).
     """
 
     entries: tuple[TranscriptEntry, ...]
     through_present: bool
     checkpoint: dict[str, Any] | None
+    #: Newest row of each requested custom type, keyed by type. Additive: a
+    #: caller requesting one type sees the same value in ``checkpoint``.
+    checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: WHERE each requested type's newest row sits in the journal, as the
+    #: 1-based index at which the backward scan met it — LOWER IS NEWER, because
+    #: the scan walks from EOF. Two artifacts that disagree about the same fact
+    #: (the ledger record and the turn-end checkpoint, both carrying money) can
+    #: only be reconciled by their own order, and this is that order taken from
+    #: the one pass that already reads both (QA round 1, Q2). A type the scan
+    #: never met is absent, which is the caller's signal that the order cannot be
+    #: established rather than that the type is old.
+    checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
-    bytes_read: int
-
-
-#: Backward read granularity. One MiB is large enough that a compaction's kept
-#: window (355–456 messages on the reference runtimes) is usually inside the
-#: first or second chunk, and small enough that a whole-file fallback on a
-#: journal with no compaction costs no more than the forward parse it replaces.
-_SUFFIX_CHUNK_BYTES = 1 << 20
+    bytes_read: int = 0
 
 
 def read_replay_suffix(
     directory: str | Path,
     *,
     through_id: str | None = None,
-    checkpoint_type: str | None = None,
+    checkpoint_types: tuple[str, ...] | str | None = None,
+    opportunistic_types: tuple[str, ...] | str | None = None,
 ) -> ReplaySuffix:
     """Read only the journal suffix :func:`replay_entries` needs, from EOF.
 
@@ -467,16 +651,24 @@ def read_replay_suffix(
       today's whole-file cost, which is the correct fallback, not a shortcut);
     - ``through_id``, when given, is in the buffer — a cursor not yet seen
       means "read further", never "cut at the tail" (the strict-cut contract);
-    - the newest custom row of ``checkpoint_type`` is in the buffer, when one
-      is requested, so the caller does not pay a second read for it. It is a
-      parameter rather than an import: the frontend checkpoint's type constant
-      lives in ``frontend_state``, whose import graph reaches the TUI, and this
-      module must stay a leaf.
+    - the newest custom row of EVERY REQUIRED type is in the buffer, so the
+      caller does not pay a second read for it. "Required" is the load-bearing
+      word (review R1-2): a type that may legitimately be ABSENT from a journal
+      must not gate this, or the reader walks to the start of the file for the
+      whole population that lacks it — which is what happened when the spend
+      record joined the request, taking a 16.7 MB journal from a 4.19 MB read to
+      its full length on every cold open, and making a store-wide census cost
+      29 s. Such types go in ``opportunistic_types``: collected when the backward
+      scan already passes them (the scan still reaches the compaction boundary,
+      so anything inside the replayed window IS collected) and never a stop
+      condition. Types are parameters rather than imports: the frontend
+      checkpoint's type constant lives in ``frontend_state``, whose import
+      graph reaches the TUI, and this module must stay a leaf.
 
-    Malformed rows are skipped individually, matching forward replay. The
-    first partial line of the earliest chunk is discarded: it is the tail of a
-    row whose head is in the chunk before it, and is completed once that chunk
-    is read.
+    Malformed rows are skipped individually, matching forward replay. The byte
+    handling — chunk boundaries, and a row larger than a chunk — lives in
+    :func:`_iter_complete_lines_backward`, shared with the display page reader
+    so the two cannot drift on where a row begins.
     """
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
@@ -488,52 +680,49 @@ def read_replay_suffix(
         return ReplaySuffix(
             entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
         )
-    checkpoint: dict[str, Any] | None = None
+    # Normalise the request ONCE, so every stop/collect site below reads the
+    # same tuple: an empty request means "no custom rows wanted" (the cheapest
+    # read), and a bare string is one type — the spelling every existing caller
+    # already uses.
+    wanted: tuple[str, ...] = (
+        (checkpoint_types,) if isinstance(checkpoint_types, str) else tuple(checkpoint_types or ())
+    )
+    # Collected but never required: see the stop-condition note in the docstring.
+    opportunistic: tuple[str, ...] = (
+        (opportunistic_types,)
+        if isinstance(opportunistic_types, str)
+        else tuple(opportunistic_types or ())
+    )
+    collectible = wanted + opportunistic
+    checkpoints: dict[str, dict[str, Any]] = {}
+    checkpoint_order: dict[str, int] = {}
+    met = 0  # 1-based: the scan walks newest-first, so lower means newer
     compaction: TranscriptEntry | None = None
     first_kept_id: str | None = None
     seen_ids: set[str] = set()
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
+    bytes_read = 0
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
-        position = handle.tell()
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
         # file an appending runtime may have grown in between, reporting bytes
         # this call never read (round 5, NIT).
-        end_of_file = position
-        # Invariant: ``pending`` is the bytes after ``position`` that have NOT
-        # yet been split into rows. It only ever grows by one chunk and is
-        # split exactly once, when a row boundary lands inside it — so a row
-        # larger than a chunk (the 256 KiB bookkeeping rows in the fixtures)
-        # costs one join, not one re-split per chunk. The first version
-        # re-split the carried tail every step and the no-compaction fallback
-        # over a 100 MB file went quadratic, slower than the forward parse it
-        # is meant to match.
-        pending = b""
-        while True:
-            chunk_size = min(_SUFFIX_CHUNK_BYTES, position)
-            position -= chunk_size
-            handle.seek(position)
-            pending = handle.read(chunk_size) + pending
-            if position > 0:
-                boundary = pending.find(b"\n")
-                if boundary < 0:
-                    # No complete row yet; the whole buffer is a row's tail.
-                    continue
-                # Everything before the first newline is the tail of a row
-                # whose head is still unread; keep it for the next chunk.
-                complete = pending[boundary + 1 :].split(b"\n")
-                pending = pending[:boundary]
-            else:
-                complete = pending.split(b"\n")
-                pending = b""
-            for raw in reversed(complete):
+        end_of_file = handle.tell()
+        # The carried-tail invariant (never re-split the bytes held over between
+        # chunks) now lives in the walker; ``bytes_read`` is priced from the
+        # chunk this loop last consumed, so it names bytes the caller actually
+        # looked at rather than the walker's internal position.
+        for chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
+            bytes_read = end_of_file - chunk_start
+            for raw in lines:
                 if not raw.strip():
                     continue
                 entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
                 if entry is None:
                     continue
                 parsed.append(entry)
+                met += 1
                 seen_ids.add(entry.id)
                 if through_id is not None and entry.id == through_id:
                     # Rows after the cursor are discarded by the replay, so a
@@ -552,19 +741,25 @@ def read_replay_suffix(
                 ):
                     compaction = entry
                     first_kept_id = entry.payload.get("first_kept_entry_id") or None
-                if (
-                    checkpoint_type is not None
-                    and checkpoint is None
-                    and entry.type == ENTRY_CUSTOM
-                    and entry.payload.get("custom_type") == checkpoint_type
-                ):
-                    checkpoint = dict(entry.payload.get("details", {}))
-            at_start = position == 0
+                if collectible and entry.type == ENTRY_CUSTOM:
+                    custom_type = entry.payload.get("custom_type")
+                    if (
+                        isinstance(custom_type, str)
+                        and custom_type in collectible
+                        and custom_type not in checkpoints
+                    ):
+                        details = dict(entry.payload.get("details", {}))
+                        checkpoints[custom_type] = details
+                        # First hit wins going backward, so this is the type's
+                        # NEWEST row: its meeting index is what orders it against
+                        # another type's newest row.
+                        checkpoint_order[custom_type] = met
+            at_start = chunk_start == 0
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = checkpoint_type is None or checkpoint is not None
+            checkpoint_seen = all(name in checkpoints for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
@@ -574,8 +769,12 @@ def read_replay_suffix(
     return ReplaySuffix(
         entries=tuple(parsed),
         through_present=through_id is None or through_id in seen_ids,
-        checkpoint=checkpoint,
-        bytes_read=end_of_file - position,
+        # The FIRST requested type, deliberately: every pre-existing caller
+        # passes one type and must see the value it always saw here.
+        checkpoint=checkpoints.get(wanted[0]) if wanted else None,
+        checkpoints=checkpoints,
+        checkpoint_order=checkpoint_order,
+        bytes_read=bytes_read,
     )
 
 
@@ -789,10 +988,22 @@ class Transcript:
             payload["preserved_turns_shed"] = preserved_turns_shed
         return await self._append(ENTRY_COMPACTION, payload)
 
-    async def append_custom(self, custom_type: str, details: dict[str, Any]) -> TranscriptEntry:
+    async def append_custom(
+        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+    ) -> TranscriptEntry:
         """Append a host bookkeeping entry (wake schedules, checkpoints, …).
-        Custom entries never enter LLM context."""
-        return await self._append(ENTRY_CUSTOM, {"custom_type": custom_type, "details": details})
+
+        Custom entries never enter LLM context. ``preserve_mtime`` forwards the
+        bookkeeping request to the write path (it is still validated there
+        against :data:`BOOKKEEPING_CUSTOM_TYPES`): the per-session spend record
+        must not move the activity clock, or a live session appending one per
+        provider call would keep re-ranking itself as freshly worked.
+        """
+        return await self._append(
+            ENTRY_CUSTOM,
+            {"custom_type": custom_type, "details": details},
+            preserve_mtime=preserve_mtime,
+        )
 
     async def append_prune(self, target_entry_id: str, notice: str) -> TranscriptEntry:
         """Journal that compaction blanked the tool result at ``target_entry_id``.
@@ -807,10 +1018,15 @@ class Transcript:
         return await self._append(ENTRY_PRUNE, {"target": target_entry_id, "notice": notice})
 
     async def _append(
-        self, type: str, payload: dict[str, Any], entry_id: str | None = None
+        self,
+        type: str,
+        payload: dict[str, Any],
+        entry_id: str | None = None,
+        *,
+        preserve_mtime: bool = False,
     ) -> TranscriptEntry:
         entry = TranscriptEntry(entry_id or uuid.uuid4().hex, time.time(), type, payload)
-        return (await self._commit(lambda: [entry]))[0]
+        return (await self._commit(lambda: [entry], preserve_mtime=preserve_mtime))[0]
 
     async def _commit(
         self,
@@ -1124,6 +1340,26 @@ class Transcript:
         function for why the boundary is positional and why it matters.
         """
         return usages_since_newest_shrink(self._entries)
+
+    def all_usage_rows(self) -> list[dict[str, Any]]:
+        """Every message entry's ``usage``, oldest first, with NO boundary.
+
+        The one-time rebuild's input (design §6.2): a session's money is not
+        invalidated by a later rewrite of its context, so the sum must include
+        rows a compaction or prune pushed outside the replay window. Delegating
+        to the module function keeps that rule in one place, exactly as
+        :meth:`usages_since_compaction` delegates the opposite one.
+        """
+        return all_usage_rows(self._entries)
+
+    def lost_money_rows(self) -> bool:
+        """Whether this journal POSITIVELY reports a dropped money row.
+
+        Not a marker count: compactions and prunes rewrite and hide rows without
+        removing any money (see :func:`lost_money_rows`), so a marker is not a
+        reason to claim ``≥``.
+        """
+        return lost_money_rows(self._entries)
 
     def search_spend_rows(self) -> list[dict[str, Any]]:
         """Every ``web_search`` cost this conversation recorded, oldest first.
@@ -1616,6 +1852,70 @@ def usages_since_newest_shrink(entries: Sequence[TranscriptEntry]) -> list[dict[
         for entry in entries[start:]
         if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
     ]
+
+
+def all_usage_rows(entries: Sequence[TranscriptEntry]) -> list[dict[str, Any]]:
+    """Every message entry's ``usage`` payload, oldest first, UNCUT.
+
+    Deliberately unbounded by the shrink boundary, and that is the whole point
+    of the rebuild it feeds (design §2.2). The boundary exists because a context
+    SIZE reading taken before a pass describes a context that no longer exists;
+    money is not invalidated by a later rewrite of the context, so restricting
+    the sum to survivors would delete spend that was really charged. Measured on
+    one real session: every row in the file prices at $324.99, only the 262 rows
+    inside the boundary at $36.99 — the boundary silently removes 8.8x of the
+    bill. :meth:`Transcript.search_spend_rows` states the same rule for search
+    money: "money already spent is not invalidated by a later rewrite of the
+    context".
+
+    Module-level and parameterised on ``entries`` for the same reason
+    :func:`usages_since_newest_shrink` is: the rebuild reads a real transcript's
+    own already-parsed entries, and nothing here touches the filesystem.
+    """
+    return [
+        dict(entry.payload["usage"])
+        for entry in entries
+        if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
+    ]
+
+
+#: How a journal reports that rows were DROPPED (not merely rewritten). Nothing
+#: writes this today: see the note in ``Session._rebuild_spend``. It exists so the
+#: rebuild's ``floor`` has one place to read a real loss from, rather than
+#: inferring one from markers that provably remove no money (review R1-4).
+LOST_USAGE_KEY = "lost_usage_rows"
+
+
+def lost_money_rows(entries: Sequence[TranscriptEntry]) -> bool:
+    """Whether the file POSITIVELY reports that a money-carrying row is gone.
+
+    The rebuild's ``floor`` is this predicate and nothing else, and what it must
+    NOT be is a marker count. This was ``journal_shrank``, which returned True
+    for any ``compaction``/``prune`` entry or fold mark, and every writer in this
+    module keeps its money when it rewrites:
+
+    * ``_pruned_entry`` replaces ``payload["content"]`` and keeps the rest of the
+      payload, so a pruned row's ``usage`` survives — and the only prune call
+      site targets tool RESULTS, whose money is ``provider_payload.details
+      .search_cost``, also outside ``content``;
+    * ``compact_file`` drops prune ENTRIES and superseded collapsible customs
+      (the roster, this record), never a message row;
+    * the compaction boundary hides older rows from the CONTEXT replay
+      (``usages_since_newest_shrink``) without removing them from the file —
+      which is exactly why the rebuild must ignore that boundary (§2.2).
+
+    So a marker is evidence of rewriting, not of loss, and marking 494 sessions
+    ``≥`` for one spends the meaning the mark was rebuilt to carry (review R1-4).
+    ``≥`` is for money the file cannot show, which after this change means calls
+    the pricing could not size at all (``CostKnowledge.PARTIAL``).
+    """
+    for entry in entries:
+        payload = entry.payload or {}
+        if payload.get(LOST_USAGE_KEY) or (
+            (payload.get("provider_payload") or {}).get(LOST_USAGE_KEY)
+        ):
+            return True
+    return False
 
 
 def context_cut_index(entries: Sequence[TranscriptEntry], *, quiet: bool = False) -> int:

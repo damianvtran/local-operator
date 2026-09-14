@@ -804,16 +804,14 @@ async function renderOnce(): Promise<void> {
     // approval (U5). Only on a newly-shown prompt, so a re-render cannot steal
     // focus back from a user who has tabbed onward.
     //
-    // `preventScroll` is load-bearing, not a nicety. `.body` became a scroll
-    // container when the card was bounded to the viewport, and focusing an
-    // element inside one scrolls it into view — so on the tallest card this
-    // scrolled to the bottom on open, putting the title AND the whole danger
-    // banner above the fold at ≥125% zoom (design D7 / UX U8, measured
-    // scrollTop 139 at 125%, 219 at 150%). Overlay scrollbars are 0px wide and
-    // the header stays pinned, so a zoomed user saw an ordinary consent prompt
-    // with live Allow/Deny and no sign their answer could not land — round-1
-    // U1, reintroduced by the round-1 D2 fix through a control neither
-    // mentions. The keyboard landing point is unchanged.
+    // `preventScroll` is load-bearing, not a nicety. Focusing an element that
+    // sits below the fold scrolls its scroll container to reveal it, which put
+    // the title and the whole danger banner above the fold at zoom (design D7 /
+    // UX U8, measured scrollTop 139 at 125%, 219 at 150%). Overlay scrollbars
+    // are 0px wide and the header stays pinned, so a zoomed user saw an ordinary
+    // consent prompt with live Allow/Deny and no sign their answer could not
+    // land — round-1 U1, reintroduced by the round-1 D2 fix through a control
+    // neither mentions. The keyboard landing point is unchanged.
     if (freshPrompt) {
       document.getElementById("origin-scope")?.focus({ preventScroll: true });
       // Belt and braces: a fresh prompt always opens at the TOP of its card.
@@ -821,8 +819,13 @@ async function renderOnce(): Promise<void> {
       // that reveals an element would reintroduce the same defect, and the
       // first thing the user must read is the question (and the banner that
       // qualifies it), never the middle of the card.
-      const body = document.querySelector(".body");
-      if (body) body.scrollTop = 0;
+      //
+      // The DOCUMENT is the container, not `.body`: once popup.css stopped
+      // bounding the card to the viewport (a popup's `100vh` is its own window
+      // height — see .card), the body never scrolls and Chrome scrolls the page
+      // past its 600px cap, so a `.body` reset would be a no-op on exactly the
+      // capped popup where a mid-card prompt is reachable at all.
+      if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
     }
     return;
   }

@@ -45,7 +45,7 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -1421,6 +1421,26 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     Additive on purpose. An older runtime never sets it and every consumer
     keeps today's behaviour; an older viewer receiving it ignores it, because
     ``AgentEvent`` allows extra fields.
+
+    ``dictation_complete`` marks the LAST frame of a call's dictation — the one
+    the producer cannot send again, because the step's stream has ended. It
+    exists because a composing row is a PREDICTION that a call exists, and the
+    producer used to announce the prediction's beginning and then only one of
+    its three endings (the call starts; it is queued behind a sibling's
+    execution group and starts much later; it never runs at all). A call
+    composed in a batch that ends with ``wait(wait_ms=1800000)`` ahead of an
+    ``exclusive`` sibling therefore kept a row saying ``composing…`` — with a
+    ticking clock — for the sibling's whole half-hour, which is exactly how it
+    was reported. The frame carries the final ``argument_bytes`` (not merely the
+    last reported one) so the row it settles keeps the size it really reached.
+
+    ``not_run_reason`` is the never-run ending, bounded to one clipped line (the
+    wire and the seed both budget text, and this rides both), and set only on a
+    call parked at planning or skipped by steering. Those calls deliberately
+    have no ``tool_execution_start``/``_end`` — the API server matches tool
+    records by id, and a synthetic start would claim the tool ran — so the
+    compose surface is the only one that announced them and the only one that
+    can honestly settle them.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
@@ -1429,6 +1449,8 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     argument_bytes: int = 0
     intent: str | None = None
     supersedes_tool_call_id: str | None = None
+    dictation_complete: bool = False
+    not_run_reason: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
@@ -2006,12 +2028,30 @@ class ModelSpec(BaseModel):
     # either. So the fix is compliance at the wire layer rather than better
     # capture.
     #
-    # Derived in ``build_model_spec`` like every other capability here, so no
-    # wire client has to recognise a model name: it is set for the
-    # DeepSeek-hosted thinking-mode family -- which is a property of the
-    # WEIGHTS, so it is set on every route that can serve them, the aggregator
-    # routes included -- and it stays off for the legacy ``deepseek-chat`` /
-    # ``deepseek-reasoner`` rows.
+    # Derived from the model id at ``ModelSpec`` construction (see
+    # ``_derive_deepseek_thinking_contract``) and, on the builder's path, in
+    # ``build_model_spec`` — whichever runs, the SAME rule in
+    # ``model.configure.reasoning_echo_required`` answers, so no wire client has
+    # to recognise a model name. It is set for the DeepSeek-hosted thinking-mode
+    # family -- which is a property of the WEIGHTS, so it is set on every route
+    # that can serve them, the aggregator routes included -- and it stays off for
+    # the legacy ``deepseek-chat`` / ``deepseek-reasoner`` rows.
+    #
+    # **``None`` is "no caller stated a value", not a third state on the wire.**
+    # The default is tri-state for one measured reason: a STATED ``False`` has to
+    # survive a round trip, and a plain ``bool`` default cannot distinguish "this
+    # spec says no echo" from "nobody filled the field" the moment a persister
+    # dumps with ``exclude_defaults=True`` -- the ``False`` IS the default, so it
+    # is dropped, and re-validating what is left derives the echo back on for a
+    # route whose caller deliberately said otherwise. With ``None`` as the
+    # default, ``False`` is no longer equal to it and survives the dump (pinned by
+    # ``test_a_defaults_excluding_dump_survives_a_stated_false``).
+    #
+    # No VALIDATED spec carries ``None``: the construction hook resolves it to the
+    # rule's answer, so every reader may treat this as a bool. Only a value that
+    # bypassed the hook (``model_construct``, a ``model_copy`` that writes
+    # ``None`` itself) can read as ``None``, which is the same falsy answer an
+    # unstated spec would get.
     #
     # It is NOT route-keyed, and an earlier revision's decision to key it on
     # the direct ``deepseek`` hosting was wrong on its own evidence. That
@@ -2030,7 +2070,7 @@ class ModelSpec(BaseModel):
     # the safe way: the echo is one short sentence per assistant turn, measured
     # accepted on that route as well, where being wrong the other way kills a
     # turn hundreds of messages deep.
-    requires_reasoning_echo: bool = False
+    requires_reasoning_echo: bool | None = None
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     # ``None`` means OMIT: send no key at all and let the vendor's own default
     # apply. That is now the common case rather than an exotic one — most
@@ -2151,6 +2191,162 @@ class ModelSpec(BaseModel):
     # than treat this as authoritative.
     display_name: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_deepseek_thinking_contract(cls, data: Any) -> Any:
+        """Derive the DeepSeek thinking-mode ECHO from the model id itself.
+
+        ``build_model_spec`` derived ``requires_reasoning_echo`` as a local, so a
+        ``ModelSpec`` built any other way took the field default -- echo off, which
+        is the HTTP 400 this capability exists to prevent ("The
+        `reasoning_content` in the thinking mode must be passed back to the
+        API"). Measured in the field: 76 sessions carry that refusal wording, and
+        the incidents continue past the release that shipped the derivation. A
+        spec built by any path OTHER than the builder is what this hook removes.
+
+        Deriving it here rather than asking every construction site to remember is
+        the point: a capability that has to be REMEMBERED at each site is one that
+        will be dropped at the next one, and the failure is silent until a user's
+        turn dies hundreds of messages deep. The rule itself is IMPORTED from
+        ``model.configure.reasoning_echo_required`` and never restated -- two
+        copies of a family regex drift, and then the builder and a directly-built
+        spec disagree about the same model, which is the defect this method
+        removes rather than moves.
+
+        **Only the echo.** The effort LADDER is deliberately NOT derived here,
+        and that was a review finding rather than a preference: the ladder is not
+        only a wire input, it is what decides whether the status band paints an
+        effort segment at all (``tui/widgets/status_line.py``), and the cold
+        viewer and the desktop draft preview render specs built by this path -- so
+        filling it here moved a rendered surface (a new ``auto`` segment) for a
+        backend resilience fix. It also left the ladder with two owners, since
+        ``build_model_spec`` resolves it from the provider's own LISTING first and
+        no construction hook can see a listing. The ladder therefore keeps its one
+        owner, ``build_model_spec``, and no behaviour here depends on it: the
+        harness-side recovery in ``harness/loop.py`` re-sends with the echo filled
+        and needs no rung -- verified live on the worst case, capability off AND
+        ladder empty.
+
+        **Runs only for a spec being BUILT from a model id**, which is what makes
+        it "cannot be dropped by omission" rather than "cannot be stated at all":
+
+        * a mapping (``ModelSpec(provider=..., model_id=...)``,
+          ``model_validate({...})``, the wire) is filled in only when it does not
+          carry a value, so a caller that never heard of the capability -- or a
+          spec rebuilt from a record written before it existed -- still lands on
+          the right answer;
+        * a value the caller DID state is left alone, because that is a statement
+          rather than an omission. ``None`` means "unstated" (see the field's own
+          docstring for why the default is tri-state), so both an absent key and
+          an explicit ``None`` get the rule's answer;
+        * an existing spec INSTANCE is not rewritten at all. Pydantic re-runs an
+          ``after``-mode validator against a nested instance in place, which is
+          why this is a ``before``-mode one: the instrument that reproduces the
+          pre-fix body (``scripts/deepseek_reasoning_echo_probe.py``) and the
+          loop's own regression tests state "this spec does not carry the echo",
+          and a construction hook that overwrote them would delete the
+          measurement rather than fix the bug. A spec only ever becomes an
+          instance by passing through this hook first, so nothing is lost by
+          trusting it.
+
+        Scoped so nothing else moves. ``reasoning_echo_required`` is False for
+        every family but the DeepSeek thinking one (the legacy ``deepseek-chat`` /
+        ``deepseek-reasoner`` rows and a local user-operated server included), and
+        it answers only for a spec that stated nothing -- so no route, and no
+        caller with an opinion, can have behaviour changed here.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        if data.get("requires_reasoning_echo") is not None:
+            return data
+        provider = data.get("provider")
+        model_id = data.get("model_id")
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            # An incomplete or non-string pair is the caller's problem to
+            # report, and duplicating pydantic's error here would only make the
+            # message worse.
+            return data
+        # Function-local: ``model.configure`` imports this module at module
+        # scope, so a top-level import here would be a cycle.
+        from local_operator.model.configure import reasoning_echo_required
+
+        # Resolve the tri-state unconditionally, so no validated spec carries
+        # ``None`` and every reader may treat the field as a bool.
+        return {
+            **data,
+            "requires_reasoning_echo": reasoning_echo_required(provider, model_id),
+        }
+
+
+#: The most tokens ONE model call may generate, reasoning included.
+#:
+#: ``ModelSpec.max_output_tokens`` is the ceiling a PROVIDER publishes, which is
+#: a model capability and not the budget of a single turn: an aggregator states
+#: "this model can emit 943,718 tokens" for a 1M-window model -- 90% of that
+#: window -- and a request that named no ask of its own carried that capability
+#: verbatim, so every call asked for it. Measured on the OSWorld arm, ONE
+#: decision returned ``output_tokens=97189`` with ``reasoning_tokens=95098`` and
+#: ``stop=stop``, 35 of 410 calls exceeded 16K, and the mean call took ~52 s. The
+#: TUI shared the defect -- same request contract, same capability-shaped ask --
+#: which is why the bound belongs in the contract rather than at the two call
+#: sites that happened to be measured.
+#:
+#: The NUMBER is chosen so that a normal turn cannot become more truncatable than
+#: it was before the bound existed, and the operator's own ledger
+#: (``~/.local-operator/analytics.db``, 876,719 recorded calls) is what says
+#: where that line is: 430 calls ever emitted more than 16,384 output tokens, and
+#: 300 of those are ordinary calls in 127 ordinary sessions (91 conversations,
+#: rolling each session up to its root the way the rollup does) -- which is why a
+#: benchmark-sized ceiling was the wrong number for every other interface; 2
+#: ordinary calls exceeded 65,536, both ``anthropic/claude-opus-5`` at exactly its
+#: own 128,000 published ceiling, i.e. already truncated by the provider; NONE
+#: exceeded 131,072. So 131,072 is the smallest round ceiling no ordinary turn
+#: has ever crossed, while the capability-shaped asks that ARE the defect are cut
+#: 4-8x (943,718 -> 131,072 on muse-spark, 1,041,903 -> 131,072 on gpt-4.1,
+#: 524,288 -> 131,072 on kimi-k3).
+#:
+#: This is a POLICY, not a wire limit, and not a benchmark rule: the OSWorld arm
+#: declares its own, much smaller, ceiling at its decision call
+#: (``evaluation/runner/provider_client.py``), because 16,384 is the reference
+#: agent's cap and a statement about THAT arm's requests. The wire clamp in
+#: ``providers.clients._effective_max_tokens`` is untouched by all of this: it
+#: still lowers the ask to whatever the window can actually fund, and it still
+#: refuses a prompt that leaves no room for a usable reply.
+#:
+#: Lowering it is a deliberate act, not a default: name a
+#: ``ChatRequest.max_tokens`` (a host bounding a model or a workflow that does
+#: not need a long answer) or pass ``ceiling`` to :func:`turn_output_budget`.
+DEFAULT_TURN_OUTPUT_TOKENS = 131_072
+
+
+def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
+    """The ``max_tokens`` a request carries when its caller names none.
+
+    ONE number, decided in ONE place -- with one exception, stated here rather
+    than left implicit: for a request that names nothing of its own,
+    ``providers.clients._effective_max_tokens`` prefers a provider's OWN
+    published default where it documents one (DeepSeek's effort ladder of
+    8K/64K/64K/128K) over this ceiling. That is a provider-native ASK and not a
+    second policy: it only ever lowers the ask, it applies only to the request
+    that named nothing, and an ask the caller named is untouched by both.
+
+    Model-aware only in the NARROWING direction. A model that publishes a
+    smaller ceiling (MiniMax M3's 8K) keeps it, because that is a real provider
+    limit; a model that publishes a LARGER one is NOT raised back to it, because
+    raising the ask to an advertised capability is what let a single DeepSeek
+    decision run to 97,189 output tokens (95,098 of them reasoning). A spec that
+    publishes no cap at all (``0`` is "no data", not "unlimited") gets the
+    policy ceiling: a turn with no bound is the defect this exists to remove.
+
+    ``ceiling`` is the override -- ``None`` or a non-positive value means
+    :data:`DEFAULT_TURN_OUTPUT_TOKENS`. It is the hook a configuration key would
+    feed, but see AGENTS.md ("Adding a configuration key") before wiring one:
+    a key that only exists in the code that reads it is invisible to /settings.
+    """
+    limit = DEFAULT_TURN_OUTPUT_TOKENS if ceiling is None or ceiling <= 0 else int(ceiling)
+    advertised = int(getattr(model, "max_output_tokens", 0) or 0)
+    return min(limit, advertised) if advertised > 0 else limit
+
 
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
@@ -2161,7 +2357,25 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
-    max_tokens: int | None = None
+    # The generation bound for THIS call. Left ``None`` it is filled from
+    # :func:`turn_output_budget` by the validator at the end of this class, so a
+    # request built anywhere in the harness is bounded without the caller having
+    # to remember -- see :data:`DEFAULT_TURN_OUTPUT_TOKENS` for the number and
+    # the measurement behind it. An explicit value WINS: errands name a
+    # deliberate small one (``Session.ERRAND_MAX_TOKENS``, 1024 for titling) and
+    # the compaction summariser names its own.
+    #
+    # ``0`` is REJECTED (``ge=1``), and that is a correction rather than a
+    # tightening. It used to mean "ask the provider for no cap", but the four
+    # wire builders never agreed on what an absent cap is -- the OpenAI-shaped
+    # and Google bodies omit the key, while Anthropic's API REQUIRES one -- and
+    # on a model that advertises a cap it did not mean "no cap" at all: the
+    # clamp fell back to the advertised capability and put 943,718 back on the
+    # wire, re-creating the very ask this contract exists to remove (QA round 1,
+    # Q4). A caller that wants the provider's own default gets it by naming
+    # nothing, which is also what keeps DeepSeek's published effort ladder
+    # reachable (review m1 / QA Q3).
+    max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = None
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
@@ -2340,6 +2554,79 @@ class ChatRequest(BaseModel):
     #: the read-only resolve (6). That the naming call actually SETS this flag
     #: is tested separately, over a real ``Session`` and a capturing stream fn.
     isolated: bool = False
+
+    @model_validator(mode="after")
+    def _bound_generation(self) -> "ChatRequest":
+        """Give every request a generation bound, from the one policy.
+
+        Here rather than at the loop's construction and the benchmark's, because
+        those are two of N interfaces that build a ``ChatRequest`` and the defect
+        is a request that carried the provider's capability as its own ask, not a
+        mistake in either of them: whichever
+        site is missed next re-opens it silently. Filling it at the contract makes
+        a turn without a cap unrepresentable.
+
+        The loop's construction (``harness/loop.py``, ``_model_turn``) and the
+        benchmark's (``evaluation/runner/provider_client.py``, ``decide``) are
+        the two that matter today; this covers both and the subset of hosts,
+        errands and side channels that build their own.
+        """
+        if self.max_tokens is None:
+            self.max_tokens = turn_output_budget(self.model)
+            self._max_tokens_from_policy = True
+        return self
+
+    def with_model(self, spec: "ModelSpec") -> "ChatRequest":
+        """This request aimed at a DIFFERENT model, with its bound re-derived.
+
+        The one production path that changes the model under an already-built
+        request is failover (``providers/failover.py``), and it did
+        ``model_copy(update={"model": spec})`` -- which cannot re-run the
+        validator, by design. So the bound did not follow the swap: a 131,072
+        bound copied onto a fallback publishing 4,096 asked above that model's
+        published ceiling (a 400 from the provider where main re-read the spec),
+        and a request built against a small model kept the small ask on a large
+        fallback where a fresh request would carry the contract's own. Both
+        directions are wrong for the same reason, and this is the fix for both:
+        a policy FILLED bound is re-derived against the new spec, an ask the
+        caller NAMED is carried untouched.
+
+        The marker survives the copy (pydantic copies private attributes), so a
+        request that has been through two hops is still recognisably
+        policy-bounded on the third rather than silently becoming a named ask.
+
+        The re-derivation runs through :func:`turn_output_budget` with no
+        ``ceiling``, and so does the ``mode="after"`` validator on
+        :class:`ChatRequest`. Those two are the only call sites that derive a
+        bound from a spec, and ``turn_output_budget``'s own docstring invites a
+        configuration key to feed ``ceiling``. When that key lands, BOTH have
+        to be threaded with it: threading the validator alone would leave a
+        failover hop re-deriving the unconfigured 131,072 and silently
+        discarding the bound the hop exists to respect (review R2-n3).
+        """
+        update: dict[str, Any] = {"model": spec}
+        if self._max_tokens_from_policy:
+            update["max_tokens"] = turn_output_budget(spec)
+        return self.model_copy(update=update)
+
+    #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
+    #: because the caller named nothing, False when a caller named a value --
+    #: including the errands' deliberate small asks. It is what
+    #: :meth:`with_model` needs to tell a bound that must follow the model from
+    #: an ask that must not be touched, and what
+    #: ``providers.clients._effective_max_tokens`` needs to tell "nobody asked"
+    #: from "the harness bounded it" when it prefers a provider's own default.
+    _max_tokens_from_policy: bool = PrivateAttr(default=False)
+
+    @property
+    def max_tokens_from_policy(self) -> bool:
+        """Whether ``max_tokens`` is the harness's bound rather than an ask.
+
+        A read-only view of the private marker above, for the wire clamp, which
+        lives in another module and must not reach into a private attribute to
+        answer a question the contract can answer itself.
+        """
+        return self._max_tokens_from_policy
 
 
 class StreamStartEvent(BaseModel):

@@ -1176,13 +1176,65 @@ class ProjectionFold:
                     if promoted is not None:
                         promoted.tool_call_id = event.tool_call_id
             row = self._tool_row(event.tool_call_id, event.tool_name)
-            row.tool_state = "composing"
-            row.summary = event.intent or f"dictating {event.tool_name}"
+            # Three endings to one dictation, in the frames the producer sends:
+            #
+            # * an ordinary frame — the model is still writing the call;
+            # * `dictation_complete` — it has stopped, and the call may still be
+            #   waiting behind a sibling's execution group (or for a group the
+            #   turn never reached), so the row says `queued` rather than going
+            #   on claiming the model is dictating something it finished
+            #   writing. The TUI landed the same state in the same commit; the
+            #   phone was the surface that used to keep the lie after the row
+            #   above it had stopped;
+            # * `not_run_reason` — it will never run (planning failure,
+            #   duplicate id, steering skip), and the reason is the harness's
+            #   own. Settled here rather than left to the client, because a
+            #   phone has no retirement pass to fall back on.
+            #
+            # Both new fields are read off the model rather than with
+            # `getattr`, unlike the TUI: this branch is behind an
+            # ``isinstance`` check, so an older runtime's frame carries the
+            # defaults (`False`/`None`) and takes the composing path below —
+            # today's behaviour, unchanged.
+            #
+            # A row that has already STARTED outgrows the whole announcement,
+            # and the TUI returns from its handler for exactly this case (its
+            # running registry). The phone needs the guard too: a replayed
+            # terminal frame for a call whose twin's start already landed would
+            # otherwise relabel a running row `failed` — or, because the
+            # terminal frame also carries `dictation_complete`, walk it BACK to
+            # `queued`. Note the arms are exclusive on purpose: falling through
+            # to them is the bug, not the fallback.
+            started = row.tool_state in ("running", "done", "failed")
+            if event.not_run_reason:
+                if not started:
+                    row.tool_state = "failed"
+                    row.error = _compact(event.not_run_reason, 200)
+                    # The reason in the one-line summary too: the row is all a
+                    # phone shows by default, and "this call never ran, here is
+                    # why" is the whole content of that fact.
+                    row.summary = row.error
+            elif started:
+                pass
+            elif event.dictation_complete:
+                row.tool_state = "queued"
+                row.summary = event.intent or f"waiting to run {event.tool_name}"
+            else:
+                row.tool_state = "composing"
+                row.summary = event.intent or f"dictating {event.tool_name}"
             row.intent = event.intent or ""
             row.details["argument_bytes"] = event.argument_bytes
         elif isinstance(event, ToolExecutionStartEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
             row.tool_state = "running"
+            # The failure TEXT goes with the failure STATE. This row may have
+            # been settled by a never-run verdict before its call started — two
+            # calls sharing an id, the loser settling the row and the winner
+            # running it — and the renderer draws `error` as a red danger line
+            # inside the expansion for ANY state, so the phone would otherwise
+            # keep `Duplicate call id '…' skipped.` over a row that succeeded,
+            # and `hasDetails` true because of it.
+            row.error = ""
             row.summary = _summarize_args(event.tool_name, event.args)
             row.intent = event.intent or row.intent
             self._tool_started_at[event.tool_call_id] = time.monotonic()
@@ -1217,9 +1269,23 @@ class ProjectionFold:
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )
         elif isinstance(event, NoticeEvent):
+            # ``kind`` rides into ``details`` as the phone's ``severity``. This
+            # fold is the phone's ONLY view of a LIVE notice, `NoticeRow` reads
+            # the glyph and the ink from that field alone, and dropping it drew
+            # every live warning as the quiet ``·`` in ``text-ink-dim`` -- the
+            # tier this surface's own test file calls "a receipt nobody has to
+            # read" -- while the SAME event, replayed after a reconnect, took
+            # the branch below and rendered amber ``!``. One event, two inks,
+            # decided by whether the client attached before or after it
+            # (design round 1, D1; measured, replay ``{'severity': 'warning'}``
+            # against live ``{}``). The three kinds map 1:1 onto the phone's
+            # ``info|warning|error``.
             self._append(
                 TranscriptEntry(
-                    id=f"nt-{time.time_ns()}", kind="notice", text=_compact(event.text, 400)
+                    id=f"nt-{time.time_ns()}",
+                    kind="notice",
+                    text=_compact(event.text, 400),
+                    details={"severity": event.kind},
                 )
             )
         elif isinstance(event, SteeringDeliveredEvent):
@@ -1481,7 +1547,17 @@ class ProjectionFold:
         if not p.streaming:
             return
         if isinstance(event, ToolCallComposeEvent):
-            self._set_activity(event.intent or f"dictating {event.tool_name}")
+            # The same three endings as the row above, because the activity line
+            # is the other place that can go on saying "dictating" for a call
+            # the model finished writing: the terminal frame means the wait is
+            # now on the harness (the call is queued), and a never-run verdict
+            # means the wait is over and the call is not coming.
+            if event.not_run_reason:
+                self._set_activity(event.not_run_reason)
+            elif event.dictation_complete:
+                self._set_activity(f"waiting to run {event.tool_name}")
+            else:
+                self._set_activity(event.intent or f"dictating {event.tool_name}")
         elif isinstance(event, ToolExecutionStartEvent):
             self._set_activity(event.intent or f"running {event.tool_name}")
         elif isinstance(event, ToolExecutionEndEvent):

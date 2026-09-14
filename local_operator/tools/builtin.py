@@ -62,7 +62,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Se
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, cast
+from typing import Any, BinaryIO, Literal, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -178,10 +178,25 @@ BASH_SHELL_FALLBACK = "/bin/sh"
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
-#: Files larger than this are refused by read as TEXT (serve 2MB+ blobs
-#: through bash with head/tail instead); the cap serves the per-tool output
-#: budget. Images are governed by :data:`READ_IMAGE_LIMIT_BYTES` instead.
+#: Files larger than this are refused by ``read`` as a WHOLE-file text read.
+#: That is a CONTEXT-budget decision, not a performance one: the bytes become
+#: context, and the per-tool output budget is what this cap serves.
+#: It deliberately does NOT apply to a ranged read, which streams only the
+#: lines the caller named (see :func:`_stream_text_window`): the window is
+#: bounded by the request, and refusing it pushed agents into
+#: ``bash sed -n 'A,Bp'``, losing the numbering, the clamp footer and the
+#: ``range`` key compaction supersedes on. Images are governed by
+#: :data:`READ_IMAGE_LIMIT_BYTES` instead, which bounds DECODE cost.
 READ_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+#: Bytes a ranged read pulls from disk per iteration. This is what makes peak
+#: memory independent of file size: a forward pass over the bytes to locate
+#: line boundaries is exactly what ``sed -n 'A,Bp'`` does, but no single bytes
+#: object ever holds the file.
+_RANGED_READ_CHUNK_BYTES = 64 * 1024
+#: Bytes of a file's head used to classify it as text or binary. Named because
+#: two call sites must agree on it: the whole-file read, which has all the
+#: bytes, and the streamed ranged read, which only sees its first chunk.
+_BINARY_PEEK_BYTES = 8000
 #: Byte ceiling for a file read as an IMAGE, 8x the text ceiling. The text cap
 #: exists because bytes become context; an image's context cost is its PIXELS
 #: (~w*h/750 tokens on Anthropic and OpenAI alike) and is bounded downstream by
@@ -2545,9 +2560,33 @@ def _parse_line_range(spec: str) -> tuple[int, int | None]:
     return start, end
 
 
-def _number_lines(lines: list[str], start: int) -> str:
-    width = len(str(start + len(lines) - 1))
+def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
+    """Number ``lines`` from ``start`` in a right-aligned column.
+
+    ``span`` overrides the line count the column is sized from. A streamed
+    ranged read may hold fewer lines than the window it heads — it stops
+    keeping line bodies once no more of them could survive the clamp (see
+    :func:`_stream_text_window`) — while the numbering width must stay the one
+    the full window would have produced, or the same range would render
+    different bytes on a small file than it did before it was streamed.
+    """
+    width = len(str(start + (len(lines) if span is None else span) - 1))
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
+
+
+def _fits_output_budget(body: str) -> bool:
+    """Whether a rendered ``read`` body escapes the per-result clamp.
+
+    One definition of the threshold, because two callers must agree on it to
+    the character: :func:`_clamp_file_body` reads it to decide whether a
+    footer is appended, and the streamed ranged read reads it to decide
+    whether the file's exact line total is needed at all — the footer is the
+    ONLY consumer of that total (see :func:`_read_ranged_snapshot`). Two
+    restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
+    future edit to one of them stop the scan early on a body that then gets
+    clamped, which is precisely the ``None`` leak the footer must never see.
+    """
+    return len(body) <= READ_OUTPUT_LIMIT_CHARS
 
 
 def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
@@ -2563,7 +2602,7 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     "carry on from where this stopped"; splicing in a tail would break the
     contiguity that makes a numbered listing readable.
     """
-    if len(body) <= READ_OUTPUT_LIMIT_CHARS:
+    if _fits_output_budget(body):
         return body
     clipped = body[:READ_OUTPUT_LIMIT_CHARS]
     cut = clipped.rfind("\n")
@@ -3270,6 +3309,270 @@ def _decode_text_lines(data: bytes) -> tuple[str, list[str]]:
     return text, text.splitlines()
 
 
+#: The Unicode line breaks ``str.splitlines`` splits on beside ``\r``, ``\n``
+#: and ``\r\n``. A streamed ranged read must agree with the whole-file path
+#: line for line, so it cannot assume ``\n``: a ``\n``-only splitter returns
+#: different lines for any file whose "lines" end in one of these, which is a
+#: silent behaviour change in the middle of a file-format edge case.
+_LINE_BREAK_CHARS = "\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+#: The same set plus ``\r``, as a scanner. The scan steps break to break rather
+#: than character to character — reading a range out of an ordinary file is a
+#: hot path (agents read ranges constantly) and a per-character Python loop
+#: measured ~20x the cost of the C-level ``splitlines`` it replaces on a 2.2 MB
+#: file, for identical results. Iterating the break POSITIONS keeps the loop
+#: count proportional to the lines, not to the bytes.
+_LINE_BREAK_RE = re.compile(f"[{_LINE_BREAK_CHARS}\r]")
+
+#: Characters of a window a streamed ranged read accumulates before it stops
+#: keeping line bodies and only counts boundaries. The budget is the clamp's
+#: own threshold rather than an arbitrary slice: while the kept text fits in
+#: one clamp's worth the head is provably a character-prefix of what the
+#: whole-file path would have rendered, so a clipped window is clipped at
+#: exactly the same character (see :func:`_stream_text_window`). This is what
+#: bounds peak memory for an open-ended ``range="30000-"``, where "the
+#: requested lines" is the whole tail of the file.
+_RANGED_KEEP_CHARS = READ_OUTPUT_LIMIT_CHARS
+
+
+class _RangedRead(NamedTuple):
+    """What one coherent ranged snapshot found.
+
+    ``info`` is the image classification; when it is set it is the only
+    meaningful field, and the caller falls back to the whole-file path so a
+    ``range`` on an image behaves exactly as it always has. ``binary`` means
+    the head carried a NUL byte, so there is no text window at all. ``lines``
+    is the window head actually kept — at most :data:`_RANGED_KEEP_CHARS`
+    worth of it — while ``window_lines`` is how many lines the window really
+    holds, which is what sizes the numbering column. ``total_lines`` is the
+    file's exact line count, or ``None`` when the scan stopped as soon as the
+    window was complete and so never learned the total; that ``None`` is only
+    ever reachable for a window the output clamp never touches, and the caller
+    re-counts before it can.
+    """
+
+    info: ImageInfo | None
+    binary: bool
+    lines: list[str]
+    window_lines: int
+    total_lines: int | None
+
+
+def _stream_text_window(
+    handle: BinaryIO, start: int, end: int | None, *, count_only: bool = False
+) -> tuple[bool, list[str], int, int | None]:
+    """Scan a byte stream for a 1-based inclusive line window.
+
+    Returns ``(binary, kept, window_lines, total_lines)``. Peak memory is the
+    chunk size plus the kept window, never the file.
+
+    The scanner IS the semantics: it reproduces ``str.splitlines`` with the
+    separator set in :data:`_LINE_BREAK_CHARS` and the ``\r``/``\r\n`` state
+    below, instead of retyping the whole-file path's ``text.splitlines()``. A
+    ``\n``-only splitter would have been a behaviour change, not an
+    implementation detail.
+
+    A BOUNDED window (``end is not None``) stops the scan the moment the break
+    that closes line ``end`` is seen: every later line is outside the window,
+    so the only thing a longer pass could add is the file's exact total — and
+    that total is consumed solely by the clamp footer, which exists only when
+    the rendered head overflows the budget. ``total_lines`` is then ``None``
+    ("the scan stopped; the exact total is not known") and the caller decides
+    whether it must be recovered (:func:`_read_ranged_snapshot`). An
+    open-ended window (``end is None``) has no such bound and still scans to
+    EOF, because its window is the whole tail.
+
+    ``count_only`` is that recovery pass, not a second splitter: the same
+    scanner with retention off and the early exit disabled, so the count it
+    reports is accounted for by exactly the state machine that produced the
+    window. It returns an exact total and therefore never ``None``.
+    """
+    # ``errors="replace"`` throughout, deliberately: the whole-file path's
+    # strict-then-replace pair exists only so the common valid case skips a
+    # second pass, and an incremental STRICT decoder would abort the scan at
+    # the first invalid byte instead of reporting the window around it. The
+    # two agree on every input — valid UTF-8 never reaches the replacement.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    kept: list[str] = []
+    window_lines = 0
+    total_lines = 0
+    line_no = 1
+    keeping = start <= line_no and (end is None or line_no <= end)
+    kept_chars = 0
+    partial = ""
+    # Whether the line being scanned has any character in it yet. Deliberately
+    # NOT ``bool(partial)``: ``partial`` holds only what is RETAINED, so a last
+    # line outside the window (or past the retention budget) would look empty
+    # and the file's final line would go uncounted.
+    line_open = False
+    # A chunk ending in "\r" cannot tell yet whether the next character is the
+    # "\n" of the same break. That is why the pairing lives in scanner state:
+    # a chunk boundary must never turn one break into two lines.
+    pending_cr = False
+    # Set once the break closing line ``end`` has been scanned: the window is
+    # then complete and nothing left in the file can enter it, so the scan may
+    # stop. Never set in ``count_only``, which exists to reach EOF.
+    window_done = False
+
+    def finish_line(*, at_eof: bool = False) -> None:
+        """Close the scanned line the way ``splitlines`` does at a break.
+
+        ``at_eof`` marks the trailing call for a last line with no break
+        behind it. The window-complete check is suppressed there: we already
+        reached the end of the file, so the scan has the exact total anyway
+        and recording a stop would throw it away for nothing.
+        """
+        nonlocal window_lines, total_lines, line_no, keeping, kept_chars, partial, line_open
+        nonlocal window_done
+        total_lines += 1
+        if keeping and not count_only:
+            window_lines += 1
+            if kept_chars <= _RANGED_KEEP_CHARS:
+                kept.append(partial)
+                # Charge the body plus its joining separator and a floor for
+                # the numbering prefix. Charging at or below the rendered
+                # length is what guarantees the rendered body is never shorter
+                # than this budget, so the caller's clamp can still clip the
+                # kept head at the same character the full window would have
+                # been clipped at.
+                kept_chars += len(partial) + 2
+        line_no += 1
+        keeping = start <= line_no and (end is None or line_no <= end)
+        partial = ""
+        line_open = False
+        if not at_eof and not count_only and end is not None and line_no > end:
+            # The window is complete. Every later line is outside it, so the
+            # only thing left in the file is the exact total — needed only
+            # when the rendered head is clamped. Stopping here is what keeps
+            # ``range="1-5"`` off a full O(file) pass.
+            window_done = True
+
+    def keep(segment: str) -> None:
+        """Extend the current line body, inside the retention budget.
+
+        Bounded per segment as well as per line, so one gigantic line in the
+        window cannot grow the buffer past the budget either.
+        """
+        nonlocal partial
+        if not count_only and keeping and segment:
+            room = _RANGED_KEEP_CHARS + 1 - kept_chars - len(partial)
+            if room > 0:
+                partial += segment[:room]
+
+    def consume(text: str) -> None:
+        """Advance the scan across one decoded piece of the file."""
+        nonlocal pending_cr, line_open
+        if pending_cr and text:
+            pending_cr = False
+            if text.startswith("\n"):
+                # The other half of the previous chunk's break, not a break of
+                # its own. An empty piece leaves the question open for the next.
+                text = text[1:]
+        cursor = 0
+        for match in _LINE_BREAK_RE.finditer(text):
+            if match.start() < cursor:
+                # The "\n" of a "\r\n" already consumed as one break.
+                continue
+            if match.start() > cursor:
+                line_open = True
+                if keeping:
+                    keep(text[cursor : match.start()])
+            if match.group() == "\r":
+                if match.end() < len(text) and text[match.end()] == "\n":
+                    cursor = match.end() + 1
+                else:
+                    # Either the next character is not a newline, or it is not
+                    # in this piece at all — the state carries that question.
+                    cursor = match.end()
+                    pending_cr = match.end() == len(text)
+            else:
+                cursor = match.end()
+            finish_line()
+            if window_done:
+                # The loop that opened this line is the only place a stop is
+                # legitimate: everything after it is outside the window.
+                return
+        if cursor < len(text):
+            line_open = True
+            keep(text[cursor:])
+
+    first = True
+    while not window_done:
+        raw = handle.read(_RANGED_READ_CHUNK_BYTES)
+        if not raw:
+            break
+        if first and not count_only and b"\x00" in raw[:_BINARY_PEEK_BYTES]:
+            # The same classification the whole-file path applies to the head
+            # of the bytes it holds; the scan stops here rather than reading a
+            # binary file to the end just to report that it is one. Not applied
+            # in ``count_only``: that pass runs only on bytes already
+            # classified as text by the window pass, and a ``0`` here would be
+            # a silent, wrong total.
+            return True, [], 0, 0
+        first = False
+        consume(decoder.decode(raw))
+    if not window_done:
+        consume(decoder.decode(b"", final=True))
+        if line_open:
+            # A file that ends without a break still has a last line; a file that
+            # ends WITH one gets no trailing empty line. That is ``splitlines``.
+            finish_line(at_eof=True)
+    return False, kept, window_lines, (None if window_done else total_lines)
+
+
+def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRead:
+    """Classify and stream one line window under the mutation stripe.
+
+    Everything the caller decides from — image versus text, NUL in the head,
+    and the window's lines and counts — comes from this single transaction, so
+    a concurrent in-process write cannot swap the file between the
+    classification and the bytes served. The whole-file cap is deliberately
+    not consulted: the caller named a bounded window, and that is precisely the
+    case the cap must not refuse.
+
+    The window pass stops as soon as a bounded window is complete, so
+    ``total_lines`` comes back ``None`` whenever the file was not scanned to
+    EOF. Resolving it is this function's job, not the caller's, because the
+    re-scan must read the SAME bytes: the exact total is only ever rendered by
+    the clamp footer, and the rendered head is what tells us whether there is
+    one. Rendering it here to decide — with the very primitives the caller
+    renders with — keeps the two decisions on one threshold
+    (:func:`_fits_output_budget`) and the whole read in one transaction.
+    """
+    with _file_transaction(path):
+        info = sniff_image_file(str(path))
+        if info is not None:
+            # An image has no line window; the caller re-reads it through the
+            # whole-file path, which owns the image cap and the caption that
+            # says the ``range`` was ignored.
+            return _RangedRead(info, False, [], 0, 0)
+        with path.open("rb") as handle:
+            binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
+            body = _number_lines(lines, start, span=window_lines)
+            if total_lines is None and not _fits_output_budget(body):
+                # The head would be clamped and the footer needs the exact
+                # count, so recover it: the same scanner with retention off,
+                # over the same bytes, never a second divergent splitter.
+                handle.seek(0)
+                _, _, _, total_lines = _stream_text_window(handle, start, end, count_only=True)
+        return _RangedRead(None, binary, lines, window_lines, total_lines)
+
+
+def _binary_read_error(tool_call_id: str, path: Path) -> ToolResult:
+    """The NUL-byte classification, shared by the whole-file and ranged paths."""
+    guessed = mimetypes.guess_type(path.name)[0] or ""
+    if guessed.startswith("image/"):
+        # The extension is the only evidence left, and it says image. Name
+        # the format instead of reporting a generic binary: "not readable
+        # as text" reads as a bug in read when the caller can see a .bmp.
+        return _error(
+            tool_call_id,
+            "read",
+            f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
+            "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
+        )
+    return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
+
+
 @_guard("read")
 async def execute_read(
     tool_call_id: str,
@@ -3399,6 +3702,65 @@ async def execute_read(
             details={"path": str(path), **(spill_details or {})},
         )
 
+    # A ranged read streams the window off disk instead of loading the file.
+    # The 2 MiB cap below is a CONTEXT budget for a whole-file read, and a
+    # range is bounded by the caller's request, so applying the cap here refused
+    # the cheap thing for being part of something expensive — agents fell back
+    # to `bash sed -n 'A,Bp'` and lost the numbering, the clamp footer and the
+    # `range` key compaction supersedes on. Images and binaries still classify
+    # first and fall through to the same branches an unranged read uses, so the
+    # two paths cannot disagree about what the file is.
+    if params.range:
+        try:
+            start, end = _parse_line_range(params.range)
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
+        ranged = await asyncio.to_thread(_read_ranged_snapshot, path, start, end)
+        if ranged.info is None:
+            if ranged.binary:
+                return _binary_read_error(tool_call_id, path)
+            if ranged.window_lines == 0:
+                # Explicitly "the window holds no line", which is also what
+                # ``not ranged.lines`` tested by accident: an in-window empty
+                # line IS retained as "" (``finish_line`` appends the partial
+                # body unconditionally), so the list is truthy for ``"\n\n\n"``
+                # and this branch must not be reached. Reading the count says
+                # that rather than relying on it.
+                return _text(
+                    tool_call_id,
+                    "read",
+                    f"(range {params.range} is beyond end of file {path})",
+                    useless=True,
+                    details={"path": str(path), "useless": True},
+                )
+            # ``window_lines`` sizes the number column: a streamed read may
+            # keep fewer lines than the window holds, and the width must
+            # still be the one the full window renders with.
+            body = _number_lines(ranged.lines, start, span=ranged.window_lines)
+            if _fits_output_budget(body):
+                # No footer, so the file's exact total was never needed and
+                # the scan was allowed to stop as soon as the window was
+                # complete (see _stream_text_window): this is the common
+                # shape — read(path, range="1-5") on a large file — and it
+                # must not pay a forward pass over the whole file.
+                rendered = body
+            else:
+                total = ranged.total_lines
+                # Not None by construction: _read_ranged_snapshot recovers the
+                # exact total with a count-only pass over the same bytes
+                # whenever the rendered head does not fit this budget.
+                assert total is not None
+                rendered = _clamp_file_body(body, path, start, total)
+            return _text(
+                tool_call_id,
+                "read",
+                rendered,
+                # The range rides in details: compaction's supersede key must
+                # distinguish ranged reads of the same file, or a read of lines
+                # 900-1000 blanks an unrelated 1-100 read as "superseded".
+                details={"path": str(path), "range": params.range},
+            )
+
     # Stat, content sniff and body read are one worker-thread transaction.
     # Classification is by CONTENT, never extension — and it must describe
     # the same bytes returned below. A concurrent in-process edit/write takes
@@ -3409,7 +3771,7 @@ async def execute_read(
         advice = (
             "Resize it first (bash + sips/magick)."
             if info
-            else "Use bash (head/tail) or a 'range' on a smaller file."
+            else "Pass a 'range' to read the lines you need, or use bash (head/tail)."
         )
         return _error(
             tool_call_id,
@@ -3439,48 +3801,14 @@ async def execute_read(
             details={"path": str(path), "mime_type": wire_mime},
         )
 
-    if b"\x00" in data[:8000]:
-        guessed = mimetypes.guess_type(path.name)[0] or ""
-        if guessed.startswith("image/"):
-            # The extension is the only evidence left, and it says image. Name
-            # the format instead of reporting a generic binary: "not readable
-            # as text" reads as a bug in read when the caller can see a .bmp.
-            return _error(
-                tool_call_id,
-                "read",
-                f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
-                "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
-            )
-        return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
+    if b"\x00" in data[:_BINARY_PEEK_BYTES]:
+        return _binary_read_error(tool_call_id, path)
 
     # Decode + split in a thread: a 2 MB text read is a 2 MB decode and a
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
 
-    if params.range:
-        try:
-            start, end = _parse_line_range(params.range)
-        except InvalidToolArgumentsError as exc:
-            return _invalid_arguments(tool_call_id, "read", str(exc))
-        selected = lines[start - 1 : end]
-        if not selected:
-            return _text(
-                tool_call_id,
-                "read",
-                f"(range {params.range} is beyond end of file {path})",
-                useless=True,
-                details={"path": str(path), "useless": True},
-            )
-        return _text(
-            tool_call_id,
-            "read",
-            _clamp_file_body(_number_lines(selected, start), path, start, len(lines)),
-            # The range rides in details: compaction's supersede key must
-            # distinguish ranged reads of the same file, or a read of lines
-            # 900-1000 blanks an unrelated 1-100 read as "superseded".
-            details={"path": str(path), "range": params.range},
-        )
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
     # body, and re-reads only the ranges it needs. The repo's own benchmark

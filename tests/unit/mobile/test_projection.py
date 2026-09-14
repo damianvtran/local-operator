@@ -1107,6 +1107,47 @@ def test_diff_counts_only_from_reported_details() -> None:
     assert _diff_counts({"added": "junk"}) == (0, 0)
 
 
+def test_a_live_notice_carries_its_severity_to_the_phone() -> None:
+    """Design round 1, D1: a LIVE notice must arrive with its tier.
+
+    ``NoticeRow`` reads the glyph and the ink from ``details.severity`` alone,
+    so a fold that drops it draws a ``warning`` truncation as the quiet ``·``
+    in ``text-ink-dim`` -- and then flips the SAME event to amber ``!`` on the
+    next refresh, when it arrives through the replay fold, which carries the
+    field. The two produces must agree, so this asserts the live entry against
+    the replayed one rather than against a literal.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    fold = make_fold()
+    live = NoticeEvent(text="the model hit the output limit", kind="warning")
+    fold.fold_event(live)
+    live_entry = fold.projection.transcript[-1]
+    assert live_entry.kind == "notice"
+    assert live_entry.details["severity"] == "warning"
+
+    # The same event as a REPLAYED row (the message the harness journals), read
+    # through the fold that has always carried the tier.
+    replayed = fold_messages_to_entries(
+        [
+            Message(
+                role="assistant",
+                content=[TextContent(text="partial answer")],
+                id="a1",
+                stop_reason="length",
+            )
+        ]
+    )
+    replayed_notices = [e for e in replayed if e.kind == "notice"]
+    assert replayed_notices, "the replay fold must also emit the notice row"
+    assert live_entry.details["severity"] == replayed_notices[-1].details["severity"]
+
+    # All three kinds map across, not just the one this PR made visible.
+    for kind in ("info", "warning", "error"):
+        fold.fold_event(NoticeEvent(text=f"note {kind}", kind=kind))
+        assert fold.projection.transcript[-1].details["severity"] == kind
+
+
 def test_projection_version_bumps_on_every_fold() -> None:
     fold = make_fold()
     v0 = fold.projection.version
@@ -1436,3 +1477,162 @@ def test_a_cut_off_turn_still_offers_the_phones_resume_affordance() -> None:
     clean = ProjectionFold(SessionProjection(session_id="clean-phone", pid=1))
     clean.fold_event(AgentEndEvent(generation=1))
     assert clean.projection.stop_reason == "completed"
+
+
+def test_a_terminal_dictation_frame_queues_the_phone_row_and_the_activity_line() -> None:
+    """The phone is a consumer of the same frames, and it kept the same lie.
+
+    A call queued behind a long sibling was rendered ``dictating <tool>`` on the
+    phone for the sibling's whole run — the row AND the activity line above it —
+    because the compose frame was the last thing that surface heard about the
+    call. The producer now sends one more frame saying the dictation is over,
+    and the phone has to read it as the TUI does: the row is ``queued`` (live,
+    waiting, executing nothing) and the line says what the harness is waiting
+    for rather than what the model finished writing.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_wake", tool_name="wake", argument_bytes=14)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating wake"
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_wake",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "queued"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+    assert "waiting to run wake" in fold.projection.activity
+
+    # ...and the call still becomes a running row, then a finished one. `queued`
+    # is a state on the way, not a verdict.
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_wake", tool_name="wake", args={"text": "30m"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+
+
+def test_a_never_run_verdict_fails_the_phone_row_with_the_reason() -> None:
+    """The phone has no retirement pass, so the verdict has to settle it there.
+
+    A planning failure, a duplicate id or a steering skip leaves the row
+    announcing the call with nothing else coming: no start, no end. The reason
+    rides the terminal compose frame, and it is what the row must show — a row
+    that merely stopped saying ``dictating`` would leave the phone unable to tell
+    "queued" from "dead".
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Tool not found: wake",
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "failed"
+    assert row.error == "Tool not found: wake"
+    assert row.summary == "Tool not found: wake"
+
+
+def test_a_verdict_for_a_call_that_already_started_is_not_applied() -> None:
+    """The phone's own guard, matching the TUI's running registry.
+
+    A relayed or replayed terminal frame can reach a surface after its call's
+    start — a seed folded out of order, an attach re-reading the relay — and the
+    verdict describes a row that has outgrown it. Without the guard the row of a
+    call the user is watching execute was relabelled ``failed`` on the phone,
+    and because the terminal frame also carries ``dictation_complete``, the next
+    arm would have walked it back to ``queued``: two lies instead of one.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_x", tool_name="wake", args={"text": "30m"})
+    )
+    running = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert running.tool_state == "running"
+    was_summary = running.summary
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_x' skipped",
+        )
+    )
+
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running", "a started call is not relabelled never-run"
+    assert row.summary == was_summary
+    assert row.error == ""
+
+
+def test_a_duplicate_id_winner_clears_the_losers_failure_text() -> None:
+    """The revive path drops the failure TEXT with the failure STATE.
+
+    Two calls can share an id: the loser settles the row with the harness's
+    reason and the winner then executes it through this same row. The renderer
+    draws ``error`` as a red danger line inside the expansion for ANY state, so
+    the phone kept ``Duplicate call id … skipped.`` over a call that had just
+    succeeded — and ``hasDetails`` true because of it.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_dup",
+            tool_name="wait",
+            argument_bytes=20,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_dup' skipped",
+        )
+    )
+    failed = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert failed.tool_state == "failed" and failed.error
+
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_dup", tool_name="wait", args={"text": "1"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+    assert row.error == "", "the reason goes with the state it described"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+
+
+def test_the_new_compose_fields_absent_on_the_wire_change_nothing() -> None:
+    """BACKWARD COMPATIBILITY: an older runtime omits both new fields.
+
+    The phone's fold reads them off the model, so the older frame arrives with
+    today's defaults and must take exactly today's path: a composing row whose
+    activity line says the model is dictating. This is the control that says the
+    new states are additive rather than a change of meaning.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_old", tool_name="bash", argument_bytes=8)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating bash"
