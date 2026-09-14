@@ -76,14 +76,18 @@ itself — `/v1/capabilities` flips `desktop_available` to `true`, the legacy
 control surface (`/v1/config`, `/v1/credentials`, `/v1/agents`, `/v1/jobs`,
 `/v1/schedules`, `/v1/models`) becomes bearer-gated for every other local
 caller, and an `Origin` that is not on the allowlist loses its CORS grant
-altogether. That last part is scoped to the *posture*, not to a configured list:
-a governed daemon with an empty allowlist admits **no** browser origin, exactly
-as the bearer check already refuses every Origin-bearing request in that state.
-Only a plane nobody governs keeps the historical wildcard CORS, which is what
-keeps CLI clients and existing embedders working. The cost is deliberate and
-named: an operator's own `curl` script against a claimed daemon starts seeing
-`401`, and the daemon logs an audit line naming the instance and the origin the
-claim installed so that is diagnosable.
+altogether. That last part — the echo, not the bearer check — narrows only when
+the allowlist in force is **non-empty**: an `Origin` that is not admitted gets
+no grant, and an allowlist-less daemon keeps the historical wildcard CORS. That
+residual is deliberate and measured: the shipped app's renderer is loaded from
+`file://`, so it sends the opaque origin `null`, and it reads `/health`
+directly as its "server offline" signal, so suppressing the echo there made the
+app report a healthy daemon as down. This is why the docs do **not** claim that
+a claim removes the wildcard echo on every daemon: it removes it where the claim
+admits an origin, and the control half above is what protects the rest. The cost
+is deliberate and named: an operator's own `curl` script against a claimed
+daemon starts seeing `401`, and the daemon logs an audit line naming the
+instance and the origin the claim installed so that is diagnosable.
 
 In managed mode — a `LOCAL_OPERATOR_DESKTOP_TOKEN` in the environment **or** an
 accepted claim, which are one posture — the legacy `/v1/config`,
@@ -99,10 +103,13 @@ by validation responses.
 Two surfaces are deliberately **outside both gate families**, so no bearer and no
 claim gates them: `/v1/chat`, `/v1/sse`, `/v1/ws`, `/v1/static`, and the
 `/v1/models/...` sub-paths (the gate matches the exact `/v1/models` template).
-This predates the claim handshake and is unchanged by it; a claim still removes
-their CORS grant, so a page can no longer *read* them cross-origin, but an
-unauthenticated local caller still can. Widening the gate to cover them is a
-separate, larger decision and is recorded rather than made here.
+This predates the claim handshake and is unchanged by it; on a daemon whose
+allowlist admits an origin, a claim still removes their CORS grant from every
+other origin, so a page can no longer *read* them cross-origin, while an
+allowlist-less daemon keeps the echo (see the `null`-origin residual above) and
+an unauthenticated local caller can still reach them either way. Widening the
+gate to cover them is a separate, larger decision and is recorded rather than
+made here.
 
 ## Providers and accounts
 

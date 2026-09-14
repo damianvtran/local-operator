@@ -41,14 +41,18 @@ by any page the user visited. Accepting a claim puts this process into the same
 managed posture the app imposes when it starts the backend itself, so
 ``/v1/agents``, ``/v1/jobs``, ``/v1/schedules``, ``/v1/config``,
 ``/v1/credentials`` and ``/v1/models`` become bearer-gated for every other
-local caller, and the CORS echo is scoped to the POSTURE rather than to a
-configured allowlist: on a governed daemon a browser origin that is not
-admitted gets no grant at all, and an EMPTY allowlist means "no browser origin
-is admitted" rather than "tightening is off". The two are not the same
-statement, and reading the empty allowlist as the latter left the drive-by
-surface open on precisely the native (Origin-less) claim this route exists
-for. The accepted cost is named in the design (rollout risk 1): a local
-``curl`` script against a claimed daemon starts seeing 401.
+local caller, and the CORS echo is scoped to the admitted allowlist rather
+than to the posture alone: once anything is admitted, a browser origin that is
+not admitted gets no grant at all. An EMPTY admitted set deliberately keeps the
+historical wildcard echo instead of being read as "no browser origin is
+admitted", because the app-managed default installs exactly that state -- the
+shipped renderer runs at ``file://``, so every request it makes carries the
+opaque origin ``"null"``, and it reads ``/health`` directly as its liveness
+signal. Suppressing on the empty set made the app report a healthy daemon as
+down. What protects that state is the CONTROL half (``require_desktop`` on the
+credential/configuration families, and the legacy boundary), not the echo. The
+accepted cost is named in the design (rollout risk 1): a local ``curl`` script
+against a claimed daemon starts seeing 401.
 
 **Who may claim — the key, and never from a page.** The key is the whole
 credential, and a claim carrying ``Sec-Fetch-Site`` is refused EVEN WITH the
@@ -97,9 +101,13 @@ class DesktopPosture(NamedTuple):
     the environment's list UNIONED with the origins the accepted claim
     installed (its own ``Origin`` header and whatever it declared).
 
-    An allowlist of ``frozenset()`` on a plane whose ``enabled`` is true means
-    "no browser origin is admitted", never "no allowlist is in force" — the
-    distinction the CORS suppressor is scoped on.
+    An allowlist that is EMPTY while ``enabled`` is true is what
+    ``require_desktop`` reads as "no browser origin is admitted": an
+    Origin-bearing request reaching a gated family is refused. It is NOT read
+    that way by the CORS echo suppressor, which needs a non-empty set to have
+    anything to admit -- an allowlist-less daemon keeps its historical wildcard
+    echo, because the shipped renderer reads ``/health`` cross-origin from a
+    ``file://`` document and would otherwise report a live daemon as down.
 
     A pair rather than two functions so that a caller cannot read the bearer
     and the allowlist from two different moments — the boundary middleware and
