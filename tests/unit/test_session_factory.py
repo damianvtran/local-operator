@@ -487,6 +487,57 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
 
 @pytest.mark.asyncio
+async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Path) -> None:
+    """The chosen level is CONSTRUCTED into the spec, not applied afterwards.
+
+    This is the seam the desktop plane's spawn environment reaches:
+    ``spawn_owned_session(birth_effort=...)`` → ``args.birth_effort`` →
+    ``configure_model(reasoning_effort=...)``. It is a construction input rather
+    than a later switch because the owner's FIRST frontend snapshot and its
+    first provider call are then already right, with no window in which the spec
+    disagrees with the chip the user just used.
+
+    Both halves matter. The configured ``model_effort`` must still govern a
+    caller that chose no level (every launch before this feature, and the TUI),
+    so the second session below is constructed with the birth argument ABSENT
+    and must come back on the configured rung.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: anthropic\n"
+        "  model_name: claude-sonnet-5\n"
+        "  model_effort: low\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_effort="max"),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.reasoning_effort == "max"
+        assert "max" in chosen.model.reasoning_efforts, "the level must be one the model offers"
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.reasoning_effort == "low", "configured model_effort must still govern"
+    finally:
+        await default.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:

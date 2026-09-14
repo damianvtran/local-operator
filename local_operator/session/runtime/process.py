@@ -519,6 +519,14 @@ async def amain() -> int:
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
     provider = os.environ.get("LOP_MOBILE_CHILD_PROVIDER") or None
     model_id = os.environ.get("LOP_MOBILE_CHILD_MODEL") or None
+    # The reasoning level this conversation is BORN with, when its viewer chose
+    # one. It is a birth sample like the pair above: ``session_factory`` uses it
+    # in place of the configured default so the spec this process constructs
+    # carries the level, which is what makes the first frontend snapshot, the
+    # first provider call and the selection row written at admission agree. A
+    # value this model cannot express is CLAMPED there rather than refused — a
+    # stored choice may outlive the ladder that offered it.
+    birth_effort = os.environ.get("LOP_MOBILE_CHILD_EFFORT") or None
     resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
     if resume:
         # A runtime ADOPTS the id it was given rather than requiring a
@@ -536,6 +544,7 @@ async def amain() -> int:
             cwd=cwd,
             provider=provider,
             model_id=model_id,
+            birth_effort=birth_effort,
             resume=resume,
             model_selection_override=os.environ.get("LOP_MODEL_SELECTION_OVERRIDE") == "1",
         )
