@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 
 from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
+from local_operator.tui.input_decode import install_nonfatal_stdin_decode
 from local_operator.tui.terminal_modes import (
     guard_pixel_mouse_latch,
     install_pixel_mouse_gate,
@@ -204,6 +205,15 @@ async def run_tui(
     # SMOOTH_SCROLL from the environment — and the gate reads that frozen value,
     # so it has to run after the import for the same reason.
     install_pixel_mouse_gate()
+
+    # Unconditional, and deliberately NOT part of the guard above: the crash
+    # this prevents is caused by a BYTE ALREADY ON ITS WAY to us, not by
+    # anything we negotiated, so no kill switch or user preference may disarm
+    # it (see `input_decode`). It has to run before the app is constructed,
+    # because the driver looks the decoder factory up when its input thread
+    # starts. Placed after the gate so that comment's "first textual import on
+    # this path" stays true.
+    install_nonfatal_stdin_decode()
 
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 

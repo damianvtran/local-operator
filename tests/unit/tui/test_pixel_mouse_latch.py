@@ -60,6 +60,7 @@ from textual._xterm_parser import XTermParser
 from local_operator.tui.terminal_modes import (
     DISABLE_IN_BAND_RESIZE,
     DISABLE_PIXEL_SCALE_MODES,
+    REASSERT_SGR_MOUSE,
     guard_pixel_mouse_latch,
     pixel_mouse_negotiation_open,
     reset_in_band_resize,
@@ -274,11 +275,14 @@ def test_reset_writes_only_to_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
     tty = _FakeStream(tty=True)
     assert reset_in_band_resize(tty) is True  # type: ignore[arg-type]
-    # Both modes, as ONE write, in the driver's own re-enable order inverted:
-    # `?2048l` for the report mode, `?1016l` for the pixel-mouse mode a
-    # co-tenant sets with it. Asserted as literal bytes because the wire is the
-    # contract — a constant that drifted would keep this green otherwise.
-    assert tty.written == DISABLE_PIXEL_SCALE_MODES == "\x1b[?2048l\x1b[?1016l"
+    # Both modes plus the SGR re-assert, as ONE write, in the driver's own
+    # re-enable order inverted: `?2048l` for the report mode, `?1016l` for the
+    # pixel-mouse mode a co-tenant sets with it, then `?1006h` so resetting 1016
+    # cannot leave the terminal reporting the mouse in the legacy X10 encoding
+    # (the 0.54.35-0.54.37 crash; `input_decode.py`). Asserted as literal bytes
+    # because the wire is the contract — a constant that drifted would keep this
+    # green otherwise.
+    assert tty.written == DISABLE_PIXEL_SCALE_MODES == "\x1b[?2048l\x1b[?1016l\x1b[?1006h"
     assert DISABLE_IN_BAND_RESIZE == "\x1b[?2048l"
     assert tty.flushes == 1
 
@@ -409,8 +413,8 @@ def test_startup_writes_the_reset_before_the_in_band_query() -> None:
     The two calls could both be present and still be useless if they landed
     after ``drivers/linux_driver.py:299`` had already asked the terminal about
     mode 2048 — and the same is true of the ``?1016l`` half, which is why the
-    PAIR (contiguous, one write) is what is located here rather than the 2048
-    sequence alone.
+    WHOLE WRITE (contiguous, one write, closing on the ``?1006h`` that keeps the
+    encoding SGR) is what is located here rather than the 2048 sequence alone.
 
     Scope, stated because it was overstated once (review round 3, MINOR 1):
     the child above re-implements the two calls, so this test pins the calls
@@ -428,6 +432,14 @@ def test_startup_writes_the_reset_before_the_in_band_query() -> None:
 
     pair = DISABLE_PIXEL_SCALE_MODES.encode()
     assert pair in data, f"the reset pair never reached the wire; captured: {data[:400]!r}"
+    # The write is a TRIO on the wire and the last member is what keeps the
+    # encoding parseable: `?2048l`, `?1016l`, then `?1006h` (SGR). Asserted as
+    # one contiguous run rather than three members, because the point of the
+    # single write is that a report cannot be encoded by a mode we have already
+    # reset — a `?1006h` that arrived several frames later would still leave a
+    # window in which the terminal may send legacy X10 bytes, which is the
+    # 0.54.35-0.54.37 crash (`input_decode.py`).
+    assert pair.endswith(REASSERT_SGR_MOUSE.encode()), pair
 
     resets_at = data.index(pair)
     query_at = data.index(query)

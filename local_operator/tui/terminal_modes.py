@@ -113,7 +113,7 @@ user whose textual is still negotiating keeps their smooth scrolling and pixel
 coordinates. The sink is ``driver.write`` and not ``sys.__stderr__`` for the
 reason ``terminal_title.py`` and ``tui/images.py`` document: Textual serialises
 every byte it paints through one writer thread, so a second writer interleaves
-an escape into the middle of a frame. Volume: one 16-byte write per delivered
+an escape into the middle of a frame. Volume: one 24-byte write per delivered
 ``Resize`` message and per focus gain, with no per-frame or per-widget
 multiplier. Textual's ``App._on_resize`` (``app.py:4345-4356``) coalesces the
 SCREEN-level re-arrange at 1/120 s and returns early on an unchanged size, but
@@ -121,7 +121,7 @@ that early return is inside its own handler, so the public ``on_resize`` still
 runs for every delivered message — the ceiling is the terminal's SIGWINCH
 delivery rate, the only remaining source in this configuration because the
 in-band path is off. A clock, a flush timer and their tests to turn a
-few-times-a-second 16-byte write into a smaller number of 16-byte writes is not a
+few-times-a-second 24-byte write into a smaller number of 24-byte writes is not a
 trade worth making, so this deliberately does not coalesce.
 
 SO EACH MECHANISM IS LOAD-BEARING AND NONE IS REDUNDANT. The reset clears the
@@ -170,6 +170,25 @@ process on the tty, that no negotiation of ours clears and that changes what the
 numbers on the wire mean. The trade is therefore explicit rather than implied —
 a co-tenant that wanted pixel mouse loses it — and it is what makes "our
 coordinates are cells" true at the terminal instead of assumed.
+
+AND THE RESET IS FOLLOWED BY ``?1006h``, WHICH IS NOT OPTIONAL. Resetting 1016
+leaves a terminal that honours it with no pixel-scale encoding requested, and
+what such a terminal puts on the wire next is exactly the crash this pairing
+fixes: without SGR the mouse goes back to the LEGACY X10 encoding, ``CSI M``
+plus three RAW bytes (values + 32), so any coordinate past cell 95 is >= 0x80 and
+is NOT valid UTF-8. Textual decodes stdin with a STRICT incremental decoder
+(``linux_driver.py:430``/``:447``), so such a byte raises ``UnicodeDecodeError``
+on the input thread and the driver answers by panicking
+the app (``:405-410``) — the 0.54.35-0.54.37 production crash, reproduced from
+the operator's log at ``byte 0x80 in position 4`` (position 4 is the x byte).
+Asserting ``?1006h`` beside the reset is what keeps the encoding unambiguously
+SGR, and it is a mode Textual itself sets as part of enabling the mouse
+(``?1000h``/``?1002h``/``?1003h`` and ``?1006h``), so this re-asserts our own
+negotiation rather than reaching for a co-tenant's. It is belt AND braces, not
+either: ``local_operator.tui.input_decode`` makes the decode non-fatal and
+translates a legacy report that arrives anyway, because a byte that is already
+on its way to us must not be able to kill the app even while this reset is being
+processed.
 
 The gate's divisor clearing is only correct where the coordinates really are
 cells, and that is exactly what the 1016 reset establishes. The three
@@ -273,13 +292,24 @@ DISABLE_IN_BAND_RESIZE = "\x1b[?2048l"
 #: docstring for the arm this exists for.
 DISABLE_PIXEL_MOUSE = "\x1b[?1016l"
 
-#: Both resets as ONE write, in the mirror-image order of the driver's own
-#: re-enable branch (``?2048h`` then ``?1016h``, ``linux_driver.py:480-482``):
-#: one write because the pair has to reach the driver's serialised writer as one
-#: unit (a frame painted between them would be sized by a mode we have already
-#: given up on), and this order because the only sequence we are undoing is
-#: upstream's — so ours reads as its inverse at a glance.
-DISABLE_PIXEL_SCALE_MODES = DISABLE_IN_BAND_RESIZE + DISABLE_PIXEL_MOUSE
+#: ``CSI ? 1006 h`` — enable SGR extended mouse reporting, the encoding whose
+#: coordinates are ASCII. It belongs in the same write as the ``?1016l`` reset
+#: and not in a separate one: resetting 1016 without it leaves a terminal free
+#: to fall back to the LEGACY X10 encoding, whose raw coordinate bytes are what
+#: killed the app on the input thread (see AND THE RESET IS FOLLOWED BY
+#: ``?1006h`` in the module docstring). Not a pixel-scale mode and not a mode we
+#: are taking from anyone — Textual enables it as part of enabling the mouse, and
+#: this only makes sure it is still on after we switch 1016 off.
+REASSERT_SGR_MOUSE = "\x1b[?1006h"
+
+#: What the boot reset and the re-clean put on the wire: both resets as ONE write
+#: plus the SGR re-assert, in the mirror-image order of the driver's own
+#: re-enable branch (``?2048h`` then ``?1016h``, ``linux_driver.py:480-482``),
+#: which is then INVERTED here, and closed with the encoding we parse. One write
+#: because the three sequences have to reach the driver's serialised writer as
+#: one unit (a frame painted between them would be sized, or a report encoded, by
+#: a mode we have already given up on).
+DISABLE_PIXEL_SCALE_MODES = DISABLE_IN_BAND_RESIZE + DISABLE_PIXEL_MOUSE + REASSERT_SGR_MOUSE
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE``
 #: (``terminal_title.py:54``). Wanted by anything capturing raw terminal output
@@ -341,9 +371,10 @@ def guard_pixel_mouse_latch(env: MutableMapping[str, str] | None = None) -> bool
 
 
 def reset_in_band_resize(stream: TextIO | None = None) -> bool:
-    """Write ``CSI ?2048l`` and ``CSI ?1016l``; True when the bytes were written.
+    """Write the mode reset pair plus ``CSI ?1006h``; True when bytes were written.
 
-    Both modes, because under the guard we ask for neither: see
+    All three, because under the guard we ask for neither pixel-scale mode and
+    the terminal must be left in an encoding we can parse: see
     :data:`DISABLE_PIXEL_SCALE_MODES` and THE CO-TENANCY TRADE in the module
     docstring. The name still says 2048 because that is the mode #979 closed
     here and the one this function's callers know it for.
@@ -505,9 +536,12 @@ def pixel_mouse_gate_installed() -> bool:
 class InBandResizeReclaimer:
     """Re-assert the pixel-scale resets mid-session through an injected sink.
 
-    Both halves of :data:`DISABLE_PIXEL_SCALE_MODES` — ``?2048l`` for the report
-    mode the resize reveals, ``?1016l`` for the pixel-mouse mode a co-tenant
-    sets with it, which is what keeps the coordinates arriving as cells.
+    Every sequence in :data:`DISABLE_PIXEL_SCALE_MODES` — ``?2048l`` for the
+    report mode the resize reveals, ``?1016l`` for the pixel-mouse mode a
+    co-tenant sets with it, which is what keeps the coordinates arriving as
+    cells, and the ``?1006h`` that keeps the encoding SGR after that reset.
+    Re-sent together rather than as a delta because the write is a statement
+    about the mode the terminal should be in, not about what just changed.
 
     The boot reset cannot reach a mode a co-tenant sets while we run, and the
     report that reveals it arrives before any handler could act, so this is the

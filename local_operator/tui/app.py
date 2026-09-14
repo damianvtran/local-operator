@@ -20712,9 +20712,11 @@ class OperatorApp(App[None]):
     def _start_mode_reclaimer(self) -> None:
         """Keep the in-band resize mode closed for the rest of the session.
 
-        Both resets the object writes (``?2048l`` and ``?1016l``, see
-        ``terminal_modes.DISABLE_PIXEL_SCALE_MODES``) are re-asserted, because
-        under the guard we ask for neither the reports nor pixel-scale
+        Both mode resets the object writes (``?2048l`` and ``?1016l``, see
+        ``terminal_modes.DISABLE_PIXEL_SCALE_MODES``) are re-asserted — with the
+        ``?1006h`` that follows them, so the encoding cannot fall back to the
+        legacy X10 reports ``local_operator.tui.input_decode`` has to survive —
+        because under the guard we ask for neither the reports nor pixel-scale
         coordinates and the terminal state behind both is shared with every
         process on the tty.
 
@@ -21741,7 +21743,7 @@ class OperatorApp(App[None]):
         # tty can have negotiated mode 2048 (a suspended TUI resuming, a shell
         # running an unpatched `lop`), so both halves of the pair are re-closed
         # here before the reports that would scale are the ones we are about to
-        # read. User-driven, so at most one 16-byte write per focus gain.
+        # read. User-driven, so at most one 24-byte write per focus gain.
         if self._mode_reclaimer is not None:
             self._mode_reclaimer.reclaim()
         if self._notifier is not None:
