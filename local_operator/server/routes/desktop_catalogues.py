@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import pathlib
 import time
-from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from local_operator.server.desktop import require_desktop
@@ -61,6 +61,21 @@ class Entities(BaseModel):
     command: str
     entities: list[dict[str, Any]]
     current: Any = None
+
+
+#: A session id in a PATH segment. Declared rather than validated inside the
+#: handler for the reason ``AttachmentDigest`` is: the ledger query takes the id
+#: as a bound parameter, and pinning the shape at the route means no later edit
+#: inside a handler can route around it. 12 hex characters is the canonical
+#: session id (the same pattern ``/analytics`` and ``/skills`` use for the query
+#: form of this identifier).
+#:
+#: ``Path`` here is FastAPI's route-parameter marker, as it is in the sibling
+#: ``desktop_sessions.py``: this module also builds filesystem paths
+#: (``pathlib.Path(cwd)`` for skill discovery), so the filesystem class is
+#: imported by module name rather than by name — flake8's F811 is the guard that
+#: noticed when they collided.
+SessionID = Annotated[str, Path(pattern=r"^[a-f0-9]{12}$")]
 
 
 @router.get("/v1/desktop/commands", response_model=CRUDResponse[Commands])
@@ -165,13 +180,115 @@ async def analytics(
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
         try:
             aggregate = store.aggregate(since_ms=since_ms, until_ms=until_ms, session_id=session_id)
+            # ``session_names``/``session_parents`` are SIDE ATTRIBUTES on the
+            # aggregate (``store.py`` attaches them with ``setattr``), so
+            # ``asdict`` drops them: it walks declared fields only. They are
+            # read here rather than folded into the per-session rows because the
+            # TUI's tree rollup is a PRESENTATION choice — the payload stays a
+            # raw per-session feed whose column sums to the headline total, and a
+            # client that wants the tree is handed the edges to re-partition
+            # itself. Absent (an older ledger without ``parent_session_id``, or a
+            # store that predates the attributes) is ``{}``, which is a true
+            # "no edges known" rather than a failure.
             return {
                 "aggregate": dataclasses.asdict(aggregate),
                 "daily": [dataclasses.asdict(row) for row in store.daily_series(days)],
                 "daily_scope": "all_sessions",
+                "session_names": dict(getattr(aggregate, "session_names", None) or {}),
+                "session_parents": dict(getattr(aggregate, "session_parents", None) or {}),
             }
         finally:
             store.close()
+
+    return reply({"data": await asyncio.to_thread(read_report)})
+
+
+@router.get("/v1/desktop/info", response_model=CRUDResponse[Report])
+async def info():
+    """The host read behind the desktop ``/info`` panel.
+
+    No parameters, because ``/info`` has exactly one answer per host — the same
+    reason the slash command takes no argument at all.
+
+    ``collect_snapshot`` BLOCKS (the macOS session probe measured ~880 ms,
+    because it shells ``top -l1`` for the whole system), so it runs on a worker
+    thread through ``asyncio.to_thread`` exactly as ``/analytics`` does; on the
+    loop it would stall every other request for the duration.
+
+    ``LiveState()`` is deliberately EMPTY — no session is attached and the
+    session bridge is not touched. The live half of the snapshot (the subagent
+    tree, job counts, MCP probes, approval mode) is a fact about a SESSION, and
+    the desktop already holds those live in ``canonical.frontend`` for the
+    conversation on screen; filling them here would give one live fact two
+    sources of truth. The host half (install, process, session registry, env)
+    is what this panel renders.
+    """
+    from local_operator.info.collect import LiveState, collect_snapshot
+
+    return reply(
+        {"data": dataclasses.asdict(await asyncio.to_thread(collect_snapshot, LiveState()))}
+    )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/report", response_model=CRUDResponse[Report])
+async def session_report(
+    session_id: SessionID,
+    request: Request,
+    recent_limit: int = Query(default=12),
+):
+    """One exact session's ledger report, from one WAL snapshot.
+
+    ``AnalyticsStore.session_report`` opens a single explicit read transaction,
+    so every figure on the panel comes from the same committed state even while
+    the recorder writes behind it. It uses arithmetic and bounds the caller does
+    not restate here — in particular the 0..50 bound on ``recent_limit`` is the
+    store's own clamp (``store.py``), applied there so the HTTP surface and the
+    terminal report cannot disagree about how many rows "the last 50" means.
+
+    ``recent_limit`` is therefore deliberately UNBOUNDED at this declaration: a
+    caller asking for 500 gets the store's 50, which is the documented "hard cap
+    in the API" rather than a 422 whose error text would have to repeat the
+    number the store owns.
+
+    JSON encoding is part of the contract, not an implementation detail.
+    ``by_model`` is keyed by a ``(provider, model_id)`` TUPLE and
+    ``by_purpose_outcome`` by a ``(purpose, outcome)`` tuple; a JSON object
+    cannot carry tuple keys, so ``asdict`` of either is not serialisable and both
+    are rebuilt as ARRAYS of objects here.
+
+    ``by_purpose`` is keyed by a plain string and would therefore serialise as an
+    object, and that validity is exactly why it is converted anyway: one response
+    carrying three sibling group-bys in two different encodings makes the client
+    keep one shape per breakdown and makes a reader remember which is which. The
+    key type is an accident of the data, not a decision about the wire, so all
+    three are ``[{...key fields, "aggregate": {...}}]``.
+    """
+    from local_operator.analytics.store import AnalyticsStore
+
+    def read_report() -> dict[str, Any]:
+        store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
+        try:
+            report = store.session_report(session_id, recent_limit=recent_limit)
+        finally:
+            store.close()
+        payload = dataclasses.asdict(report)
+        payload["by_model"] = [
+            {
+                "provider": provider,
+                "model_id": model_id,
+                "aggregate": dataclasses.asdict(aggregate),
+            }
+            for (provider, model_id), aggregate in report.by_model.items()
+        ]
+        payload["by_purpose"] = [
+            {"purpose": purpose, "aggregate": dataclasses.asdict(aggregate)}
+            for purpose, aggregate in report.by_purpose.items()
+        ]
+        payload["by_purpose_outcome"] = [
+            {"purpose": purpose, "outcome": outcome, "calls": calls}
+            for (purpose, outcome), calls in report.by_purpose_outcome.items()
+        ]
+        return payload
 
     return reply({"data": await asyncio.to_thread(read_report)})
 
@@ -189,7 +306,7 @@ async def skills(
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
         discovered, warnings = await asyncio.to_thread(
-            discover_skills, default_skill_roots(Path(cwd))
+            discover_skills, default_skill_roots(pathlib.Path(cwd))
         )
         detail = None
         if name is not None:
