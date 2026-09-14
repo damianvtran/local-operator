@@ -351,15 +351,23 @@ async def test_a_degradation_arm_also_pushes_the_outcome_to_a_subscriber(
 async def test_the_in_process_path_wires_mcp_without_any_publisher(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The TUI's own Session never publishes a record, and must still wire MCP.
+    """A deferred session with NO publisher must still wire MCP.
 
-    This is the failure mode a publication gate invites, and it is not
-    hypothetical: the TUI builds an in-process Session with
-    ``defer_mcp_wiring=True`` and there is no ``RuntimeServer`` anywhere in that
-    process to open a latch. The gate is therefore OPT-IN — ``None`` means "no
-    publisher", and the deferred task is dispatched ungated exactly as it was
-    before the parameter existed — which this pins by settling
-    ``session.mcp_startup`` with no gate and no server in sight.
+    This is the failure mode a publication gate invites, and it is a real one:
+    ``create_session(defer_mcp_wiring=True)`` with no ``RuntimeServer`` anywhere
+    in the process has no latch to open, so a gate that applied to it would park
+    the wiring and MCP would silently never be wired. The gate is therefore
+    OPT-IN — ``None`` means "no publisher", and the deferred task is dispatched
+    ungated exactly as it was before the parameter existed — which this pins by
+    settling ``session.mcp_startup`` with no gate and no server in sight.
+
+    The caller here is synthetic, and deliberately so: in THIS tree the ungated
+    path is exercised by tests and by the two scripts that build an in-process
+    Session (a screenshot and a cleanup sweep). The TUI process builds no
+    ``Session`` at all on this release — ``cli.py``'s "THE OWNER PATH IS GONE"
+    note says so — and no TUI code passes ``defer_mcp_wiring=True``. The default
+    is kept because it is the honest answer for a caller with no publisher, not
+    because a TUI depends on it.
     """
     from local_operator.session_factory import (
         await_store_maintenance_for_tests,
@@ -407,9 +415,9 @@ async def test_the_in_process_path_wires_mcp_without_any_publisher(
             await asyncio.sleep(0.02)
         startup = getattr(session, "mcp_startup", None)
         assert startup is not None, (
-            "an ungated deferred session never settled its MCP outcome: the "
-            "in-process/TUI path has no publisher to open a gate, so a gate that "
-            "applied to it would mean MCP was never wired at all"
+            "ungated deferred session never settled its MCP outcome: a caller "
+            "with no publisher has no latch to open, so a gate that applied to it "
+            "would mean MCP was never wired at all"
         )
         assert startup.failures == {BROKEN_SERVER: BROKEN_ERROR}
     finally:
@@ -430,13 +438,18 @@ async def test_a_gated_wiring_parks_until_the_latch_is_set(
     before the record exists.
     """
     from local_operator import session_factory
+    from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import (
         await_store_maintenance_for_tests,
         create_session,
     )
 
     entered = asyncio.Event()
-    gate = asyncio.Event()
+    # The REAL latch, not a stand-in: its cross-thread behaviour is pinned in
+    # ``test_publication_gate.py``, and using it here keeps this test's contract
+    # ("the wiring waits on what the runtime opens") on the same type the
+    # runtime child actually passes.
+    gate = PublicationGate()
 
     async def spy(session: Any, tools: Any, cwd: str, **kwargs: Any) -> Any:
         entered.set()
@@ -546,3 +559,51 @@ async def test_the_runtime_child_gates_its_wiring_on_publication(
     finally:
         server.close()
         await session.dispose()
+
+
+def test_the_wiring_warm_list_is_derived_from_the_factorys_own() -> None:
+    """The warm list must not be a second, drifting copy (review round 1, R3).
+
+    The delivery of this change rests on the warm covering the wiring's
+    *synchronous* prefix: add an MCP import to the wiring and the loop stall
+    returns silently, with every behavioural test still green, because nothing
+    else ties "what the wiring imports before its first await" to "what we import
+    off the loop". The correspondence is therefore structural — the wiring list
+    is built FROM ``_WARM_IMPORTS`` — and this pins that property so a future edit
+    cannot quietly restate the list instead of extending it.
+    """
+    from local_operator import session_factory
+
+    factory_mcp = {
+        name
+        for name in session_factory._WARM_IMPORTS
+        if name == "mcp" or name.startswith("local_operator.mcp")
+    }
+    wiring = set(session_factory._MCP_WIRING_IMPORTS)
+
+    assert factory_mcp, "the factory's warm list no longer names any MCP module"
+    assert factory_mcp <= wiring, (
+        "the wiring's warm list dropped a module the factory's own warm list "
+        f"covers: {sorted(factory_mcp - wiring)}"
+    )
+    # The wiring's own function-local imports, and the SDK submodules the
+    # discovery path imports from inside functions (invisible to the factory).
+    assert {
+        "local_operator.mcp",
+        "local_operator.session.mcp_status",
+        "mcp.types",
+        "mcp.client.stdio",
+        "mcp.client.streamable_http",
+    } <= wiring
+
+
+def test_the_warm_swallows_a_module_that_cannot_import(monkeypatch) -> None:
+    """An absent SDK is a supported configuration, so the warm never raises.
+
+    ``wire_mcp_into_session`` handles a missing SDK by recording an outcome;
+    a warm that raised would replace that recorded degradation with a boot fault.
+    """
+    from local_operator import session_factory
+
+    monkeypatch.setattr(session_factory, "_MCP_WIRING_IMPORTS", ("definitely.not.a.real.module",))
+    session_factory._warm_mcp_wiring_imports()
