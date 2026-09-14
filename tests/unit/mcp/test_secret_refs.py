@@ -310,6 +310,43 @@ class TestDecoratedFragments:
         assert SENTINEL not in message
         assert fragment not in message
 
+    @pytest.mark.parametrize(
+        ("store_key", "fragment"),
+        [
+            # The store accepts ANY key (control characters only), so Settings can
+            # hold a name whose punctuation no run class can spell. Round 2's run
+            # shapes alone dropped the raw fragment as a candidate and handed these
+            # over as literals again (review round 3, finding 1).
+            ("MY KEY", "${MY KEY}"),
+            ("API:KEY", "${API:KEY}"),
+            ("KEY#2", "${KEY#2}"),
+            ("KEY%1", "${KEY%1}"),
+            ("TOKEN+2", "${TOKEN+2}"),
+            ("KEY,1", "${KEY,1}"),
+            ("A@B", "${A@B}"),
+            ("TOKEN/2", "${TOKEN/2}"),
+            # Only the STRIPPED candidate can match here, so it pins what adding
+            # ``inner.strip()`` buys beyond the raw fragment.
+            ("MY KEY", "${ MY KEY }"),
+        ],
+    )
+    def test_a_stored_key_with_punctuation_outside_the_run_class_is_refused(
+        self,
+        store_key: str,
+        fragment: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _store(_isolate(monkeypatch, tmp_path), {store_key: SENTINEL})
+
+        with pytest.raises(McpSecretRefError) as caught:
+            resolve_config_secrets("handwritten", _stdio({"VALUE": fragment}))
+
+        message = str(caught.value)
+        assert store_key in message
+        assert "unusable secret reference" in message
+        assert SENTINEL not in message
+
     def test_a_fragment_naming_nothing_stored_is_still_literal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
