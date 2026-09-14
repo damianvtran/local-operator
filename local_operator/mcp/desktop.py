@@ -92,6 +92,7 @@ class MCPControl(BaseModel):
 def public_server_config(cfg: Any) -> dict[str, Any]:
     """Expose destinations, never legacy inline headers/env/argument secrets."""
     from local_operator.mcp.auth import server_rejects_oauth
+    from local_operator.mcp.secret_refs import public_secret_refs
 
     url = getattr(cfg, "url", None)
     redacted = False
@@ -110,6 +111,7 @@ def public_server_config(cfg: Any) -> dict[str, Any]:
         "endpoint_redacted": redacted,
         "environment_keys": sorted(getattr(cfg, "env", {})),
         "header_keys": sorted(getattr(cfg, "headers", {})),
+        "secret_refs": public_secret_refs(cfg),
         "transport_oauth_supported": False if server_rejects_oauth(cfg) else None,
         "downstream_authorization": "unknown",
     }
@@ -207,11 +209,43 @@ class MCPDesktop:
                 return self.snapshot()
             resolved = resolve_server(self.session, body.name)
             if body.action == "probe":
-                supported = False if isinstance(resolved, str) else await login_allowed(*resolved)
+                from pathlib import Path
+
+                from local_operator.mcp.auth import server_rejects_oauth
+                from local_operator.mcp.credentials import credential_source
+                from local_operator.mcp.secret_refs import public_secret_refs
+                from local_operator.paths import config_dir
+
+                configs, _ = load_all_mcp_configs(self.cwd)
+                cfg = configs.get(body.name)
+                if cfg is None:
+                    raise ValueError("Unknown MCP server")
+                # Best-effort discovery's False also means unreachable/unknown.
+                # Only explicit transport/config refusal may claim non-OAuth.
+                supported = (
+                    False
+                    if server_rejects_oauth(cfg)
+                    else (
+                        True
+                        if not isinstance(resolved, str) and await login_allowed(*resolved)
+                        else None
+                    )
+                )
+                refs = public_secret_refs(cfg)
+                base = Path(getattr(self.session, "config_dir", None) or config_dir())
+                states = await asyncio.to_thread(
+                    lambda: [
+                        {"id": ref["id"], "source": credential_source(ref["id"], base)}
+                        for ref in refs
+                    ]
+                )
                 return {
                     "name": body.name,
                     "transport_oauth_supported": supported,
                     "downstream_authorization": "unknown",
+                    "secret_refs": refs,
+                    "credential_state": states,
+                    "key_submission_supported": True,
                 }
             if isinstance(resolved, str):
                 raise ValueError("This server does not support OAuth")

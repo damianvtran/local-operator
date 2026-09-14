@@ -4615,6 +4615,11 @@ class Session:
             self._variables, self.journal_credential_change, action, key, value
         )
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.mcp.credentials import MCPCredentials, store_credentials
+
+        return await store_credentials(self, MCPCredentials.model_validate(body))
+
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:

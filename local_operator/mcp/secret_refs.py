@@ -78,7 +78,8 @@ endpoint verbatim.
 from __future__ import annotations
 
 import re
-from typing import Mapping, TypeVar
+from pathlib import Path
+from typing import Any, Callable, Mapping, TypeVar
 
 from pydantic import SecretStr
 
@@ -120,7 +121,7 @@ def _missing(server: str, field: str, entry: str, key: str) -> McpSecretRefError
     """
     return McpSecretRefError(
         f"MCP server {server!r} needs {key} from the credential store for {field} "
-        f"{entry} — add it in Settings > API credentials, then reconnect "
+        f"{entry} — enter it through MCP sign-in, then reconnect "
         f"(or double the $ to pass it through literally)"
     )
 
@@ -207,7 +208,7 @@ def _candidate_keys(inner: str) -> list[str]:
     return keys
 
 
-def _store_values() -> dict[str, SecretStr]:
+def _store_values_legacy(base: Path) -> dict[str, SecretStr]:
     """The credential store's values, as ``SecretStr``, keyed by name.
 
     Values stay WRAPPED: the mapping is built on every connect that has a
@@ -223,7 +224,6 @@ def _store_values() -> dict[str, SecretStr]:
     """
     from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 
-    base = config_dir()
     if not (base / CREDENTIALS_FILE_NAME).exists():
         # No store exists, so every reference is unresolvable. Read directly
         # rather than constructing CredentialManager, whose constructor CREATES
@@ -232,6 +232,89 @@ def _store_values() -> dict[str, SecretStr]:
         return {}
     # ``dict(...)`` is a shallow copy: the manager hands back its own live dict.
     return dict(CredentialManager(base).get_credentials())
+
+
+def _reference_fragments(value: str):
+    """The resolver's left-to-right opener/escape scan, without reading a store."""
+    index = 0
+    while index < len(value):
+        if value.startswith("$${", index):
+            index += 3
+        elif value.startswith("${", index):
+            close = value.find("}", index + 2)
+            if close == -1:
+                return
+            yield value[index + 2 : close]
+            index = close + 1
+        else:
+            index += 1
+
+
+def public_secret_refs(cfg: object) -> list[dict[str, Any]]:
+    """Publish IDs and bindings from pristine config, never templates or values."""
+    refs: dict[str, list[dict[str, str]]] = {}
+    for field in ("env", "headers"):
+        for key, value in (getattr(cfg, field, None) or {}).items():
+            for text in _reference_fragments(value):
+                if _NAME_RE.fullmatch(text):
+                    binding = {"field": field, "key": key}
+                    if binding not in refs.setdefault(text, []):
+                        refs[text].append(binding)
+    return [{"id": key, "bindings": bindings} for key, bindings in sorted(refs.items())]
+
+
+def _store_values(
+    cfg: object = None,
+    *,
+    base: Path | None = None,
+    register: Callable[[str], object] | None = None,
+) -> dict[str, SecretStr]:
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+    from local_operator.secrets.keys import store_path
+
+    base = base if base is not None else config_dir()
+    required = {ref["id"] for ref in public_secret_refs(cfg)}
+    candidates = set(required)
+    for field in ("env", "headers"):
+        for value in (getattr(cfg, field, None) or {}).values():
+            for text in _reference_fragments(value):
+                candidates.update(_candidate_keys(text))
+    # Legacy values remain wrapped and read-only. Never obtain unrelated
+    # encrypted values just to decide whether a malformed fragment names a key.
+    legacy: dict[str, SecretStr] | None = None
+    values: dict[str, SecretStr] = {}
+    if cfg is None:
+        return _store_values_legacy(base)
+    for key in candidates:
+        try:
+            absent = not store_path(base).exists()
+            if not absent:
+                try:
+                    if key in required:
+                        value = access.retrieve_secret(key, base).decode()
+                        if not value:
+                            raise McpSecretRefError("The encrypted MCP credential is empty")
+                        values[key] = SecretStr(value)
+                    else:
+                        access.open_store(base).describe(key)
+                        values[key] = SecretStr("present")
+                except SecretNotFound:
+                    absent = True
+            if absent:
+                if legacy is None:
+                    legacy = _store_values_legacy(base)
+                if key in legacy:
+                    values[key] = legacy[key]
+            if register is not None and key in values and key in required:
+                register(values[key].get_secret_value())
+        except Exception:
+            # Refusal, corruption and empty encrypted entries are NOT absence.
+            # Public diagnostics cannot quote a store exception's input either.
+            raise McpSecretRefError(
+                "MCP credentials are unavailable; unlock or repair the encrypted store"
+            ) from None
+    return values
 
 
 def _resolve_value(
@@ -329,7 +412,29 @@ def _substitute_value(
     raise _unreadable(server, field, entry_name, key)
 
 
-def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:
+def has_references(cfg: object) -> bool:
+    """Whether any ``env``/``headers`` value carries a ``${`` at all.
+
+    Exported so a CALLER can decide whether resolving this config needs the
+    off-the-event-loop path, without re-implementing the check and drifting from
+    it. A config with no ``${`` resolves to itself in one comparison and touches
+    no store, so hoisting it to a worker thread buys nothing and costs every
+    connect a thread hop.
+    """
+    for field in ("env", "headers"):
+        for value in (getattr(cfg, field, None) or {}).values():
+            if isinstance(value, str) and "${" in value:
+                return True
+    return False
+
+
+def resolve_config_secrets(
+    name: str,
+    cfg: _ConfigT,
+    *,
+    base: Path | None = None,
+    register: Callable[[str], object] | None = None,
+) -> _ConfigT:
     """``cfg`` with the ``${NAME}`` references in its ``env``/``headers`` resolved.
 
     Returns ``cfg`` ITSELF when no value carries a reference, so a config that
@@ -344,9 +449,11 @@ def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:
         ("env", getattr(cfg, "env", None) or {}),
         ("headers", getattr(cfg, "headers", None) or {}),
     )
-    if not any("${" in value for _, values in fields for value in values.values()):
+    # The SAME predicate the connect path branches on (`has_references`), so the
+    # cheap path and the caller's decision cannot disagree.
+    if not has_references(cfg):
         return cfg
-    store = _store_values()
+    store = _store_values(cfg, base=base, register=register)
     updates: dict[str, dict[str, str]] = {}
     for field, values in fields:
         if not values:
@@ -365,4 +472,4 @@ def resolve_config_secrets(name: str, cfg: _ConfigT) -> _ConfigT:
     return cfg.model_copy(update=updates)
 
 
-__all__ = ["McpSecretRefError", "resolve_config_secrets"]
+__all__ = ["McpSecretRefError", "has_references", "resolve_config_secrets"]

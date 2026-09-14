@@ -2316,7 +2316,19 @@ async def wire_mcp_into_session(
         return None
 
     try:
-        manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd, auth_store=auth_store)
+        # The owner's config root (which store the references resolve against) and
+        # its redaction sink, taken from the session rather than defaulted: a
+        # manager built without them would read the wrong store and register
+        # nothing for the MCP sinks to scrub. Both are getattr-probed because a
+        # reduced host may implement neither, and the manager treats `None` as
+        # "no registration" rather than requiring a stub.
+        variables = getattr(session, "variables", None)
+        manager, mcp_tools, errors = await discover_and_load_mcp_tools(
+            cwd,
+            auth_store=auth_store,
+            secret_base=getattr(session, "config_dir", None),
+            register_secret=getattr(variables, "register_redaction", None),
+        )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
         # Discovery raising IS reportable, unlike the import gap above: reaching
         # this line means the config layer was present and still could not be

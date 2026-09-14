@@ -374,7 +374,7 @@ class TestDecoratedFragments:
 
         _iso = _isolate(monkeypatch, tmp_path)
         _store(_iso, {"OTHER": SENTINEL})
-        monkeypatch.setattr(secret_refs, "_store_values", lambda: {"T": 12345})
+        monkeypatch.setattr(secret_refs, "_store_values", lambda *args, **kwargs: {"T": 12345})
 
         with pytest.raises(McpSecretRefError) as caught:
             resolve_config_secrets("hubspot", _stdio({"T": "${T}"}))

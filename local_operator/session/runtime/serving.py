@@ -2736,6 +2736,11 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the credential is already stored
             logger.warning("could not announce credential change", exc_info=True)
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.mcp.credentials import MCPCredentials, store_credentials
+
+        return await store_credentials(self._session, MCPCredentials.model_validate(body))
+
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:

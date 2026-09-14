@@ -56,15 +56,29 @@ cannot resolve never spends one:
 }
 ```
 
-The store is `<config dir>/credentials.env` (default
-`~/.local-operator/credentials.env`) — the same one the desktop Settings >
-API credentials screen and `local-operator credential update NAME` write, so a
-reference names a key the user can see and edit. It is the **only** source:
-the process environment is deliberately not consulted, so a project-scoped
-`.mcp.json` cannot use a reference to copy an unrelated variable out of the
-running app's environment. Nothing is cached, so a credential added while a
-session is running is picked up by the next connect (`/mcp reload`, or the
-server's reconnect).
+**The store is the ENCRYPTED secret store** (`<config dir>/secrets/store.db`, the
+one `lop secret` and the MCP key popout write), read **first** and only for the
+IDs a config actually declares. A legacy `<config dir>/credentials.env` — the
+file the desktop Settings > API credentials screen and
+`local-operator credential update NAME` write — is read as a **read-only
+fallback, and only when the ID is definitively ABSENT from the encrypted store**.
+It is never consulted when the encrypted store refused, is locked, is corrupt,
+or holds an empty entry for that ID: those are not absence, and falling back to a
+plaintext copy of the very value the encrypted store would not hand over is the
+one direction this must never take. The legacy file is never written or migrated
+by this path, and unrelated provider credentials are untouched.
+
+It is deliberately **not** the process environment, in either tier: a
+project-scoped `.mcp.json` cannot use a reference to copy an unrelated variable
+out of the running app's environment. Nothing is cached, so a credential added
+while a session is running is picked up by the next connect (`/mcp reload`, or
+the server's reconnect).
+
+Writing one: the MCP key popout sends `POST /v1/desktop/sessions/{id}/mcp/credentials`,
+which validates every ID against the server's own declared references and stores
+in the encrypted store only. `Settings > API credentials` writes the *provider*
+store and is not this path — an MCP key entered there is a different store's
+credential and will not resolve.
 
 **The reference rule.** `NAME` is `[A-Za-z_][A-Za-z0-9_]*`.
 
@@ -78,12 +92,24 @@ server's reconnect).
 | a `${` whose inner text contains a name the store holds, whatever surrounds it (`${hubspot-token}`, `${NAME:-}`, `${NAME-SUB}`, `${NAME#x}`, `${!NAME}`, `${#NAME}`, `${env:NAME}`, `${ NAME }`) | refused: the key exists, so the fragment cannot be a literal, and passing it through would start the server with the reference as its credential |
 | a well-formed reference mixed with a fragment (`${TOKEN}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
 
+**A resolved value is scrubbed at every MCP sink, not just in the transcript.**
+The stdio child's stderr is scrubbed **before** it is split into lines (a value
+can straddle a read boundary, so the filter is stream-aware and line-bounded),
+the retained tail is scrubbed again at read time, the connect error is built
+from scrubbed text, and a logging filter on the root handlers covers records the
+MCP SDK and httpx emit themselves. That matters because an ordinary child that
+prints `invalid API token: <value>` to stderr reaches the MCP log file and the
+raised error **before** anything model-visible — the transcript filter was
+always too late for it (review BI-1). Registration is scrubbing-only: the value
+never enters the session credential map, so it is never injected into an
+unrelated child's environment.
+
 **An unresolvable reference is a refusal, never the literal.** A server whose
 reference names a key the store does not hold (or holds empty) fails to start
 with, verbatim:
 
 ```
-MCP server 'crm' needs CRM_API_KEY from the credential store for headers Authorization — add it in Settings > API credentials, then reconnect (or double the $ to pass it through literally)
+MCP server 'crm' needs CRM_API_KEY from the encrypted secret store for headers Authorization — enter it through MCP sign-in, then reconnect (or double the $ to pass it through literally)
 ```
 
 (`for <field> <entry>` names the `env` variable or header the reference sits in;

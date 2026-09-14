@@ -6776,6 +6776,12 @@ class AttachedSession:
             return {"ok": False, "reason": "disconnected"}
         return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise RuntimeError("The MCP credential owner is disconnected")
+        return await client.mcp_credentials(body)
+
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:
