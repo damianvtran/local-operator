@@ -231,6 +231,44 @@ class WarmReceipt(BaseModel):
     state: Literal["warm", "warming", "cold"]
 
 
+class MoveReceipt(BaseModel):
+    """What a working-directory change did, and where it left the session.
+
+    ``cwd`` is the directory now IN FORCE (absolute, normalised) and ``label``
+    is the backend's own home-aware rendering of it. Both are returned because
+    they are different facts: the caller compares the absolute path against the
+    value the frontend state stream later reports, and prints the label, and
+    only the process that owns the session knows how to spell ``~``.
+    """
+
+    cwd: str
+    label: str
+    #: ``set_working_directory``'s own vocabulary -- a COLD viewer is a field
+    #: assignment and a BOUND one is a runtime rebind -- plus one route-level
+    #: value, ``unchanged``, for a target the session is already in. Deliberately
+    #: NOT a new enum to learn elsewhere: the two moved outcomes are the words
+    #: the facade already returns, and ``unchanged`` is the receipt the TUI
+    #: already prints for the same case ("already in ~/x").
+    outcome: Literal["cold", "rebound", "unchanged"]
+    #: Whether the move was about to make the user WAIT when it was sampled --
+    #: i.e. ``AttachedSession.move_will_wait()`` immediately before the call.
+    #: A HINT with the same status the TUI gives it, and deliberately NOT
+    #: load-bearing for the UI, which cannot use a pre-call sample to narrate
+    #: anything: it learns this value after the move has already happened.
+    #: It is here so an operator (and the route's tests) can tell "the session
+    #: restarted" from "the field moved under an engage that then failed".
+    will_wait: bool
+    #: Set by the receipt journal when this answer was replayed rather than
+    #: re-run (``DesktopReceipts.run``), exactly as ``CreatedSession`` and
+    #: ``CommandReceipt`` do. It MUST be a declared field and not merely a key
+    #: the journal adds: FastAPI validates the reply against this model as the
+    #: route's ``response_model``, so an undeclared ``replayed`` is silently
+    #: dropped on the way out and a replay becomes indistinguishable from a
+    #: fresh run. For a move that matters more than for a create: a client that
+    #: cannot tell would narrate a restart that did not happen twice.
+    replayed: bool = False
+
+
 class NotificationClaim(BaseModel):
     """Whether THIS surface may raise the banner for one completion.
 

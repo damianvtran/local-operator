@@ -115,6 +115,20 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # Moving a live session's working directory
+                # (POST /v1/desktop/sessions/{id}/working-directory).
+                #
+                # Its OWN key rather than a bump, and the rule is the one
+                # `session_search` and `draft_preview` state above: an EXISTING
+                # surface must keep working against a backend that lacks the new
+                # route. Here the existing surface is the read-only
+                # working-directory chip, which is exactly what a renderer that
+                # sees no `session_move` keeps rendering. Bumping `commands`
+                # would be the wrong lever twice over -- a client renders the
+                # command palette perfectly well without this route, and
+                # `/move`'s presentation already exists on older backends (it
+                # answers its native_action today).
+                "session_move": 1,
                 # ``/info``'s host read and ``/session``'s one-snapshot ledger
                 # report. A NEW key rather than a bump of `catalogues`, and the
                 # rule is the one `session_search` states above: a renderer

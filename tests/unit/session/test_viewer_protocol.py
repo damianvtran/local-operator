@@ -1153,9 +1153,16 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # can be in owner recovery at all — an owner `Session` has no lost owner to
     # recover from, so the member is viewer-only by construction rather than by
     # placement.
-    assert len(viewer_only) == 53, (
+    #
+    # 53 → 54 is the same direction again: the desktop move route needs the
+    # directory the session WORKS in — to resolve a relative target against it
+    # (``/move ../sibling``) and to recognise a no-op — and that is a viewer's
+    # field. An owner ``Session`` cannot usefully answer it: its directory is the
+    # one its process was constructed in and no seam moves it, so there is
+    # nothing for an owner to report back about where it works.
+    assert len(viewer_only) == 54, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 53, and the aggregate floor is set at 40 against that number. A "
+        "says 54, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

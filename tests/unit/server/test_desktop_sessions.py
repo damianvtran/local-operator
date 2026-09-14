@@ -3579,3 +3579,751 @@ async def test_a_fresh_intent_does_not_inherit_a_withdrawn_ones_pace(tmp_path, m
         )
         assert len(attempts) == 2, attempts
     await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Moving a live session's working directory (POST .../working-directory)
+# ---------------------------------------------------------------------------
+
+
+class MoveClient:
+    """The attach client's move-relevant surface, and nothing else.
+
+    The two refusals that matter for a move are both decided from state a real
+    client holds (a live socket, an ack that is not ``retiring``), so this double
+    is what lets the route's tests reach them without spawning a runtime — the
+    same shape ``tests/unit/session/test_remote_move.py`` uses one layer down,
+    lifted here because these tests are about what the ROUTE and the BRIDGE do
+    with each answer.
+    """
+
+    def __init__(self, answer: str = "retiring") -> None:
+        self.answer = answer
+        self.ops: list[str] = []
+        # ``is_cold`` and ``move_will_wait`` both read this.
+        self.connected = True
+
+    async def retire_now(self) -> str:
+        self.ops.append("retire_now")
+        return self.answer
+
+    def close(self) -> None:
+        pass
+
+
+class LegacyMoveClient:
+    """A runtime from before the wire grew ``retire_now``.
+
+    A class rather than a ``SimpleNamespace`` for the reason the warm tests
+    record: ``dispose()`` tests the client for set membership, and a
+    ``SimpleNamespace`` defines ``__eq__`` and so is unhashable.
+    """
+
+    connected = True
+
+    def close(self) -> None:
+        pass
+
+
+def _bind_move_client(bridge: Any, client: object, *, idle: bool = True) -> None:
+    """Make the bridge's facade look bound, and idle unless told otherwise.
+
+    ``runtime_idle`` is replaced rather than arranged, because the boundary
+    between "idle" and "working" is the RUNTIME's (it re-checks ``may_refresh``
+    on its own side); what the route owes is a faithful mapping of each answer.
+    """
+    bridge.remote._client = client
+    bridge.remote._ready_for_events = True
+    bridge.remote.runtime_idle = lambda: idle  # type: ignore[method-assign]
+
+
+def _move_body(cwd: str, request_id: str | None = None) -> dict[str, str]:
+    return {"request_id": request_id or str(uuid.uuid4()), "cwd": cwd}
+
+
+def _marker_path(root: Path, session_id: str) -> Path:
+    return root / "sessions" / session_id / module.DESKTOP_MARKER_NAME
+
+
+@pytest_asyncio.fixture
+async def move_api(tmp_path: Path, monkeypatch):
+    """A minimal app over THIS test's config root, for the move route.
+
+    The same shape as ``draft_api`` above (its own ``tmp_path``, every ``CMUX_*``
+    stripped, the pool closed after the client): the property under test is what
+    a move does to the FILESYSTEM and to the bridge's own fields, so the root has
+    to be the test's own and the pool has to outlive the requests rather than be
+    reconstructed per call. ``app.state.desktop_sessions`` is how a test reaches
+    the BRIDGE — the durability and re-engage claims are about what it does with
+    fields it owns, not about the JSON the route returned.
+    """
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "move-test-token")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer move-test-token"},
+    ) as client:
+        yield client, app, tmp_path.resolve()
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_a_bound_move_retires_the_runtime_and_answers_the_new_directory(move_api) -> None:
+    """The bound path: the runtime has to go, and the receipt says where it went.
+
+    ``will_wait`` is asserted True because this is the case it exists to
+    describe — the runtime has to be asked to retire, which takes seconds — and
+    a MOVED session whose receipt said ``will_wait: False`` while it repaid a
+    spawn would be the hint lying about the one thing it is read for.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        request = _move_body(str(after))
+        response = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["outcome"] == "rebound"
+        assert result["cwd"] == str(after)
+        assert result["label"] == str(after).replace(str(root), "~", 1)
+        assert result["will_wait"] is True
+        assert double.ops == ["retire_now"], "the runtime was not asked to leave"
+        assert bridge.remote.cwd == str(after), "the viewer still works in the old tree"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_move_is_a_field_assignment_and_answers_cold(move_api, monkeypatch) -> None:
+    """The common case — `lop` opens cold — is a field assignment, and the
+    assertion that matters is not the return value: 92 green tests were once
+    green while the runtime came up in the OLD directory, because they asserted
+    ``_cwd`` rather than what the next engage was HANDED."""
+    from local_operator.session.runtime import launch
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    spawns: list[str] = []
+
+    async def record_engage(session_id, cwd, work, **kwargs):
+        spawns.append(str(cwd))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None and bridge.remote.is_cold
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        result = response.json()["result"]
+        assert result["outcome"] == "cold"
+        assert result["will_wait"] is False
+        assert bridge.remote.cwd == str(after)
+
+        # The spawn the successor would make, driven for real: `engage_runtime`
+        # is where the directory stops being a field and becomes a process.
+        monkeypatch.setattr(launch, "engage_runtime", record_engage)
+        try:
+            await asyncio.wait_for(bridge.remote._ensure_bound(), timeout=10)
+        except Exception:  # noqa: BLE001 — the engage's own outcome is not under test
+            pass
+
+    assert spawns == [str(after)], "the next engage was handed the wrong directory"
+
+
+@pytest.mark.asyncio
+async def test_a_move_rewrites_the_desktop_marker(move_api) -> None:
+    """The durability claim of §2.4: the marker is what ``locate()`` reads after
+    a server restart or a bridge eviction, so a move that leaves it naming the
+    old directory is a session that silently resumes in the old tree."""
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    assert json.loads(marker.read_text()) == {"version": 1, "cwd": str(before)}
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(marker.read_text()) == {"version": 1, "cwd": str(after)}
+    assert (marker.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_an_evicted_bridge_respawns_in_the_moved_directory(move_api, monkeypatch) -> None:
+    """Both stale copies at once, which is why the route writes both.
+
+    The BRIDGE field is the half the marker cannot cover: a re-``acquire()`` of a
+    bridge still in the pool passes ``cwd=self.cwd`` to ``cold(cwd=…)``, and a
+    field that was only ever set in ``__init__`` would spawn the successor in the
+    directory the session LEFT. The marker is the half the bridge field cannot
+    cover: an EVICTED bridge is rebuilt from ``locate()``, which reads the file.
+    """
+    monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
+    client, app, root = move_api
+    before, after, other = root / "before", root / "after", root / "other"
+    before.mkdir()
+    after.mkdir()
+    other.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    async with pool.session(sid):
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+
+    # Released but retained: the bridge's own field, read back before anything
+    # can rebuild it from disk.
+    assert pool.bridges[sid].cwd == str(after), "the bridge field still names the old tree"
+
+    other_sid = await pool.create(str(other))
+    async with pool.session(other_sid):
+        assert sid not in pool.bridges, "no eviction happened; this test proves nothing"
+
+    async with pool.session(sid) as bridge:
+        assert bridge.cwd == str(after), "the rebuilt bridge read the old directory"
+        assert bridge.remote is not None and bridge.remote.cwd == str(
+            after
+        ), "the successor would be engaged in the old directory"
+
+
+@pytest.mark.asyncio
+async def test_moving_to_the_directory_youre_already_in_is_a_no_op(move_api) -> None:
+    """The receipt the TUI prints ("already in ~/x"), and the property that makes
+    a RETRY safe: a move that had already landed must not retire a second time,
+    which is what lets the route declare ``retry_safe=True``."""
+    client, app, root = move_api
+    before = root / "before"
+    before.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    untouched = marker.read_bytes()
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(before))
+        )
+        result = response.json()["result"]
+
+        assert response.status_code == 200, response.text
+        assert result["outcome"] == "unchanged"
+        assert result["cwd"] == str(before)
+        assert double.ops == [], "a no-op retired the runtime"
+        assert bridge.remote.cwd == str(before)
+    assert marker.read_bytes() == untouched, "a no-op rewrote the durable marker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["../sibling", "~/project"])
+async def test_a_relative_or_tilde_path_resolves_against_the_SESSIONS_directory(
+    move_api, typed
+) -> None:
+    """`resolve_working_directory` is the WRONG resolver here and the difference is
+    the whole test: it resolves against this process's cwd, so ``/move ../sibling``
+    would mean the sibling of the SERVER's directory. ``expand_path`` resolves
+    against the session's, which is what the band shows and what the TUI does.
+    ``~`` is the same rule's other half, and its ``label`` proves the backend
+    renders it home-aware rather than echoing the typed text.
+    """
+    client, app, root = move_api
+    start, sibling, project = root / "x" / "y", root / "x" / "sibling", root / "project"
+    start.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+    project.mkdir()
+    expected = sibling if typed == "../sibling" else project
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(start))
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(typed)
+    )
+
+    result = response.json()["result"]
+    assert response.status_code == 200, response.text
+    assert result["cwd"] == str(expected)
+    assert result["label"] == str(expected).replace(str(root), "~", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "sentence"),
+    [
+        ("absent", "no such directory: "),
+        ("file", "not a directory: "),
+        ("unreadable", "cannot enter "),
+    ],
+)
+async def test_a_rejected_target_is_refused_with_409_and_moves_nothing(
+    move_api, case, sentence
+) -> None:
+    """The three rejections told apart, because they call for three different next
+    moves — and the state assertion afterwards is the point: a refusal must leave
+    all three copies (the viewer's ``_cwd``, the bridge field, the marker) agreeing
+    on the OLD directory. A 409 that had already rewritten the marker would make
+    the NEXT server start resume in a directory the user was refused."""
+    client, app, root = move_api
+    before = root / "before"
+    before.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    untouched = marker.read_bytes()
+
+    if case == "absent":
+        target = root / "nowhere"
+    elif case == "file":
+        target = root / "a-file"
+        target.write_text("not a directory")
+    else:
+        target = root / "locked"
+        target.mkdir()
+        target.chmod(0o000)
+
+    try:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(target))
+            )
+
+            assert response.status_code == 409, response.text
+            assert sentence in response.json()["detail"], response.json()
+            assert bridge.remote.cwd == str(before)
+            assert bridge.cwd == str(before)
+    finally:
+        if case == "unreadable":
+            target.chmod(0o700)
+    assert marker.read_bytes() == untouched, "a refused move rewrote the durable marker"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_session_is_refused_409_not_503(move_api) -> None:
+    """The load-bearing mapping of this route.
+
+    ``errors()`` answers a bare ``RuntimeError`` with 503 and "Session owner is
+    unavailable. Reconnect and reconcile before retrying." A mid-turn session is
+    not an unreachable backend — it is a HEALTHY session declining — and telling
+    the user to reconnect would be advice about a problem they do not have.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double, idle=False)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == (
+            "this session is working right now — /move again when the turn finishes"
+        )
+        assert double.ops == []
+        assert bridge.remote.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_keeps_itself_rolls_the_marker_back(move_api) -> None:
+    """Work can arrive between this viewer's idle read and the runtime's own
+    re-check, so the runtime is the authority and its reason is the receipt.
+
+    The marker is asserted BYTE-identically: the durable copy is what a later
+    server start reads, and leaving it at the refused directory is a move the
+    user was told did not happen, silently applied on the next restart.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    untouched = marker.read_bytes()
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient(answer="kept: a background job started")
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == "could not move: a background job started"
+        assert bridge.cwd == str(before)
+        assert bridge.remote.cwd == str(before)
+    assert marker.read_bytes() == untouched, "the marker was left at the refused directory"
+
+
+@pytest.mark.asyncio
+async def test_a_version_skewed_runtime_gets_the_vetted_sentence(move_api) -> None:
+    """A runtime too old to know ``retire_now``: refused in the sentence written
+    for it rather than moved anyway and left in the old directory."""
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        _bind_move_client(bridge, LegacyMoveClient())
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == (
+            "this session's runtime is too old to be moved; /reload first"
+        )
+        assert bridge.remote.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_a_move_during_owner_recovery_answers_503(move_api) -> None:
+    """The one refusal the route deliberately LEAVES to the ladder.
+
+    A recovering viewer is chasing a successor that will bind at whatever
+    directory the owner's record names, so a "cold move" reported here would be
+    undone the moment that bind lands. The reconnect banner is the right surface
+    for "the owner is reconnecting", which is why this stays a 503 with the
+    ladder's sentence rather than a 409 with the session's.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    untouched = marker.read_bytes()
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._recovering = True
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == (
+            "Session owner is unavailable. Reconnect and reconcile before retrying."
+        )
+        assert bridge.remote.cwd == str(before)
+    assert marker.read_bytes() == untouched, "a refusing viewer moved the durable copy"
+
+
+@pytest.mark.asyncio
+async def test_a_retried_move_with_the_same_request_id_replays_the_first_receipt(move_api) -> None:
+    """A lost response must not cost a SECOND retire.
+
+    ``retry_safe=True`` is only safe because the re-run is a no-op — so the
+    assertion that matters is not "replayed: true" but that the runtime was asked
+    to retire exactly once.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    request = _move_body(str(after))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        first = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+        second = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert "replayed" in second.json()["result"], (first.json(), second.json(), double.ops)
+        assert second.json()["result"]["cwd"] == first.json()["result"]["cwd"]
+        assert double.ops == ["retire_now"], "the retry retired the runtime a second time"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_move_does_not_spend_its_request_id(move_api) -> None:
+    """A refused move leaves the receipt row UNRESOLVED rather than claiming an
+    outcome, so the same request can be retried once the reason for the refusal
+    is gone — here, once the turn that was running has finished.
+
+    The retry is the SAME request id and the SAME body, because that is what a
+    retry IS: the fingerprint is the body's hash, so a client that changed its
+    mind about the directory is a new request with a new id, and it gets the
+    honest ``ReceiptConflict`` rather than a replay of an answer to a question it
+    no longer asks.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    request = _move_body(str(after))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double, idle=False)
+        refused = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+        assert refused.status_code == 409, refused.text
+
+        bridge.remote.runtime_idle = lambda: True  # type: ignore[method-assign]
+        retried = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["result"]["cwd"] == str(after)
+        assert (
+            retried.json()["result"]["replayed"] is False
+        ), "a refused move recorded an outcome the retry then replayed"
+        assert double.ops == ["retire_now"]
+
+
+@pytest.mark.asyncio
+async def test_a_retiring_frame_reengages_the_successor_on_the_desktop_bridge(tmp_path) -> None:
+    """The §2.5 gap, and the test that would have caught it.
+
+    ``retiring`` means "a successor is owed; engage one" for a build refresh and
+    for a move alike. The TUI answers it with a refresh callback; the bridge
+    installed NONE, so a retired runtime left the desktop viewer cold and the
+    chip on the OLD directory until the user's next send happened to engage —
+    which is the difference between the chip settling in a second and settling
+    whenever the user next types.
+
+    Driven through the real frame path (``_on_disconnected(RETIRING_REASON)``,
+    which is what the client's pump delivers when the runtime announces
+    ``retiring``), and the engage is the ordinary BACKGROUND one: a successor
+    nobody asked for must not claim a foreground envelope.
+    """
+    from local_operator.mobile.attach_client import RETIRING_REASON
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        remote = bridge.remote
+        assert remote is not None
+        engages: list[bool] = []
+
+        async def record_engage(*, foreground: bool = True) -> None:
+            engages.append(foreground)
+
+        remote._ensure_bound = record_engage  # type: ignore[method-assign]
+        remote._on_disconnected(RETIRING_REASON)
+
+        task = bridge.warm_task
+        assert task is not None, "the retiring frame left the viewer cold with no engage"
+        await asyncio.wait_for(task, timeout=10)
+        assert remote.is_cold, "the retire frame must leave the viewer cold for its successor"
+    assert engages == [False], "the successor engage must be the background envelope"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_move_route_is_advertised_by_session_move_only(move_api) -> None:
+    """Its OWN key, and nothing else moves.
+
+    A renderer that does not see ``session_move`` keeps its read-only
+    working-directory chip — the EXISTING surface, working unchanged — which is
+    the rule every other key in this map states. Bumping ``commands`` would hide
+    the palette (which renders fine without this route) to guard a chip, and
+    ``session_catalogue`` versions warming, not moving.
+    """
+    client, _app, _root = move_api
+    response = await client.get("/v1/capabilities")
+    features = response.json()["result"]["features"]
+
+    assert response.status_code == 200, response.text
+    assert features["session_move"] == 1
+    assert features["commands"] == 1
+    assert features["session_catalogue"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_command_endpoint_still_presents_move_rather_than_running_it(move_api) -> None:
+    """``/move`` is a PRESENTATION request, on both forms, and it stays one.
+
+    Adding ``move`` to ``OWNER_COMMANDS`` would route it to the runtime's slash
+    dispatcher, which has no ``move`` branch and answers a user with a 200 notice
+    about "this machine's configuration" — a false statement about the command
+    and a dead end that looks like success. So the backend must keep answering
+    the native action and must NOT execute anything: the renderer owns both the
+    picker and the typed-path call.
+    """
+    from local_operator.server.utils.desktop_commands import OWNER_COMMANDS
+
+    client, app, root = move_api
+    before = root / "before"
+    before.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    assert "move" not in OWNER_COMMANDS
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        bare = await client.post(
+            f"/v1/desktop/sessions/{sid}/commands",
+            json={"request_id": str(uuid.uuid4()), "command": "move"},
+        )
+        typed = await client.post(
+            f"/v1/desktop/sessions/{sid}/commands",
+            json={
+                "request_id": str(uuid.uuid4()),
+                "command": "move",
+                "args": str(root / "after"),
+            },
+        )
+
+        for response in (bare, typed):
+            assert response.status_code == 200, response.text
+            action = response.json()["result"]["result"]
+            assert action["kind"] == "native_action"
+            assert action["destination"] == "session.move"
+        assert double.ops == [], "the command endpoint executed the move"
+        assert bridge.remote.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_the_catalogue_keeps_its_own_mtime_for_a_session_with_a_transcript(move_api) -> None:
+    """A move rewrites ``desktop.json``, and rewriting it must not reorder a real
+    session in the sidebar: the marker's mtime is a DRAFT fallback for a directory
+    with no transcript, so a session that has one keeps the mtime it already had.
+    """
+    from local_operator.session.catalog import load_catalog
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    transcript = root / "sessions" / sid / TRANSCRIPT_FILENAME
+    transcript.write_text(
+        json.dumps({"type": ENTRY_MESSAGE, "role": "user", "content": "hello"}) + "\n"
+    )
+    old = time.time() - 3600
+    os.utime(transcript, (old, old))
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+    )
+    assert response.status_code == 200, response.text
+
+    rows = {entry.row.id: entry.row for entry in load_catalog(app.state.config_manager.config_dir)}
+    assert sid in rows, "the session fell out of the catalogue"
+    assert rows[sid].mtime == pytest.approx(
+        old, abs=1.0
+    ), "the move's marker rewrite reordered a real session"
+
+
+@pytest.mark.asyncio
+async def test_a_move_keeps_the_drafts_stored_model(move_api) -> None:
+    """A move changes ``cwd`` and NOTHING else.
+
+    The marker is also where a draft's chosen model is stored (upstream's
+    ``DRAFT_MODEL_KEY``), and a move rewrites the whole document. A writer that
+    reproduced the file from its own arguments would silently discard the choice
+    the new-conversation pane made — the first turn would then be born on a
+    different model than the strip showed.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(
+        str(before),
+        model={"provider": "anthropic", "model_id": "claude-opus-5", "reasoning_effort": "high"},
+    )
+    marker = _marker_path(root, sid)
+    assert json.loads(marker.read_text())["model"]["model_id"] == "claude-opus-5"
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+    )
+
+    assert response.status_code == 200, response.text
+    stored = json.loads(marker.read_text())
+    assert stored["cwd"] == str(after)
+    assert stored["model"] == {
+        "provider": "anthropic",
+        "model_id": "claude-opus-5",
+        "reasoning_effort": "high",
+    }, "the move discarded the draft's chosen model"
+
+
+@pytest.mark.asyncio
+async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path) -> None:
+    """The retire frame must not spawn into a daemon that is being REPLACED.
+
+    A build update latches the daemon (``server/retire.py``): it has told its
+    clients to leave and its successor is on the way, so a runtime started here
+    would be one whose viewer follows it onto a dead address — the refusal
+    ``warm`` states, and the reason it asks ``assert_admitting`` before anything
+    else. The retire-frame caller is not a route and has no named 503 to
+    compose, so it declines silently: the app reconnects to whatever replaces
+    the daemon.
+
+    A MOVE is the other case, and the one this callback exists for — the daemon
+    is healthy, only the session's runtime went, and the successor is owed by
+    this frame alone. Both directions are pinned, so neither can be "fixed" into
+    the other.
+    """
+    from local_operator.mobile.attach_client import RETIRING_REASON
+    from local_operator.session.attached import AttachedSession
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path), retiring=lambda: True)
+    remote = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=module._no_takeover
+    )
+    bridge.remote = remote
+    remote.set_refresh_callback(bridge._on_runtime_retired)
+
+    remote._on_disconnected(RETIRING_REASON)
+
+    assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
+    assert remote.is_cold

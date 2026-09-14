@@ -35,6 +35,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftPreviewPayload,
     HistoryPage,
     MessageAdmission,
+    MoveReceipt,
     NotificationClaim,
     SessionList,
     SessionSearch,
@@ -54,6 +55,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     SubagentChildUnavailable,
+    move_session,
     resolve_working_directory,
 )
 from local_operator.session.attention import SupersededCompletionToken
@@ -151,6 +153,24 @@ class CreateSession(Input):
     #: the configured default. This is the ONLY optional admission of the two
     #: routes, and it is what lets an older client keep posting the old body.
     model: DraftModel | None = None
+
+
+class MoveSession(Input):
+    """A live session's new working directory.
+
+    Same field shape and bound as :class:`CreateSession.cwd` and
+    :class:`DraftPreview.cwd`: one bound for "a path a user typed", so the two
+    routes cannot disagree about what fits in one.
+
+    The path is validated against the SESSION's directory, not this process's:
+    `cwd` may therefore be relative (``../sibling``) or carry ``~``, exactly as
+    the TUI's ``/move`` accepts, because the same machinery resolves it
+    (`local_operator.tui.move_targets.expand_path`). `create` is the route that
+    must resolve against the server's own cwd, and it keeps its own resolver.
+    """
+
+    request_id: RequestID
+    cwd: str = Field(min_length=1, max_length=4096)
 
 
 class DraftPreview(Input):
@@ -1205,6 +1225,93 @@ async def warm(session_id: str, body: Warm, request: Request):
     async with errors(), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/working-directory",
+    response_model=CRUDResponse[MoveReceipt],
+)
+async def move(session_id: str, body: MoveSession, request: Request):
+    """Point a live session at ``body.cwd``, rebuilding its runtime if it has one.
+
+    THE DESKTOP HALF OF THE TUI'S ``/move``, and the same operation: one
+    implementation behind both surfaces (``move_session``), so "what does moving
+    a session mean" has one answer. The desktop cannot reuse the TUI's route to
+    it, because the TUI's is a key handler in the process that owns the session.
+
+    WHY A DEDICATED ROUTE RATHER THAN ``/commands``. Three reasons, in order of
+    weight. (1) The argument form cannot be answered through ``CommandReceipt``:
+    its ``result`` is ``NativeAction | OwnerCommandResult``, a move produces
+    neither, and adding a third member changes the renderer's shared
+    ``SlashOutcome`` union and every consumer of it. (2) ``/commands`` executes
+    slash commands and a move is not one — the runtime cannot respawn itself at
+    a new cwd (its directory is baked in at spawn) and the state to change lives
+    on the VIEWER, so routing it through a runtime slash handler would answer the
+    user with the runtime's own "/move reads this machine's configuration…"
+    notice: a false statement about ``move``, on a 200. (3) ``/warm`` is the
+    structural precedent — both are lifecycle operations on this session's
+    runtime, both have their own route, op and receipt. A move is a warm that
+    goes somewhere else.
+
+    ``/move`` ITSELF STAYS AS IT IS. It keeps its ``session.move`` destination in
+    the command catalogue and stays out of ``OWNER_COMMANDS``: a bare ``/move``
+    still answers a ``native_action`` (a request for PRESENTATION, claiming
+    nothing ran) and the renderer opens its picker; a typed ``/move <path>`` is
+    executed by the renderer calling THIS route. Nothing in the command path
+    changes, so an older renderer against this backend still presents ``/move``
+    correctly, and this backend against an older renderer is simply a route
+    nobody calls.
+
+    REACHABLE ONLY WITH ``features.session_move``, which is why that key is its
+    own rather than a bump: a renderer that does not see it keeps its read-only
+    working-directory chip and reports the degradation, exactly as it does
+    today, instead of firing a request an older backend answers with a 404.
+
+    WHAT THIS RESPONSE DOES NOT CLAIM: that the successor is up. The runtime
+    leaves by the ``retiring`` route, and the successor is engaged by the retire
+    frame on the BRIDGE (see ``DesktopSessionBridge._on_runtime_retired``), not
+    by this request. The receipt says where the session now works and what
+    happened to the old runtime; the renderer's chip settles when the successor
+    binds and publishes its frontend state.
+
+    RECEIPTED, unlike ``/warm`` beside it, because this DOES mutate: it writes
+    the durable marker, may retire a runtime and may spend a spawn. A re-run is a
+    no-op (``move_session`` returns ``unchanged`` for a directory the session is
+    already in), which is what makes ``retry_safe=True`` correct rather than
+    merely tolerable — a lost response can be retried instead of answering
+    "outcome is indeterminate" for a mutation whose re-run is provably safe and
+    cannot retire a second time.
+
+    ``RuntimeError`` IS MAPPED TO 409 HERE, and that is the load-bearing line of
+    this route. It is the SESSION's own refusal — "working right now", "too old
+    to be moved", "could not move: <reason>" — and these are states of a HEALTHY
+    session. ``errors()``'s ladder answers ``RuntimeError`` with its 503 sentence
+    ("Session owner is unavailable. Reconnect and reconcile before retrying."),
+    which would tell a user mid-turn that the backend is unreachable. The
+    session's sentence is what the user needs, and 409 is the status the rest of
+    this API uses for "your request is understood and refused".
+
+    A REJECTED TARGET's own ``ValueError`` sentence (absent, not a directory,
+    unenterable) is deliberately NOT caught here: the ladder already answers it
+    with a 409 carrying the vetter's text, and catching it would be a second copy
+    of that mapping to keep in step.
+    """
+    async with errors(), host(request).session(session_id) as bridge:
+
+        async def execute():
+            try:
+                return (await move_session(bridge, body.cwd)).model_dump(mode="json")
+            except RuntimeError as error:
+                raise HTTPException(409, str(error)) from None
+
+        return reply(
+            await receipts(request).run(
+                session_id + ":" + body.request_id,
+                body.model_dump(),
+                execute,
+                retry_safe=True,
+            )
+        )
 
 
 @router.get("/v1/desktop/sessions/{session_id}/events")

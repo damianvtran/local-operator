@@ -400,3 +400,25 @@ async def test_a_move_CANCELLED_while_joining_the_engage_rolls_back(cold_session
     finally:
         session._bind_lock.release()
     assert session._cwd == "/tmp", "a move cancelled while joining left the directory moved"
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_reports_the_directory_its_next_runtime_will_use(cold_session) -> None:
+    """``cwd`` is the read a move's CALLER needs, and the reason it is a property
+    rather than a second convention beside ``_cwd``.
+
+    The desktop move route has to answer two questions about the session's own
+    directory: where a relative target resolves FROM (``/move ../sibling``), and
+    whether the target is a no-op. Both are answered by this value — and the
+    route's candidate for it, ``DesktopSessionBridge.cwd``, is written once at
+    construction, so it answers with the directory the session LEFT after a first
+    move. Pinned here at the facade, where the value actually lives: the cold
+    directory the next engage will spawn with, and then the moved-to one.
+    """
+    session = await cold_session("/tmp")
+    assert session.cwd == "/tmp"
+
+    _bind(session, FakeClient())
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
+    assert await session.set_working_directory("/usr") == "rebound"
+    assert session.cwd == "/usr", "the viewer's own read lagged the move it just made"

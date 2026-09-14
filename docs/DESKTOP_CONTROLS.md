@@ -91,6 +91,21 @@ and rendered verification.
 
 All paths start `/v1/desktop/sessions/{id}` unless noted.
 
+- `POST /working-directory`: request_id and cwd, the live-session half of the
+  terminal's `/move` and the same implementation. `cwd` resolves against the
+  SESSION's current directory (`~` and `../sibling` accepted); the answer is
+  `{cwd,label,outcome,will_wait}` with outcome `cold|rebound|unchanged`. A
+  refusal is a 409 carrying the session's own sentence (mid-turn, runtime too
+  old to be moved, work that arrived during the retire, absent/unenterable
+  path). The new directory is durable in BOTH `desktop.json` and the bridge's
+  own `cwd` before anything is retired, and a refused move restores both. THE
+  SUCCESSOR IS ENGAGED BY THE RETIRE FRAME, NOT BY THIS REQUEST: the runtime
+  leaves by the `retiring` route, the viewer goes cold and the bridge re-engages
+  eagerly, and the successor's bind is what republishes `frontend.cwd`. Gated by
+  `features.session_move`; `move` stays out of `OWNER_COMMANDS`, so a bare
+  `/move` remains a native_action that asks the renderer to open its picker.
+  Subagent children are separate sessions on their own leases and are NOT moved
+  with their parent — a move mid-subagent leaves the child in the old tree.
 - `POST /credentials`: action `list|store|forget`, optional key, secret value only
   for store, confirmed=true for forget. It calls the runtime's `credential_op`. Values
   never enter the command receipt database or transcript; only key names are
