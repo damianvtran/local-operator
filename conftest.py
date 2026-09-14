@@ -106,12 +106,14 @@ So nothing here divides. What the file does instead is REPORT the resolution,
 one line on stderr, because the terms behind a count are otherwise invisible
 from outside the process and a session can spend hours guessing which one bound:
 
-    pytest worker cap: 6 (bound by memory, cpu arm 7, memory arm 6,
+    pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
     available 5,313 MB, reserve 2,048 MB, siblings 11)
 
 That line, and the read-only sibling probe it uses, are part of the change from
-that investigation; the count itself is computed as it always was, with the two
-constants below moved to where the measurement says they belong.
+that investigation. The count is computed as it always was; of the constants
+below, only the reserve cap moved, and it moved because the A/B says the
+reserve was the term doing the binding (see THE TITRATION and
+``_MEMORY_RESERVE_CAP_MB``).
 
 THE TITRATION
 -------------
@@ -120,28 +122,60 @@ wants - because "3 workers" on a 14-core box at 0-2.5% CPU is a memory verdict,
 not a compute one. Measured 2026-09-13/14 with interleaved waves of 3 concurrent
 instances of ``tests/unit/tui/test_slash_echo.py`` (71 tests, ~58 Textual app
 boots, the boot-bound shape the whole suite is 82% of), staged 25 s apart, at
-real fleet depth - 11-13 sibling suites live throughout. Median per-instance
-wall time, and the three instances' total CPU:
+real fleet depth - 11-13 sibling suites live throughout. Per-instance wall time,
+and the three instances' total CPU:
 
 * cap 3 (what this host resolved): 313.3 s, 225.2 s over two rounds; 118.4 s and
   107.8 s of CPU.
 * cap 6: 188.9 s, 161.6 s, 188.7 s over three rounds; 129.2 s, 123.9 s, 129.5 s.
-  **28-40% faster per instance for ~12% more CPU.**
+  **28-40% faster per instance for ~12% more CPU**, in that run.
 * cap 8: 171.3 s (one paired round); 150.2 s of CPU. 9% faster than cap 6 for
   16% more CPU - it does NOT clear the >=15% bar that would justify a wider run,
   so the 2..8 clamp and the 0.5 CPU share are untouched.
 
-Swap and free memory are NOT the discriminator here and are reported honestly as
-such: across those waves ``swap_used`` moved -2,173, -36 and +480 MB on the raised
-arm and -331 and +57 MB on the current one, while the ~13 sibling suites move the
-same counter by ~500 MB on their own. No wave collapsed free memory (the lowest
-reading, 17 MB, was recovered within the next wave), and no raised-arm wave grew
-swap on more than one of three rounds - so the raised arm is bounded, not
-proven harmless, and the per-instance wall time is what carries the decision.
+**The DIRECTION is what reproduces; the MAGNITUDE is host-dependent, and the
+smaller figure is the one to plan with.** An independent A/B (review round 1,
+2026-09-14) ran fresh interleaved waves on a host carrying 24-36 sibling pytest
+processes. It reproduced the ordering - cap 6 was never worse than cap 3, pooled
+per-instance medians 139.3 s against 165.9 s - but at **15-16%, not 28-40%**, and
+against a different baseline (its cap-3 arm measured 157-182 s where the waves
+above measured 225-313 s). Absolute wall times taken minutes apart on a box with
+a live fleet of unknown depth are not comparable, which is exactly why the
+28-40% range was not reproducible and is gone from the docs. What both runs
+agree on, and all that is claimed here: 6 beats 3 on this host, and the CPU the
+raised arm spends is real - ~11% more in the waves above, ~33% more in the
+independent one. The mechanism is the reason to believe it at all: the suite is
+wait-bound, so extra workers hide latency until the machine stops absorbing
+them.
 
-The two constants that produce 6 at this host's chronic 5,000-5,500 MB available
-are ``_MB_PER_WORKER`` (600 -> 400 MB) and the reserve (3,072 -> 2,048 MB); see
-their own comments for why each moved and what margin is retained.
+**What ships is a 3 -> 4 raise on this host, not a 3 -> 6 one.** The titration
+above shows the OLD resolution was too tight and that more workers pay on this
+wait-bound suite; it does not measure 4. An earlier revision bought the count 6
+by halving ``_MB_PER_WORKER``, which the per-worker RSS measurement then
+refused - the charge would have sat BELOW the peak tree it has to cover - so the
+whole raise comes from the reserve cap instead and lands one worker higher than
+before. Stated plainly because the smaller step is the honest one: the
+measurement supports 6 workers being faster than 3, and it supports the reserve
+cap having been the binding term; it does not support a 400 MB charge, so the
+charge did not move.
+
+Swap and free memory are NOT the discriminator, and are no longer quoted as one.
+``vm.swapusage``'s counter moves GIGABYTES in either direction on its own under
+this fleet - the same file calls that counter unusable as a pressure signal
+below, and a paragraph quoting ``+480`` / ``-2,173`` MB deltas next to it cannot
+stand. So the deltas are dropped, and what is claimed is only what the arms
+actually showed: no wave collapsed free memory (the lowest reading, 17 MB,
+recovered within the next wave), and in the independent run the raised arm's
+free-memory minima were not lower than the current arm's (4,499 / 4,595 MB at cap
+6 against 4,518 / 4,160 MB at cap 3). CPU time and the free-memory minima carry
+the decision; the raised arm is bounded, not proven harmless.
+
+At this host's chronic 4,500-5,500 MB of available memory the resolution is
+therefore **4** (5,313 MB buys ``min(2,656, 3,265) // 600``), up from the 3 the
+released reserve cap produced. Only the reserve CAP moved (3,072 -> 2,048 MB;
+the 1/8 fraction is unchanged, so every small-host floor is exactly what it was);
+``_MB_PER_WORKER`` stays at 600 because the measurement says it must. See their
+own comments, and `_MB_PER_WORKER`'s for what bounds the ~1,090 MB outlier.
 
 WHAT THIS DOES NOT AFFECT
 -------------------------
@@ -170,7 +204,7 @@ WHAT THIS DOES NOT AFFECT
   parallelism on every provider nobody remembered to add.
 
 * **A memory reserve is held back** on top of the fraction, scaled per host
-  (``min(2048, total // 18)`` MB). It exists because the fraction claims a share
+  (``min(2048, total // 8)`` MB). It exists because the fraction claims a share
   of what REMAINS, so sibling suites converge toward zero free memory rather
   than toward a floor. Note its real reach before tuning it: because the shape
   is ``min(share, available - reserve)``, it binds only below twice itself (~4 GB
@@ -247,6 +281,17 @@ def _under_real_store(candidate: object) -> bool:
     return resolved == _REAL_STORE or _REAL_STORE in resolved.parents
 
 
+#: Marker attribute set on every wrapper :func:`_guarded` installs. It is what
+#: makes ``_install_real_store_guard`` idempotent: this module is executed twice
+#: in one process (pytest loads the root conftest as a plugin, and
+#: ``tests/unit/test_xdist_worker_budget.py`` imports a private copy to reach the
+#: hook), and an unconditional install wrapped the PREVIOUS wrapper, so every
+#: later ``os.remove``/``unlink``/``rmtree`` in that worker ran N stacked
+#: ``Path.resolve()`` checks - N reaching ~28 before this marker existed, on a
+#: suite whose subject is wall time.
+_GUARD_MARKER = "_local_operator_real_store_guard"
+
+
 def _guarded(original, *, positions: tuple[int, ...]):
     """Wrap ``original`` so the arguments at ``positions`` are checked first."""
 
@@ -261,6 +306,7 @@ def _guarded(original, *, positions: tuple[int, ...]):
                 )
         return original(*args, **kwargs)
 
+    setattr(wrapper, _GUARD_MARKER, True)
     return wrapper
 
 
@@ -280,6 +326,14 @@ def _install_real_store_guard() -> None:
             _REAL_STORE_ENTRIES = frozenset(entry.name for entry in entries)
     except OSError:
         _REAL_STORE_ENTRIES = None
+    if getattr(shutil.rmtree, _GUARD_MARKER, False):
+        # The wrappers are already in place, installed by an earlier execution of
+        # this module in this process. Installing again would only add a layer:
+        # ``_guarded`` closes over _REAL_STORE and the real store cannot have
+        # moved within the process, so the layer already there is the whole
+        # guard. This early return is why the ~28 module loads the worker-budget
+        # tests perform cost 28 snapshot reads and zero extra wrapper layers.
+        return
     # Both the source (a session directory being moved away) and the target
     # (something being moved onto it) are checked for the two-argument forms.
     shutil.rmtree = _guarded(shutil.rmtree, positions=(0,))
@@ -378,29 +432,57 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 #: Divisor for the memory budget. This is a deliberately CONSERVATIVE ENVELOPE,
 #: not the measured per-worker RSS - do not "correct" it to the measured figure.
 #: Cleanly measured xdist workers (matched by their execnet command line, on a
-#: subset that spawns no subprocesses of its own) sit at 226-262 MB; 400 is a
-#: 1.5-1.8x margin over that, and the margin is retained on purpose: a worker's
-#: RSS depends on which tests it draws (the worst observed single worker was
-#: ~1,090 MB, which no budget shape here covers anyway - the value of this
-#: constant is that it bounds the COMMON case, not the tail), some suites fork
-#: their own children that the budget still has to cover (the eval-tool tests
-#: spawn kernel subprocesses), and the controller's own footprint is charged to
-#: no worker. The asymmetry still justifies the margin: under-provisioning costs
-#: wall time, over-provisioning costs the whole machine a swap storm.
+#: subset that spawns no subprocesses of its own) sit at 226-262 MB, and a
+#: worker's RSS depends on which tests it draws, so the constant has to cover a
+#: draw, not an average. Measured 2026-09-14 (review round 1) on the suite's
+#: known heavy corner - ``tests/unit/tools/test_eval_tool.py`` (real kernel
+#: subprocesses), ``tests/unit/evaluation/adapters/osworld`` (builds the shipped
+#: adapter wheel once, then a real copied interpreter per spawn),
+#: ``runner/test_episode_subprocess.py``, ``adapters/test_supervisor.py`` and the
+#: boot-bound ``tests/unit/tui/test_slash_echo.py``, 685 tests at ``-n 6``, 120 s,
+#: sampling every worker's whole process tree with ``ps`` every 1.5 s:
 #:
-#: WHY IT MOVED FROM 600 (2026-09-14): 600 against a measured 226-262 MB was a
-#: 2.5x margin, and on a host that has been sitting at 4,500-5,500 MB of
-#: *available* memory for hours it is the term that decides everything - the
-#: budget is ``min(0.5 * available, available - reserve)``, so an inflated charge
-#: per worker turns ~5 GB of free memory into 3 workers on 14 cores that are
-#: 0-2.5% busy. The titration in the module docstring is what justifies the new
-#: number: cap 6 beat cap 3 by 28-40% wall time per instance for ~12% more CPU at
-#: this host's chronic availability, and 400 MB/worker is what lets 6 workers fit
-#: in ~2.5 GB of budget. The measured fleet aggregate for 18 workers across three
-#: concurrent instances peaked at 2,462 MB INCLUDING controllers, children and
-#: the app processes the suite spawns - i.e. the envelope is still ~1.6x above
-#: what was actually observed at that width.
-_MB_PER_WORKER = 400
+#:   * peak per-worker process tree: **441.5 MB** (269.9 MB of it the worker
+#:     itself, 171.6 MB its descendants); the next two peaked at 405.3 and
+#:     360.7 MB. Peak per-worker RSS alone was 302.5 MB.
+#:   * peak aggregate across all 6 workers: **1,647.3 MB**, including the
+#:     children and app processes the suite spawns.
+#:   * a narrower run of the same spawn-heavy files without the TUI slice peaked
+#:     at 284 MB per worker and 1,240 MB aggregate, so the TUI slice is what
+#:     moves the per-worker peak.
+#:
+#: 600 is therefore **1.36x over the measured peak tree** (600 / 441.5), which is
+#: the margin to reason about - NOT the 2.5x a "226-262 MB clean worker" figure
+#: suggests, because that figure excludes exactly the draws this constant has to
+#: survive.
+#:
+#: WHY IT IS 600 AND NOT 400 (review round 1). An earlier revision of this change
+#: lowered it to 400 on evidence that measured a 137 MB/worker average from ONE
+#: boot-bound 71-test file - a slice lighter than the 226-262 MB the envelope was
+#: built on - with the A/B arms pinning the worker count through
+#: ``PYTEST_XDIST_AUTO_NUM_WORKERS``, so neither this constant nor the reserve was
+#: exercised by the measurement at all. 400 is BELOW the peak this constant has
+#: to cover (441.5 MB; two further workers peaked above 400 as well), i.e. it
+#: stops bounding the common case and starts under-charging for it. The raise to
+#: a wider run is now taken from the reserve cap alone (see
+#: `_MEMORY_RESERVE_CAP_MB`), which is the term that was actually binding on this
+#: host, and this constant is left where it was.
+#:
+#: THE ~1,090 MB OUTLIER, and what protects the host when it is drawn. This
+#: constant does not cover it and never did; what bounds the run is the aggregate.
+#: A count of N is only ever produced on a host with **at least 1,200 x N MB of
+#: available memory** - the budget is ``min(0.5*available, available - reserve)``,
+#: so ``budget >= 600N`` forces ``available >= 1,200N`` - which is >= 9,600 MB at
+#: the 2..8 clamp's ceiling of 8 workers. A worker drawing the 1,090 MB case at 8
+#: workers puts ~1,090 + 7 x 250 MB of worker RSS on a host that had >= 9.6 GB
+#: free when it chose 8, and the memory arm is recomputed per run from *current*
+#: pressure, so a shrinking host hands out fewer workers instead of more. What is
+#: NOT claimed is that the charge covers that case.
+#:
+#: The asymmetry is what keeps the envelope where it is: under-provisioning costs
+#: wall time on a wait-bound suite, over-provisioning costs the whole machine a
+#: swap storm.
+_MB_PER_WORKER = 600
 
 #: Fraction of available memory the suite may claim. The rest is left for the
 #: editor, the agent sessions and the OS page cache that are the reason this
@@ -479,32 +561,55 @@ _AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 #: hazard worth importing into every ``pytest`` startup.
 #:
 #: SCALED, not flat: a flat 2 GB would reserve most of a 4 GB CI container.
-#: ``total // 18`` gives 227 MB on a 4 GB runner and 2,048 MB on this 36 GB
-#: laptop, where the 2048 cap then binds. Traced on the runners that matter, all
-#: unchanged: 2 vCPU/4 GB -> 2, 2 vCPU/8 GB -> 2, 4 vCPU/16 GB -> 4,
-#: 8 vCPU/32 GB -> 8. The memory arm and the 2..8 clamp apply on CI (see the
-#: module docstring), so the reserve applies there too - intentionally, because a
-#: runner that runs out of memory fails exactly the way a laptop does, and the
-#: scaling is what makes that safe.
+#: ``total // 8`` gives 512 MB on a 4 GB runner, 1,024 MB on an 8 GB one and
+#: 2,048 MB on this 36 GB laptop, where the 2048 cap then binds. Traced on the
+#: runners that matter, all unchanged: 2 vCPU/4 GB -> 2, 2 vCPU/8 GB -> 2,
+#: 4 vCPU/16 GB -> 4, 8 vCPU/32 GB -> 8. The memory arm and the 2..8 clamp apply
+#: on CI (see the module docstring), so the reserve applies there too -
+#: intentionally, because a runner that runs out of memory fails exactly the way
+#: a laptop does, and the scaling is what makes that safe.
 #:
-#: WHY IT MOVED FROM min(3072, total // 8) (2026-09-14): on this host total // 8
-#: exceeds the cap, so the suite held a flat 3,072 MB per process out of a budget
-#: that is 50% of *available* memory - and with `available` chronically at
+#: WHY THE FRACTION IS 8 AND NOT 18 (review round 1). An earlier revision of this
+#: change cut the fraction to 1/18, which silently cut the anti-swap floor on the
+#: hosts with the least headroom by ~2.25x - 4 GB: 512 -> 227 MB, 8 GB: 1,024 ->
+#: 455 MB, 16 GB: 2,048 -> 910 MB - while ``min(2048, ...)`` held this laptop's own
+#: floor at 2,048 MB. Two constants moving in the same direction compounded on
+#: exactly the hosts that cannot absorb it, and no traced host showed it, because
+#: the four documented CI shapes above are CPU-bound and the reserve's net effect
+#: on them is ZERO by construction: their worker count is set by the CPU arm
+#: either way, so the trace cannot see a reserve change at all. 1/8 restores every
+#: small-host floor to exactly what it was, and this host still resolves 2,048 MB,
+#: so the titration below is untouched. What actually changed versus the released
+#: file is the CAP only (3,072 -> 2,048 MB), which binds wherever ``total // 8``
+#: exceeds it, i.e. on hosts with more than 16 GB of RAM; the fraction - and
+#: therefore the proportional protection a CI container gets - is the same 1/8 it
+#: always was.
+#:
+#: WHY THE CAP MOVED FROM 3,072 MB (2026-09-14): on this host total // 8 exceeds
+#: the cap either way, so the suite held a flat 3,072 MB per process out of a
+#: budget that is 50% of *available* memory - and with `available` chronically at
 #: 4,500-5,500 MB the reserve was binding on every single run (the crossover is
 #: 2x the reserve = 6,144 MB, and this host lives below it). That is how 5 GB of
 #: free memory became `min(2,570, 2,068)` = 2,068 MB = 3 workers. 2,048 MB still
-#: holds a real floor out of the budget - 18 GB of this host's memory cannot be
-#: claimed by a suite, and a CI container keeps the same proportional protection
-#: it had - while letting the share be the binding term in the regime the fleet
-#: actually runs in. See the titration in the module docstring: with this reserve
-#: plus `_MB_PER_WORKER = 400`, the measured 5,313 MB of available memory
-#: resolves 6 workers, which is the count that measured 28-40% faster.
+#: holds a real floor out of the budget - it is 1/18 of this host's 36 GB, i.e.
+#: about 2 GB, NOT the "18 GB" an earlier revision of this comment claimed (the
+#: 2,048 in ``min(2048, total // 8)`` is a megabyte figure, and 2,048 MB is 1/18
+#: OF 36 GB; reading it as "18 GB" was a 9x overstatement) - while letting the
+#: share be the binding term in the regime the fleet actually runs in.
+#:
+#: THE RESOLUTION IT BUYS, stated so nobody over-claims it: with the cap at 2,048
+#: MB and ``_MB_PER_WORKER`` left at 600, the measured 5,313 MB of available
+#: memory resolves **4** workers (``min(2,656, 3,265) // 600``), where the
+#: released cap of 3,072 gave 3. One worker, from this term alone - the term that
+#: was binding on every run in this regime. Getting to 6 needed the per-worker
+#: charge to drop too, and the per-worker RSS measurement refused that (see
+#: `_MB_PER_WORKER`: 400 would sit below the measured 441.5 MB peak tree).
 #:
 #: SOFTER THAN IT READS on macOS: ``_available_memory_mb`` counts file-backed
 #: page cache, which the kernel would evict under pressure anyway, so this
 #: reserves some memory that was never really at risk.
 _MEMORY_RESERVE_CAP_MB = 2048
-_MEMORY_RESERVE_FRACTION = 18
+_MEMORY_RESERVE_FRACTION = 8
 
 #: Hard bounds. Below 2 the suite stops being parallel at all (and a one-worker
 #: xdist run is strictly worse than ``-n0``); above 8 buys nothing measurable on
@@ -545,13 +650,42 @@ _SIBLING_PROBED = False
 #: `_report_worker_cap`). Cheap enough to be worth having: a CI log or a
 #: transcript being parsed for output wants to opt out, and a one-line rule is
 #: easier to trust than a "comment it out" convention.
+#:
+#: Read as a flag, not as "set at all": ``PYTEST_QUIET_WORKER_CAP=0`` (or
+#: ``false``/``no``/``off``, any case) leaves the line ON, matching the
+#: documented ``=1`` and every other env flag in this tree. The earlier
+#: any-non-empty test made ``=0`` silence it, which is the one value a reader is
+#: most likely to reach for when they want the opposite.
 _QUIET_ENV = "PYTEST_QUIET_WORKER_CAP"
+
+#: Values of an env flag that mean "not set". A flag is ON for any other
+#: non-empty string, so `PYTEST_QUIET_WORKER_CAP=true` still silences.
+_FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+#: Env var that replaces the whole calculation with a typed-in number
+#: (documented in AGENTS.md, honoured unclamped).
+_OVERRIDE_ENV = "PYTEST_XDIST_AUTO_NUM_WORKERS"
+
+
+def _env_flag(name: str) -> bool:
+    """True when ``name`` holds a value that means ON (see `_FALSY_ENV_VALUES`)."""
+    return os.environ.get(name, "").strip().lower() not in (_FALSY_ENV_VALUES | {""})
+
 
 #: An interpreter name as ``ps`` renders it: ``python``, ``python3``,
 #: ``python3.12``, ``python3.12t``. Used to separate a pytest run from a shell
 #: whose command line merely MENTIONS pytest - the distinction matters because a
 #: ``bash -c "... python -m pytest ... | tail"`` wrapper is not a suite, and
 #: treating it as one would make its child look like a nested run.
+#:
+#: Case-sensitive on purpose, and that is a known false negative: a macOS
+#: framework/Xcode interpreter renders its ``comm`` as ``Python3.12``, so a
+#: controller running from one of those is invisible to the probe and the fleet
+#: count is low by that many suites. Left as-is because the field is reporting
+#: only - a low count never changes a worker cap, and widening the pattern to
+#: ``re.IGNORECASE`` would also start matching shell aliases and wrapper names
+#: that merely capitalise the word.
 _PYTHON_EXECUTABLE = re.compile(r"python[0-9.]*[a-z]?")
 
 #: ``env`` flags that consume the following token. Needed because the documented
@@ -631,6 +765,14 @@ def _count_live_sibling_suites() -> int | None:
 
     One read-only ``ps``, one pass over its output, no lock, no file, no shared
     state: a probe that cannot block and cannot wedge another session.
+
+    COST, because it runs before any test in every suite: one ``ps -A -w -w``
+    over a full process table, measured 64-430 ms here (median 90 ms across 15
+    runs, 973 processes on the box at load ~140) and 0.42-1.36 s during review
+    round 1's heavier stretch. So the figure to plan with is a few hundred ms on
+    a loaded machine, NOT the sub-100 ms an idle host suggests - and it is why
+    the answer is cached per process rather than recomputed, and why the probe
+    failure path degrades to ``unknown`` instead of retrying.
 
     A process counts when ALL of these hold:
 
@@ -751,20 +893,46 @@ def _report_worker_cap(
     Wrapped so that a broken stream cannot decide a worker count: the caller has
     already computed `workers`, and this function is only allowed to describe it.
     """
-    if os.environ.get(_QUIET_ENV):
+    memory = "unmeasurable" if memory_arm is None else str(memory_arm)
+    available = "unknown" if available_mb is None else f"{available_mb:,} MB"
+    reserve = "not applied" if reserve_mb is None else f"{reserve_mb:,} MB"
+    siblings = "unknown" if sibling_count is None else str(sibling_count)
+    ci = ", CI" if on_ci else ""
+    _emit_worker_cap_line(
+        f"pytest worker cap: {workers} "
+        f"(bound by {bound}, cpu arm {cpu_arm}, memory arm {memory}, "
+        f"available {available}, reserve {reserve}, siblings {siblings}{ci})"
+    )
+
+
+def _report_worker_override(workers: int) -> None:
+    """Report a cap chosen by the operator via ``PYTEST_XDIST_AUTO_NUM_WORKERS``.
+
+    WHY this exists separately: the override returns before the calculation, so
+    it used to print NOTHING - and the run it printed nothing on is the one where
+    the number is hardest to explain, because the hook did not choose it. A
+    silent 12-worker run is also indistinguishable from a ``-n0``/explicit-``-n``
+    run, where the silence is honest (the hook genuinely never ran and has
+    nothing to say). Naming the override as the binding term is the whole line:
+    the arms, the reserve and the fleet have no say in this number, so reporting
+    them here would misrepresent it.
+    """
+    _emit_worker_cap_line(f"pytest worker cap: {workers} (bound by {_OVERRIDE_ENV}, unclamped)")
+
+
+def _emit_worker_cap_line(line: str) -> None:
+    """Write `line` to stderr unless silenced. A broken stream changes nothing.
+
+    The only place either report reaches the terminal, so the quiet flag and the
+    never-raise guarantee are stated once and cannot drift apart between the two
+    callers. The count is already computed by the time this runs; a diagnostic
+    that raised here would be caught by the hook's outer ``except`` and turn a
+    good resolution into ``_FALLBACK_WORKERS``.
+    """
+    if _env_flag(_QUIET_ENV):
         return
     try:
-        memory = "unmeasurable" if memory_arm is None else str(memory_arm)
-        available = "unknown" if available_mb is None else f"{available_mb:,} MB"
-        reserve = "not applied" if reserve_mb is None else f"{reserve_mb:,} MB"
-        siblings = "unknown" if sibling_count is None else str(sibling_count)
-        ci = ", CI" if on_ci else ""
-        print(
-            f"pytest worker cap: {workers} "
-            f"(bound by {bound}, cpu arm {cpu_arm}, memory arm {memory}, "
-            f"available {available}, reserve {reserve}, siblings {siblings}{ci})",
-            file=sys.stderr,
-        )
+        print(line, file=sys.stderr)
     except Exception:  # a diagnostic must never decide anything
         return
 
@@ -887,19 +1055,27 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
     threw would be a far worse failure than a suboptimal worker count.
     """
     try:
-        override = os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+        override = os.environ.get(_OVERRIDE_ENV)
         if override:
             try:
                 # An explicit operator override is honoured UNCLAMPED. Someone who
                 # types a number has a reason (a dedicated machine, or bisecting a
                 # parallelism-sensitive failure at 1); second-guessing it would
                 # make the escape hatch useless.
-                return int(override)
+                workers = int(override)
             except ValueError:
                 warnings.warn(
-                    f"PYTEST_XDIST_AUTO_NUM_WORKERS is not a number: {override!r}. Ignoring it.",
+                    f"{_OVERRIDE_ENV} is not a number: {override!r}. Ignoring it.",
                     stacklevel=2,
                 )
+            else:
+                # Reported, not silent: this is the one path where the count is
+                # NOT this hook's decision, so a run that prints nothing is
+                # indistinguishable from a `-n0`/explicit-`-n` run (where the
+                # hook never ran at all) and the reader has no way to tell that a
+                # 12-worker run on a 4-worker machine was typed in by hand.
+                _report_worker_override(workers)
+                return workers
 
         cpus = os.cpu_count() or 1
         # `CI` is set by GitHub Actions and essentially every other provider,

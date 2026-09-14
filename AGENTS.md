@@ -26,35 +26,49 @@ on `tests/unit/server` measured `-n 4` at 5.3-5.9s against `-n 14` at
 7.8-11.3s, because the suite waits on the event loop rather than on CPU. The
 cap is the smaller of a CPU share and a memory budget, so a machine already
 under pressure from sibling worktrees backs off on its own. The budget divides
-by 400 MB per worker, which is a deliberate 1.5-1.8x safety envelope rather than
-the measured figure: cleanly measured workers sit at 226-262 MB, but a worker's
-RSS depends on which tests it draws (worst observed ~1,090 MB) and some tests
-fork their own subprocesses the budget must still cover. Measured on this host on
-2026-09-14, a 3-instance wave of `tests/unit/tui/test_slash_echo.py` peaked at
-2,462 MB of aggregate tree RSS **for 18 workers** including controllers and the
-app processes the suite spawns, i.e. ~137 MB per worker, so the envelope still
-sits well above what the fleet actually uses.
+by **600 MB per worker** — a deliberately conservative envelope, not the measured
+per-worker RSS: cleanly measured workers sit at 226-262 MB, but a worker's RSS
+depends on which tests it draws, and the suite's known heavy corner
+(`tests/unit/tools/test_eval_tool.py`, which spawns real kernel subprocesses,
+`tests/unit/evaluation/adapters/osworld`, which builds the shipped adapter wheel
+and a real copied interpreter, and the boot-bound
+`tests/unit/tui/test_slash_echo.py`) measured a peak worker **process tree** of
+**441.5 MB** at `-n 6` on 2026-09-14 with a peak aggregate of 1,647.3 MB across
+the six — so the charge is 1.36x over the draw it has to cover. The worst single
+worker ever observed is ~1,090 MB and is NOT covered by the charge; what bounds
+that case is the aggregate, because a count of N is only ever produced on a host
+with at least 1,200 x N MB of available memory (the budget is the smaller of
+half of available and available minus the reserve).
 
 **The cap was titrated on 2026-09-13/14 — it had been too tight, not too loose.**
 Before this, at this host's chronic 4,500-5,500 MB of *available* memory, the
 reserve below was binding on every run and resolved **3 workers on 14 cores**
 that were 0-2.5% busy. Interleaved A/B waves of 3 concurrent instances of the
-same boot-bound slice, at real fleet depth (11-13 sibling suites live), median
+same boot-bound slice, at real fleet depth (11-13 sibling suites live),
 per-instance wall time: **cap 3 → 313.3 s / 225.2 s; cap 6 → 188.9 s / 161.6 s /
-188.7 s; cap 8 → 171.3 s**. So 6 is 28-40% faster than 3 for ~12% more CPU, and
-8 is only 9% better than 6 for 16% more CPU — which is why the reserved floor
-moved (`min(3072, total / 8)` → `min(2048, total / 18)`) and the per-worker
-charge halved (600 → 400 MB), and why `_CPU_SHARE` and the 2..8 clamp did not
-move. The four documented CI runner shapes resolve exactly as they did before.
+188.7 s; cap 8 → 171.3 s** — 6 beat 3 in that run, and 8 beat 6 by only 9%. An
+independent A/B (review round 1) reproduced the ordering but not the magnitude
+(15-16%, with a different baseline), so quote the direction and never a
+percentage. What ships is the reserve CAP moving (`min(3072, total / 8)` →
+`min(2048, total / 8)` — the 1/8 fraction, and so every small-host floor and the
+proportional protection a CI container gets, is unchanged), which takes this host
+to **4** at chronic availability, one worker above the released 3. The
+**per-worker charge did NOT move**: an earlier revision halved it to 400 MB, and
+the 441.5 MB peak tree above refused it. `_CPU_SHARE` and the 2..8 clamp did not
+move, and the four documented CI runner shapes resolve exactly as they did
+before.
 
 **The hook says why it chose N, and does not divide by the fleet.** One stderr
 line at startup names every term that produced the count:
 
 ```
-pytest worker cap: 6 (bound by memory, cpu arm 7, memory arm 6, available 4,848 MB, reserve 2,048 MB, siblings 11)
+pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4, available 5,313 MB, reserve 2,048 MB, siblings 11)
 ```
 
-Silence it with `PYTEST_QUIET_WORKER_CAP=1`. It never writes to stdout, which
+Silence it with `PYTEST_QUIET_WORKER_CAP=1` (`=0`/`false`/`no`/`off` leave it on).
+An operator override (`PYTEST_XDIST_AUTO_NUM_WORKERS`) gets its own one-line
+report naming the override as the term that bound, because that is the path where
+the count is least explicable otherwise. Neither line ever writes to stdout, which
 `-q` output is parsed from. The `siblings` field is a read-only count of the
 other live pytest suites (one `ps`, no lock file) and it is REPORTED ONLY:
 dividing both arms by it was implemented and measured on 2026-09-13 and rejected
@@ -101,7 +115,7 @@ halve parallelism on every provider nobody remembered to add, which is the
 regression above. If you are adding a new non-interactive variable to
 `NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
 
-**A memory reserve is also held back**, scaled per host (`min(2048, total / 18)`
+**A memory reserve is also held back**, scaled per host (`min(2048, total / 8)`
 MB), because the budget otherwise claims a fraction of what *remains* and
 sibling suites converge toward zero free memory instead of toward a floor. Know
 its actual reach before tuning it: the shape is `min(share, available -
@@ -109,10 +123,11 @@ reserve)`, so it binds only below **twice** itself (~4 GB free on a 36 GB box)
 and is invisible above that — and this host spends hours at a time BELOW that
 boundary, so here the reserve is the ordinary binding term rather than a rarely
 armed safety net. That is exactly how 5 GB of free memory used to buy 3 workers,
-and why the titration above lowered it. It is a floor under one suite's
-appetite, not a cap on the fleet: a cross-process budget would be a truer lever
-for the fleet total, and is deliberately not built (see
-`harness/group_reaper.py` on wedged `flock` holders propagating a freeze
+and why the titration above lowered the reserve's cap (only its cap: the 1/8
+fraction is unchanged, so the floors on small hosts are exactly what they were).
+It is a floor under one suite's appetite, not a cap on the fleet: a cross-process
+budget would be a truer lever for the fleet total, and is deliberately not built
+(see `harness/group_reaper.py` on wedged `flock` holders propagating a freeze
 between sessions). A fleet divisor was also measured and rejected — see
 `conftest.py`'s module docstring before proposing one.
 

@@ -358,23 +358,36 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # chronic 4,500-5,500 MB of available memory the reserved floor was binding on
 # every run and resolved 3 workers on 14 cores that sat 0-2.5% busy. Interleaved
 # A/B waves of 3 concurrent instances of tests/unit/tui/test_slash_echo.py (a
-# boot-bound slice) at real fleet depth measured median per-instance wall time
-# 313.3 / 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s
-# at cap 8: 6 is 28-40% faster than 3 for ~12% more CPU, 8 is 9% better than 6
-# for 16% more. Hence the reserve (`min(3072, total/8)` -> `min(2048, total/18)`)
-# and the per-worker charge (600 -> 400 MB) moved, while the CPU share and the
-# 2..8 clamp did not, and the four documented CI runner shapes resolve exactly
-# as before. conftest.py carries the full table.
+# boot-bound slice) at real fleet depth measured per-instance wall time 313.3 /
+# 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s at cap 8:
+# 6 beat 3 in that run and 8 beat 6 by 9%. An independent A/B (review round 1,
+# 2026-09-14) reproduced the ORDERING but not the magnitude - 15-16% against a
+# different baseline - so the direction is what this file claims and no
+# percentage range is quoted anywhere.
+#
+# Hence the reserve CAP moved (`min(3072, total/8)` -> `min(2048, total/8)`; the
+# 1/8 fraction is unchanged, so every small-host floor is exactly what it was)
+# while the CPU share and the 2..8 clamp did not, and the four documented CI
+# runner shapes resolve exactly as before. The per-worker CHARGE did NOT move: an
+# earlier revision halved it to 400 MB, which the per-worker RSS measurement then
+# refused - the heavy corner of this suite peaked at a 441.5 MB worker process
+# tree at cap 6, so 400 would have sat below the draw it has to cover. The
+# release therefore raises this host's chronic-resolution count by one worker
+# (3 -> 4), from the reserve cap alone. conftest.py carries the full table and
+# the measurement.
 #
 # The hook prints ONE stderr line naming the terms that produced the count, and
 # the size of the live suite fleet alongside them. That line is what turns "3
-# workers on a 14-core machine" into a diagnosis in one reading; silence it with
-# `PYTEST_QUIET_WORKER_CAP=1`. It never writes to stdout, which `-q` output is
-# parsed from, and the fleet size it reports is NOT used to compute the cap: a
-# divisor over both arms was implemented and measured on 2026-09-13 and rejected
-# (it floors every suite at 2 workers here and cost 45% wall time at identical
-# CPU) - conftest.py's module docstring carries the numbers so it is not
-# re-tried without them. The count itself is unchanged by the reporting; the
+# workers on a 14-core machine" into a diagnosis in one reading; an operator
+# override (`PYTEST_XDIST_AUTO_NUM_WORKERS`) gets its own one-line report naming
+# the override as the term that bound, because that is the path where the count
+# is least explicable otherwise. Silence both with `PYTEST_QUIET_WORKER_CAP=1`
+# (`=0`/`false`/`no`/`off` leave them on). Neither ever writes to stdout, which
+# `-q` output is parsed from, and the fleet size reported is NOT used to compute
+# the cap: a divisor over both arms was implemented and measured on 2026-09-13
+# and rejected (it floors every suite at 2 workers here and cost 45% wall time at
+# identical CPU) - conftest.py's module docstring carries the numbers so it is
+# not re-tried without them. The count itself is unchanged by the reporting; the
 # only behavioural change here is the titrated pair of constants above.
 #
 # `auto` must stay literal here: an explicit `-n N` in addopts would make both

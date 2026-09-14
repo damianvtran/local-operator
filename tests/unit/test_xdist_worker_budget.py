@@ -56,7 +56,9 @@ Three consequences of that for how these tests are written:
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
+import shutil
 import types
 
 import pytest
@@ -119,6 +121,41 @@ def _resolve(
     for name, value in (env or {}).items():
         monkeypatch.setenv(name, value)
     return module.pytest_xdist_auto_num_workers(None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# The loader itself (re-executing the conftest, and the guard it re-installs)
+# ---------------------------------------------------------------------------
+
+
+def test_reloading_the_hook_module_does_not_stack_the_real_store_guard() -> None:
+    """A second load of the root conftest must REUSE the guard, not wrap it again.
+
+    WHY it is here: ``_load_hook_module`` executes the conftest's module level,
+    and that ends in ``_install_real_store_guard()``. Installing unconditionally
+    wrapped whatever was already installed, so the loads this module performs
+    left one wrapper per load stacked on ``os.remove``/``os.unlink``/``rmtree``
+    (measured: nesting depth == number of loads, 14 tests -> 28 loads). Every
+    later removal in the worker that ran them then paid one ``Path.resolve()``
+    per layer, on the suite whose whole subject is wall time - a self-inflicted
+    tax on unrelated tests sharing that worker.
+
+    Falsifiable: reverting the install to unconditional makes the identity
+    assertion below fail on the second load.
+    """
+    module = _load_hook_module()
+    installed = (os.remove, os.unlink, shutil.rmtree)
+    _load_hook_module()
+    _load_hook_module()
+    now = (os.remove, os.unlink, shutil.rmtree)
+    assert now == installed, "a later load must keep the installed guard, not wrap it again"
+    if module._REAL_STORE is not None:
+        # Where there is a real store to protect the invariant is stronger than
+        # identity: the guard is present, and it is exactly one layer deep.
+        assert getattr(os.remove, module._GUARD_MARKER, False), "the guard must be installed"
+        assert not getattr(
+            getattr(os.remove, "__wrapped__", None), module._GUARD_MARKER, False
+        ), "the wrapper must close over the real os.remove, not a previous wrapper"
 
 
 # ---------------------------------------------------------------------------
@@ -228,13 +265,13 @@ def test_reserve_reduces_workers_under_memory_pressure(
 ) -> None:
     """Below twice the reserve, the budget is the reserve arm rather than the share.
 
-    3,500 MB available on a 36 GB host (below the 2,048 MB reserve's 2x
-    boundary): the share alone would allow ``1750 // 400 = 4`` workers; holding
-    the 2,048 MB reserve back allows ``1452 // 400 = 3``. Reverting the reserve
-    returns 4.
+    3,600 MB available on a 36 GB host (below the 2,048 MB reserve's 2x
+    boundary): the share alone would allow ``1800 // 600 = 3`` workers; holding
+    the 2,048 MB reserve back allows ``1552 // 600 = 2``. Reverting the reserve
+    returns 3.
     """
-    workers = _resolve(hook_module, monkeypatch, cpus=14, available_mb=3500)
-    assert workers == 3
+    workers = _resolve(hook_module, monkeypatch, cpus=14, available_mb=3600)
+    assert workers == 2
 
 
 def test_reserve_cannot_drive_the_result_below_min_workers(
@@ -261,15 +298,15 @@ def test_solo_developer_at_generous_memory_is_not_double_charged(
 
     The shape is ``min(share, available - reserve)``. The rejected alternative,
     ``(available - reserve) * share``, applies two politeness terms to the same
-    memory and costs several workers even with no sibling suites at all: at
-    6,000 MB free it returns 4 where today returns 7, and at 4,000 MB it returns
-    2 where today returns 4. Both assertions below fail under that shape.
+    memory and costs workers even with no sibling suites at all: at 6,000 MB free
+    it returns 3 where today returns 5, and at 4,000 MB it returns 2 where today
+    returns 3. Both assertions below fail under that shape.
 
     64 cores deliberately: on 14 the CPU arm (7) or the 8-worker clamp would
     flatten the two shapes onto the same number and the test would stop testing.
     """
-    assert _resolve(hook_module, monkeypatch, cpus=64, available_mb=6000) == 7
-    assert _resolve(hook_module, monkeypatch, cpus=64, available_mb=4000) == 4
+    assert _resolve(hook_module, monkeypatch, cpus=64, available_mb=6000) == 5
+    assert _resolve(hook_module, monkeypatch, cpus=64, available_mb=4000) == 3
 
 
 def test_reserve_is_invisible_above_twice_itself(
@@ -292,11 +329,21 @@ def test_reserve_is_invisible_above_twice_itself(
     ), "above twice the reserve the term must be invisible"
 
     # And it genuinely binds below the boundary, or the test above would pass
-    # for the trivial reason that the reserve does nothing anywhere.
-    below = 2 * reserve - 1200
-    assert _resolve(hook_module, monkeypatch, cpus=64, available_mb=below) < _resolve(
-        hook_module, monkeypatch, cpus=64, available_mb=below, total_mb=None
-    ), "below twice the reserve the term must bind"
+    # for the trivial reason that the reserve does nothing anywhere. SEARCHED
+    # rather than pinned at a constant availability: whether the reserve changes
+    # the COUNT depends on where a ``_MB_PER_WORKER`` charge boundary happens to
+    # fall between the two budgets, so a hard-coded availability would silently
+    # start asserting nothing the moment that charge moved (as it did in review
+    # round 1, when the reserve stopped being visible at 3,500 MB and became
+    # visible at 3,600 MB instead).
+    binding = [
+        a
+        for a in range(2 * reserve - 1, reserve, -1)
+        if _resolve(hook_module, monkeypatch, cpus=64, available_mb=a)
+        < _resolve(hook_module, monkeypatch, cpus=64, available_mb=a, total_mb=None)
+    ]
+    assert binding, f"below twice the reserve ({2 * reserve} MB) the term must bind somewhere"
+    assert max(binding) < 2 * reserve
 
 
 def test_reserve_scales_down_on_a_small_runner(
@@ -304,7 +351,7 @@ def test_reserve_scales_down_on_a_small_runner(
 ) -> None:
     """A flat 2 GB reserve would take most of a 4 GB CI container.
 
-    ``total // 18`` is 227 MB there, so a 2-vCPU/4 GB runner is unaffected. With
+    ``total // 8`` is 512 MB there, so a 2-vCPU/4 GB runner is unaffected. With
     a flat 2,048 MB reserve the budget would go to 0 and the runner would be
     pinned at the floor for no reason.
     """
@@ -313,16 +360,38 @@ def test_reserve_scales_down_on_a_small_runner(
     )
     assert small == 2
     # The clearest case for scaling: 3,600 MB free on a 4 GB runner. The scaled
-    # 227 MB reserve leaves the share arm binding at 4 workers. A flat 2,048 MB
-    # reserve would leave 1,552 MB and 3 workers, i.e. it would cost a worker on
-    # the smallest runner in the fleet for no benefit there. Reverting the
-    # scaling returns 3.
+    # 512 MB reserve leaves the share arm binding at 3 workers (1800 // 600). A
+    # flat 2,048 MB reserve would leave 1,552 MB and 2 workers, i.e. it would
+    # cost a worker on the smallest runner in the fleet for no benefit there.
+    # Reverting the scaling returns 2.
     assert (
         _resolve(
             hook_module, monkeypatch, cpus=8, available_mb=3600, total_mb=4096, env={"CI": "1"}
         )
-        == 4
+        == 3
     )
+
+
+def test_the_reserve_fraction_keeps_the_small_host_floor(
+    hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fraction is 1/8. 1/18 cuts the floor on the hosts that need it most.
+
+    WHY this is separate from the scaling test above: on a 4 GB host the two
+    fractions differ by 285 MB, which is under one 600 MB charge, so NO
+    assertion on a 4 GB host can tell them apart. The difference only becomes
+    visible where the reserve is large and the host is not - a 16 GB box:
+    1/8 holds 2,048 MB, 1/18 only 910 MB.
+
+    At 3,500 MB free on 4 cores (CPU arm 4) that is 2 workers against 4. The
+    smaller reserve buys two workers by promising the machine 1,138 MB less
+    breathing room, which is the trade this change was NOT supposed to make: the
+    reserve's job is the anti-swap floor underneath the per-worker charge, and
+    1/18 would have cut it on exactly the hosts with the least headroom while
+    leaving this laptop's own 2,048 MB cap intact.
+    """
+    assert _resolve(hook_module, monkeypatch, cpus=8, available_mb=3500, total_mb=16384) == 2
+    assert hook_module._MEMORY_RESERVE_FRACTION == 8
 
 
 def test_unmeasurable_total_memory_degrades_to_the_old_budget(
@@ -333,7 +402,7 @@ def test_unmeasurable_total_memory_degrades_to_the_old_budget(
     Degrading to the pre-existing share-only budget is deliberate: a guessed
     reserve on an unknown host could pin an unrelated machine to the floor.
     """
-    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=6000, total_mb=None) == 7
+    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=6000, total_mb=None) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +427,36 @@ def test_explicit_override_wins_unclamped(
         env={"PYTEST_XDIST_AUTO_NUM_WORKERS": "12"},
     )
     assert workers == 12, "the override must beat both the clamp and the memory floor"
+
+
+def test_the_override_is_reported_as_what_bound_the_count(
+    hook_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The override path reports too: this hook DID choose, it just was not free to.
+
+    ``-n0`` and an explicit ``-n`` are silent honestly - the hook never runs and
+    has nothing to say. This path is the opposite: it ran, honoured the
+    operator's number and returned before the calculation, so a silent run is
+    indistinguishable from a serialised one and the count is the one a reader is
+    least able to explain (12 workers on a machine that resolves 4). The line
+    names the override as the term that bound - and only that term, because the
+    arms, the reserve and the fleet had no say in this number and printing them
+    would imply they did.
+    """
+    workers = _resolve(
+        hook_module,
+        monkeypatch,
+        cpus=14,
+        available_mb=1000,
+        env={"PYTEST_XDIST_AUTO_NUM_WORKERS": "12"},
+    )
+    err = capsys.readouterr().err
+    assert workers == 12
+    assert err.count("pytest worker cap:") == 1, "one line per run, on every path that chooses"
+    assert "pytest worker cap: 12 (bound by PYTEST_XDIST_AUTO_NUM_WORKERS, unclamped)" in err
+    assert "cpu arm" not in err, "the arms did not decide this count and must not be implied"
 
 
 def test_hook_never_raises_when_a_probe_throws(
@@ -415,7 +514,7 @@ def test_total_memory_probe_reads_this_host(hook_module: types.ModuleType) -> No
 #      implemented and measured on 2026-09-13 (conftest.py's module docstring
 #      records it): on this host it resolves every suite to the 2-worker floor,
 #      where it cost **45% more wall time for the same work** than the 3 workers
-#      the current constants give - 3 concurrent instances of
+#      the constants gave at the time (4 now) - 3 concurrent instances of
 #      tests/unit/tui/test_slash_echo.py at real fleet depth measured 338.4 /
 #      314.5 / 308.1 s at 2 workers against 219.8 / 216.3 / 209.8 s at 3, with
 #      sum CPU 105.7 s vs 103.1 s. If a future change starts using this count to
@@ -424,11 +523,14 @@ def test_total_memory_probe_reads_this_host(hook_module: types.ModuleType) -> No
 
 #: The memory level the report's assertions are anchored on: 5,000 MB free on a
 #: 36 GB host, i.e. this machine's measured *chronic* availability during the
-#: 2026-09-13/14 titration (waves saw 4,522-5,555 MB). With the titrated
-#: constants - ``min(2,500, 5,000 - 2,048)`` = 2,500 MB of budget, over 400 MB
-#: per worker - that resolves 6 workers against a 7-worker CPU arm, so the
-#: memory arm is the one that decides. That is the number the A/B measured as
-#: 28-40% faster than the 3 this host used to resolve.
+#: 2026-09-13/14 titration (waves saw 4,522-5,555 MB). With the shipped
+#: constants - ``min(2,500, 5,000 - 2,048)`` = 2,500 MB of budget, over 600 MB
+#: per worker - that resolves 4 workers against a 7-worker CPU arm, so the memory
+#: arm is the one that decides. The raise over the released constants is one
+#: worker (3 -> 4), from the reserve cap alone; the A/B behind it measured cap 6
+#: against cap 3 (15-16% on the independent A/B, 28-40% in the first one), so
+#: quote the DIRECTION and never the range - see ``conftest.py``'s module
+#: docstring for why the count is 4 and not the 6 the earlier revision bought.
 _CHRONIC_PRESSURE_MB = 5000
 #: Below the reserve, where ``_MIN_WORKERS`` is the term that decides.
 _FLOOR_BINDING_MB = 1000
@@ -449,13 +551,13 @@ def test_the_worker_cap_is_reported_once_with_every_term(
         hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB, siblings=11
     )
     captured = capsys.readouterr()
-    assert workers == 6, "14 cores -> cpu arm 7; min(2,500, 2,952) MB -> 6 workers"
+    assert workers == 4, "14 cores -> cpu arm 7; min(2,500, 2,952) MB // 600 -> 4 workers"
     assert captured.out == "", "the report must never touch stdout: -q output is parsed from it"
     assert captured.err.count("pytest worker cap:") == 1
-    assert "pytest worker cap: 6" in captured.err
+    assert "pytest worker cap: 4" in captured.err
     assert "bound by memory" in captured.err
     assert "cpu arm 7" in captured.err
-    assert "memory arm 6" in captured.err
+    assert "memory arm 4" in captured.err
     assert "available 5,000 MB" in captured.err
     assert "reserve 2,048 MB" in captured.err
     assert "siblings 11" in captured.err
@@ -482,7 +584,7 @@ def test_the_report_names_the_binding_arm(
 
     This is the field that makes the diagnosis instant: "3 workers" is
     unactionable, "bound by memory, cpu arm 7, memory arm 3, available 5,140 MB,
-    reserve 3,072 MB" points at the constants to move. A floor or a clamp can
+    reserve 2,048 MB" points at the constants to move. A floor or a clamp can
     mask both arms, which is why they are named separately rather than inferred.
     """
     _resolve(hook_module, monkeypatch, cpus=cpus, available_mb=available_mb, siblings=0)
@@ -529,7 +631,7 @@ def test_the_fleet_size_is_reported_and_never_divided_by(
         hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB, siblings=11
     )
     crowded_err = capsys.readouterr().err
-    assert solo == crowded == 6, "the fleet size must not move the worker count"
+    assert solo == crowded == 4, "the fleet size must not move the worker count"
     assert "siblings 0" in solo_err
     assert "siblings 11" in crowded_err
 
@@ -544,8 +646,28 @@ def test_the_worker_cap_report_can_be_silenced(
     resolved = _resolve(
         hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB, siblings=3
     )
-    assert resolved == 6
+    assert resolved == 4
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "FALSE", "Off"])
+def test_the_quiet_flag_is_read_as_a_flag_not_as_set_at_all(
+    hook_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    """``PYTEST_QUIET_WORKER_CAP=0`` leaves the line ON.
+
+    The documented contract is that ``=1`` silences. An any-non-empty test made
+    every other value silence it as well, including the one a reader is most
+    likely to reach for when they want the report BACK - so the escape hatch
+    read as broken in exactly the direction that is hardest to notice (the run
+    looks normal, it just says nothing). A flag is read as a flag.
+    """
+    monkeypatch.setenv(hook_module._QUIET_ENV, value)
+    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB) == 4
+    assert "pytest worker cap: 4" in capsys.readouterr().err
 
 
 def test_a_broken_report_cannot_decide_the_worker_count(
@@ -564,7 +686,7 @@ def test_a_broken_report_cannot_decide_the_worker_count(
         raise BrokenPipeError("stderr closed")
 
     monkeypatch.setattr(hook_module, "print", broken_print, raising=False)
-    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB) == 6
+    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +826,7 @@ def test_every_probe_failure_is_reported_as_unknown(
             _resolve(
                 hook_module, monkeypatch, cpus=14, available_mb=_CHRONIC_PRESSURE_MB, siblings=None
             )
-            == 6
+            == 4
         )
         assert "siblings unknown" in capsys.readouterr().err
 
@@ -737,11 +859,20 @@ def test_sibling_probe_reads_this_host(hook_module: types.ModuleType) -> None:
     Unpinned on purpose, like the total-memory probe above: every other test in
     this section patches ``subprocess.run``, so a ``ps`` invocation that fails
     everywhere would leave the report saying "siblings unknown" on every run
-    with the rest of the suite green. ``None`` is legal only because the probe
-    is allowed to fail - an int is what a working host produces.
+    with the rest of the suite green. Falsifiable rather than merely
+    non-crashing: an earlier revision accepted ``None`` here, which is exactly
+    the permanent-probe-failure case this docstring names as the reason the test
+    exists, so it could not fail on the defect it was written for.
+
+    The ``ps`` existence check is the one legitimate skip: on a platform with no
+    ``ps`` the probe is documented to degrade to "unknown", and the parser is
+    covered by the synthetic cases above.
     """
+    if shutil.which("ps") is None:
+        pytest.skip("no ps on this platform; the probe degrades to 'unknown' by design")
     siblings = hook_module._count_live_sibling_suites()
-    assert siblings is None or siblings >= 0
+    assert siblings is not None, "ps is installed but the probe could not read the machine"
+    assert siblings >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -752,40 +883,49 @@ def test_sibling_probe_reads_this_host(hook_module: types.ModuleType) -> None:
 # constants themselves - a constant is an implementation detail, the count a
 # suite gets is the behaviour. The measurement (conftest.py's module docstring
 # carries the full table): 3 concurrent instances of
-# tests/unit/tui/test_slash_echo.py at real fleet depth, median per-instance wall
-# time 313.3/225.2 s at cap 3 against 188.9/161.6/188.7 s at cap 6, for ~12% more
-# CPU; cap 8 was 9% better again, which did not clear the 15% bar. Before the
-# titration this host resolved 3 at its chronic availability; the tests below say
-# it must now resolve 6 there and MUST NOT have overshot elsewhere.
+# tests/unit/tui/test_slash_echo.py at real fleet depth, per-instance wall time
+# 313.3/225.2 s at cap 3 against 188.9/161.6/188.7 s at cap 6, for ~12% more
+# CPU; cap 8 was 9% better again, which did not clear the 15% bar. An independent
+# A/B (review round 1) reproduced the ORDERING but not the magnitude - 15-16%
+# with a different baseline - so what these tests pin is the resolution, and no
+# doc quotes the percentage range. Before the titration this host resolved 3 at
+# its chronic availability; the tests below say it must now resolve 4 there and
+# MUST NOT have overshot elsewhere.
 
 
 @pytest.mark.parametrize("available_mb", [4964, 5140, 5313, 5555])
-def test_the_titrated_constants_resolve_six_at_measured_availability(
+def test_the_released_constants_resolve_four_at_measured_availability(
     hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, available_mb: int
 ) -> None:
-    """At the four availabilities the A/B measured, the memory arm allows 6.
+    """At the four availabilities the A/B measured, the memory arm allows 4.
 
-    ``min(0.5 * a, a - 2048) // 400``: 2,482-2,777 MB of budget, and the CPU arm
-    (7) stays clear of it, so memory is still the binding term and the raise is
-    bought from the reserve and the per-worker charge rather than from the cores.
+    ``min(0.5 * a, a - 2048) // 600``: 2,482-2,777 MB of budget, and the CPU arm
+    (7) stays clear of it, so memory is still the binding term and the raise from
+    the released 3 is bought from the reserve CAP rather than from the cores or
+    from the per-worker charge. 4, NOT the 6 an earlier revision bought by halving
+    that charge: the per-worker RSS measurement (see ``_MB_PER_WORKER`` in
+    ``conftest.py``) put the peak worker tree at 441.5 MB, above 400, so the
+    charge stays at 600 and the count follows it down.
     """
     workers = _resolve(hook_module, monkeypatch, cpus=14, available_mb=available_mb)
-    assert workers == 6, f"at {available_mb} MB available"
+    assert workers == 4, f"at {available_mb} MB available"
 
 
 def test_the_titration_did_not_overshoot_or_undershoot(
     hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The edges: the low end of the observed range falls to 5, the top stays at 7.
+    """The edges: the low end of the observed range falls to 3, the top stays at 7.
 
-    4,522 MB is the lowest `available` any A/B wave measured, and 5 is what that
-    buys - the raise must not be tuned so hard that a *worse* machine is handed
-    more workers than a better one. At the other end, 8,498 MB and 24,000 MB must
-    both resolve the CPU arm's 7 (not 8): the titration moved memory constants
+    4,522 MB is the lowest `available` any A/B wave measured, and 3 is what the
+    shipped constants buy there (``min(2,261, 2,474) // 600``) - the raise must
+    not be tuned so hard that a *worse* machine is handed more workers than a
+    better one, and at this level the reserve still takes the host back to the
+    count the released constants gave. At the other end, 8,498 MB and 24,000 MB
+    must both resolve the CPU arm's 7 (not 8): the change moved a memory constant
     only, and a suite on a machine with memory to spare must not get a wider run
     than the CPU share allows.
     """
-    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=4522) == 5
+    assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=4522) == 3
     assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=8498) == 7
     assert _resolve(hook_module, monkeypatch, cpus=14, available_mb=24000) == 7
 
@@ -810,9 +950,18 @@ def test_the_ci_runner_shapes_are_unchanged_by_the_titration(
     """Every documented CI runner shape resolves exactly what it did before.
 
     These four rows are the trace in `_MEMORY_RESERVE_CAP_MB`'s comment. The
-    reserve's scaling changed (``total // 8`` to ``total // 18``) and the
-    per-worker charge halved, so this is the test that says the change was a
-    hosted-runner no-op - a raise that also widened CI would be paid on every PR.
+    reserve's CAP moved (3,072 -> 2,048 MB; the 1/8 fraction is unchanged) and
+    the per-worker charge did NOT, so this is the test that says the change was a
+    hosted-runner no-op - a reserve cap that also widened CI would be paid on
+    every PR.
+
+    Note what these rows CANNOT show, and why the fraction is pinned elsewhere:
+    all four are CPU-bound, so their worker count is set by the CPU arm under
+    either constant set and the reserve's net effect on them is zero by
+    construction. A fraction cut therefore passes this test untouched, which is
+    how 1/18 reached review in the first place -
+    `test_the_reserve_fraction_keeps_the_small_host_floor` is the assertion that
+    can see it.
     """
     resolved = _resolve(
         hook_module,
