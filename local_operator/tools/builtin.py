@@ -7638,8 +7638,7 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL; a fresh open creates a NEW tab "
-        "— your session then owns it and reuses it) "
+        description="open (start a surface at a URL; a fresh open creates a NEW tab) "
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list all agent-driven tabs, other "
@@ -9172,6 +9171,14 @@ async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> 
     section's fail-safe clause ("an old record behaves exactly as it does
     today"). The probes therefore answer only the question the record cannot:
     which host may a session that has no durable pin open its FIRST surface on.
+    `pinned_host()` draws the same line from the other side — it pins a HANDLE
+    (the surface is held), or a `host` field only while the record still owes a
+    reconciliation, and answers "" for a settled one — because a fresh `open`
+    has no transport to keep stable: the precedence below is
+    availability-based, and a record left over from a closed tab must not
+    override it. Governing that open is the mirror-image defect: a session whose
+    app is down refuses to open at all while the extension that would serve it
+    sits there running.
     """
     pinned = _host_of_surface(state.surface_id) or resource.pinned_host()
     if pinned:
@@ -10649,7 +10656,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         describe_approval=_describe_browser_approval,
         description=(
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
-            "tab, their paired Local Operator browser extension, or a cmux browser "
+            "tab, their paired browser extension, or a cmux browser "
             "panel): open/goto a URL, read page text, snapshot the "
             "accessibility tree for click refs, click, type, scroll, read console "
             "logs, screenshot, close. Cookies and logins persist across calls and "
@@ -10672,8 +10679,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt where the host shows it "
-            "— the extension's popup, or the app's browser tab — "
+            "user (ask tool or message) to approve the prompt in the extension popup "
+            "or the app's browser tab, "
             "and 'await_access' to wait for their decision before navigating again. "
             "Use it for every "
             "screenshot and page interaction; never install or script a browser "

@@ -440,6 +440,159 @@ async def test_a_resumed_legacy_record_keeps_the_bridge_lane_with_the_app_up(
     assert ui_client.calls == []
 
 
+def _disagreeing_context(tmp_path: Path) -> tuple[ToolContext, BrowserResource]:
+    """A resumed session whose record names one host in its field and another
+    in its handle, written through the product's own writer.
+
+    The disagreement is the writer's normal behaviour, not corruption:
+    `remember("ui:…", host="ui")` passes the truthful host while `select_host`
+    keeps an ESTABLISHED lane's host, so a session that has been talking to the
+    daemon records `host: "bridge"` beside a `ui:` handle.
+    """
+    previous = BrowserResource(tmp_path, tmp_path.name)
+    previous.initialize()
+    previous.select_host("bridge")
+    previous.remember("ui:100:capability", host="ui")
+    record = json.loads(previous.path.read_text())
+    assert (record["host"], record["surface_id"]) == ("bridge", "ui:100:capability")
+    return _context(tmp_path)
+
+
+async def _obligation_without_a_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ToolContext, BrowserResource]:
+    """A record left behind by a recovery that could not prove its handle.
+
+    `recover()` moves a handle the host would not confirm into
+    `unresolved_surface_id` and clears `surface_id`, so the surviving evidence
+    of which host holds the tab is the `host` field alone. Driven through the
+    product's own writer — `remember` plus a recovery whose host answers
+    `unresolved` — rather than by writing JSON, so the shape cannot drift from
+    what the product produces.
+    """
+    from local_operator.ui_browser import backend as ui_backend
+
+    class UnresolvedUiClient(FakeUiClient):
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "owner_recover":
+                self.calls.append((method, params))
+                return {"ownership_version": 1, "state": "unresolved", "tab": ""}
+            return await super().call(method, params)
+
+    previous = BrowserResource(tmp_path, tmp_path.name)
+    previous.initialize()
+    previous.remember("ui:100:capability", host="ui")
+
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: UnresolvedUiClient())
+    resumed = BrowserResource(tmp_path, tmp_path.name)
+    resumed.initialize()
+    await resumed.recover()
+
+    record = json.loads(resumed.path.read_text())
+    assert record["host"] == "ui" and record["unresolved_surface_id"]
+    assert not record["surface_id"]
+    return _context(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_handle_decides_when_it_disagrees_with_the_record_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """R6: the field and the handle can name different hosts, and the HANDLE wins.
+
+    Read field-first, the lane went to the daemon for a tab that lives in the
+    app: the daemon answers `unresolved` with no tab, `recover()` moves the
+    handle into `unresolved_surface_id`, and the action then fails "no browser
+    surface open" with the app's live tab stranded — where the pre-fix code,
+    which had no field to read, self-healed on the handle. The app is DOWN here
+    on purpose: the field, the availability order and the probe all point at the
+    daemon, and only the handle points at the tab.
+    """
+    _hosts(monkeypatch, ui=False, bridge=True)
+    context, resource = _disagreeing_context(tmp_path)
+
+    result = await builtin.execute_browser("t", {"action": "read"}, None, None, context)
+
+    assert result.is_error is False, result.text
+    assert resource.host == "ui", "the lane followed the field, not the handle"
+    assert [method for method, _p in ui_client.calls][:1] == ["owner_recover"]
+    assert bridge_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_handle_less_record_that_owes_a_reconciliation_keeps_its_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """R7, direction 1: with no handle, an obligation in flight is what pins.
+
+    This is the shape `recover()` leaves when it cannot prove a handle, and the
+    session still owes `owner_*` an answer about the tab it lost track of. The
+    field is the only thing naming the host holding it, so it must outrank the
+    probes even with the app down — the honest refusal is the point, and a
+    probe-decided lane would move the obligation onto a host that never held
+    the tab.
+    """
+    _hosts(monkeypatch, ui=False, bridge=True)
+    context, resource = await _obligation_without_a_handle(tmp_path, monkeypatch)
+    # Back to the fixture's host for the gate call: the recovery above replaced
+    # the client factory, and the assertion is about the WIRE this session's
+    # lane speaks on, not about a fresh fake's own call list.
+    from local_operator.ui_browser import backend as ui_backend
+
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: ui_client)
+
+    await builtin.execute_browser("t", {"action": "read"}, None, None, context)
+
+    assert resource.host == "ui", "the obligation was moved off its host"
+    assert [method for method, _p in ui_client.calls][:1] == ["owner_recover"]
+    assert bridge_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_handle_less_record_without_an_obligation_lets_availability_decide(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """R7, direction 2: a settled record must not govern the next `open`.
+
+    `close` clears `surface_id` and deliberately leaves `host` behind, so this
+    is what every session that has closed a tab carries. A fresh `open` has no
+    transport to keep stable, and the documented cascade is availability-based:
+    pinning to the field here makes a session whose app is down refuse to open
+    at all while the extension that would serve it sits there running. The
+    rewrite of the record is asserted too — that is what stops the field and the
+    surface going on to contradict each other.
+    """
+    _hosts(monkeypatch, ui=False, bridge=True)
+    previous = BrowserResource(tmp_path, tmp_path.name)
+    previous.initialize()
+    previous.remember("ui:100:capability", host="ui")
+    previous.remember("")  # the close path: handle cleared, host kept
+    assert json.loads(previous.path.read_text())["host"] == "ui"
+    context, resource = _context(tmp_path)
+
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert resource.host == "bridge", "a settled record pinned the fresh open"
+    assert "open" in [method for method, _p in bridge_client.calls]
+    assert ui_client.calls == []
+    # The record follows the surface, so the contradiction R7 names cannot
+    # survive the open that would have created it.
+    record = json.loads(resource.path.read_text())
+    assert record["host"] == "bridge" and record["surface_id"].startswith("bridge:")
+
+
 @pytest.mark.asyncio
 async def test_a_ui_host_serves_the_whole_flow_on_its_own_wire(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
