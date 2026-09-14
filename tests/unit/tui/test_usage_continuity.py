@@ -41,6 +41,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.registry import ModelInfo
 from local_operator.session.session import Session
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import RESTORED_COST_PREFIX, OperatorApp
 from local_operator.tui.events import ContextUsageReported, TurnEnded
@@ -838,6 +839,102 @@ async def test_a_cold_open_paints_the_newer_money_artifact(
         ],
     )
     assert await band_of(unpriceable) == "$—", "an unknown sum is a dash, not a zero"
+
+
+async def _journal_with_record(directory: Path, details: dict[str, Any]) -> None:
+    """One journal: a conversation and the durable spend record beside it.
+
+    The reading carries TOKENS and no price, which is what makes the band's
+    ``$—`` branch reachable for a record that states nothing.
+    """
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(_assistant(output=1_000, context=12_000))
+    await transcript.append_custom(SESSION_SPEND_CUSTOM_TYPE, details)
+
+
+@pytest.mark.asyncio
+async def test_one_journal_spells_the_same_cold_and_in_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, policy 3: one journal, two paths, ONE spelling.
+
+    QA round 2's Q1 (in-process only) and Q3 both came from the same divergence —
+    the cold seed, the store's publish path and the live band each decided a
+    record's visibility for themselves. This asserts the property directly rather
+    than the three symptoms: the same journal opened COLD and with a RUNTIME,
+    byte-identical money spelling, for the three states a record can be in.
+
+    - a turn-end remainder — money with ``calls == 0`` (``adjust_spend``, what the
+      store calls at turn end): both must show ``$0.50``, and the live band must
+      not fall through to the one-receipt floor that used to paint ``≥$2.10``
+      ABOVE the record (Q3);
+    - a store-adopted total — ``micro > 0, priced_calls == 0`` (review R3-1):
+      money we can state, so both show the figure rather than hiding it;
+    - an unpriceable sum — ``micro == 0`` with an unpriced call: both show
+      ``$—``, which is the one state where "cannot state" is the truth (Q1).
+    """
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.spend import SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    async def never_take_over(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the cold open reached for a runtime")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    async def band_of(sid: str, *, warm: bool) -> str:
+        directory = tmp_path / "sessions" / sid
+
+        async def factory() -> Any:
+            if warm:
+                # A runtime session over the SAME journal: the ordinary open path,
+                # which paints through `_restore_reported_usage` and the store.
+                return await _session_over(directory, [])
+            return await AttachedSession.cold(
+                sid, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never_take_over
+            )
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(120, 18)) as pilot:
+            if warm:
+                await _settled(app, pilot)
+            else:
+                for _ in range(200):
+                    await pilot.pause()
+                    if app._session is not None:
+                        break
+                for _ in range(40):
+                    await pilot.pause()
+            assert app._status is not None, sid
+            return app._status._cost
+
+    cases = [
+        # The ladder's own rung for a sub-dollar EXACT figure is 3dp (§8.2), so
+        # the spelling under test is `$0.500` — the point is that both paths use
+        # the SAME one, not that it is the one a first guess expects.
+        ("remainder", SessionSpend(micro=500_000, calls=0, writer="w:1"), "$0.500"),
+        ("adopted", SessionSpend(micro=2_000_000, calls=0, priced_calls=0, writer="w:2"), "$2.00"),
+        (
+            "unpriceable",
+            SessionSpend(micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="w:3"),
+            "$—",
+        ),
+    ]
+    for name, spend, expected in cases:
+        directory = tmp_path / "sessions" / f"same-{name}"
+        directory.mkdir(parents=True, exist_ok=True)
+        await _journal_with_record(directory, spend.to_details())
+        cold = await band_of(f"same-{name}", warm=False)
+        warm = await band_of(f"same-{name}", warm=True)
+        assert cold == expected, f"{name}: cold band {cold!r}"
+        assert warm == expected, f"{name}: in-process band {warm!r}"
 
 
 @pytest.mark.asyncio

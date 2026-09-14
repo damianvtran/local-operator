@@ -153,6 +153,7 @@ from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
     LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
     SearchSpendSnapshot,
     job_cost,
     search_spend_is_floor,
@@ -8850,7 +8851,7 @@ class OperatorApp(App[None]):
                     # ``_spend_text``'s docstring calls the more expensive one.
                     self._spend_text(search_usd, floor=True)
                     if search_usd
-                    else ("$—" if billed_unknown else None)
+                    else (UNKNOWN_COST_CELL if billed_unknown else None)
                 )
             ),
             # A local opener label is DISPLAY state until a generated title is
@@ -9506,13 +9507,28 @@ class OperatorApp(App[None]):
         # direction (design R1).
         restored_spend = getattr(session, "restored_spend", None)
         spend: Any = restored_spend() if callable(restored_spend) else None
-        if spend is not None and spend.calls:
-            self._total_cost = spend.usd
-            self._spend_is_floor = spend.knowledge() in {
+        if spend is not None:
+            # The RECORD is the authority for the money, whatever its counts say
+            # (QA round 2, Q3): a record can hold a turn-end remainder with
+            # ``calls == 0``, and gating on ``calls`` kept that money off the
+            # cell and let the one-receipt fallback below paint a floor ABOVE it.
+            figure = spend.published_usd()
+            self._total_cost = figure
+            self._spend_is_floor = figure is not None and spend.knowledge() in {
                 CostKnowledge.FLOOR,
                 CostKnowledge.PARTIAL,
             }
-            self._status.update(cost=self._spend_text())
+            if figure is None:
+                # Money we cannot state (nothing was priceable): ``$—``, and the
+                # mark is impossible because there is no figure to qualify. This
+                # path never passes through ``_apply_frontend_state``, so its
+                # branch cannot reach the cell from there.
+                billed = bool(
+                    getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0)
+                )
+                self._status.update(cost=UNKNOWN_COST_CELL if billed else None)
+            else:
+                self._status.update(cost=self._spend_text())
             return
         # Priced through the same `_cost_for` every live turn uses, so a
         # restored figure and an accrued one cannot disagree about what the same

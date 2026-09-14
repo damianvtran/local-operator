@@ -3677,8 +3677,14 @@ class FrontendStateStore:
         # the same number instead of replacing it).
         self._seed_legacy_spend(session, last_usage if isinstance(last_usage, Usage) else None)
         spend = self._spend_of(session)
-        if spend.calls:
-            parent_cost = spend.usd
+        if spend is not None and (spend.has_money or spend.unknown_money):
+            # The MONEY decides, not the call counts (QA round 2, Q3), and it is
+            # ``published_usd`` that says whether the record holds a figure we can
+            # state at all: ``None`` reaches the band as ``$—`` instead of the
+            # ``0.0`` this gate used to publish for an unpriceable sum, which the
+            # band's zero policy then dropped (Q1's in-process half). A record
+            # holding a turn-end remainder has ``calls == 0`` and real money.
+            parent_cost = spend.published_usd()
             knowledge = spend.knowledge()
         elif parent_cost is None and last_usage is not None:
             cost = turn_cost(_label(effective), last_usage)
@@ -4013,8 +4019,13 @@ class FrontendStateStore:
         }
         self._seed_legacy_spend(session, usage)
         spend = self._spend_of(session)
-        if spend.calls:
-            changes["cumulative_parent_cost"] = spend.usd
+        if spend is not None:
+            # The RECORD speaks for the money, not its call counts (QA round 2,
+            # Q3): ``published_usd`` is the one derivation the cold seed, this
+            # path and the band all read, and it answers ``None`` for a record
+            # holding money we cannot state — which is what makes the band's
+            # ``$—`` branch reachable here instead of an unreachable zero.
+            changes["cumulative_parent_cost"] = spend.published_usd()
             changes["cost_knowledge"] = spend.knowledge()
         return self.mutate(**changes)
 
