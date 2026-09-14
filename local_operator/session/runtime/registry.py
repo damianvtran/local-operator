@@ -137,6 +137,19 @@ def _staged_write(target: Path, payload: Any, *, prefix: str) -> None:
     The target's directory is NOT created here: a writer that invented a
     directory would let, say, a stop marker conjure a conversation directory
     that every session listing then shows as an empty session.
+
+    NO FSYNC, AND THE GUARANTEE IS STATED AT THAT STRENGTH. There is no
+    ``fsync`` between the write and the rename, so what is guaranteed is
+    PROCESS-durability: the bytes are in the page cache and every reader sees
+    the old file or the new one, which is the semantics all of these artifacts
+    need (the process that dies is the ARTIFACT'S SUBJECT; the host does not).
+    Host-durability would be a different contract, and it is not this shape: a
+    power loss between the write and the rename is uncovered. Adding it here
+    would put an fsync on every heartbeat of every live session, which the one
+    artifact that would arguably want it (the stop marker) does not justify.
+    A writer killed mid-call leaves a ``.<name>.*.tmp`` sibling: bounded, tiny,
+    and never read as the artifact itself (readers name the file, not a
+    pattern).
     """
     directory = target.parent
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
@@ -193,11 +206,32 @@ def write_stop_marker(conversation_dir: Path, payload: dict[str, Any]) -> Path:
     Raises only when the write itself fails — a stop must be able to report
     that it could not leave evidence — so the caller decides whether a missing
     marker aborts the step. Deliberately does NOT create the conversation
-    directory: see :func:`_staged_write`.
+    directory: see :func:`_staged_write`, which is also where the strength of
+    the "durable" in this name is stated (process-durable; no fsync).
+
+    Deliberately NOT a permanent write either: ``control`` withdraws its own
+    marker when the ladder refuses, so :func:`remove_stop_marker` exists and is
+    the only supported way to take one back.
     """
     target = stop_marker_path(conversation_dir)
     _staged_write(target, payload, prefix=f".{STOP_MARKER_NAME}.")
     return target
+
+
+def remove_stop_marker(conversation_dir: Path) -> None:
+    """Take one conversation's stop marker back. Best-effort.
+
+    The ONLY caller is the ladder's refusal path
+    (``control._withdraw_staged_stop_marker``), and it checks the file's own
+    run key and killer before calling: a marker attests to an act, so a stop
+    that ends up acting on nothing must not leave one behind — the target is
+    still alive and its later, involuntary death would read as the user's own
+    stop. Never raises: a refusal must not fail over evidence cleanup.
+    """
+    try:
+        stop_marker_path(conversation_dir).unlink()
+    except OSError:
+        pass
 
 
 def read_stop_marker(conversation_dir: Path) -> dict[str, Any] | None:

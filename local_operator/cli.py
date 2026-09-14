@@ -4197,6 +4197,7 @@ def stop_command(args: argparse.Namespace) -> int:
                 only_pids={rec.pid for rec in targets},
                 force=args.force,
                 _root=config_dir(),
+                _command="lop stop --all",
             )
         )
         return _report_stops(outcomes, args.json, summary=True)
@@ -4212,7 +4213,15 @@ def stop_command(args: argparse.Namespace) -> int:
         return 1
 
     outcome = asyncio.run(
-        control.stop_session(record, timeout_s=timeout_s, force=args.force, _root=config_dir())
+        control.stop_session(
+            record,
+            timeout_s=timeout_s,
+            force=args.force,
+            _root=config_dir(),
+            # The artifact's point is naming WHO stopped it, so the CLI records
+            # what the user typed rather than the function they reached.
+            _command="lop stop",
+        )
     )
     return _report_stops([outcome], args.json)
 

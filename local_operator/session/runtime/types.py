@@ -24,6 +24,15 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+# The one spelling of the session-directory name, owned by the cleanup policy's
+# vocabulary (``retention``) and imported here rather than re-spelled: the
+# DURABLE STOP MARKER has to be found from two sides that never meet
+# (``control.stop_session`` writes it from a record plus a config root;
+# ``attention._classify_orphaned_run`` reads it from the transcript directory),
+# and a second copy of the literal is what lets those two drift. Stdlib-only on
+# the other side, so it costs this import-light module nothing.
+from local_operator.session.retention import SESSIONS_DIRNAME
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -229,17 +238,9 @@ RUN_DIRNAME = "run/mobile"
 #: ``kill -9`` leaves exactly one file behind for the next scan to reap.
 SERVE_RUN_DIRNAME = "run/serve"
 
-#: Directory (under the config root) holding one directory per conversation.
-#:
-#: Named here because the DURABLE STOP MARKER (see ``registry.STOP_MARKER_NAME``)
-#: has to be found from two sides that never meet: ``control.stop_session``
-#: writes it from a discovery record plus a config root, while
-#: ``attention._classify_orphaned_run`` reads it starting from the transcript
-#: directory. One spelling, so a marker written by a stop is always the marker
-#: the classifier reads — a reader that derived the path differently would
-#: report every deliberate stop as an unexplained death, which is the exact
-#: failure the marker exists to remove.
-SESSIONS_DIRNAME = "sessions"
+# SESSIONS_DIRNAME (imported above) is the name of the directory holding one
+# directory per conversation, and session_dir() names the join once for the
+# stop marker's writer and reader, so neither re-derives the layout.
 
 
 def session_dir(root: "Path", session_id: str) -> "Path":

@@ -522,6 +522,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "best-effort delete of a run-namespace FILE (a record, a reaped entry)",
     ),
     (
+        "local_operator/session/runtime/registry.py::remove_stop_marker",
+        "<path>.unlink",
+        "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
+    ),
+    (
         "local_operator/session/runtime/registry.py::_reap_dead_record",
         "os.replace",
         "runtime/<pid>.json -> runtime/reaped/<pid>.json; both run_dir()-derived",

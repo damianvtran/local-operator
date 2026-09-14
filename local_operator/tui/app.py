@@ -28161,7 +28161,7 @@ class OperatorApp(App[None]):
             f'stopping "{name}" (pid {record.pid})… waiting for it to answer', "info"
         )
         self._append_block(pending)
-        outcome = await control.stop_session(record, _root=config_dir())
+        outcome = await control.stop_session(record, _root=config_dir(), _command="/stop")
         kind: NoticeKind = (
             "error"
             if outcome.method == "sigkill"
@@ -28336,7 +28336,9 @@ class OperatorApp(App[None]):
         # last below — so the notice the announcement triggers must not
         # attribute it to another terminal (U4-1).
         self._issued_own_stop = True
-        outcomes = await control.stop_all(own_pid=os.getpid(), only_pids=listed, _root=root)
+        outcomes = await control.stop_all(
+            own_pid=os.getpid(), only_pids=listed, _root=root, _command="/stop --all"
+        )
         # Anything that did NOT stop cleanly gets its own line, because the
         # grouped count cannot say WHICH agent was refused or had to be
         # killed, and that is the one thing the user must act on. Clean

@@ -164,7 +164,9 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
         resolved.append(kwargs)
         return target, [], ""
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
         return control.StopOutcome(
             record.pid, record.session_id, "other agent", "socket", 'stopped "other agent"'
         )
@@ -218,7 +220,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     def fake_targets(root, own_pid=None):  # noqa: ANN001, ANN202
         return targets
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
@@ -274,7 +278,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
 async def test_stop_all_repeat_outside_the_window_re_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
@@ -328,7 +334,9 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
     its own warning line so the user can act on it."""
     monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         return [
             control.StopOutcome(9, "sid-9", "z", "refused", 'refused "z" (pid 9) — identity'),
         ]
@@ -521,7 +529,9 @@ async def test_stop_all_re_arms_when_the_listing_changed(monkeypatch: pytest.Mon
     targets = [_record(101, "alpha")]
     calls: list[str] = []
 
-    async def fake_all(*, own_pid, _root, only_pids=None, timeout_s=10.0):  # noqa: ANN001, ANN202
+    async def fake_all(
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
+    ):  # noqa: ANN001, ANN202
         calls.append("all")
         return []
 
@@ -951,7 +961,9 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
         selectors.append(kwargs)
         return target, [], ""
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
             record.pid, record.session_id, "the runaway", "socket", 'stopped "the runaway"'
@@ -1100,7 +1112,9 @@ async def test_the_unbound_stop_never_reaches_a_look_alike_session(
     decoy = _record(4242, f"notes about {watched}")
     stopped: list[str] = []
 
-    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+    async def fake_stop(
+        record, *, timeout_s=10.0, _root=None, _command=None
+    ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
             record.pid, record.session_id, record.conversation_name, "socket", "stopped"

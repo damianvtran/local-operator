@@ -58,7 +58,12 @@ as ``owner-lost``, because the classifier could only reconstruct a deliberate
 act out of a missing record and a silent socket. The marker is what turns "the
 runtime disappeared without exiting cleanly" into "the user's stop reached the
 sigkill rung, run by pid N". It is staged per rung and OVERWRITTEN as the
-ladder escalates, so the file always names the rung that actually acted.
+ladder escalates, so the file always names the rung that actually acted — and
+withdrawn when the ladder refuses, because a refusal signs nothing (see
+:func:`_withdraw_staged_stop_marker`). "Durable" here is process-durability:
+the file is visible to every reader before the signal, which is the semantics
+this needs (the target dies; the host does not) — see :func:`_write_stop_marker`
+for what that does and does not cover.
 """
 
 from __future__ import annotations
@@ -753,8 +758,15 @@ def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -
     }
 
 
-def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
+def _write_stop_marker(
+    record: SessionRecord, root: Path, rung: Method, *, command: str
+) -> dict[str, Any] | None:
     """Stage the durable stop marker BEFORE the step it attests to.
+
+    Returns the payload it staged, or ``None`` when the write failed — the
+    caller needs to know whether THIS ladder put a file there, because a rung
+    that stages and then does not act has to take its own marker back (see
+    :func:`_withdraw_staged_stop_marker`).
 
     Best-effort, and the swallow is the decision rather than an oversight: a
     stop the user asked for must still happen when a sidecar cannot be
@@ -762,21 +774,66 @@ def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, comma
     and stated — the receipt is unaffected, and that one death falls back to
     the dead-record rung, which is where it stood before this existed.
 
+    THE GUARANTEE IS PROCESS-DURABILITY, NOT HOST-DURABILITY, and the ordering
+    claim is worth stating at that strength: the file is in the page cache and
+    visible to every reader before the signal, which is exactly the semantics
+    this needs (the TARGET process dies; the HOST does not), and it is the same
+    shape ``registry.publish`` already uses for the records themselves. A power
+    loss between the write and the rename is not covered — added fsync would
+    buy that for every heartbeat of every live session, which is a cost this
+    evidence does not justify. A killer killed mid-write leaves a
+    ``.runtime-stop.json.*.tmp`` behind: bounded, tiny, and never read as a
+    marker (the reader names the file, not the pattern).
+
     Sits next to the rung it describes rather than in a wrapper, because the
-    ordering IS the invariant: the file must be on disk before the signal, and
+    ordering IS the invariant: the file must be visible before the signal, and
     a caller that ever moves one of these calls below its rung has broken the
-    thing the file is for. The same invariant is why there is NO removal path
-    for a marker: only a rung that ACTS stages one, so the two shapes that must
-    not attest to anything — an unacked socket request, a refusal — never write
-    one in the first place.
+    thing the file is for.
     """
+    payload = _stop_marker_payload(record, rung, command=command)
     try:
-        registry.write_stop_marker(
-            session_dir(root, record.session_id),
-            _stop_marker_payload(record, rung, command=command),
-        )
+        registry.write_stop_marker(session_dir(root, record.session_id), payload)
     except OSError:
-        pass
+        return None
+    return payload
+
+
+def _withdraw_staged_stop_marker(record: SessionRecord, root: Path) -> None:
+    """Take back OUR rung-1 marker when the ladder refuses to go further.
+
+    Rung 1 stages its marker on the target's ACK — the ack is what sets the
+    target's exit in motion — and the ladder can still REFUSE before any signal:
+    a socket that answers naming a different session id is a live stranger, and
+    a start-time proof can fail. The target is then ALIVE, with a durable marker
+    on disk that is keyed to its very run, so its later and quite involuntary
+    death (a crash, OOM, another kill wave) would classify as the user's own
+    stop. That is the wrong-verdict class this evidence exists to remove, in the
+    worst direction: it HIDES a crash rather than inventing a stop.
+
+    WHAT IS REMOVED IS OURS, decided by READING the file rather than by
+    remembering that we wrote one: same run key, ``rung == "socket"``, and
+    ``killer.pid`` == ours. A marker another ladder staged for the same run (a
+    concurrent ``lop stop`` from another front end) therefore survives, and so
+    does a later rung's marker — the refusal branch cannot see either for this
+    call, but the check is what makes that true rather than the call order.
+    Best-effort like every other evidence write: a refusal must not fail over
+    cleanup.
+    """
+    conversation = session_dir(root, record.session_id)
+    staged = registry.read_stop_marker(conversation)
+    if not staged or staged.get("rung") != "socket":
+        return
+    if staged.get("session_id") != record.session_id or staged.get("pid") != record.pid:
+        return
+    # The run KEY, all of it: the marker's own three fields are what the
+    # classifier compares against a dead record, so they are what decides
+    # whether this file is a statement about the run we are refusing.
+    if staged.get("started_at") != record.started_at:
+        return
+    killer = staged.get("killer")
+    if not isinstance(killer, dict) or killer.get("pid") != os.getpid():
+        return
+    registry.remove_stop_marker(conversation)
 
 
 async def _graceful_stop(
@@ -800,6 +857,12 @@ async def _graceful_stop(
     "deliberate stop" marker behind for a rung that never acted, which is the
     one misreading the marker must not create: an unacked socket request to a
     process that had already crashed would then read as the user's own stop.
+
+    AND A RUNG THAT STAGES BUT DOES NOT LAND DOES NOT KEEP ITS MARKER WHEN THE
+    LADDER REFUSES: this rung can ack against a process the identity gate then
+    refuses to signal (a socket answering another session id, a failed
+    start-time proof), which leaves the target alive. `stop_session` withdraws
+    our own marker on that path — see :func:`_withdraw_staged_stop_marker`.
     """
     reply = await _exchange(record, {"op": "stop"}, reply_timeout_s=timeout_s)
     if reply is None or reply.get("op") != "ack":
@@ -868,11 +931,14 @@ async def stop_session(
     the ambient ``config_dir()``.
 
     ``_command`` is the front end the stop came from, carried verbatim into
-    every rung's stop marker so the artifact can name its author
-    (``control.stop_session`` for a single stop, ``lop stop --all`` for the
-    sweep). It is the caller's to set because only the caller knows which
-    request the user actually made — and the marker's whole value is that the
-    answer survives the process that knew it.
+    every rung's stop marker so the artifact can name its author — the tokens
+    are the user's own entries: ``lop stop`` (the CLI's single stop),
+    ``lop stop --all`` (its sweep), ``/stop`` and ``/stop --all`` (the TUI's).
+    It is the caller's to set because only the caller knows which request the
+    user actually made — and the marker's whole value is that the answer
+    survives the process that knew it. The default names this function only so
+    an in-process caller (a test, a future supervisor) is honest about being
+    one rather than borrowing a front end's name.
     """
     root = _root if _root is not None else config_dir()
     name = record.conversation_name or record.session_id
@@ -959,6 +1025,13 @@ async def stop_session(
             why_not = ""
             forced = True
     if not confirmed:
+        # A refusal signs nothing — and must leave nothing signed either. Rung 1
+        # may already have staged its socket marker before this gate refused
+        # (an acked stop against a process that then answered a different
+        # session id, or a failed start-time proof), so the target is ALIVE and
+        # holding evidence keyed to its own run; left there it would publish
+        # that target's next, involuntary death as the user's own stop.
+        _withdraw_staged_stop_marker(record, root)
         method = "refused"
         return StopOutcome(
             pid=record.pid,
@@ -1050,6 +1123,7 @@ async def stop_all(
     only_pids: "frozenset[int] | set[int] | None" = None,
     force: bool = False,
     _root: Path | None = None,
+    _command: str = "lop stop --all",
 ) -> list[StopOutcome]:
     """Stop every OTHER agent on this machine. Never raises.
 
@@ -1058,6 +1132,12 @@ async def stop_all(
     run to a set the user was SHOWN — the TUI's arm listing is the
     confirmation, so a session that appeared between arm and repeat must
     not be stopped on the strength of a listing it was never on.
+
+    ``_command`` is the front end the sweep came from, forwarded to every
+    target's marker (see :func:`stop_session`): ``lop stop --all`` by default,
+    ``/stop --all`` from the TUI's kill switch. A sweep's marker has to name
+    the sweep, not a single stop, or the artifact cannot tell the operator
+    whether they pressed a key on one session or the whole machine.
 
     Sequential, not concurrent: the graceful rung waits up to ``timeout_s``
     per uncooperative session, and a fan-out would hold every target's wait
@@ -1087,7 +1167,7 @@ async def stop_all(
             continue
         outcomes.append(
             await stop_session(
-                record, timeout_s=timeout_s, force=force, _root=root, _command="lop stop --all"
+                record, timeout_s=timeout_s, force=force, _root=root, _command=_command
             )
         )
     return outcomes
