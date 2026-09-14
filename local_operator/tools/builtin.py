@@ -7638,22 +7638,30 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL; a fresh open creates a NEW tab) "
+        description="open (start a surface at a URL) "
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
-        "(console + errors) | tabs (list all agent-driven tabs, other "
-        "sessions' included) | request_access (raise the site-approval prompt "
-        "for a not-yet-allowed origin; returns pending/allowed/denied immediately) "
-        "| await_access (wait for the user's decision on that prompt) | "
+        "(console + errors) | tabs (list agent-driven tabs) | request_access "
+        "(raise the site-approval prompt for a not-yet-allowed origin; returns "
+        "pending/allowed/denied immediately) | "
+        "await_access (wait for the user's decision on that prompt) | "
         "cancel_access (cancel YOUR pending exact-origin request) | "
-        "recover (recover YOUR tab after an interrupted action) | "
-        "retain (hold it, reason in text) | release (end that hold) | close (end "
-        "YOUR tab when done with it)."
+        "recover (recover YOUR tab) | "
+        "retain (hold it) | release (end that hold) | close (end "
+        "YOUR tab)."
     )
     url: str = Field(
         default="",
         description=(
             "http(s) URL for 'open'/'goto'/'request_access'/'await_access'/" "'cancel_access'."
+        ),
+    )
+    tab: str = Field(
+        default="",
+        description=(
+            "'open' only: ADOPT a browser tab the USER handed to this session, "
+            "named by the handle 'tabs' reported for it (handed_to_you). Omit it "
+            "to create a new tab; another session's handle is refused here."
         ),
     )
     path: str = Field(default="", description="Destination file for 'screenshot'.")
@@ -8010,6 +8018,42 @@ def _validate_typed_text(raw: str) -> str:
     return ""
 
 
+def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
+    """Return a refusal for an unusable `tab` adoption handle, or "".
+
+    TWO REFUSALS, and the second is the one that keeps this from being a way to
+    address a tab that is not yours:
+
+    * the handle must be in the two non-cmux hosts' published grammar, checked by
+      the SAME expression the rest of the tool uses so the grammars cannot drift
+      apart;
+    * it is only meaningful for `open`, so naming a handle on any other action is
+      refused rather than silently ignored — an ignored selector would leave the
+      model believing it had addressed a specific tab.
+
+    What this deliberately does NOT do is decide WHICH tabs may be adopted. That
+    is the host's question, and it answers it from the capability it minted for a
+    handover: an agent cannot adopt a tab the user did not hand to THIS session,
+    whatever it passes here. Python's job is to not manufacture authority, so it
+    forwards the handle unchanged and never enumerates or guesses tab ids.
+    """
+    handle = params.tab.strip()
+    if not handle:
+        return ""
+    if action != "open":
+        return (
+            f"'tab' is only valid for 'open' (got it on '{action}'): it names a tab "
+            "to ADOPT, and adoption happens once, when the surface is taken"
+        )
+    if not NON_CMUX_SURFACE_HANDLE_RE.match(handle):
+        return (
+            f"refusing 'tab' handle {params.tab!r}: expected the surface handle "
+            "'tabs' reported for a tab handed to this session "
+            "(e.g. ui:3:<capability>)"
+        )
+    return ""
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -8021,6 +8065,15 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     Googles a non-URL and still exits 0, and a flag-shaped value in a
     positional or ``--text`` slot is parsed as an option.
     """
+    adoption = _validate_adoption_handle(action, params)
+    if adoption:
+        return adoption
+    if action == "open" and params.tab.strip():
+        # Adoption legitimately carries NO url: taking over a tab the user handed
+        # you does not have to navigate it, and the host's `open` adopts without
+        # navigating when no URL is named. A URL that IS given is validated by the
+        # same rule as any other open, because it is the same navigation.
+        return _validate_browser_url(params.url, action) if params.url.strip() else ""
     if action in ("open", "goto", "request_access", "await_access", "cancel_access"):
         # The access actions take the SAME url validation as open/goto: they
         # exist to pre-approve exactly the navigation open/goto would make, so
@@ -9163,10 +9216,11 @@ async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> 
     `state.surface_id` — the lane adopts it from the record later — so the only
     thing that knows which host owns its tab is the record itself
     (`resource.pinned_host()`). Consulting availability first there would hand
-    the lane to whichever host happened to be up, and since `select_host` sets
-    `self.host`, which `_lane()` prefers over `record["host"]`, the record would
-    then LOSE: a `bridge` record would move to the app as soon as the app was
-    up, and a `ui` record would move to the daemon as soon as the app was down.
+    the lane to whichever host happened to be up, and the probe's answer lands in
+    `self.host`, which the record does not otherwise outrank: a `bridge` record
+    would move to the app as soon as the app was up, and a `ui` record would move
+    to the daemon as soon as the app was down (see `BrowserResource._lane`, where
+    only a HELD handle answers ahead of it).
     That is §10.5's consequence 2 in mirror image, and it contradicts the same
     section's fail-safe clause ("an old record behaves exactly as it does
     today"). The probes therefore answer only the question the record cannot:
@@ -9360,6 +9414,7 @@ async def _bridge_open(
     context: ToolContext | None = None,
     *,
     client: Any = None,
+    adopt: str = "",
 ) -> ToolResult:
     """Open (or resume) a tab on a NON-CMUX host: `client` selects which.
 
@@ -9368,6 +9423,12 @@ async def _bridge_open(
     back from the wire (`bridge:` vs `ui:`), which is why the host is derived from
     the client rather than passed as a second argument that could disagree with
     it.
+
+    `adopt` names a tab the USER handed to this session, which the host turns into
+    an authorized adoption (design: the human hand-over flow). It is a THIRD mode
+    beside "resume our own handle" and "create a new tab", and the difference is
+    deliberate: adoption is the only one where the capability already exists and
+    the host, not this function, decides whether this session may have it.
     """
     host = _host_of_client(client)
     prefix = HOST_UI_PREFIX if host == HOST_UI_PREFIX else HOST_BRIDGE_PREFIX
@@ -9381,9 +9442,15 @@ async def _bridge_open(
         **_browser_identity_params(context, tool_call_id),
     }
     resuming = _host_of_surface(state.surface_id) == prefix
+    adopting = bool(adopt.strip()) and not resuming
     created_new = not resuming
     if resuming:
         params["tab"] = state.surface_id
+    elif adopting:
+        # Passed through UNCHANGED. The host validates that this capability was
+        # handed to this requester; a rewritten or derived handle here would be
+        # Python inventing authority it does not have.
+        params["tab"] = adopt.strip()
     result, problem = await _bridge_call(
         tool_call_id, "open", params, surface=state.surface_id, client=client
     )
@@ -10390,18 +10457,50 @@ async def _execute_browser(
         # A prefixed handle still pins the transport for the life of the surface,
         # so this only decides where a brand-new surface lands.
         pinned = _host_of_surface(state.surface_id)
+        adopt = params.tab.strip()
+        if adopt and state.surface_id and adopt != state.surface_id:
+            # Two different tabs in one call: adopting while already holding
+            # another surface would leave the first one's cleanup to a lane that
+            # no longer names it. The model closes what it holds first.
+            return _error(
+                tool_call_id,
+                "browser",
+                "this session is already driving a browser tab; close it before "
+                "adopting the tab the user handed over",
+            )
+        if adopt and not (ui_available or bridge_available):
+            # cmux keeps no multi-surface registry, so a handed-over tab can only
+            # be adopted on a non-cmux host. Refused explicitly rather than
+            # falling through to a brand-new cmux surface, which would look like
+            # a successful adoption of a tab the agent is not actually driving.
+            return _error(
+                tool_call_id,
+                "browser",
+                "adopting a handed-over tab needs the desktop app's browser tab or "
+                "the browser extension; neither is reachable",
+            )
         if pinned:
             return await _bridge_open(
-                tool_call_id, state, params.url, context, client=_client_for(pinned)
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(pinned),
+                adopt=adopt,
             )
         if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
         if ui_available:
             return await _bridge_open(
-                tool_call_id, state, params.url, context, client=_client_for(HOST_UI_PREFIX)
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(HOST_UI_PREFIX),
+                adopt=adopt,
             )
         if bridge_available:
-            return await _bridge_open(tool_call_id, state, params.url, context)
+            return await _bridge_open(tool_call_id, state, params.url, context, adopt=adopt)
         return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
@@ -10662,26 +10761,26 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
             "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default one screen down, or by "
-            "x/y pixels, a direction keyword, or a selector to reveal) and reports "
-            "whether more content remains; 'logs' returns the page's console "
-            "output and uncaught exceptions for debugging web apps. Parallel "
+            "cannot. 'scroll' pages the view (default: one screen down) and "
+            "reports whether more content remains; 'logs' returns the page's "
+            "console output and uncaught exceptions for debugging web apps. "
+            "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
             "Before your final response, call 'close' unless the user explicitly "
             "needs it left open for a pending or immediately continuing interaction. "
             "'tabs' lists every agent-driven tab including other sessions' "
-            "(handles are redacted: the listing is awareness-only and cannot "
+            "(handles are redacted: awareness-only, it cannot "
             "drive or close anything), and 'close' ends only your own tab. "
             "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
-            "your turn with 'retain' (reason in text) and end that hold with 'release'. "
+            "your turn with 'retain' and end that hold with 'release'. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
             "user (ask tool or message) to approve the prompt in the extension popup "
             "or the app's browser tab, "
-            "and 'await_access' to wait for their decision before navigating again. "
+            "and 'await_access' before navigating again. "
             "Use it for every "
             "screenshot and page interaction; never install or script a browser "
             "engine instead."

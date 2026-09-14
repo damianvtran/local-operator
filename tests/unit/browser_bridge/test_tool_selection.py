@@ -1254,7 +1254,11 @@ async def test_fresh_open_precedence_matrix(
     _availability(monkeypatch, cmux=cmux, bridge=bridge, ui=ui)
     chosen: list[str] = []
 
-    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None):
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        # `adopt` is part of the shipped signature (the open-tab handover), so the
+        # double takes it even though these cases do not exercise adoption: a
+        # double that lags the function it stands in for fails on the call rather
+        # than on the behaviour under test.
         chosen.append(builtin._host_of_client(client))
         return builtin._text("t", "browser", "non-cmux")
 
@@ -1299,7 +1303,11 @@ async def test_a_pinned_handle_overrides_the_precedence(
     _availability(monkeypatch, cmux=True, bridge=True, ui=True)
     chosen: list[str] = []
 
-    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None):
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        # `adopt` is part of the shipped signature (the open-tab handover), so the
+        # double takes it even though these cases do not exercise adoption: a
+        # double that lags the function it stands in for fails on the call rather
+        # than on the behaviour under test.
         chosen.append(builtin._host_of_client(client))
         return builtin._text("t", "browser", "non-cmux")
 
