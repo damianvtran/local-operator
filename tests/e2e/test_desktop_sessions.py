@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import socket
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ import uvicorn
 
 from local_operator.mobile.attach_client import AttachClient
 from local_operator.server.app import app
+from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn, tool_call_turn
@@ -982,3 +984,137 @@ async def test_a_real_child_transcript_is_readable_through_the_parent_route(
         await asyncio.wait_for(serving, 30)
         listener.close()
         await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_presence_decides_whether_the_runtime_speaks(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """RUNG 2, over real loopback HTTP and the production runtime handle.
+
+    The rule the whole ladder exists for, in the one shape that cannot be faked
+    by a unit double: a background completion must be announced by the DESKTOP
+    while a notify-capable app is connected, and by the RUNTIME the moment that
+    lease is withdrawn. A predicate that answered from a mode set at boot passes
+    a unit test and fails this one.
+
+    The lease is real (`POST /v1/desktop/presence` against the live feed
+    subscription, materialised at ``run/desktop/delivery.json``) and it is
+    revoked by closing the SSE socket, which is the signal the design makes
+    load-bearing: withdrawing only on a missed heartbeat would leave 45 s in
+    which every runtime on the machine stays silent for a banner nobody can
+    raise.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+
+    banners: list[dict[str, Any]] = []
+    from local_operator.session.runtime.presence import reset_cache
+    from local_operator.tui import notify as notify_module
+
+    monkeypatch.setattr(
+        notify_module,
+        "detached_notify",
+        lambda title, body, **kwargs: banners.append({"title": title, "body": body, **kwargs})
+        or True,
+    )
+    session = handle = runtime = None
+    try:
+        for _ in range(10000):
+            if server.started:
+                break
+            if serving.done():
+                await serving
+            await asyncio.sleep(0)
+        assert server.started
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            client.headers["Authorization"] = f"Bearer {token}"
+            created = await client.post(
+                "/v1/desktop/sessions",
+                json={
+                    "request_id": "55555555-5555-4555-8555-555555555555",
+                    "cwd": str(workspace),
+                },
+            )
+            assert created.status_code == 200, created.text
+            sid = created.json()["result"]["session_id"]
+            stream = ScriptedStream([text_turn("background work finished")])
+            session = build_session(root / "sessions" / sid, stream, cwd=workspace)
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            runtime = RuntimeServer(handle, kind="daemon")
+            await runtime.start_in_process()
+
+            store = AttentionStore(root / "attention.db")
+            identity = f"session/{sid}"
+
+            # Nothing connected yet: the runtime is the last rung and must speak.
+            store.publish(identity, str(uuid.uuid4()), "a1", "complete")
+            await asyncio.to_thread(handle._announce_completion)
+            assert len(banners) == 1, banners
+            assert banners[0]["session_id"] == sid
+            # The claim is spent, so the next attempt for THIS completion is a
+            # no-op until another surface hands it back.
+            await asyncio.to_thread(handle._announce_completion)
+            assert len(banners) == 1
+
+            async with client.stream("GET", "/v1/desktop/events") as feed:
+                assert feed.status_code == 200
+                feed_lines = feed.aiter_lines()
+                opened = await next_frame(feed_lines, lambda f: f["type"] == "open")
+                beat = await client.post(
+                    "/v1/desktop/presence",
+                    json={
+                        "subscription_id": opened["payload"]["subscription_id"],
+                        "can_notify": True,
+                        "can_notify_kinds": ["complete", "error"],
+                        "window": {
+                            "exists": True,
+                            "focused": True,
+                            "visible": True,
+                            "minimized": False,
+                        },
+                    },
+                )
+                assert beat.status_code == 200, beat.text
+                assert beat.json()["result"]["lease_seconds"] == 45
+                reset_cache()
+
+                store.publish(identity, str(uuid.uuid4()), "a2", "complete")
+                await asyncio.to_thread(handle._announce_completion)
+                assert len(banners) == 1, "a notify-capable desktop must silence the runtime"
+
+            # The socket is closed, so the lease is revoked with it.
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                reset_cache()
+                from local_operator.session.runtime.presence import (
+                    desktop_delivery_present,
+                )
+
+                if not desktop_delivery_present(root, "complete"):
+                    break
+            assert not desktop_delivery_present(root, "complete")
+            await asyncio.to_thread(handle._announce_completion)
+            assert len(banners) == 2, "the runtime stayed silent for a withdrawn lease"
+    finally:
+        if session is not None:
+            await session.dispose()
+        server.should_exit = True
+        await serving
+        engine = getattr(app.state, "desktop_feed", None)
+        if engine is not None:
+            await engine.close()
+        app.state.desktop_feed = None
+        app.state.desktop_sessions = None
+        reset_cache()
