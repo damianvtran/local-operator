@@ -29,6 +29,24 @@ None of these changes caches a mutable job by its identity, trajectory length,
 status or current progress string. Those are not revisions: a bounded trajectory
 can rotate at constant length, and nested usage/todos can change independently.
 
+## The runtime-side retained-window memo
+
+The writer side of the same value is held to a stricter bar, because there the cost
+was measured (`docs/evidence/frame-cost-loop-starvation/`): a roster refresh
+re-froze every retained row of every job on a 50 ms coalescer and demanded more
+than one core to publish nothing. `FrontendStateStore` therefore keeps a per-job
+memo of the frozen retained window (`_TrajectoryWindows`,
+`session/frontend_state.py`), keyed on the raw row list's OBJECT identity, the
+count and the stamps at both ends (which the writer never revises), and the tail
+row object. Those are the facts the paragraph above rules out as sufficient on
+their own; used together they prove a window is UNCHANGED, which is the only
+claim a memo may make. A rotation at constant length moves the end stamps, a
+rebuild replaces the list or its tail object, and an unstamped row is never
+memoised at all; anything it cannot prove is re-frozen. `replace()`,
+`refresh_from_session(initial=True)` and an epoch move drop the memo, and a job
+leaving the roster drops its entry. The viewer's `apply_update` path is untouched
+by this.
+
 ## Reusable deterministic benchmark
 
 ```sh
