@@ -75,6 +75,7 @@ from local_operator.mcp.config import (
     load_all_mcp_configs,
     validate_server_config,
 )
+from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
     build_agent_tool,
     create_mcp_tool_name,
@@ -2218,7 +2219,16 @@ class McpManager:
         stored refresh token against the DISCOVERED token endpoint, race-free
         across concurrently starting sessions, so a day-old access token never
         forces a browser grant on startup.
+
+        ``env`` and ``headers`` arrive as ``${NAME}`` secret references and are
+        resolved to their values first (see :mod:`local_operator.mcp.secret_refs`),
+        so the child process and the HTTP client are never handed the reference
+        text. The resolution is per connect ATTEMPT on purpose — a credential
+        added while the session is running is picked up by a reconnect — and the
+        pristine config stays in ``self._configs``, which is what
+        ``config_digest`` hashes for the tool cache.
         """
+        cfg = resolve_config_secrets(name, cfg)
         timeout_s = resolve_mcp_timeout_s(cfg)
         await self._ensure_oauth_fresh(name, cfg)
         stack = AsyncExitStack()
