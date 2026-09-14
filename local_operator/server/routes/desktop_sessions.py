@@ -53,7 +53,6 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     SubagentChildUnavailable,
-    birth_effort_for,
     resolve_working_directory,
 )
 from local_operator.session.cold_model import synthesise_cold_state
@@ -127,10 +126,14 @@ class DraftModel(Input):
     already showing rather than translating one vocabulary into another — a
     second shape is how the chip and the model that answers come to disagree.
 
-    ``reasoning_effort=None`` means "no level chosen", which is the model's own
-    default. It is NOT the same as "this model has no ladder": the ladder check
-    is what refuses an unexpressible level below, and a model with an empty
-    ladder refuses every level but ``None``.
+    ``reasoning_effort=None`` means "no level chosen". It is NOT the same as "this
+    model has no ladder": the ladder check is what refuses an unexpressible level
+    below, and a model with an empty ladder refuses every level but ``None``. It is
+    also NOT "the model's own default": the conversation is born on the machine's
+    configured ``model_effort`` (clamped into this model's ladder), and only a
+    config that expresses no opinion falls back to the model's seeded rung. The
+    MARKER records the ``None`` — the choice — while the pane and the launch report
+    that resolved level; see ``session.cold_model.resolve_birth_effort``.
     """
 
     provider: str = Field(min_length=1, max_length=64)
@@ -259,28 +262,42 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
         spec = spec.model_copy(update={"reasoning_effort": effort})
     elif spec.reasoning_effort is not None:
         # The seed, not a choice — and the two must not become indistinguishable
-        # in the marker. See the docstring: this is R1's fix, and the pair it has
-        # to agree with is ``draft_birth_selection``, which clears the same seed
-        # on the way in.
+        # in the marker, which is the ONLY consumer of this cleared value
+        # (``create`` persists it). This is NOT what the plane resolves against:
+        # ``session.cold_model.resolve_birth_effort`` reads the SEED, and its third
+        # case is defined on it, so a caller that hands it this cleared spec
+        # answers "no level" where the launch answers the seed. Round 2's R6 is
+        # exactly that mistake, made by the preview; the honest shape of the two
+        # halves is ASYMMETRIC — the marker stores the CHOICE, the reading resolves
+        # the RUNNING level — and the earlier comment here claimed they were the
+        # same thing.
         spec = spec.model_copy(update={"reasoning_effort": None})
     return spec
 
 
 def _preview_birth_model(root: pathlib.Path, model: DraftModel) -> ModelSpec:
-    """The validated choice, resolved to the level the first turn will RUN at.
+    """The picked pair as the model describes it, at the level the turn will RUN at.
 
-    ``_draft_model_spec`` answers what the user CHOSE, which is also what
-    ``create`` stores in the marker — ``null`` for "this model, no level". The pane
-    cannot report that: it reports the readings the first turn gets, and for a pick
-    with no level the level is the machine's configured ``model_effort`` (or, when
-    the config has no opinion, the model's own seed). Both answers come from
-    :func:`birth_effort_for`, the same function the plane seeds a real session with,
-    so the chip cannot differ between this payload and the first cold frame the UI
-    swaps in at ``finishDraft``.
+    Two values come out of the body's pick and they are NOT the same value:
+
+    * what was CHOSEN, which is what ``create`` stores in the marker (``null`` for
+      "this model, no level") — ``_draft_model_spec``'s answer, and it is used here
+      only for its refusals;
+    * what the first turn will RUN at, which is the reading this pane may publish.
+
+    So the spec built here is ``build_model_spec``'s own result — it still carries
+    the model's SEEDED rung, which is what ``resolve_birth_effort``'s third case is
+    defined on. Handing it the seed-CLEARED spec instead made the preview report
+    "no level" whenever the machine configured no ``model_effort``, while the cold
+    frame and the first turn reported the seed (review round 2, R6).
     """
-    spec = _draft_model_spec(model)
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.cold_model import resolve_birth_effort
+
+    chosen = _draft_model_spec(model)
+    spec = build_model_spec(chosen.provider, chosen.model_id)
     return spec.model_copy(
-        update={"reasoning_effort": birth_effort_for(spec, spec.reasoning_effort, root)}
+        update={"reasoning_effort": resolve_birth_effort(spec, chosen.reasoning_effort, root)}
     )
 
 
@@ -513,9 +530,16 @@ async def create_session(body: CreateSession, request: Request):
     All three are the admissions ``DesktopSessions.create`` itself applies, so a
     body that passes here passes there — and the pool runs them again rather than
     trusting this pre-flight, because that is the callable's own contract and a
-    second caller must not be able to reach it unvalidated. Each is a read (a
-    stat, and the registries ``create`` would build anyway), so a retried request
-    replays them for a syscall and writes nothing.
+    second caller must not be able to reach it unvalidated. Two of the three are
+    pure reads (a ``stat`` for the directory; the catalogue and the metadata cache
+    for the model, which writes nothing at all), and they run BEFORE the target's,
+    which builds the registries ``create`` would build anyway — on a fresh root that
+    materialises ``<config>/agents``, so it is the one admission with a filesystem
+    effect (review round 2, R8; the preview route documents the same carve-out).
+
+    A REPLAYED request runs none of them: a retry whose directory has since vanished
+    must answer what the first attempt recorded, not turn a success into a refusal
+    (review round 2, R7).
 
     No ``model`` ⇒ the body, the marker and the launch are byte-for-byte today's.
     """
@@ -543,31 +567,35 @@ async def create_session(body: CreateSession, request: Request):
 
     async with errors():
         pool = host(request)
-        # The SAME admissions ``create`` applies, in the SAME order ``preview``
-        # applies them, so one body gets one answer from either route. See
-        # ``DesktopSessions.create`` / ``resolve_working_directory``.
-        await asyncio.to_thread(resolve_working_directory, body.cwd)
-        if body.target is not None:
-            target = body.target.model_dump()
-            from local_operator.agents import AgentRegistry
-            from local_operator.server.utils.desktop_profiles import validate_target
-            from local_operator.teams import TeamRegistry
+        key = "create:" + body.request_id
+        spec: ModelSpec | None = None
+        # A recorded key short-circuits the admissions below: see the docstring.
+        # ``recorded`` is a read — it neither claims the key nor creates the store.
+        if not await asyncio.to_thread(receipts(request).recorded, key):
+            # The SAME admissions ``create`` applies, in the SAME order ``preview``
+            # applies them: the working directory, then the model (which writes
+            # nothing), then the target (whose registry build materialises
+            # ``<config>/agents``). See ``DesktopSessions.create`` /
+            # ``resolve_working_directory``.
+            await asyncio.to_thread(resolve_working_directory, body.cwd)
+            if body.model is not None:
+                # Off the loop: the catalogue it reads is a disk document, and for
+                # an unshipped model the metadata resolver may consult the provider.
+                spec = await asyncio.to_thread(_draft_model_spec, body.model)
+            if body.target is not None:
+                target_row = body.target.model_dump()
+                from local_operator.agents import AgentRegistry
+                from local_operator.server.utils.desktop_profiles import validate_target
+                from local_operator.teams import TeamRegistry
 
-            await asyncio.to_thread(
-                validate_target,
-                AgentRegistry(pool.root),
-                TeamRegistry(pool.root),
-                target["kind"],
-                target["name"],
-            )
-        spec = None
-        if body.model is not None:
-            # Off the loop: the catalogue it reads is a disk document, and for an
-            # unshipped model the metadata resolver may consult the provider.
-            spec = await asyncio.to_thread(_draft_model_spec, body.model)
-        return reply(
-            await receipts(request).run("create:" + body.request_id, body.model_dump(), create)
-        )
+                await asyncio.to_thread(
+                    validate_target,
+                    AgentRegistry(pool.root),
+                    TeamRegistry(pool.root),
+                    target_row["kind"],
+                    target_row["name"],
+                )
+        return reply(await receipts(request).run(key, body.model_dump(), create))
 
 
 @router.post("/v1/desktop/sessions/preview", response_model=CRUDResponse[DraftPreviewPayload])
@@ -613,10 +641,19 @@ async def preview_session(body: DraftPreview, request: Request):
 
     async def preview():
         pool = host(request)
-        # The SAME admission ``create`` applies, so one body gets one answer from
-        # either route (and 409, not a 200 describing a session that could never
-        # be created). See ``DesktopSessions.create`` / ``resolve_working_directory``.
+        # The SAME admissions ``create`` applies, in the SAME order, so one body gets
+        # one answer from either route (and 409, not a 200 describing a session that
+        # could never be created). See ``DesktopSessions.create`` /
+        # ``resolve_working_directory``.
         await asyncio.to_thread(resolve_working_directory, body.cwd)
+        # The MODEL before the TARGET, as in ``create``: the model admission writes
+        # nothing at all, while building the registries the target needs
+        # materialises ``<config>/agents`` (review round 2, R8).
+        birth_model = (
+            await asyncio.to_thread(_preview_birth_model, pool.root, body.model)
+            if body.model is not None
+            else None
+        )
         if body.target is not None:
             target = body.target.model_dump()
             from local_operator.agents import AgentRegistry
@@ -639,13 +676,13 @@ async def preview_session(body: DraftPreview, request: Request):
             # resolver, same metadata — so the pane's identity AND its spec
             # (context window, effort ladder, and the level the first turn runs at)
             # are the ones the first turn gets rather than the configured
-            # default's. Still session-less and side-effect free: this is an
-            # INPUT, and the state below writes nothing (see the docstring above).
-            birth_model=(
-                await asyncio.to_thread(_preview_birth_model, pool.root, body.model)
-                if body.model is not None
-                else None
-            ),
+            # default's. With NO selection the same synthesis answers the
+            # CONFIGURED pair, and ``session.cold_model`` resolves that through the
+            # model's own metadata too, so the ladder and the level are there for
+            # an unpicked draft as well (review round 2's effort-reading defect).
+            # Still session-less and side-effect free: this is an INPUT, and the
+            # state below writes nothing (see the docstring above).
+            birth_model=birth_model,
         )
         sync = FrontendSync(
             epoch=state.epoch,

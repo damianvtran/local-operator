@@ -1541,11 +1541,20 @@ async def test_a_draft_preview_resolves_the_requested_selection(draft_api) -> No
 
 @pytest.mark.asyncio
 async def test_a_preview_that_omits_the_selection_is_byte_for_byte_todays_answer(draft_api) -> None:
-    """``model`` is OPTIONAL, and omitting it must not move a single field.
+    """``model`` is OPTIONAL: omitting it changes nothing a client can observe.
 
     The frozen contract is that a body without the field behaves as it always
-    did; this pins it against the same body with an explicit ``null``, which is
-    the spelling a client that always sends the key would produce.
+    did — the same identity, no new refusal, nothing durable — and this pins it
+    against the same body with an explicit ``null``, which is the spelling a
+    client that always sends the key would produce.
+
+    What DID change, deliberately and in one direction only: the SPEC the pane
+    publishes is now the configured pair resolved through its own metadata, so the
+    effort LADDER and LEVEL are answered instead of being left empty. That is the
+    operator's own report (an empty ladder hides the strip's effort chip and makes
+    the picker unreachable on every new conversation), and the frame the UI swaps
+    in at send answers the same fields — see
+    ``test_an_unpicked_draft_answers_the_ladder_and_level_it_will_run_at``.
     """
     client, root = draft_api
     ConfigManager(config_dir=root).update_config(CONFIGURED)
@@ -1561,8 +1570,11 @@ async def test_a_preview_that_omits_the_selection_is_byte_for_byte_todays_answer
     assert omitted.status_code == explicit_null.status_code == 200
     assert omitted.json() == explicit_null.json()
     snapshot = omitted.json()["result"]["frontend"]["snapshot"]
-    assert snapshot["selected_model"]["model_id"] == "claude-sonnet-5"
-    assert snapshot["selected_model"]["reasoning_effort"] is None
+    model = snapshot["selected_model"]
+    assert model["model_id"] == "claude-sonnet-5", "the configured identity, untouched"
+    assert model["reasoning_efforts"], "the ladder is answered, not left empty"
+    assert model["reasoning_effort"] == "high", "the seeded rung, since no level is configured"
+    assert not (root / "sessions").exists(), "omitting the field is still free"
 
 
 #: Every way a draft selection can be refused, one per clause of the contract.
@@ -1977,6 +1989,160 @@ async def test_both_routes_answer_the_same_refusal_for_a_body_bad_in_two_ways(dr
     )
     assert corrected.status_code == 200, corrected.text
     assert corrected.json()["result"]["replayed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_create_answers_its_receipt_even_if_the_cwd_is_gone(
+    draft_api, tmp_path
+) -> None:
+    """A retry of a request that SUCCEEDED is answered, not refused (round 2, R7).
+
+    The four admissions run above the receipt claim so a refusal cannot claim a
+    request id. The cost of putting them there is that they must NOT run for a
+    request whose first attempt already created the session: the client the
+    at-most-once contract exists for is the one whose response was lost, and
+    answering it with "choose an existing working directory" turns a success into
+    a failure. The probe is what keeps the claim's meaning — a recorded key is
+    answered from its receipt, admissions and all.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    request_id = str(uuid.uuid4())
+    body = {"request_id": request_id, "cwd": str(workdir)}
+
+    first = await client.post("/v1/desktop/sessions", json=body)
+    assert first.status_code == 200, first.text
+    session_id = first.json()["result"]["session_id"]
+
+    workdir.rmdir()
+    replay = await client.post("/v1/desktop/sessions", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"]["session_id"] == session_id
+    assert replay.json()["result"]["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_at_the_model_admission_writes_nothing(draft_api) -> None:
+    """The model admission runs BEFORE the target's registry build (round 2, R8).
+
+    ``validate_target`` needs an ``AgentRegistry``, whose constructor materialises
+    ``<config>/agents``. Running the target admission first therefore made a body
+    refused at the MODEL step — which writes nothing at all — leave a directory
+    behind, while the docstring and the docs both said a refusal writes nothing.
+    Ordering the pure reads ahead of it is what makes that sentence true; both
+    routes keep the same order, so they still answer the same refusal (R4).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    assert not (root / "agents").exists()
+    body = {
+        "request_id": str(uuid.uuid4()),
+        "cwd": str(root),
+        "target": {"kind": "agent", "name": "manager"},
+        "model": {"provider": "no-such-provider", "model_id": "x"},
+    }
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    previewed = await client.post("/v1/desktop/sessions/preview", json=body)
+    assert created.status_code == 422, created.text
+    assert previewed.status_code == 422, previewed.text
+    assert created.json()["detail"]["code"] == "provider_unknown"
+    assert created.json()["detail"] == previewed.json()["detail"]
+    assert not (root / "agents").exists(), "a refusal left <config>/agents behind"
+
+
+def test_the_previews_model_read_does_not_materialise_a_config_directory(tmp_path) -> None:
+    """``birth_effort_for`` reads the config WITHOUT creating it (round 2, Q-R2-3).
+
+    ``ConfigManager``'s loader mkdirs the directory it is pointed at, and the
+    preview is documented as side-effect free. Through HTTP the directory always
+    exists, so the write was unreachable by accident rather than by construction;
+    a root that does not exist has no configured level, which is the honest
+    answer.
+    """
+    root = tmp_path / "absent" / "deeper"
+    spec = desktop_sessions._preview_birth_model(
+        root, desktop_sessions.DraftModel(provider="deepseek", model_id="deepseek-flash")
+    )
+    assert spec.model_id == "deepseek-flash"
+    assert not root.exists(), "the config read created the directory it was pointed at"
+
+
+@pytest.mark.asyncio
+async def test_a_pick_with_no_level_matches_the_cold_frame_when_nothing_is_configured(
+    draft_api,
+) -> None:
+    """The two readers agree when the machine configures NO level (round 2, R6).
+
+    With no ``model_effort`` the level a birth RUNS at is the model's own seeded
+    rung, and that is the case round 1 broke: the preview resolved through the
+    seed-CLEARED spec (the marker's value) instead of the seeded one, so it said
+    "no level" while the cold frame and the first turn said ``high``. ``CONFIGURED``
+    carries no ``model_effort`` deliberately — with one set the defect is
+    invisible, which is why the round-1 guard beside this one could not see it.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(CONFIGURED)
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": draft_model()},
+    )
+    assert created.status_code == 200, created.text
+    session_id = created.json()["result"]["session_id"]
+
+    stored = _marker(root, session_id)["model"]
+    assert stored["reasoning_effort"] is None, "the marker stores the CHOICE, not the level"
+
+    frame = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]
+    frame_model = frame["payload"]["frontend"]["snapshot"]["selected_model"]
+    pane = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "model": draft_model()},
+    )
+    pane_model = pane.json()["result"]["frontend"]["snapshot"]["selected_model"]
+
+    assert frame_model["reasoning_effort"] == "high"
+    assert pane_model["reasoning_effort"] == frame_model["reasoning_effort"]
+    assert pane_model["reasoning_efforts"] == frame_model["reasoning_efforts"]
+
+
+@pytest.mark.asyncio
+async def test_an_unpicked_draft_answers_the_ladder_and_level_it_will_run_at(draft_api) -> None:
+    """A draft that chose NO model still answers its effort reading (round 2).
+
+    The operator's report: on a fresh conversation the effort reading was hidden and
+    the picker unreachable, because the pane's ``selected_model`` carried an empty
+    ladder and no level — a config-only projection — and the desktop strip gates its
+    effort chip and its picker on exactly those fields. The ladder is a
+    MODEL-derived field (``ModelSpec.reasoning_efforts``), so the draft's own
+    resolution can answer it, and it must: the frame the UI swaps in at send answers
+    it too, or the reading changes under the user.
+
+    The WINDOW is deliberately not asserted equal here: it is model-derived in both
+    readings, but a real cold open may apply ACCOUNT metadata and a window the plan
+    scopes, and this op must not read account metadata (see the module docstring).
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(
+        {"hosting": "deepseek", "model_name": "deepseek-flash"}
+    )
+    body = {"request_id": str(uuid.uuid4()), "cwd": str(root)}
+
+    pane = await client.post("/v1/desktop/sessions/preview", json=body)
+    pane_model = pane.json()["result"]["frontend"]["snapshot"]["selected_model"]
+    assert (pane_model["provider"], pane_model["model_id"]) == ("deepseek", "deepseek-flash")
+    assert pane_model["reasoning_efforts"], "the ladder is what gates the strip's effort chip"
+    assert tuple(pane_model["reasoning_efforts"]) == ("none", "low", "high", "max")
+    assert pane_model["reasoning_effort"] == "high"
+
+    created = await client.post("/v1/desktop/sessions", json=body)
+    session_id = created.json()["result"]["session_id"]
+    frame = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]
+    frame_model = frame["payload"]["frontend"]["snapshot"]["selected_model"]
+    assert frame_model["reasoning_efforts"] == pane_model["reasoning_efforts"]
+    assert frame_model["reasoning_effort"] == pane_model["reasoning_effort"]
 
 
 @pytest.mark.asyncio

@@ -310,32 +310,44 @@ records `reasoning_effort: null`, and the pane, the child's construction and the
 first turn's admission row all resolve the machine's configured `model_effort`
 (clamped into the picked model's ladder) — exactly what a launch that named no
 model resolves. The model's own default rung is a seed, not a choice: it is never
-stored, and it is never what the birth sample carries, because that sample rides
-the owner's model RPC as well as the spawn environment — and a pair-only RPC
-reseats the conversation on the seed.
+STORED. It IS carried when the machine configures no level, because it is then the
+machine's own resolution — and it has to travel explicitly rather than be left
+out, because the birth sample rides the owner's model RPC as well as the spawn
+environment and that RPC rebuilds the spec from the model's metadata, reseating
+the conversation on the seed.
 - **Rendered before it is refused, never after.** An unknown provider, a model
 id the provider's catalogue does not serve, a pair that cannot be resolved into
 a spec, or a level the model's ladder does not offer is refused with `422`
 (`detail.code` ∈ `provider_unknown`, `model_unknown`, `model_unavailable`,
 `effort_unsupported`) on **both** routes, which apply the same admissions in the
-same order (working directory, target, model) and so answer the same refusal for
-the same body — before anything durable is written, including the create route's
-receipt claim, so a corrected retry of the same `request_id` still creates. A
+same order — working directory, model, target — and so answer the same refusal
+for the same body. Refusals happen before anything the REQUEST would write,
+including the create route's receipt claim, so a corrected retry of the same
+`request_id` still creates. Two scopes are stated rather than implied: the
+directory and model admissions are pure reads (a `stat`; the catalogue and the
+metadata cache), while the target admission builds the registries `create` would
+build anyway, and on a fresh root that materialises `<config>/agents` — the same
+carve-out the `preview` route documents. A retry of a request that SUCCEEDED is
+answered from its receipt without re-running any admission, so a working
+directory that has since vanished does not turn a success into a failure. A
 catalogue that cannot be enumerated offline (an aggregator on a cold cache, a
 local endpoint) is not a refusal: an unserved pair then surfaces at the first
 turn, exactly as it does today.
-- **Preview answers the readings for the selection it was GIVEN** — that
-selection's identity *and* the spec it will run on (context window, effort
-ladder), from the same synthesis a cold open uses — while staying session-less
-and side-effect free: no directory, no marker, no receipt row. An omitted
-`model` answers what a cold frame answers for a session that has made no choice
-at all: the configured pair out of the configured resolution (window 128000, no
-ladder, no level for the default `claude-sonnet-5`, against the same model id's
-own metadata of window 1000000 and a five-rung ladder). That the FIRST TURN then
-resolves the same identity through the model's own metadata is a pre-existing
-divergence between the cold path and the launch path — a cold open of a session
-with no choice shows the same reading today, with or without a `model` field —
-so it is recorded as a known limitation rather than fixed in this change.
+- **Preview answers the readings for the conversation that would be created** —
+the identity *and* the spec the first turn will run on, from the same synthesis a
+cold open uses — while staying session-less and side-effect free: no directory, no
+marker, no receipt row. With a `model` that is the picked pair at the level it will
+run at; with **no** `model` it is the CONFIGURED pair, resolved through the same
+model metadata, so the effort ladder and the level are answered for an unpicked
+draft too. (A config-only projection answered an empty ladder and no level, which
+hid the desktop strip's effort chip and left its picker unreachable on every new
+conversation.) Which field is whose, stated precisely: the LADDER
+(`reasoning_efforts`) and the LEVEL are MODEL-derived and answered here; the
+WINDOW is model-derived here but ACCOUNT-derived in a real cold open, which may
+apply account metadata (`resolve_context_metadata`) and a window the account's plan
+scopes. A draft must not read account metadata at all (a synthetic stickiness key
+would move a real account's stickiness), so an account-scoped window can still
+differ between this payload and the first cold frame.
 - **Create stores the choice in the marker** (additively, under `model`), and
 the FIRST turn is born on it: the plane seeds the cold viewer from the marker,
 which carries it into the spawn (`LOP_MOBILE_CHILD_PROVIDER`/`_MODEL`/`_EFFORT`

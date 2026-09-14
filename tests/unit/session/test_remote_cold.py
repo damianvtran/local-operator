@@ -1317,6 +1317,13 @@ async def test_a_seeded_reading_keeps_no_window_it_cannot_vouch_for(
     path already guards against (``context_metadata_resolved``); the seeded path
     needs the same refusal, so the strip renders its honest ``window unknown``
     state while still showing the tokens it does know.
+
+    The SPEC's window is no longer the default here: the config path now resolves
+    the configured pair through its own metadata (the effort ladder and level the
+    desktop strip gates its chips on), so the window is the MODEL's — exactly what
+    every runtime-built spec carries. What the flag says, and what this test
+    exists for, is unchanged: nothing ACCOUNT-scoped was resolved, so the state
+    still refuses to adopt the window as a denominator.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
@@ -1339,7 +1346,11 @@ async def test_a_seeded_reading_keeps_no_window_it_cannot_vouch_for(
             "precondition: this config-only spec has no resolved window, so there is "
             "no denominator to vouch for"
         )
-        assert spec.context_window == 128_000, "precondition: the spec's DEFAULT is still there"
+        assert spec.context_window == 1_000_000, (
+            "precondition: the spec carries the MODEL's own window out of its metadata "
+            "row, not a bare default (the config path resolves the pair so the effort "
+            "ladder and level are answerable)"
+        )
         assert (
             state.context_window is None
         ), "a defaulted window must not be adopted as the denominator for a real reading"
