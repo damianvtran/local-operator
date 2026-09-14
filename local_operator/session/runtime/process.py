@@ -282,21 +282,38 @@ class _BuildWatch:
         self._missing_since: float | None = None
 
     def poll(self, handle: object, *, now: float | None = None) -> _BuildPoll:
-        """One check of the disk against what this process loaded."""
+        """One check of the disk against what this process loaded.
+
+        NOTHING HERE EVER CLEARS THE BOUND, and that is deliberate (review
+        round 1, MINOR 1). An observation that cannot establish the build's
+        identity — the ~2 checks per install where ``build_changed`` answers
+        ``None`` because ``.lop-source`` is younger than the settle — used to
+        reset both counters. That made the belt the age of the last
+        uninterrupted run of declines rather than the age of the first one, and
+        because an install is exactly what produces those ``None``
+        observations, the event the belt bounds was also the event that reset
+        it: the "stamp that keeps moving" shape was left to the per-stamp count
+        alone. Reproduced on the previous head — 40 checks, a fresh stamp
+        every other check, one decline each, ``hard_stale`` False forever.
+
+        There is nothing to reset TO. The count is per stamp (a different newer
+        build restarts it in :meth:`_count_decline`), and the belt is monotone
+        for the life of the process, which is what "must not refuse the same
+        newer build forever" means. Neither is consulted unless a settled newer
+        stamp is on disk AND this runtime is not free to act on it, so a
+        runtime that is on the current build never trips either — and the one
+        way out of a trip is the process leaving.
+        """
         at = time.monotonic() if now is None else now
         idle = _idle_for_refresh(handle)
         newer = _build_changed(self.boot)
         files_gone = self._files_gone(at)
-        if newer is None:
-            # Nothing newer on disk, or nothing readable: nothing is being
-            # declined, so the counters start again at the next observation.
-            # The probe still stands on its own — a tree that is gone is
-            # exactly the case that answers no stamp at all.
-            self._reset()
-            return _BuildPoll(idle=idle, files_gone=files_gone)
-        if idle:
-            self._reset()
-            return _BuildPoll(newer=newer, idle=True, files_gone=files_gone)
+        if newer is None or idle:
+            # Nothing to be hard-stale about: no settled newer build, or one the
+            # soft rung will act on at its next check. The probe still stands on
+            # its own — a tree that is gone is exactly the case that answers no
+            # stamp at all.
+            return _BuildPoll(newer=newer, idle=idle, files_gone=files_gone)
         return _BuildPoll(
             newer=newer,
             idle=False,
@@ -309,9 +326,9 @@ class _BuildWatch:
         """Record one observation of a newer stamp this runtime did not act on.
 
         Per stamp: a DIFFERENT newer build is a different fact (a fresh
-        ``lop-update``), and it restarts the count while ``_stale_since`` keeps
-        the age of the first decline, which is what catches a stamp that keeps
-        moving under the counter.
+        ``lop-update``) and restarts the count, while ``_stale_since`` — the
+        belt — keeps the age of the FIRST decline this process ever recorded
+        and is never cleared (see :meth:`poll`).
         """
         if self._declined != newer:
             self._declined = newer
@@ -325,11 +342,6 @@ class _BuildWatch:
         if self._declines >= BUILD_MAX_STALE_GENERATIONS:
             return True
         return self._stale_since is not None and at - self._stale_since >= BUILD_MAX_STALENESS_S
-
-    def _reset(self) -> None:
-        self._declined = None
-        self._declines = 0
-        self._stale_since = None
 
     @property
     def _probe_armed(self) -> bool:
@@ -384,12 +396,17 @@ class _BuildWatch:
 def _loaded_tree_paths() -> "tuple[Path, ...]":
     """The module paths whose disappearance means "my files are gone".
 
-    A SAMPLE, captured once at boot from the running tree: the package
-    ``__init__``, the package root, and this module's own file — three stats on
-    the existing ``BUILD_CHECK_S`` cadence spanning the top-level package and a
-    subpackage. Deliberately not a walk of the ~930 installed files: this runs
-    on the runtime's own loop, and a dirty-flag storm on a busy filesystem is a
-    failure mode of its own.
+    A SAMPLE, captured once at boot from the running tree: this module's own
+    file, the package ``__init__`` when the package can name it, and the PARENT
+    of the first of those that resolved — the package root in the ordinary
+    case, and merely this module's own directory when
+    ``local_operator.__file__`` is unavailable. That difference is harmless on
+    purpose: any one of the sampled paths missing means the tree is gone, so
+    the sample is a probe and never a claim about the tree's shape. Three stats
+    on the existing ``BUILD_CHECK_S`` cadence spanning the top-level package
+    and a subpackage. Deliberately not a walk of the ~930 installed files: this
+    runs on the runtime's own loop, and a dirty-flag storm on a busy filesystem
+    is a failure mode of its own.
     """
     import local_operator
 
@@ -603,14 +620,22 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             return False
         next_build_check = time.monotonic() + BUILD_CHECK_S
         poll = watch.poll(handle)
+        if drain is not None:
+            # A LATCHED DRAIN WINS, and it is tested FIRST (review round 1,
+            # MINOR 2). The drain latches while the runtime is busy by
+            # construction, so the first build check after the work ends finds
+            # it idle-and-newer; taking the soft rung there would draw a SECOND
+            # ``BUILD_STAGGER_S`` slice at the exit — the exact delay
+            # ``_Drain.stagger_until`` is drawn at drain start to avoid — and
+            # announce ``retiring`` a second time for one departure.
+            return await _drain_for(drain, handle, runtime, stop)
         if poll.refreshable():
             return await _refresh_for(cast("BuildStamp", poll.newer), handle, runtime, stop)
         if not poll.draining():
             return False
+        drain = await _begin_drain(poll, handle, runtime, stop)
         if drain is None:
-            drain = await _begin_drain(poll, handle, runtime, stop)
-            if drain is None:
-                return False
+            return False
         return await _drain_for(drain, handle, runtime, stop)
 
     while not stop.is_set():
@@ -870,22 +895,61 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
         logger.info("session runtime: work arrived as the drain closed; keeping")
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
+    await _hand_wakes_to_successor(handle)
     await _clean_exit(handle, runtime, reason=drain.reason)
     stop.set()  # amain's wait() returns; exit code stays 0
     return True
 
 
+async def _hand_wakes_to_successor(handle: object) -> int:
+    """Write the wakes this drain swallowed, so a successor is raised for them.
+
+    Called at the EXIT rather than from the drain's own deliver hook, because
+    the hook runs inside ``WakeScheduler.pump``'s write lock: the write this
+    needs would deadlock against it, and the pump persists its post-retire list
+    moments later, which would overwrite a write made from there. By the exit
+    that persist has landed — see ``Session.hand_wakes_to_successor``.
+
+    The wakes that need it are the ones whose fire RETIRED their schedule: the
+    index row the supervisor raises a wake errand from is gone with the
+    schedule, so an unwatched session would keep the reminder and never run the
+    work until a human opened the conversation (review round 1, MINOR 3).
+
+    Never raises: a runtime that has already stopped admitting work must not be
+    held by a failed handover, and the session logs the loss itself.
+    """
+    session = getattr(handle, "_session", None)
+    probed = getattr(session, "hand_wakes_to_successor", None)
+    if not callable(probed):
+        return 0
+    hand_over = cast("Callable[[], Awaitable[int]]", probed)
+    try:
+        handed = await hand_over()
+    except Exception:  # noqa: BLE001 — a failed handover must not block the exit
+        logger.warning("could not hand the drain's wakes to a successor", exc_info=True)
+        return 0
+    return int(handed)
+
+
 async def _drain_inbox_into(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
+
+    Also the handover path: the same file is where a DRAINING runtime spools what
+    arrives while it finishes (``serving._spool_for_successor``), so this drains
+    both "nothing was running" and "what was running had already committed to a
+    replaced build".
 
     Called from :func:`amain` after the session exists and before the control
     socket listens — see the call site for why that ordering is the delivery
     guarantee rather than an implementation detail.
 
-    Delivery uses the record-only branch (``mode="mailbox"``, ``wake=False``):
-    these arrived as QUIET notes, and a spool that opened a turn per message on
-    the next open would turn "read this when you next run" into "start work
-    now", which is the opposite of what the sender asked for.
+    Delivery honours the row's ``wake`` (``mode="mailbox"`` either way): a row
+    spooled by a runtime that was leaving a replaced build carries what its
+    sender asked for, and a wake — a fired alarm, or a peer ``send --wake`` —
+    asked for a TURN. Delivering it as a quiet note would keep the message and
+    never do the work, which for a recurring automation is the "scheduled work
+    silently not running" shape this drain exists to avoid (review round 1,
+    MINOR 3). Rows written before the field existed read as notes, unchanged.
 
     Best-effort per message: one malformed or rejected row must not stop the
     rest, and none of it may prevent the runtime from starting.
@@ -908,7 +972,12 @@ async def _drain_inbox_into(handle: object) -> int:
     delivered = 0
     for line in lines:
         try:
-            await receive(line.text, mode="mailbox", wake=False, sender=line.sender)
+            await receive(
+                line.text,
+                mode="mailbox",
+                wake=bool(getattr(line, "wake", False)),
+                sender=line.sender,
+            )
             delivered += 1
         except Exception:  # noqa: BLE001 — one bad row is not the others' problem
             logger.warning("spooled message could not be delivered", exc_info=True)

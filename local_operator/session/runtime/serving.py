@@ -1214,7 +1214,9 @@ class ServingSessionHandle(SessionHandle):
             "was not admitted — send it again and the next engage runs the new build"
         )
 
-    async def _spool_for_successor(self, text: str, *, mode: str, sender: dict[str, Any]) -> str:
+    async def _spool_for_successor(
+        self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]
+    ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
         The draining alternative to refusing. ``inbox.jsonl`` is drained by the
@@ -1226,6 +1228,14 @@ class ServingSessionHandle(SessionHandle):
         steer is someone asking THIS session to do something, and turning that
         into a refusal they must re-issue is a worse answer than a deferral
         they were told about.
+
+        ``wake`` rides the ROW, because it is the sender's ask rather than the
+        reader's choice: ``send --wake`` asked for a turn, and a successor that
+        filed the text as a quiet note would keep the message and never do the
+        work (review round 1, MINOR 3 — the field used to be written and then
+        ignored, so every spooled wake could only be read). The receipt names
+        which of the two shapes the sender bought, because that is the part
+        they can act on: re-issuing a spooled wake is not necessary.
 
         Falls back to the refusal when there is nowhere to spool to (no session
         directory, an unwritable inbox): the caller then gets the sentence that
@@ -1243,7 +1253,13 @@ class ServingSessionHandle(SessionHandle):
             written = await asyncio.to_thread(
                 append_inbox,
                 Path(directory),
-                InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+                InboxLine(
+                    text=text,
+                    sender=dict(sender),
+                    mode=mode,
+                    written_at=time.time(),
+                    wake=wake,
+                ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
             logger.warning("could not spool a peer message for the successor", exc_info=True)
@@ -1251,6 +1267,8 @@ class ServingSessionHandle(SessionHandle):
         if not written:
             raise RuntimeError(self._retiring_refusal())
         logger.info("session runtime: spooled a peer message for the successor")
+        if wake:
+            return "spooled (the next runtime to open the session runs it)"
         return "spooled (will be read when the session next opens)"
 
     def may_refresh(self) -> str:
@@ -2035,7 +2053,9 @@ class ServingSessionHandle(SessionHandle):
         # A COMMITTED exit has no such window and keeps the refusal.
         if self._retiring_cause and (wake or mode != "mailbox"):
             if self._draining and not self._exit_committed:
-                return await self._spool_for_successor(text, mode=mode, sender=sender or {})
+                return await self._spool_for_successor(
+                    text, mode=mode, wake=wake, sender=sender or {}
+                )
             raise RuntimeError(self._retiring_refusal())
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}

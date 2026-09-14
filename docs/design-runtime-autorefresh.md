@@ -504,7 +504,15 @@ Two bounds on the refusal, plus a latch that does not wait for idle:
   install lands.
 - **The clock** (`BUILD_MAX_STALENESS_S = 30 min`): the age of the FIRST
   decline, which is the bound for a stamp that keeps MOVING — a rebuild per
-  check would otherwise reset a per-stamp count back to one every time.
+  check would otherwise reset a per-stamp count back to one every time. It is
+  MONOTONE for the life of the process and nothing clears it, which is
+  load-bearing rather than tidy: every install also produces observations with
+  no settled stamp at all (`.lop-source` younger than `BUILD_SETTLE_S`, about
+  two checks per install at the shipped cadence), so a clock reset on those
+  measures the last uninterrupted run of declines and leaves the moving-stamp
+  shape to the count that cannot see it. Review round 1 reproduced exactly that
+  — 40 checks, a fresh stamp every other one, one decline each, never
+  hard-stale.
 - **`begin_drain(cause)`** (`serving.py`): §3.2's admission refusal kept, its
   idle gate dropped. Admissions refuse from that instant; the live turn, its
   subagents, its jobs and a parked gate run to completion; the process leaves at
@@ -513,10 +521,33 @@ Two bounds on the refusal, plus a latch that does not wait for idle:
   and the drain's whole point is that the runtime stops taking work while it is
   still busy, so the first refused message must read as a handover rather than
   as an error. `BUILD_STAGGER_S` covers these exits too.
+- **A latched drain is consulted BEFORE the soft rung** on every build check:
+  the drain latches while the runtime is BUSY by construction, so the first
+  check after the work ends finds it idle-and-newer, and letting the soft rung
+  take that instant draws a SECOND `BUILD_STAGGER_S` slice and announces the
+  same departure twice — the delay the drain's own stagger exists to avoid
+  (review round 1, MINOR 2).
 - **A wake or peer message arriving mid-drain is SPOOLED**, to `inbox.jsonl`,
   which the successor drains at boot before its socket listens. Refusing would
   lose a wake somebody is waiting on; running it would run new work against the
-  build that is leaving.
+  build that is leaving. The row carries what its sender ASKED FOR
+  (`InboxLine.wake`), so a `send --wake` is delivered WAKING and the successor
+  RUNS it instead of filing text the sender expected action on.
+- **A fired wake whose fire RETIRED its schedule is re-armed, not spooled.** A
+  one-shot — or the last occurrence of a `limit`/`until_at` series — has nothing
+  left to engage a runtime: the index row the wake supervisor raises its errand
+  from goes with the schedule, and no errand is raised for a schedule that has
+  already fired. A spooled note would then keep the reminder and never run the
+  work until a human opened the conversation, which is the "scheduled work
+  silently not running" shape this whole section is about. It is re-armed as a
+  one-shot due NOW, same id (so the user can still cancel what they scheduled),
+  and the supervisor starts a runtime for it. A fire that left a NEXT occurrence
+  needs none of that — that schedule is still in the index, so the supervisor
+  engages on its own when the occurrence comes due, and the spooled row runs
+  then. The re-arm is written by `Session.hand_wakes_to_successor` at the EXIT
+  rather than by the drain's deliver hook, because that hook runs inside
+  `WakeScheduler.pump`'s write lock: the write would deadlock against it, and
+  the persist that follows would overwrite what it wrote.
 - **A files-gone probe** on the same 5 s cadence: the package root and a sample
   of the loaded module paths, keyed on EXISTENCE and the install stamp and
   NEVER on mtime — an editable worktree legitimately looks stale by mtime, and

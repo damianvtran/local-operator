@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -61,6 +62,8 @@ class FakeRegistrant:
 
 
 class FakeHandle:
+    #: Set by the handover test; the reaper reads it through ``getattr``.
+    _session: Any = None
     """The real handle's shape: an idle gate plus the two retirement latches.
 
     ``begin_drain`` latches whatever the gate says; ``begin_retire`` refuses
@@ -227,6 +230,89 @@ async def test_the_age_bound_catches_a_stamp_that_keeps_moving(disk, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_the_age_bound_survives_the_settle_windows_of_its_own_installs(
+    disk, monkeypatch
+) -> None:
+    """MINOR 1 pinned: the belt must not be reset by the event it bounds.
+
+    Every install that moves the stamp also produces observations with NO
+    settled stamp at all — ``build_changed`` answers ``None`` while
+    ``.lop-source`` is younger than ``BUILD_SETTLE_S``, about two checks per
+    install at the shipped cadence. Clearing the clock on those made it the age
+    of the last uninterrupted run of declines and left the "stamp that keeps
+    moving" shape to the per-stamp count, which a fresh stamp every settled
+    check resets by construction. On the head this was found on: 40 checks, a
+    fresh stamp every other one, one decline each, never hard-stale.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod, "BUILD_MAX_STALE_GENERATIONS", 10_000)
+    monkeypatch.setattr(child_mod, "BUILD_MAX_STALENESS_S", 0.15)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    counter = {"n": 0}
+
+    def moving(*_a: Any, **_k: Any) -> BuildStamp:
+        counter["n"] += 1
+        return BuildStamp(version=f"0.54.{40 + counter['n']}", source_ref=f"deadbee{counter['n']}")
+
+    def settling(*_a: Any, **_k: Any) -> float:
+        # Every second check is INSIDE the settle window, which is what an
+        # install in progress looks like: a stamp on disk, nothing this runtime
+        # can be said to have refused yet.
+        return 999.0 if counter["n"] % 2 else child_mod.BUILD_SETTLE_S / 2
+
+    monkeypatch.setattr(update_mod, "installed_build", moving)
+    monkeypatch.setattr(update_mod, "build_marker_age_s", settling)
+    reg = FakeRegistrant(boot=OLD)
+    handle = FakeHandle(busy=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+
+    assert await _wait_for(lambda: handle.drained), "the belt never tripped across settle windows"
+    # The count cannot be what tripped it: every decline was a DIFFERENT stamp,
+    # so it never got past one.
+    assert "declined 1x" in handle.drain_detail, handle.drain_detail
+    assert counter["n"] >= 4, "the install really did keep moving under the counter"
+    assert not stop.is_set() and not handle.disposed, "in-flight work must never be aborted"
+    stop.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_a_latched_drain_wins_over_the_soft_rung_at_the_exit(disk, monkeypatch) -> None:
+    """MINOR 2 pinned: a latched drain is consulted BEFORE ``refreshable()``.
+
+    The drain latches while the runtime is BUSY by construction, so the first
+    build check after the work ends finds it idle-and-newer. Taking the soft
+    rung there draws a SECOND ``BUILD_STAGGER_S`` slice at the exit — the delay
+    the drain draws its own stagger to avoid — and announces ``retiring`` twice
+    for one departure.
+    """
+    # A build check due on EVERY tick, so "which branch runs first" is decided
+    # by the code rather than by the tick that happens to land first: the soft
+    # rung is only ever taken inside ``refresh_check``, which the loop runs
+    # before its own drain branch.
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.001)
+    draws: list[tuple[float, float]] = []
+    monkeypatch.setattr(child_mod.random, "uniform", lambda a, b: draws.append((a, b)) or 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    disk["build"] = NEW
+    reg = FakeRegistrant(boot=OLD)
+    handle = FakeHandle(busy=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+
+    assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
+    handle._busy = False  # the turn ends and the exit path opens up
+    assert await _wait_for(lambda: stop.is_set()), "the drain never took the exit"
+    assert draws == [(0, child_mod.BUILD_STAGGER_S)], "exactly one stagger, drawn at drain start"
+    assert reg.retiring == [("stale-build", NEW.label())], "one departure, one announce"
+    await task
+
+
+@pytest.mark.asyncio
 async def test_an_idle_runtime_keeps_todays_soft_refresh(disk, monkeypatch) -> None:
     """The negative control's other half: nothing changed for a runtime with
     nothing to lose — it retires on the FIRST observation through the soft rung,
@@ -271,12 +357,26 @@ async def test_a_handle_without_the_drain_latch_keeps_serving(disk, monkeypatch)
 # -- the files-gone probe -------------------------------------------------------
 
 
-def test_the_probe_is_disarmed_for_an_editable_tree(tmp_path: Path) -> None:
-    """THE negative control: a worktree install is not retired when its files
-    move. Every development checkout is this case, and an editor's atomic save
-    or a branch switch is not a reason to kill a session."""
+def test_the_probe_is_disarmed_for_an_editable_tree(tmp_path: Path, monkeypatch) -> None:
+    """THE negative control, through the REAL probe (review round 1, NIT 1).
+
+    The earlier form injected ``armed=False``, which proved only that the flag
+    gates the probe — never that an editable install answers False, which is the
+    half every development worktree depends on. A worktree's files legitimately
+    move under a running session (an editor's atomic save, a branch switch) and
+    its stamp is constant, so retiring on either signal would kill a session for
+    being edited.
+    """
+    from local_operator.update import InstallKind
+
     gone = tmp_path / "local_operator" / "session" / "runtime" / "process.py"
-    watch = _BuildWatch(OLD, paths=(gone,), armed=False)
+    monkeypatch.setattr(update_mod, "install_kind", lambda **_k: InstallKind.EDITABLE)
+    monkeypatch.setattr(child_mod, "_build_prefix", lambda: None)
+    assert child_mod._tree_is_replaceable() is False, "an editable tree must not arm the probe"
+
+    # And the verdict the runtime acts on is the PROBE's, not the file's
+    # absence: this deleted path is real and the watch still says nothing.
+    watch = _BuildWatch(OLD, paths=(gone,), armed=child_mod._tree_is_replaceable())
     handle = FakeHandle(busy=True)
     now = time.monotonic()
     assert watch.poll(handle, now=now).files_gone is False
@@ -356,3 +456,69 @@ async def test_files_gone_drains_even_with_no_newer_stamp(disk, monkeypatch, tmp
 def test_should_refresh_still_refuses_a_busy_runtime(disk) -> None:
     """The soft rung is unchanged: the bound lives beside it, not in it."""
     assert _should_refresh(FakeHandle(busy=True), OLD) is None
+
+
+# -- the inbox handover (the successor's half of the drain) ---------------------
+
+
+@pytest.mark.asyncio
+async def test_the_exit_hands_the_drains_wakes_to_a_successor(disk, monkeypatch) -> None:
+    """The WIRING, not just the pieces: ``_drain_for`` calls the session's
+    handover on the way out, after the commit and while the session is still
+    alive to write it.
+
+    A wake whose fire retired its schedule has no other route to a successor —
+    nothing raises an errand for a schedule that has already fired (MINOR 3) —
+    so a drain that exited without this call would leave the occurrence in the
+    log and nowhere else.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    disk["build"] = NEW
+    handed: list[str] = []
+
+    class StubSession:
+        async def hand_wakes_to_successor(self) -> int:
+            handed.append("disposed=%s" % handle.disposed)
+            return 1
+
+    reg = FakeRegistrant(boot=OLD)
+    handle = FakeHandle(busy=True)
+    handle._session = StubSession()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+
+    assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
+    handle._busy = False
+    assert await _wait_for(lambda: stop.is_set()), "the drain never took the exit"
+    assert handed == ["disposed=False"], "handed over once, before the dispose"
+    await task
+
+
+@pytest.mark.asyncio
+async def test_the_boot_drain_runs_a_spooled_wake(tmp_path: Path) -> None:
+    """MINOR 3, the sender's half: a wake row is RUN by the successor, not read.
+
+    ``send --wake`` asked for a turn, and a row spooled by a runtime that was
+    leaving a replaced build carries that ask. The boot drain used to hardcode
+    ``wake=False``, so the field was written and then ignored and every spooled
+    wake could only ever be read. A row with no wake stays the quiet note it
+    always was.
+    """
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    append_inbox(tmp_path, InboxLine(text="run the report", sender={}, mode="mailbox", wake=True))
+    append_inbox(tmp_path, InboxLine(text="fyi", sender={}, mode="mailbox", wake=False))
+    seen: list[tuple[str, str, bool]] = []
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path))
+
+        async def receive_peer_message(self, text, *, mode="mailbox", wake=False, sender=None):
+            seen.append((text, mode, wake))
+            return "recorded"
+
+    assert await child_mod._drain_inbox_into(Handle()) == 2
+    assert seen == [("run the report", "mailbox", True), ("fyi", "mailbox", False)]
