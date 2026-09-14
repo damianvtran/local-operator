@@ -125,7 +125,8 @@
 
         <!-- Ships HIDDEN like every other section. A diagnostic error state must
              never be the pre-render default: render() is async (it awaits
-             getSession() and a real /health fetch), so whichever section ships
+             its storage projections and a real /health fetch), so whichever
+             section ships
              visible is what Chrome paints before any show() runs. This one used
              to be it, and every popup open flashed "Not connected." for the
              length of the health round trip — worst exactly when the daemon is
