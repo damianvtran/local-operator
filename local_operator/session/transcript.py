@@ -40,10 +40,10 @@ import logging
 import os
 import time
 import uuid
-from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -389,6 +389,67 @@ class TranscriptPage:
     reconciled: bool = False
 
 
+#: Backward read granularity, shared by the two readers below. One MiB is large
+#: enough that a compaction's kept window (355-456 messages on the reference
+#: runtimes) and a 100-row display page (389 KB on a real long conversation)
+#: are inside the first chunk or two, and small enough that a whole-file
+#: fallback on a journal with no compaction costs no more than the forward
+#: parse it replaces.
+_BACKWARD_CHUNK_BYTES = 1 << 20
+
+
+def _iter_complete_lines_backward(
+    handle: BinaryIO, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
+) -> Iterator[tuple[int, list[bytes]]]:
+    """Yield ``(chunk_start, lines)`` pairs reading backward from ``end_of_file``.
+
+    ``lines`` are the rows whose terminating newline lies in the chunk that
+    starts at ``chunk_start`` (byte offset from the start of the file), newest
+    row first, and the final pair — ``chunk_start == 0`` — carries the file's
+    leading fragment, which is a complete row unless the file's head is torn.
+    Blank and malformed rows are the CALLER's to skip: this walker splits bytes
+    only, so both readers can share one copy of the byte handling and stay
+    byte-identical on boundaries.
+
+    WHY a generator over a plain helper that parses rows: the two readers want
+    the same bytes split the same way but disagree about what a row means (the
+    display page skips a cursor row, the replay suffix tracks compaction
+    boundaries) and about when to stop. Sharing the split keeps the one trap in
+    one place; sharing the loop would fuse two different stop conditions.
+
+    THE TRAP: ``pending`` is the bytes after the last-read chunk that have NOT
+    yet been split into rows. It only ever grows by one chunk and is split
+    exactly once, when a row boundary lands inside it — so a row larger than a
+    chunk (the 256 KiB-1 MiB bookkeeping rows in the fixtures) costs one join,
+    not one re-split per chunk. The first version of the suffix reader re-split
+    the carried tail every step and the no-compaction fallback over a 100 MB
+    file went quadratic, slower than the forward parse it replaces.
+    """
+    position = end_of_file
+    pending = b""
+    while True:
+        chunk_start = max(0, position - chunk_bytes)
+        handle.seek(chunk_start)
+        pending = handle.read(position - chunk_start) + pending
+        position = chunk_start
+        if position > 0:
+            boundary = pending.find(b"\n")
+            if boundary < 0:
+                # No complete row yet; the whole buffer is a row's tail.
+                continue
+            # Everything before the first newline is the tail of a row whose
+            # head is still unread; keep it for the next chunk.
+            complete = pending[boundary + 1 :].split(b"\n")
+            pending = pending[:boundary]
+        else:
+            complete = pending.split(b"\n")
+            pending = b""
+        complete.reverse()
+        yield position, complete
+        if position == 0:
+            return
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -398,17 +459,30 @@ def read_transcript_page(
 ) -> TranscriptPage:
     """Read a tail page, or the page immediately before ``before_id``.
 
-    The scan is streaming and retains at most ``limit + 1`` parsed rows. This
-    costs a sequential disk pass for older pages, which is intentional: the UI
-    runs it in a thread, transcripts are append-mostly, and permanent offsets
-    cannot survive ``compact_file`` replacing the file. Malformed rows are
-    skipped independently, matching normal replay. If a requested ID vanished
-    during replacement, return the current tail with ``reconciled=True`` so a
-    reader can dedupe by stable ID instead of getting stuck on a stale cursor.
+    The read runs BACKWARD from EOF in chunks, one
+    :func:`_iter_complete_lines_backward` pair at a time, so its cost is
+    proportional to the page plus the distance from EOF to a requested cursor —
+    never to the whole journal. It used to scan forward from byte 0 and
+    JSON-decode every row: on a real 243 MB conversation the desktop open path
+    spent 1.7 s and read the whole file to produce the same 100 rows this
+    returns in milliseconds, and every ``loadOlder`` page re-paid the scan from
+    byte 0. The cursor stays an ID rather than a byte offset because
+    ``compact_file`` replaces the file atomically and old offsets become lies,
+    so the read stays stateless — only its direction changed.
+
+    Contract, unchanged from the forward implementation: ``before_id`` is
+    EXCLUDED and the page is the one immediately before it; ``through_id`` is
+    INCLUDED and is the page's newest row, and rows appended after it are
+    skipped because they are newer than the frontend state this page is paired
+    with. Neither id means the tail page, and ``has_more`` reports that a
+    ``limit + 1``-th row exists. Malformed rows are skipped independently,
+    matching normal replay. If a requested ID vanished during replacement, a
+    ``before_id`` returns the current tail with ``reconciled=True`` so a reader
+    can dedupe by stable ID instead of getting stuck on a stale cursor, while a
+    missing ``through_id`` returns an empty reconciled page: a replaced file
+    cannot satisfy that snapshot, and serving a newer tail under an older state
+    cursor would silently fold unseen rows into the paired watermark.
     """
-    # An inclusive upper boundary pairs a durable page with a previously
-    # captured frontend snapshot. Reading an unbounded tail here would fold
-    # messages from AFTER that snapshot into its replay watermark.
     if before_id is not None and through_id is not None:
         raise ValueError("choose before_id or through_id, not both")
     if limit < 1:
@@ -416,31 +490,47 @@ def read_transcript_page(
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
-    retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
+    # Newest-first, holding at most ``limit + 1`` rows: the extra row is the
+    # forward reader's lookahead, kept here only so ``has_more`` can be answered
+    # without reading further back, and dropped when the page is assembled.
+    retained: list[TranscriptEntry] = []
     found = before_id is None and through_id is None
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            entry = TranscriptEntry.from_json(line)
-            if entry is None:
-                continue
-            if before_id is not None and entry.id == before_id:
-                found = True
-                break
-            retained.append(entry)
-            if through_id is not None and entry.id == through_id:
-                found = True
+    # Rows above a cursor are NEWER than the page's window and must be
+    # discarded until the cursor is reached. ``through_id`` is inclusive, so its
+    # row is kept the moment it matches; ``before_id`` is exclusive, so its row
+    # only ends the skip.
+    skipping = before_id is not None or through_id is not None
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None:
+                    continue
+                if entry.id == before_id:
+                    found = True
+                    skipping = False
+                    continue
+                if skipping:
+                    if entry.id == through_id:
+                        found = True
+                        skipping = False
+                        retained.append(entry)
+                    continue
+                retained.append(entry)
+                if len(retained) > limit:
+                    break
+            if len(retained) > limit:
                 break
     if through_id is not None and not found:
-        # A replaced file cannot satisfy this snapshot. Do not silently return
-        # a newer tail under an older state cursor; the caller must reconcile.
         return TranscriptPage((), False, True)
     if before_id is not None and not found:
         tail = read_transcript_page(directory, limit=limit)
         return TranscriptPage(tail.entries, tail.has_more, True)
-    rows = tuple(retained)
-    return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
+    rows = tuple(reversed(retained[:limit]))
+    return TranscriptPage(entries=rows, has_more=len(retained) > limit)
 
 
 @dataclass(frozen=True)
@@ -475,13 +565,6 @@ class ReplaySuffix:
     checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
-
-
-#: Backward read granularity. One MiB is large enough that a compaction's kept
-#: window (355–456 messages on the reference runtimes) is usually inside the
-#: first or second chunk, and small enough that a whole-file fallback on a
-#: journal with no compaction costs no more than the forward parse it replaces.
-_SUFFIX_CHUNK_BYTES = 1 << 20
 
 
 def read_replay_suffix(
@@ -528,10 +611,10 @@ def read_replay_suffix(
       checkpoint's type constant lives in ``frontend_state``, whose import
       graph reaches the TUI, and this module must stay a leaf.
 
-    Malformed rows are skipped individually, matching forward replay. The
-    first partial line of the earliest chunk is discarded: it is the tail of a
-    row whose head is in the chunk before it, and is completed once that chunk
-    is read.
+    Malformed rows are skipped individually, matching forward replay. The byte
+    handling — chunk boundaries, and a row larger than a chunk — lives in
+    :func:`_iter_complete_lines_backward`, shared with the display page reader
+    so the two cannot drift on where a row begins.
     """
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
@@ -565,40 +648,20 @@ def read_replay_suffix(
     seen_ids: set[str] = set()
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
+    bytes_read = 0
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
-        position = handle.tell()
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
         # file an appending runtime may have grown in between, reporting bytes
         # this call never read (round 5, NIT).
-        end_of_file = position
-        # Invariant: ``pending`` is the bytes after ``position`` that have NOT
-        # yet been split into rows. It only ever grows by one chunk and is
-        # split exactly once, when a row boundary lands inside it — so a row
-        # larger than a chunk (the 256 KiB bookkeeping rows in the fixtures)
-        # costs one join, not one re-split per chunk. The first version
-        # re-split the carried tail every step and the no-compaction fallback
-        # over a 100 MB file went quadratic, slower than the forward parse it
-        # is meant to match.
-        pending = b""
-        while True:
-            chunk_size = min(_SUFFIX_CHUNK_BYTES, position)
-            position -= chunk_size
-            handle.seek(position)
-            pending = handle.read(chunk_size) + pending
-            if position > 0:
-                boundary = pending.find(b"\n")
-                if boundary < 0:
-                    # No complete row yet; the whole buffer is a row's tail.
-                    continue
-                # Everything before the first newline is the tail of a row
-                # whose head is still unread; keep it for the next chunk.
-                complete = pending[boundary + 1 :].split(b"\n")
-                pending = pending[:boundary]
-            else:
-                complete = pending.split(b"\n")
-                pending = b""
-            for raw in reversed(complete):
+        end_of_file = handle.tell()
+        # The carried-tail invariant (never re-split the bytes held over between
+        # chunks) now lives in the walker; ``bytes_read`` is priced from the
+        # chunk this loop last consumed, so it names bytes the caller actually
+        # looked at rather than the walker's internal position.
+        for chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
+            bytes_read = end_of_file - chunk_start
+            for raw in lines:
                 if not raw.strip():
                     continue
                 entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
@@ -637,7 +700,7 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
-            at_start = position == 0
+            at_start = chunk_start == 0
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
@@ -657,7 +720,7 @@ def read_replay_suffix(
         checkpoint=checkpoints.get(wanted[0]) if wanted else None,
         checkpoints=checkpoints,
         checkpoint_order=checkpoint_order,
-        bytes_read=end_of_file - position,
+        bytes_read=bytes_read,
     )
 
 
