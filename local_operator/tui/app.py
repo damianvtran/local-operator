@@ -5873,10 +5873,59 @@ class OperatorApp(App[None]):
 
         subscribe = getattr(source.session, "subscribe_frontend", None)
         if source.unsubscribe_frontend is None and callable(subscribe):
-            subscription = subscribe(
-                lambda _update: self.call_later(self._source_frontend_changed, source)
-            )
+            subscription = subscribe(lambda _update: self._on_source_frontend_updated(source))
             source.unsubscribe_frontend = cast(FrontendSubscription, subscription).unsubscribe
+
+    def _on_source_frontend_updated(self, source: SessionInteraction) -> None:
+        """Schedule ONE change callback per source per loop turn.
+
+        The current session's own subscription has coalesced this way since
+        ``_on_frontend_update`` gained its scheduled-bit guard (the reason is
+        recorded there: a burst publishes several ordered deltas before Textual's
+        next turn, and scheduling every intermediate one repeats work that only
+        the LAST state can answer). The per-SOURCE path had none, so a burst cost
+        N ``call_later`` timers and N retention predicates — each of them a whole
+        decision about whether this source may be released — for one answer.
+
+        The bit lives on the SOURCE rather than on the app: the app has one
+        current session, and N leased sidebar sources each carry their own
+        pending callback. It is cleared by the callback alone (below), which is
+        why the clear is the first statement there and never sits behind a guard
+        — a bit that outlived its callback would leave this source permanently
+        deaf to its owner, which is exactly the "never goes stale" property these
+        subscribers exist to hold.
+        """
+        if source.frontend_change_scheduled:
+            return
+        source.frontend_change_scheduled = True
+        self.call_later(self._apply_source_frontend_change, source)
+
+    def _apply_source_frontend_change(self, source: SessionInteraction) -> None:
+        """Deliver one coalesced change for ``source``, or drop it as superseded.
+
+        Two ways a queued callback can be stale by the time Textual runs it, and
+        both are decided HERE rather than in the subscriber so the coalescer
+        cannot be skipped by the direct ``call_later(self._source_frontend_changed,
+        source)`` sites (subagent events, gate transitions, the close drain) that
+        keep their own cadence.
+
+        * The source was RETIRED — released, or swapped out with its session.
+          ``_source_frontend_changed``'s own first guard covers the release
+          decision, and ``bound is not source`` below covers the swap.
+        * The interaction was SUPERSEDED: ``_sidebar_sources`` is the live
+          binding for a session id (``_lease_sidebar_source`` returns the
+          registered non-retired source rather than minting a second one, and
+          every source records itself there before it subscribes), so a
+          different source standing in that row means this callback belongs to
+          an interaction nothing is looking at any more. A session with no id at
+          all is left alone deliberately: there is no row to compare against, and
+          dropping on an absent row would strand such a source's gate draft.
+        """
+        source.frontend_change_scheduled = False
+        bound = self._sidebar_sources.get(getattr(source.session, "session_id", ""))
+        if bound is not None and bound is not source:
+            return
+        self._source_frontend_changed(source)
 
     def _source_frontend_changed(self, source: SessionInteraction) -> None:
         if source.retired:
@@ -6510,8 +6559,11 @@ class OperatorApp(App[None]):
         the sidebar-close drain, which additionally drops sources retained
         ONLY by the owner's turn (:attr:`retained_for_auto_work`): that is a
         remote fact about a read-only projection, it is unbounded, and each
-        one costs a deep state copy per owner delta forever. Local retention
-        — our own workers, an unsent gate answer — still wins in both.
+        one costs a per-delta decision on every owner delta forever — the read
+        itself is copy-free since ``has_running_job`` landed (it used to be a
+        whole deep copy of canonical state per delta per source). Local
+        retention — our own workers, an unsent gate answer — still wins in
+        both.
         ``reason="expired"`` is the idle sweep, for which see
         :meth:`_sweep_idle_sidebar_sources`; it is `"idle"` plus permission to
         release a source the presentation LRU is still holding.
@@ -8130,8 +8182,12 @@ class OperatorApp(App[None]):
                 # without bound (25 open/close cycles leaked 50 sources, 0
                 # dispose calls). Each leaked viewer keeps a socket and a
                 # frontend subscription alive, and every owner delta then
-                # costs a deep state copy per leak: ~1.2 ms each, which is the
-                # background lag that ends in a frozen TUI.
+                # costs a per-source predicate plus a coalesced change callback
+                # per leak, on the loop that paints the frame — which is the
+                # background lag that ends in a frozen TUI. (The predicate was a
+                # ~1.2 ms deep state copy when that number was measured; the
+                # clause is kept because the SOCKET is the cost that cannot be
+                # amortised, not the read.)
                 #
                 # `reason="closed"` drops owner-turn retention but never local
                 # work, so a source running our worker or holding an unsent
@@ -40251,7 +40307,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 115
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 116
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:

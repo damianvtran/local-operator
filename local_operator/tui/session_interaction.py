@@ -235,6 +235,15 @@ class SessionInteraction:
     gate_draft: tuple[tuple[Any, ...], Any] | None = field(default=None, repr=False)
     gate_view_generation: int = 0
     unsubscribe_frontend: Any = field(default=None, repr=False)
+    #: True while a COALESCED change callback for this source is already queued on
+    #: the event loop, so a burst of owner deltas costs one callback instead of
+    #: one per delta (see `app._on_source_frontend_updated`).
+    #:
+    #: Lives on the source rather than in an app-level set because the app has
+    #: one CURRENT session, while every leased sidebar source carries its own
+    #: pending callback; it is a plain bool rather than a set membership because
+    #: `SessionInteraction` is a mutable dataclass and therefore unhashable.
+    frontend_change_scheduled: bool = False
     #: `time.monotonic()` when this source stopped being the displayed session,
     #: or ``None`` while it is current (or has never been shown).
     #:
@@ -281,19 +290,38 @@ class SessionInteraction:
         but the viewer is a read-only projection (``no_takeover``), so dropping
         it cannot stop or corrupt the owner's turn. Unbounded is the problem:
         prewarming any busy background agent mints one, and each retained
-        viewer costs a deep state copy on EVERY owner delta, so closing the
+        viewer costs a per-delta decision on EVERY owner delta, so closing the
         sidebar must be allowed to drop these (see ``_release_sidebar_source``).
+
+        The roster half of the answer is read through the session's copy-free
+        ``has_running_job`` where the host has one (both real session classes
+        do). It used to be read through ``frontend_state`` — a full deep copy of
+        canonical state, on the loop, for one boolean — and this predicate runs
+        for every delta of every leased source AND for the session being viewed.
+        The read stays UNCONDITIONAL, ahead of ``approve_all``, exactly as it
+        was: it is also what raises for a source whose store has not
+        synchronized, and hoisting the cheap clause above it would silently turn
+        that raise into ``False``. The fallback keeps hosts that expose only
+        ``frontend_state`` (reduced facades, test doubles) on the old read.
         """
-        state = getattr(self.session, "frontend_state", None)
+        running = self._owner_has_running_job()
         return bool(
-            self.draft.approve_all
-            and (
-                getattr(self.session, "is_streaming", False)
-                or any(
-                    getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ())
-                )
-            )
+            self.draft.approve_all and (getattr(self.session, "is_streaming", False) or running)
         )
+
+    def _owner_has_running_job(self) -> bool:
+        """Whether the owner's roster has a running child, clone-free if possible.
+
+        ``getattr``-probed rather than typed, in the established style of
+        ``_sidebar_gate_identity``: a host without the narrow accessor must keep
+        working through the old path rather than lose the clause.
+        """
+        session = self.session
+        accessor = getattr(session, "has_running_job", None)
+        if accessor is not None:
+            return bool(accessor)
+        state = getattr(session, "frontend_state", None)
+        return any(getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ()))
 
     @property
     def must_retain(self) -> bool:
