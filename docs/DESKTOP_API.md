@@ -589,3 +589,223 @@ reset. The test-owned runtime exits through its own stop protocol. Neither test
 uses operator credentials or connects to operator sessions. Unit tests exercise
 receipt crash ambiguity, byte/count overflow, lease aggregation, cache isolation
 and the inclusive history paging boundary.
+
+## The machine-wide event feed
+
+`GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as
+every other route on this plane (503 when the backend was not started with a
+token, 401 for a missing or wrong bearer, 403 for an unapproved `Origin`).
+
+WHY A SECOND STREAM. Every notification channel before this one was per SESSION:
+a `notification` frame rides the SSE stream of a session's bridge, and a bridge
+exists only while a route holds one. The app holds exactly one — the session it
+is displaying — so a completion in session B while the app showed session A
+produced **no composed frame at all**, and on a machine with no TUI running a
+finished turn was announced by nobody. This stream is one socket for the whole
+process, and it composes for sessions that have no bridge.
+
+**It acquires no bridge and spawns no runtime.** Its two dependencies —
+`AttentionStore` and `compose()` over `sessions/<id>/` — are both
+bridge-independent, and `tests/unit/server/test_desktop_feed.py` asserts the
+absence directly (`DesktopSessions.bridges` stays empty across a feed cycle).
+Reusing a bridge's composer instead would make watching a 200-row catalogue
+build 200 cold facades and 200 SQLite poll loops, and would take the
+`BRIDGE_COUNT` ceiling with it.
+
+### Frames
+
+The envelope's SHAPE is the session stream's (`epoch`, `seq`, `type`, `payload`,
+plus `session_id` on the types that concern one session) so the relay needs no
+new parser. `session_id` is absent on `open` and `catalogue`: the feed is not a
+session, and a fabricated id would make `observe(sessionId, frame)` look like it
+had one to attribute a catalogue event to.
+
+```jsonc
+{"epoch":"…","seq":12,"type":"open",
+ "payload":{"subscription_id":"…","heartbeat_seconds":15,"lease_seconds":45,
+            "watch_ttl_seconds":45,"catalogue_revision":98123,
+            "attention":{"session/<id>":{ /* AttentionState */ }}}}
+{"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
+{"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
+{"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
+{"epoch":"…","seq":16,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":17,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
+```
+
+- **`notification.payload` is the per-session payload**, built by the SAME
+  function the bridge uses (`notifications.compose.notification_payload`), so
+  `dedupe_key` is byte-identical and the app's local claim map collapses the pair
+  into one banner. The ONE field the two derive differently is `focus_policy` —
+  a ROUTING field, not content:
+
+  | Where the completion is | `focus_policy` |
+  |---|---|
+  | the session a desktop window is displaying | **no feed frame at all** — rung 1 applied, the card is in band |
+  | any other session | `always` |
+
+  Reusing the bridge's `when_unfocused` here was a defect: the app suppresses
+  that value whenever ANY window is focused, so in the commonest state of all —
+  the user in the app on session A while B finishes — rung 2 had already
+  silenced the runtime and the TUI and the frame was then suppressed by the
+  app's own focus gate. The completion reached nobody. The window's focus says
+  nothing about whether the user wants to hear that a DIFFERENT conversation
+  finished, so the feed says `always`.
+- **`attention` is live-only**, with the authoritative snapshot in `open`. It
+  carries no `supported` key: only a live runtime can answer that, and the
+  renderer's merge preserves the value it already holds rather than letting a
+  catalogue-shaped frame clear it (otherwise a frame arriving for the session on
+  screen disables its read receipt).
+- **Neither `notification` nor `attention` is replayed.** The connection's first
+  read is a BASELINE: it records the store's current revision and announces
+  nothing that predates the connection. A reconnect therefore does not flood,
+  and a completion missed while the app was away is recovered by the durable
+  unseen mark in the `open` snapshot — never by a late banner.
+- **The snapshot excludes the catalogue's rows.** Those carry a preview read per
+  row; the client already has them, and putting that scan on the feed would move
+  the sidebar's cost rather than remove it.
+- **`catalogue`** is a cheap invalidation token over the sessions directory (its
+  `(inode, mtime_ns)` plus the directory-name set, on a 1 s cadence), so the
+  sidebar stops polling `sessions.list` on a 5 s clock. The 30 s safety poll and
+  a refetch on window focus remain as drift insurance. An in-place transcript
+  append does not move the token — deliberately, since noticing that would mean
+  walking the store on every tick, which is the cost the poll was retired for.
+- One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
+  overflow emits `gap` and closes.
+
+### The polling cadence
+
+One task per process, started with the first subscriber and stopped with the
+last. Each tick is TWO `os.stat` calls — `attention.db` and its journal, the
+doorbell `config_watch` already uses for `config.yml` — with a SQLite read only
+when the store actually moved. That is what takes background detection from the
+1 s poll's floor to a p50 of roughly one tick. The revision gate stays the
+AUTHORITY and the delta read is only an optimisation: a heal moves neither
+`MAX(sequence)` nor `SUM(acknowledged)`, only the `mutations` counter, so a tick
+that trusted the delta alone would miss it.
+
+### The burst ceiling
+
+At most `desktop_feed.BURST_LIMIT` (3) individual banners per tick. The
+remainder is not dropped: it is announced as ONE digest frame naming the count
+(`burst_count`, `session_ids`, no single `completion_token`) so the click can
+land on the catalogue rather than on an arbitrary member. The TUI's own
+per-tick cap is the same number, asserted equal by a test rather than left to
+convention.
+
+## Desktop delivery presence
+
+`POST /v1/desktop/presence` — the machine-wide answer to *"can a desktop app on
+this host attempt a banner, right now?"*
+
+```jsonc
+// request
+{"subscription_id":"<from the open frame>","can_notify":true,
+ "can_notify_kinds":["complete","error"],"session_id":"<12 hex or omitted>",
+ "window":{"exists":true,"focused":true,"visible":true,"minimized":false}}
+// response
+{"result":{"lease_seconds":45}}
+```
+
+A ROUTE RATHER THAN A FILE THE APP WRITES. The app may be paired to a backend on
+another host, so it cannot write to that host's filesystem; the SERVER aggregates
+what its live feed subscriptions report and materialises it at
+`<config_dir>/run/desktop/delivery.json` (0700 directory, 0600 staged write),
+where every sibling process reads it. Local and remote apps then behave
+identically — which is the whole reason this is server-side.
+
+- **The lease is held against the SSE subscription.** An unknown
+  `subscription_id` is a 404, and a dropped socket REVOKES its claim. A presence
+  withdrawn only on a missed heartbeat would leave a 45 s window in which every
+  runtime on the machine stays silent for a banner nobody can raise.
+- **`PRESENCE_TTL_S` (45 s) and `PRESENCE_BEAT_S` (15 s)**, matching `WATCH_TTL`,
+  `DESKTOP_WATCH_LEASE_S` and `VIEWER_HEARTBEAT_TIMEOUT_S`. Three missed beats
+  expire a claim, and a dead pid is reaped on read — the same two reaping rules
+  as `scan_viewers`.
+- **`can_notify` means "can ATTEMPT delivery"**, nothing stronger.
+  `Notification.isSupported()` knows nothing about macOS Focus/DND, Windows
+  Focus Assist, or a permission the user denied. A suppression costs a banner,
+  never the durable `unseen` mark — a claim never advances the read watermark
+  (`docs/ATTENTION.md`).
+- **`can_notify_kinds` narrows the claim.** The feed carries completions only
+  (`complete`/`error`), so a machine-wide presence must NOT suppress a parked
+  `ask`/`approval`: nothing machine-wide would carry it, and the gate would go
+  silently unannounced. Gates keep the per-session lease and the per-session
+  toast they have today. Carrying gates on the feed is a follow-up.
+- **`window` is the app's REAL window state**, reported by Electron main. The
+  renderer's `document.visibilityState`/`hasFocus()` cannot answer it (a window
+  behind another app reports `visible`; a throttled window reports `hidden`),
+  and the desktop backend reads this field as "somebody is looking at this
+  window" for the visibility rung.
+- **`window.exists:false` discards `session_id`.** Closing the last window on
+  macOS leaves the app alive in the dock, and its record may still name the
+  conversation it was showing; treating that as "on screen" would suppress the
+  banner for the one conversation the user cannot see.
+
+## The notification eligibility ladder
+
+First match wins. It is a decision, not a race; the loser is never eligible
+rather than "suppressed", and `claim_delivery` remains the tie-break AMONG the
+eligible.
+
+1. **A surface is WATCHING the session** — a TUI attached to it, a phone, or a
+   desktop window genuinely displaying it. The card is in band; no OS banner.
+   The predicate is the VISIBILITY one (`RuntimeServer.watching_surfaces()` →
+   `_visible_attach_surfaces()`), NEVER `notification_surfaces()`. The latter
+   answers "could a banner reach this person somewhere", which is a different
+   question, and using it to suppress meant "this machine can banner" read as "a
+   human is reading X": with the panel on X and the window behind another app,
+   every OS surface went quiet while nobody was looking.
+2. **A notify-capable desktop app** on this host claims the completion kind —
+   the feed above composes it, so the runtime and the TUI stay silent.
+3. **A TUI is running anywhere on this machine** — its 1 s background announcer
+   raises it. Its viewer record is the signal, so a crashed TUI does not keep
+   every runtime silent forever.
+4. **Nothing** — the SESSION RUNTIME raises it, through
+   `tui.notify.detached_notify` and the shared composed vocabulary, claiming
+   through `claim_delivery(..., backend="runtime")` and handing the claim back
+   if the spawn reported nothing went out. Its banner carries `session_id`, so
+   the click lands in the app via the ladder below.
+
+Rung 4 is a GATE rather than a race, because the runtime learns about a
+completion earlier than every other surface (at turn settle, against the feed's
+100 ms poll and the TUI's 1 s tick): announcing unconditionally would win every
+completion and make both richer paths dead.
+
+### The click ladder
+
+`lop resume-click <id>`, first rung that works:
+
+1. **A live viewer can display it** — switch it and raise its window. Among
+   viewers that are already displaying the target, prefer that one (a no-op);
+   otherwise the most recently focused; otherwise a `surface: "desktop"` record
+   as the TIEBREAK; otherwise the lowest pid. The desktop is preferred for
+   RAISING a banner, not for the landing site: a click must not yank the user
+   out of the terminal they are sitting in, nor make them wait for a window to
+   be built, when the TUI that raised the banner can switch instantly. A record
+   reporting `has_window:false` is never treated as already displaying, and is
+   always sent the switch (its app recreates the window, then navigates).
+2. **The desktop app is installed but not running** — launch it with the session
+   id. Discovery order: the `desktop.launch_command` setting when set (argv with
+   `{session}` substituted), else `local-operator-ui` on `PATH`, else
+   `open -b com.local-operator --args --open-session <id>` on macOS. Each
+   candidate is tried and abandoned only on a NON-ZERO EXIT, and a launcher
+   still alive after the probe counts as success: a missing bundle exits 1 after
+   starting fine, so "a child started" is not evidence that anything ran.
+   `pnpm dev` and a repository checkout are deliberately undiscoverable and fall
+   through.
+3. **Nothing suitable is running** — spawn a terminal, exactly as before.
+
+## Capability keys
+
+| Key | Version | Advertises | Absent means |
+|---|---|---|---|
+| `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
+| `desktop_presence` | 1 | the backend reads `run/desktop/delivery.json` and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+
+Neither bumps `notification_contract`, which stays 1: the payload is unchanged
+except for the derived `focus_policy` routing field, which the client already
+special-cases, and a renderer that ignores the new frame types keeps working. In
+both skew directions the new behaviour is a no-op: a new backend with an old UI
+never sees a presence file (so rung 4 raises the banner), and an old backend
+with a new UI advertises no keys (so the UI keeps the poll and the per-session
+path).
