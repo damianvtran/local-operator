@@ -74,6 +74,22 @@ The daemon scans this directory every 2 s and validates each record by pid
 liveness — a SIGKILLed session leaves its record behind, and the heartbeat
 catches a live pid whose runtime wedged. Publication is staged-write + rename.
 
+A record whose owner is proven dead is **moved**, not deleted: `scan` renames
+it into `run/mobile/reaped/<pid>.json`, and the attention classifier reads both
+directories when it works out why a run ended. That is what makes a runtime's
+death attributable even after a sweep has run — a deleted record left the
+operator reading "the cause could not be determined" for a death that had a
+recorded cause. The sidecar is bounded (newest 200 entries, 24 h) and is
+invisible to discovery: nothing there is ever listed as a session.
+
+A runtime that is **stopped** also leaves positive evidence, written by the
+killer before the step it attests to: `<config>/sessions/<session_id>/runtime-stop.json`
+carries the rung the stop ladder actually used (`socket` | `sigterm` | `sigkill`),
+`deliberate`, the killer's pid/argv0/command, and the target's build. At the
+SIGKILL rung the target is not executing and cannot record anything, so this
+file is the only artifact that can say a stop was asked for rather than
+narrated as a crash.
+
 ### The control socket
 
 Each session runtime hosts a length-delimited JSON-lines socket on a random
