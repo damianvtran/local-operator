@@ -1,0 +1,324 @@
+"""Which host owns a session's surface, and the gate that decides whether the
+ownership lane runs at all.
+
+The defect these tests pin is a closed loop: the lane's gate read
+``resource.generation``, which only the lane's own ``initialize()`` ever sets, so
+on a host with no reachable bridge the lane was skipped on the first action and
+therefore on every action. `recover`, `retain` and `release` then fell through the
+dispatcher to its last branch — a screenshot — and reported success.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.browser_bridge import resources
+from local_operator.browser_bridge.resources import BrowserResource
+from local_operator.harness.types import BrowserSurface, ToolContext
+from local_operator.tools import builtin
+
+
+class FakeUiClient:
+    """A UI host that answers the ownership verbs and records what it was sent."""
+
+    host = "ui"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((method, params))
+        if method == "open":
+            return {"tab": "ui:100:aaaaaaaabbbbccccddddeeeeffff0000", "url": params["url"]}
+        if method == "read":
+            return {"url": "https://example.com/", "title": "Example Domain", "text": "body"}
+        if method == "tabs":
+            return {"tabs": [], "limit": 8}
+        if method == "owner_recover":
+            return {"ownership_version": 1, "state": "owned", "tab": "ui:100:capability"}
+        if method == "owner_retain":
+            return {"state": "retained"}
+        if method == "owner_release":
+            return {"state": "closed"}
+        if method == "owner_finish":
+            return {"state": "closed"}
+        return {}
+
+
+@pytest.fixture
+def ui_client(monkeypatch: pytest.MonkeyPatch) -> FakeUiClient:
+    fake = FakeUiClient()
+    from local_operator.ui_browser import backend as ui_backend
+
+    monkeypatch.setattr(ui_backend, "UiHostClient", lambda root=None: fake)
+    return fake
+
+
+def _ui_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host with the desktop app reachable and nothing else."""
+
+    async def ui_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+        return True
+
+    async def bridge_unreachable(classified: tuple[Any, Any] | None = None) -> bool:
+        return False
+
+    monkeypatch.setattr(builtin, "ui_browser_reachable", ui_reachable)
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", bridge_unreachable)
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: bool(False))
+
+
+def _cmux_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def bridge_unreachable(classified: tuple[Any, Any] | None = None) -> bool:
+        return False
+
+    monkeypatch.setattr(builtin, "ui_browser_reachable", bridge_unreachable)
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", bridge_unreachable)
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+
+
+def _context(tmp_path: Path, *, surface_id: str = "") -> tuple[ToolContext, BrowserResource]:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    surface = BrowserSurface()
+    surface.surface_id = surface_id
+    surface.resource = resource  # type: ignore[assignment]
+    return ToolContext(browser=surface), resource
+
+
+@pytest.mark.asyncio
+async def test_the_lane_runs_on_a_ui_only_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """Asserted through `initialize()` having run, not through the result text.
+
+    The gate's whole failure mode is that the lane never ran, so a test that
+    checks the rendered sentence can pass while the lane is still skipped (the
+    old code answered a `retain` with a screenshot SUCCESS message). The durable
+    evidence that the lane ran is the generation it mints.
+    """
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    assert resource.generation == ""
+
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert resource.generation != "", "the ownership lane never ran"
+    assert [method for method, _params in ui_client.calls][:2] == ["owner_recover", "open"]
+    # The lane is entered through the UI host's transport, and nothing in this
+    # session went looking for a daemon.
+    assert any(method.startswith("owner_") for method, _ in ui_client.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_ui_only_session_never_constructs_a_bridge_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """The lane must not require a daemon the surface does not use.
+
+    `resources.BridgeClient` is monkeypatched to raise, so any attempt to dial
+    the daemon from a UI-only session is a hard failure rather than a silently
+    unreachable one.
+    """
+    _ui_only(monkeypatch)
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a UI-only session constructed a BridgeClient")
+
+    monkeypatch.setattr(resources, "BridgeClient", forbidden)
+    context, resource = _context(tmp_path)
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert result.is_error is False, result.text
+    assert resource.generation != ""
+
+
+@pytest.mark.asyncio
+async def test_no_ownership_host_still_skips_the_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """A cmux-only host has no ownership lane, and must not invent one."""
+    _cmux_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    monkeypatch.setattr(
+        builtin,
+        "_browser_open",
+        lambda *_a, **_k: asyncio.sleep(0, result=builtin._text("t", "b", "cmux")),
+    )
+    result = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert result.text == "cmux"
+    assert resource.generation == ""
+    assert ui_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_ownership_action_with_no_ownership_host_is_a_typed_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cmux fall-through repro: `retain` must never become a screenshot.
+
+    Before the fix, a cmux-pinned surface took the lane-skipping exit, `retain`
+    matched none of the dispatcher's branches, and the request fell through to
+    `_browser_screenshot`: the model asked to hold a tab open and read
+    "Screenshot of … saved to …" with a PNG on disk.
+    """
+    _cmux_only(monkeypatch)
+    context, _resource = _context(tmp_path, surface_id="surface:7")
+
+    for action in ("recover", "retain", "release"):
+        result = await builtin.execute_browser(
+            "t", {"action": action, "text": "pending login"}, None, None, context
+        )
+        assert result.is_error, f"{action} was not refused: {result.text}"
+        assert (result.details or {}).get("error_code") == "ownership_unavailable"
+        assert "Screenshot" not in result.text
+        assert "cmux owns" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_ownership_action_with_no_surface_at_all_is_also_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cmux_only(monkeypatch)
+    context, _resource = _context(tmp_path)
+    result = await builtin.execute_browser("t", {"action": "retain"}, None, None, context)
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "ownership_unavailable"
+    # Not the generic "no browser surface open" answer: the agent needs to know
+    # that opening a surface is what makes this verb available, and on WHICH host.
+    assert "no ownership host is reachable" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_ui_record_selects_the_ui_client_and_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """The record's `host` is the whole selection: client AND discovery read."""
+    from local_operator.browser_bridge import state as bridge_state
+    from local_operator.ui_browser import state as ui_state
+
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("ui:100:capability", host="ui")
+    assert resource.record["host"] == "ui"
+
+    # The discovery read must come from the UI host's record. Given a bridge
+    # record that claims an old extension, the UI host must NOT be read as a
+    # pre-ownership peer: the floor is an extension version, and comparing an app
+    # version to it is a category error.
+    bridge_state.publish(
+        bridge_state.BridgeState(
+            pid=1,
+            port=4099,
+            session_key="k" * 32,
+            proto=1,
+            extension_connected=True,
+            extension_version="0.1.4",
+        ),
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        ui_state,
+        "read",
+        lambda root=None: ui_state.UiHostState(
+            pid=2, port=52133, session_key="k" * 32, proto=1, app_version="0.21.0"
+        ),
+    )
+
+    resumed = BrowserResource(tmp_path, tmp_path.name)
+    resumed.initialize()
+    assert resumed.host == ""  # the prefix/record decides, not the constructor
+    assert resumed._lane().name == resources.HOST_UI
+    assert resumed._peer_identity() == ("0.21.0", 1)
+    assert resumed._peer_is_pre_ownership() is False
+    # None here means "must ask", never "unavailable": the verdict is learned by
+    # the probe, and on the UI host the probe goes to the UI host.
+    assert resumed.ownership_mode() is None
+    await resumed.recover()
+    assert resumed.ownership_mode() is True
+    assert [method for method, _ in ui_client.calls] == ["owner_recover"]
+
+
+def test_a_legacy_record_without_a_host_falls_back_to_the_bridge(tmp_path: Path) -> None:
+    """Fail-safe, not fail-open: a record written before `host` existed names the
+    bridge, which is where that session was talking."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.path.write_text('{"session_id": "%s", "generation": "g"}' % tmp_path.name)
+    resource.initialize()
+    assert resource.host == ""
+    assert resource._lane().name == resources.HOST_BRIDGE
+
+
+@pytest.mark.asyncio
+async def test_a_ui_host_serves_the_whole_flow_on_its_own_wire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """open -> read -> tabs -> retain -> release -> close, all on the UI wire.
+
+    The capability matrix's claim is that the UI host is a superset of the
+    bridge's wire, so the flow that matters is the ordinary one: nothing here may
+    reach for a daemon, and the surface must stay `ui:`-prefixed throughout.
+    """
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    seen: list[str] = []
+
+    for args in (
+        {"action": "open", "url": "https://example.com"},
+        {"action": "read"},
+        {"action": "tabs"},
+        {"action": "retain", "text": "waiting on the login form"},
+        {"action": "release"},
+        {"action": "close"},
+    ):
+        result = await builtin.execute_browser("t", args, None, None, context)
+        assert result.is_error is False, f"{args['action']}: {result.text}"
+        seen.append(args["action"])
+        holder = context.browser
+        assert holder is not None
+        if args["action"] != "close":
+            assert holder.surface_id.startswith("ui:"), result.text
+
+    assert seen == ["open", "read", "tabs", "retain", "release", "close"]
+    assert [method for method, _params in ui_client.calls] == [
+        "owner_recover",
+        "open",
+        "read",
+        "tabs",
+        "owner_retain",
+        "owner_release",
+        "close",
+    ]
+    # The surface's host is written down on the first successful open, so a
+    # resumed session selects the same lane.
+    assert json.loads(resource.path.read_text())["host"] == "ui"
+
+
+def test_the_handle_prefixes_agree_with_the_record_spelling() -> None:
+    """Two modules name the same hosts, deliberately, and must not drift.
+
+    `builtin` cannot import these at module scope (the bridge package pulls in
+    httpx, and `builtin` is imported on the CLI path for every session), so the
+    literals are repeated. This test is what keeps the repetition honest: a
+    handle prefix that disagreed with the record spelling would select the wrong
+    lane for a resumed session.
+    """
+    from local_operator.browser_bridge.backend import HOST_EXTENSION, HOST_UI
+
+    assert builtin.HOST_UI_PREFIX == resources.HOST_UI == HOST_UI == "ui"
+    assert builtin.HOST_BRIDGE_PREFIX == resources.HOST_BRIDGE == "bridge"
+    # The copy spelling is the one that differs for the bridge (prose says "the
+    # extension"), and `_copy_host` is the single translation.
+    assert builtin._copy_host("ui") == HOST_UI
+    assert builtin._copy_host("bridge") == builtin._copy_host("") == HOST_EXTENSION

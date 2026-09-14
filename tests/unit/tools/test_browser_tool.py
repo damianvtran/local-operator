@@ -1163,7 +1163,7 @@ def test_dispose_closes_a_bridge_surface_the_model_left_open(monkeypatch, tmp_pa
     """The fallback covers extension tabs too, not only cmux surfaces."""
     calls: list[tuple[str, dict[str, Any], str]] = []
 
-    async def fake_call(tool_call_id, action, params, *, surface=""):
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append((action, params, surface))
         return {}, None
 

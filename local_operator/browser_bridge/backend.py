@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,6 +15,7 @@ from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
     COMMAND_TIMEOUTS,
     ORIGIN_PROMPT_WINDOW_S,
+    PROTO_VERSION,
     ErrorCode,
     ErrorDetail,
     Request,
@@ -25,7 +27,14 @@ from local_operator.browser_bridge.protocol import (
 #: past the client's deadline.
 _CLIENT_TIMEOUT_MARGIN_S = 5.0
 
-ERROR_MESSAGES = {
+#: Model-facing copy for the codes whose remedy is EXTENSION-specific. Kept as
+#: the public ``ERROR_MESSAGES`` name because every existing consumer (and the
+#: tool's `_bridge_absent_result`) means "the extension host's table", and the
+#: UI host's table below is a partial OVERRIDE rather than a parallel universe:
+#: the shared codes (`tab_closed`, `nav_failed`, `busy`, `tab_limit`, …) keep
+#: one spelling for every host, because two spellings of the same fact is how
+#: copy drifts.
+_EXTENSION_ERROR_MESSAGES = {
     ErrorCode.EXTENSION_DISCONNECTED: (
         "browser extension not connected: the bridge daemon is running but no browser is "
         "attached. Ask the user to open their browser (the extension reconnects automatically), "
@@ -72,6 +81,45 @@ ERROR_MESSAGES = {
     ),
 }
 
+#: The extension host's table, under its historical public name.
+ERROR_MESSAGES = _EXTENSION_ERROR_MESSAGES
+
+#: Codes whose remedy differs on the UI host. ADDITIVE: every code absent here
+#: falls through to the shared table above. The ones overridden are exactly the
+#: codes that name a remedy only the extension has (open your browser, toggle
+#: the extension in `chrome://extensions`, `lop browser install`) — telling the
+#: user of a running desktop app to install or restart a daemon they do not have
+#: is the misdirection class this table exists to remove.
+_UI_ERROR_MESSAGES = {
+    ErrorCode.EXTENSION_DISCONNECTED: (
+        "the Local Operator desktop app's browser host has no browser tab attached. "
+        "Ask the user to open a browser tab in the app, then retry."
+    ),
+    ErrorCode.NOT_PAIRED: (
+        "the Local Operator desktop app's browser host is not authenticated for this "
+        "session. Ask the user to restart the desktop app, then retry."
+    ),
+    ErrorCode.EXTENSION_UNRESPONSIVE: (
+        "the Local Operator desktop app's browser host is running but has stopped "
+        "answering, so the browser cannot be driven. Retry once; if the same action "
+        "fails again, ask the user to restart the desktop app — tab handles, snapshot "
+        "refs and pending site decisions are lost with it, so re-'open' and "
+        "re-'snapshot' afterwards."
+    ),
+    ErrorCode.PROTO_MISMATCH: (
+        "the Local Operator desktop app's browser host speaks a different bridge "
+        "protocol than this Local Operator. Update the desktop app or Local Operator, "
+        "then retry."
+    ),
+}
+
+
+def error_messages(host: str) -> dict[ErrorCode, str]:
+    """The message table for one host: shared codes plus that host's overrides."""
+    if host == HOST_UI:
+        return {**_EXTENSION_ERROR_MESSAGES, **_UI_ERROR_MESSAGES}
+    return _EXTENSION_ERROR_MESSAGES
+
 
 #: The one `extension_disconnected` shape that is NOT "no browser is attached":
 #: the daemon's wire fence detected that the extension REPLACED its connection
@@ -99,6 +147,92 @@ class BridgeError(RuntimeError):
 
 class BridgeUnreachable(RuntimeError):
     pass
+
+
+#: The two host identifiers the copy and the client seam are parameterised by.
+#: Strings rather than an enum because the same spelling travels outside Python —
+#: in the `ui:`/`bridge:` surface prefixes and in the resource record's `host`
+#: field — so there is one spelling shared by the tool, the record and the tests.
+HOST_EXTENSION = "extension"
+HOST_UI = "ui"
+
+
+@dataclass(frozen=True)
+class HostCopy:
+    """One host's sentences for the transport failures `HostClient.call` raises.
+
+    A per-host record rather than an `if host == …` spray inside `call`, because
+    each of these five sentences is a claim about WHICH PROCESS the reader should
+    go and look at, and a reader told to restart the wrong one is worse off than
+    one told nothing. The extension strings are byte-identical to what the
+    client raised before this seam existed.
+    """
+
+    #: What to call the thing that did not answer, in prose.
+    label: str
+    #: There is no live discovery record at all.
+    no_state: str
+    #: The record exists but its socket is not answering (refused/died/reset).
+    not_answering: str
+    #: Connected, accepted the command, never answered within the budget.
+    timeout: str
+    #: The record's key was rejected (HTTP 401).
+    rejected_key: str
+    #: A 2xx whose body is not a valid Response envelope.
+    invalid_response: str
+
+
+HOST_COPY: dict[str, HostCopy] = {
+    HOST_EXTENSION: HostCopy(
+        label="browser bridge",
+        no_state=(
+            "browser bridge unreachable: no live daemon state. Run 'lop browser status'; "
+            "'lop browser install' starts it."
+        ),
+        not_answering=(
+            "browser bridge unreachable: the daemon at 127.0.0.1:{port} is not "
+            "answering. Run 'lop browser status'; 'lop browser install' starts it."
+        ),
+        timeout=(
+            "the browser bridge accepted '{method}' but did not answer within "
+            "{timeout:.0f}s. The command may be stuck in the browser — e.g. waiting "
+            "on a site-permission decision in the extension popup. Ask the user to "
+            "check the extension popup before restarting anything."
+        ),
+        rejected_key=(
+            "browser bridge rejected its state-file key; restart with 'lop browser restart'."
+        ),
+        invalid_response="browser bridge returned an invalid response (HTTP {status}).",
+    ),
+    HOST_UI: HostCopy(
+        # Deliberately never says "run 'lop browser install'": the bridge daemon is
+        # not what this host is, and installing it changes nothing about an app
+        # that is closed (design, failure-UX table).
+        label="Local Operator desktop app's browser host",
+        no_state=(
+            "the Local Operator desktop app's browser host is not running: no live host "
+            "state. Open the desktop app (and a browser tab in it), then retry."
+        ),
+        not_answering=(
+            "the Local Operator desktop app is no longer answering at 127.0.0.1:{port}; "
+            "if you quit it, re-open it and retry."
+        ),
+        timeout=(
+            "the Local Operator desktop app's browser host accepted '{method}' but did "
+            "not answer within {timeout:.0f}s. The command may be waiting on a site "
+            "decision in the app. Ask the user to check the app's browser tab before "
+            "restarting anything."
+        ),
+        rejected_key=(
+            "the Local Operator desktop app rejected the state-file key; ask the user to "
+            "restart the app."
+        ),
+        invalid_response=(
+            "the Local Operator desktop app's browser host returned an invalid response "
+            "(HTTP {status})."
+        ),
+    ),
+}
 
 
 #: Ceiling on the confirmation probe below. It runs at most once per browser
@@ -199,26 +333,109 @@ def _origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else value
 
 
-def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> str:
-    """Map every wire error to one actionable model-facing diagnostic."""
+#: Where an approval decision lands, per host, for the sites that name it.
+_APPROVAL_SURFACE = {
+    HOST_EXTENSION: "the Local Operator extension popup",
+    HOST_UI: "the Local Operator desktop app's browser tab",
+}
+
+#: `origin_denied` / `origin_prompt_pending` are the two codes whose remedy is
+#: "go look at the consent UI", said in one sentence per host. Templates rather
+#: than a fragment, because each is a whole claim about WHERE the user looks and
+#: splicing a noun into one of them reads as machine copy.
+_ORIGIN_DENIED_COPY = {
+    HOST_EXTENSION: (
+        " Do not retry the same origin; ask the user to allow it from the extension "
+        "popup if it is needed."
+    ),
+    HOST_UI: (
+        " Do not retry the same origin; ask the user to allow it in the Local Operator "
+        "desktop app's browser tab if it is needed."
+    ),
+}
+_ORIGIN_PROMPT_PENDING_COPY = {
+    HOST_EXTENSION: "the extension is waiting for the user to approve this site in its popup.",
+    HOST_UI: (
+        "the Local Operator desktop app is waiting for the user to approve this site in "
+        "its browser tab."
+    ),
+}
+
+#: The one remedy that measurably clears a wedged browser side, per host. These
+#: differ because the PROCESS differs: the extension is reloaded in
+#: `chrome://extensions`, the app is restarted. Naming the other host's remedy is
+#: not a cosmetic error — it sends the user to a page that cannot fix anything.
+_WEDGE_REMEDY = {
+    HOST_EXTENSION: (
+        "ask the user to toggle the Local Operator extension OFF then ON in "
+        "chrome://extensions (pairing is preserved)"
+    ),
+    HOST_UI: "ask the user to restart the Local Operator desktop app",
+}
+
+#: What the sentence's SUBJECT is called in prose: the thing that received a
+#: command and did not answer it. Distinct from `HostCopy.label`, which names the
+#: TRANSPORT ("browser bridge") for the fallback error line.
+_HOST_SUBJECT = {
+    HOST_EXTENSION: "the browser extension",
+    HOST_UI: "the Local Operator desktop app's browser host",
+}
+
+
+def format_error(
+    error: BridgeError, *, action: str = "", surface: str = "", host: str = HOST_EXTENSION
+) -> str:
+    """Map every wire error to one actionable model-facing diagnostic.
+
+    ``host`` selects the host-specific copy only. Both hosts speak the same wire
+    and therefore raise the same codes; what differs is the remedy, because the
+    process the reader has to go and look at differs. Every branch below is
+    shared unless the sentence names chrome (`chrome://extensions`, the extension
+    popup, `lop browser install`) — see `_APPROVAL_SURFACE`/`_WEDGE_REMEDY`.
+    """
+    messages = error_messages(host)
+    label = HOST_COPY.get(host, HOST_COPY[HOST_EXTENSION]).label
+    subject = _HOST_SUBJECT.get(host, _HOST_SUBJECT[HOST_EXTENSION])
+    approval = _APPROVAL_SURFACE.get(host, _APPROVAL_SURFACE[HOST_EXTENSION])
+    denied_copy = _ORIGIN_DENIED_COPY.get(host, _ORIGIN_DENIED_COPY[HOST_EXTENSION])
+    pending_copy = _ORIGIN_PROMPT_PENDING_COPY.get(
+        host, _ORIGIN_PROMPT_PENDING_COPY[HOST_EXTENSION]
+    )
+    remedy = _WEDGE_REMEDY.get(host, _WEDGE_REMEDY[HOST_EXTENSION])
     # Checked BEFORE the table: this code's own copy is the "no browser is
     # attached" one, and it is exactly wrong for a replaced wire — the browser is
     # open, mid-reconnect, and the command may simply be retried (design D3-3).
     if error.code == ErrorCode.EXTENSION_DISCONNECTED and error.data.get("phase") == REPLACED_PHASE:
         return REPLACED_PHASE_MESSAGE
-    if error.code in ERROR_MESSAGES:
-        return ERROR_MESSAGES[error.code]
+    # Also before the table, and for the same reason: `proto_mismatch` on the UI
+    # host is only actionable with BOTH numbers, and the table is a static string.
+    # The wire key is `proto`, the name every other frame in this protocol uses
+    # for it. No producer in THIS repo emits this code yet (the extension leg
+    # validates at the socket instead), so the table's sentence is what usually
+    # renders; this branch is what renders once a host reports its revision.
+    if error.code == ErrorCode.PROTO_MISMATCH and host == HOST_UI:
+        peer = error.data.get("proto")
+        if peer is not None:
+            return (
+                "the Local Operator desktop app's browser host speaks bridge protocol "
+                f"{peer}; this Local Operator speaks {PROTO_VERSION}. Update the "
+                "desktop app or Local Operator, then retry."
+            )
+    if error.code in messages:
+        return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
         return (
             f"browser tab {surface or '(unknown)'} is gone; dropped the handle. "
             "Use 'open' with a URL to get a new tab."
         )
+    # Proto mismatch on the UI host names BOTH numbers when the peer reported
+    # one, because "update the app or Local Operator" is not actionable without
+    # knowing which side is behind. Implemented above the table lookup.
     if error.code == ErrorCode.ORIGIN_DENIED:
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         return (
             f"navigation to {origin or '(unknown origin)'} was denied by the user (or the "
-            "permission prompt went unanswered). Do not retry the same origin; ask the user "
-            "to allow it from the extension popup if it is needed."
+            "permission prompt went unanswered)." + denied_copy
         )
     if error.code == ErrorCode.NAV_TIMEOUT:
         return f"navigation did not complete: {error.message}"
@@ -229,7 +446,7 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
             f"element not found: {error.message}. Take a new snapshot and retry with a fresh ref."
         )
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
-        return "the extension is waiting for the user to approve this site in its popup."
+        return pending_copy
     if error.code == ErrorCode.TAB_LIMIT:
         # The extension's message already names the cap and the remedy; append
         # the discovery verb. A session that owns none of the capped tabs
@@ -259,8 +476,8 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         return (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "
-            "THE USER (via the ask tool or a message) to approve it in the Local Operator "
-            "extension popup — the popup badge alone is not reliably seen — and only then "
+            f"THE USER (via the ask tool or a message) to approve it in {approval} — the "
+            "popup badge alone is not reliably seen — and only then "
             f"action='await_access' url={url} to wait for the decision."
         )
     if error.code == ErrorCode.INTERNAL and error.data.get("tab_crashed"):
@@ -274,9 +491,8 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         # the next command run. Retry is genuinely correct here, unlike for
         # EXTENSION_UNRESPONSIVE.
         return (
-            f"the browser extension stalled on {error.data['stalled']} and gave up on this "
-            "command. Retry; if it repeats, ask the user to toggle the Local Operator "
-            "extension OFF then ON in chrome://extensions (pairing is preserved)."
+            f"{subject} stalled on {error.data['stalled']} and gave up on this "
+            f"command. Retry; if it repeats, {remedy}."
         )
     if error.code == ErrorCode.INTERNAL and error.data.get("undrivable_tab"):
         # Chrome refuses to attach the debugger to another extension's page
@@ -305,12 +521,11 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         seconds = error.data.get("timeout_s")
         budget = f" within {seconds:g}s" if isinstance(seconds, (int, float)) else ""
         return (
-            f"the browser extension received {action or 'the command'} but did not answer"
+            f"{subject} received {action or 'the command'} but did not answer"
             f"{budget}. Retry once; if it repeats, the browser side is unhealthy rather "
-            "than slow — ask the user to toggle the Local Operator extension OFF then ON "
-            "in chrome://extensions (pairing is preserved)."
+            f"than slow — {remedy}."
         )
-    return f"browser bridge error ({error.code.value}): {error.message}"
+    return f"{label} error ({error.code.value}): {error.message}"
 
 
 def client_timeout(method: str) -> float:
@@ -338,17 +553,41 @@ def client_timeout(method: str) -> float:
     return base + ORIGIN_PROMPT_WINDOW_S + _CLIENT_TIMEOUT_MARGIN_S
 
 
-class BridgeClient:
-    def __init__(self, root: Path | None = None) -> None:
+class HostClient:
+    """One host's authenticated loopback leg, over that host's discovery file.
+
+    The transport is ~65 lines and it is the same transport for every host: one
+    JSON `Request` POSTed to `http://127.0.0.1:<port>/rpc` with the session key
+    from the host's own 0600 discovery file, mapped back to a result or a typed
+    error. What differs between hosts is WHICH record to read (`store`) and WHICH
+    PROCESS the failure copy should name (`host`).
+
+    A subclass rather than a parameter so the extension's call sites keep their
+    `BridgeClient()` spelling and therefore keep working unchanged, while the UI
+    host gets the same code with a different record and a different voice —
+    duplicating this method would mean two places to fix the next transport bug.
+    """
+
+    #: Selects both the copy (`HOST_COPY`) and, on the UI side, the message
+    #: overrides. Subclasses set it; it is not derived from the store, because a
+    #: test's fake store must not be able to change the copy silently.
+    host: str = HOST_EXTENSION
+
+    def __init__(self, store: Any = state_store, root: Path | None = None) -> None:
+        # The namespace is the STORE's business, never a client parameter: every
+        # host's state module fixes its own directory and filename, so a client
+        # that could also pass them would be a second place to get them wrong.
+        self.store = store
         self.root = root
 
+    def _read(self) -> Any:
+        return self.store.read(self.root)
+
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        current = state_store.read(self.root)
+        copy = HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
+        current = self._read()
         if current is None:
-            raise BridgeUnreachable(
-                "browser bridge unreachable: no live daemon state. Run 'lop browser status'; "
-                "'lop browser install' starts it."
-            )
+            raise BridgeUnreachable(copy.no_state)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
         timeout = client_timeout(method)
@@ -364,42 +603,29 @@ class BridgeClient:
             # belongs with the unreachable branch below, not the popup one —
             # httpx.ConnectTimeout subclasses TimeoutException, not
             # ConnectError, so ordering matters here (review finding m1).
-            raise BridgeUnreachable(
-                f"browser bridge unreachable: the daemon at 127.0.0.1:{current.port} is not "
-                "answering. Run 'lop browser status'; 'lop browser install' starts it."
-            ) from exc
+            raise BridgeUnreachable(copy.not_answering.format(port=current.port)) from exc
         except httpx.TimeoutException as exc:
-            # Read/write/pool timeout AFTER connecting: the daemon accepted the
+            # Read/write/pool timeout AFTER connecting: the host accepted the
             # command and never answered within a budget that already covers
             # every legitimate wait (base + prompt window + margin). Calling
             # this "unreachable" sent a QA session (transcript 0ee4974ba84a)
             # into an hour of restarting a healthy daemon while the extension
             # popup sat waiting on the human, so name the likely cause. We only
             # KNOW the connection was accepted — say that, not "running".
-            raise BridgeUnreachable(
-                f"the browser bridge accepted '{method}' but did not answer within "
-                f"{timeout:.0f}s. The command may be stuck in the browser — e.g. waiting "
-                "on a site-permission decision in the extension popup. Ask the user to "
-                "check the extension popup before restarting anything."
-            ) from exc
+            raise BridgeUnreachable(copy.timeout.format(method=method, timeout=timeout)) from exc
         except httpx.RequestError as exc:
             # Everything else — ConnectError (refused), ReadError /
             # RemoteProtocolError (daemon died mid-request), reset — means the
             # daemon is gone or dying, so restart advice is honest here
             # (review finding m2: these must NOT get the popup message).
-            raise BridgeUnreachable(
-                f"browser bridge unreachable: the daemon at 127.0.0.1:{current.port} is not "
-                "answering. Run 'lop browser status'; 'lop browser install' starts it."
-            ) from exc
+            raise BridgeUnreachable(copy.not_answering.format(port=current.port)) from exc
         if http_response.status_code == 401:
-            raise BridgeUnreachable(
-                "browser bridge rejected its state-file key; restart with 'lop browser restart'."
-            )
+            raise BridgeUnreachable(copy.rejected_key)
         try:
             response = Response.model_validate(http_response.json())
         except (ValueError, json.JSONDecodeError) as exc:
             raise BridgeUnreachable(
-                f"browser bridge returned an invalid response (HTTP {http_response.status_code})."
+                copy.invalid_response.format(status=http_response.status_code)
             ) from exc
         if not response.ok:
             detail = response.error or ErrorDetail(
@@ -407,3 +633,12 @@ class BridgeClient:
             )
             raise BridgeError(detail.code, detail.message, detail.data)
         return response.result or {}
+
+
+class BridgeClient(HostClient):
+    """The extension bridge's client. Constructor signature unchanged."""
+
+    host = HOST_EXTENSION
+
+    def __init__(self, root: Path | None = None) -> None:
+        super().__init__(state_store, root)
