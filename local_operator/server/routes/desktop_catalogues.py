@@ -231,8 +231,23 @@ async def analytics(
 #: is deliberately left alone.
 #:
 #: The host half is NOT touched: `agents.profiles`/`teams`, the session-registry
-#: tallies, `env.guides`/`credential_keys` and the terminal/browser/mobile
-#: probes are all real probes of this machine.
+#: tallies, `env.guides`/`credential_keys` and the terminal/browser/mobile probes
+#: are all real readings of this machine. "Terminal probe" there means
+#: `env.term`/`colorterm`/`multiplexer`/`is_tty` — `os.environ` and `isatty`
+#: reads this very call performs.
+#:
+#: `env.theme` is the one field that is neither nulled nor a reading, and it is
+#: named here so the two spellings cannot drift apart again. The theme is an APP
+#: fact: `collect_live` takes it as a parameter and the TUI passes
+#: `theme.current_theme()` (`tui/app.py`), and it is the TERMINAL's `tui.theme`
+#: scope, which `docs/DESKTOP_API.md` keeps distinct from the desktop's own
+#: theme. This route has no such app, so it ships the dataclass default `""`,
+#: which is `env.theme`'s documented UNKNOWN spelling (`EnvInfo.theme`): the name
+#: of a registered theme is never empty — `set_theme` raises on an unknown one —
+#: and the client's `omitEmpty` drops empty rows (verified in review round 2),
+#: so nothing blank is painted. Nulling it
+#: instead would need `theme` nullable in §5.1's `theme: string` plus a client
+#: change, to say what that row already says.
 _UNMEASURED_ON_THE_HOST_VIEW: dict[str, tuple[str, ...]] = {
     "agents": (
         "tree",
@@ -334,10 +349,13 @@ async def session_report(
             report = store.session_report(session_id, recent_limit=recent_limit)
         finally:
             store.close()
-        # The two tuple-keyed maps are blanked BEFORE the dump rather than
-        # overwritten after it: ``asdict`` would otherwise build both of them
-        # only for the rebuild below to discard them, and those are the only
-        # parts of this report that cannot be serialised at all.
+        # ALL THREE group-bys are blanked BEFORE the dump rather than
+        # overwritten after it: ``asdict`` would otherwise build every one of
+        # them only for the rebuild below to discard it. ``by_model`` and
+        # ``by_purpose_outcome`` are keyed by tuples and could not be serialised
+        # at all; ``by_purpose`` is keyed by a string and WOULD serialise — it
+        # is blanked because one response must not ship two encodings for one
+        # idea (the docstring above states the whole rule).
         payload = dataclasses.asdict(
             dataclasses.replace(report, by_model={}, by_purpose={}, by_purpose_outcome={})
         )
