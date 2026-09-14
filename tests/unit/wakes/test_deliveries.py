@@ -29,6 +29,7 @@ def test_a_failed_attempt_is_recorded_with_a_bounded_backoff(tmp_path: Path) -> 
         tmp_path, "owedsession1", NOW_MS - 5_000, error="could not reach a runtime", now_ms=NOW_MS
     )
 
+    assert record is not None, "a failed attempt on a writable store must be recorded"
     assert record["state"] == deliveries.STATE_RETRYING
     assert record["attempts"] == 1
     assert record["first_attempt_ms"] == NOW_MS
@@ -49,6 +50,7 @@ def test_attempts_accumulate_and_the_wait_grows_to_the_cap(tmp_path: Path) -> No
         record = deliveries.note_failure(
             tmp_path, "owedsession1", NOW_MS, error="still unreachable", now_ms=NOW_MS
         )
+        assert record is not None
         assert record["attempts"] == attempt
         wait_s = (record["next_attempt_ms"] - NOW_MS) / 1000.0
         assert wait_s >= previous
@@ -104,6 +106,7 @@ def test_a_record_for_a_different_occurrence_restarts_the_run(tmp_path: Path) ->
         tmp_path, "owedsession1", NOW_MS + 60_000, error="two", now_ms=NOW_MS
     )
 
+    assert record is not None
     assert record["attempts"] == 1
     assert record["occurrence_ms"] == NOW_MS + 60_000
 
@@ -135,3 +138,20 @@ def test_no_staged_temp_file_is_left_behind(tmp_path: Path) -> None:
 
     names = sorted(os.listdir(deliveries.deliveries_dir(tmp_path)))
     assert names == ["owedsession1.json"], names
+
+
+def test_note_failure_reports_a_refused_write(tmp_path: Path) -> None:
+    """Review round 1, MINOR 2: the caller must be able to tell that it failed.
+
+    ``note_failure`` used to answer with the in-memory record whether or not the
+    write landed, so a supervisor on an unwritable store escalated to the
+    "STILL OWED … 'lop wake status' reports it" line, which was a lie in exactly
+    the case the durability work exists for. ``None`` is that answer.
+    """
+    blocker = tmp_path / "wakes"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    refused = deliveries.note_failure(
+        tmp_path, "owedsession1", NOW_MS, error="unreachable", now_ms=NOW_MS
+    )
+    assert refused is None

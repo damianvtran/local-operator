@@ -3456,6 +3456,24 @@ def _wake_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
+    """How long a fire has been owed, in seconds, or ``None`` when not owed.
+
+    The ledger's ``first_attempt_ms`` is when the supervisor first failed to
+    hand this occurrence to a runtime, so the difference is the age of the
+    OWED fire rather than the age of the schedule. Rendered in the row tail
+    (design round 1, D2): the state words alone cannot separate a wake four
+    minutes late from one stuck since last week, and below 69 columns the WHEN
+    column is gone, so the row had no age of any kind.
+    """
+    if not record:
+        return None
+    first = record.get("first_attempt_ms")
+    if not isinstance(first, int) or isinstance(first, bool):
+        return None
+    return max((now_ms - first) / 1000.0, 0.0)
+
+
 def _wake_rows() -> "list[dict[str, Any]]":
     """Every scheduled wake on this machine, soonest first.
 
@@ -3500,6 +3518,7 @@ def _wake_rows() -> "list[dict[str, Any]]":
             due = raw.get("next_due_at")
             if isinstance(due, bool) or not isinstance(due, int):
                 continue
+            delivery = record if record is not None and record.get("occurrence_ms") == due else None
             rows.append(
                 {
                     "session_id": session_id,
@@ -3550,11 +3569,10 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     # session alone: a record is about one attempt at one due
                     # time, and a recurring schedule whose next occurrence is
                     # already different must not inherit it.
-                    "delivery": (
-                        record
-                        if record is not None and record.get("occurrence_ms") == due
-                        else None
-                    ),
+                    "delivery": delivery,
+                    # Its age, against the SAME clock read as `due_in_s`, for the
+                    # `owed 9d` tail the listing renders (design round 1, D2).
+                    "owed_age_s": _owed_age_s(delivery, now_ms),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -3730,6 +3748,16 @@ def wake_command(args: argparse.Namespace) -> int:
                 # and this listing said nothing, so the same wake read
                 # differently in two places (round 1, D9).
                 repeat = " · once"
+            owed_age = row.get("owed_age_s")
+            if owed_age is not None:
+                # THE AGE GOES IN THE TAIL, where the other bounds already live
+                # and where the round-5 R6/U16 rule says it is never clamped:
+                # `retrying owedstale001` (9 days) and `retrying owedretry001`
+                # (4 minutes) were otherwise identical rows at any width that
+                # drops WHEN (below 69 columns). The message is what gives —
+                # the part of the row the reader already knows — so the row's
+                # total width is unchanged and only the prose shortens.
+                repeat += f", owed {_format_duration(owed_age)}"
             if row.get("last_fired_at"):
                 repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
             # THE MESSAGE IS WHAT GETS CLAMPED, never the state tail. Clamping
@@ -3756,6 +3784,17 @@ def wake_command(args: argparse.Namespace) -> int:
                 f"{_elide_id(row['session_id'], id_w):<{id_w}} {detail}".rstrip()
             )
 
+        if not show_when:
+            # The omission is STATED, not silent: the absolute time was dropped
+            # to keep the table aligned on a narrow terminal (round 2, D12), and
+            # the reader is told where it went rather than left to notice.
+            #
+            # AND IT IS SAID IMMEDIATELY (design round 1, D6): it used to print
+            # after the legend block, 14 rows below the table at 60 columns, so
+            # the reader who noticed the missing column had to scroll past three
+            # legends to learn why.
+            print("\n(WHEN hidden — terminal too narrow)")
+
         # ONE legend under the table rather than the same sentence on every
         # row, and only for the states actually present: what "stale" and
         # "dormant" COST is the thing a reader needs told, but telling it per
@@ -3770,6 +3809,35 @@ def wake_command(args: argparse.Namespace) -> int:
         # host or a session that will never construct (`lop wake status` carries
         # both figures).
         legend_rows: list[tuple[str, str]] = []
+
+        def _owed_state(state: str) -> bool:
+            return any(
+                row.get("delivery") and row["delivery"].get("state") == state for row in rows
+            )
+
+        if _owed_state(STATE_RETRYING) or _owed_state(STATE_UNDELIVERED):
+            # THE OWED PAIR COMES FIRST (design round 1, D8). They are the two
+            # states an operator has to act on; the three below them all mean
+            # "the supervisor is not firing this at all", so a reader scanning
+            # for what `retrying` means used to pass every one of those first.
+            #
+            # EACH WORD GETS ONE SHORT CLAUSE AND THE REST IS SAID ONCE (D5).
+            # The two legends used to repeat ~100 characters of the same
+            # sentence three lines apart, and the clause that actually separates
+            # them — one failed attempt vs repeated failures — was buried
+            # mid-sentence in each; at 60 columns that was 21 rows of legend
+            # under a 6-row table, past a standard screen.
+            if _owed_state(STATE_RETRYING):
+                legend_rows.append(("retrying", "one failed attempt so far."))
+            if _owed_state(STATE_UNDELIVERED):
+                legend_rows.append(("undelivered", "repeated failures."))
+            legend_rows.append(
+                (
+                    "",
+                    "these are still owed and retried with a backoff; 'lop wake status' has "
+                    "the attempts and the error",
+                )
+            )
         if any(
             row["stale"] and not row["dormant"] and not row["ghost"] and not row.get("delivery")
             for row in rows
@@ -3781,10 +3849,6 @@ def wake_command(args: argparse.Namespace) -> int:
                     "their session is next opened",
                 )
             )
-        if any(row["dormant"] for row in rows):
-            legend_rows.append(
-                ("dormant", "the session was stopped; reopening it re-arms its wakes")
-            )
         if any(row["ghost"] for row in rows):
             legend_rows.append(
                 (
@@ -3793,28 +3857,9 @@ def wake_command(args: argparse.Namespace) -> int:
                     "nothing clears them automatically",
                 )
             )
-        if any(
-            row.get("delivery") and row["delivery"].get("state") == STATE_RETRYING for row in rows
-        ):
+        if any(row["dormant"] for row in rows):
             legend_rows.append(
-                (
-                    "retrying",
-                    "the supervisor tried to fire this and could not reach the session; it is "
-                    "still owed and retried with a backoff ('lop wake status' has the attempts "
-                    "and the error)",
-                )
-            )
-        if any(
-            row.get("delivery") and row["delivery"].get("state") == STATE_UNDELIVERED
-            for row in rows
-        ):
-            legend_rows.append(
-                (
-                    "undelivered",
-                    "the supervisor has failed to reach this session repeatedly; the fire is "
-                    "STILL OWED and retried at the capped backoff, not dropped "
-                    "('lop wake status' has the attempts and the error)",
-                )
+                ("dormant", "the session was stopped; reopening it re-arms its wakes")
             )
 
         if legend_rows:
@@ -3823,7 +3868,10 @@ def wake_command(args: argparse.Namespace) -> int:
             # rows do. Every earlier word was at most 8 characters, so a fixed
             # 9-wide column was invisible; `undelivered` is 11 and a fixed column
             # ran the label straight into its sentence ("undeliveredthe
-            # supervisor has…"), which is the one line that explains a state.
+            # supervisor has…"), which is the one line that explains a state. A
+            # word-less row is the shared continuation (design round 1, D5): it
+            # aligns under the labels so the shared clause reads as belonging to
+            # both words above it.
             import textwrap
 
             legend_w = max(len(word) for word, _ in legend_rows) + 1
@@ -3835,11 +3883,7 @@ def wake_command(args: argparse.Namespace) -> int:
                     subsequent_indent=" " * legend_w,
                 ):
                     print(line)
-        if not show_when:
-            # The omission is STATED, not silent: the absolute time was dropped
-            # to keep the table aligned on a narrow terminal (round 2, D12), and
-            # the reader is told where it went rather than left to notice.
-            print("\n(WHEN hidden — terminal too narrow)")
+
         return 0
 
     # status
@@ -3937,10 +3981,20 @@ def wake_command(args: argparse.Namespace) -> int:
     # supervisor retries from, so the count is what the supervisor owes rather
     # than a re-derivation of it — the two cannot disagree.
     def _delivery_rows(state: str | None) -> "list[dict[str, Any]]":
+        # GHOSTS ARE EXCLUDED (QA round 1, Q1). An owed record whose session has
+        # no transcript on disk is frozen: `_engage_one` refuses a ghost before
+        # any attempt, so nothing retries it and nothing will. Reporting it as
+        # "still owed and retried with backoff" beside the `ghost:` line (which
+        # says nothing can fire it) made this surface argue with itself, and
+        # `--json` said `retrying: 1` with `overdue: 0`. The record is still on
+        # disk and still the operator's to delete; it is simply not work in
+        # progress, which is the only thing this bucket claims.
         return [
             row
             for row in armed
-            if row.get("delivery") and (state is None or row["delivery"].get("state") == state)
+            if row.get("delivery")
+            and not row["ghost"]
+            and (state is None or row["delivery"].get("state") == state)
         ]
 
     owed = _delivery_rows(None)
@@ -3970,7 +4024,23 @@ def wake_command(args: argparse.Namespace) -> int:
 
     def _next_attempt_s(row: dict[str, Any]) -> float | None:
         nxt = row["delivery"].get("next_attempt_ms")
-        return (nxt - int(time.time() * 1000)) / 1000.0 if isinstance(nxt, int) else None
+        if not isinstance(nxt, int) or isinstance(nxt, bool):
+            return None
+        return (nxt - int(time.time() * 1000)) / 1000.0
+
+    def _retry_clause(nxt: float | None) -> str:
+        """``, next attempt in 3m`` / ``, retry due now`` / ``""``.
+
+        ``next_attempt_in_s`` is the recorded attempt minus the clock this run
+        read, so it is SIGNED and design round 1 (D3) caught the old rendering:
+        the clause was dropped whenever the value was not positive, which is
+        exactly the state where the retry is already due — so the line that must
+        answer "is this being retried?" ended at `retried with backoff` with no
+        when at all, while the neighbouring `undelivered:` line printed one.
+        """
+        if nxt is None:
+            return ""
+        return f", next attempt in {_format_duration(nxt)}" if nxt > 0 else ", retry due now"
 
     # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
     # monitoring consumer branching on `state` had to string-match prose, and
@@ -4047,6 +4117,17 @@ def wake_command(args: argparse.Namespace) -> int:
         # parsing the counts above.
         "undelivered": len(stalled),
         "retrying": len(retrying),
+        # AND THEY ARE A SUBSET OF `overdue`, stated as such (design round 1,
+        # D4): every owed fire is overdue by construction, so `overdue` +
+        # `retrying` + `undelivered` counted the same wakes twice and a consumer
+        # adding the keys got 6 of 5. The flat keys above stay for the readers
+        # that already parse them; this block is the one that says what they are.
+        "owed": {
+            "subset_of": "overdue",
+            "total": len(owed),
+            "retrying": len(retrying),
+            "undelivered": len(stalled),
+        },
         "deliveries": [
             {
                 "session_id": row["session_id"],
@@ -4151,21 +4232,27 @@ def wake_command(args: argparse.Namespace) -> int:
         # is the line that answers "what is the supervisor working on".
         worst = max(row["overdue_s"] for row in overdue)
         summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        if owed:
+            # THE SUBSET IS STATED WHERE THE COUNTS ARE (design round 1, D4).
+            # Every owed fire is overdue by construction, so `overdue` already
+            # contains the `retrying:`/`undelivered:` lines below and an operator
+            # adding the three counted the same wakes twice (6 of 5 on the
+            # designer's store). One clause, on the line a reader is already
+            # doing the arithmetic against.
+            summary += f" — {len(retrying)} retrying, {len(stalled)} undelivered"
         print(_wrap_status(summary, "overdue:"))
     if stalled:
         # THE DEEPEST-FAILING ONE, because a count alone cannot distinguish "a
         # wake is 20 seconds late on a busy host" from "a session has not
         # constructible for an hour", and only the second is worth attention.
         deepest = max(stalled, key=lambda row: row["delivery"].get("attempts") or 0)
-        nxt = _next_attempt_s(deepest)
-        retry = f", next attempt in {_format_duration(nxt)}" if nxt is not None and nxt > 0 else ""
         print(
             _wrap_status(
                 f"{len(stalled)} — {deepest['session_id']} {deepest['message']!r} could not be "
-                f"handed to a runtime: {_attempts_label(deepest)}{retry} (last error: "
+                f"handed to a runtime: {_attempts_label(deepest)}"
+                f"{_retry_clause(_next_attempt_s(deepest))} (last error: "
                 f"{deepest['delivery'].get('last_error') or 'unknown'}). It is STILL OWED "
-                "and retried with backoff — a fire that cannot be delivered is no longer "
-                "dropped.",
+                "and retried with backoff.",
                 "undelivered:",
             )
         )
@@ -4174,12 +4261,11 @@ def wake_command(args: argparse.Namespace) -> int:
             retrying,
             key=lambda row: row["delivery"].get("next_attempt_ms") or 0,
         )
-        nxt = _next_attempt_s(soonest)
-        when = f" (next attempt in {_format_duration(nxt)})" if nxt is not None and nxt > 0 else ""
         print(
             _wrap_status(
                 f"{len(retrying)} — {soonest['session_id']} {soonest['message']!r}: "
-                f"{_attempts_label(soonest)}, retried with backoff{when}",
+                f"{_attempts_label(soonest)}, retried with backoff"
+                f"{_retry_clause(_next_attempt_s(soonest))}",
                 "retrying:",
             )
         )
