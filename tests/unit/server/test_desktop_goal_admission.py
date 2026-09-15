@@ -18,7 +18,11 @@ So there are three guards here, deliberately of different kinds:
   through the route, and a type added to the vocabulary tomorrow is admitted
   without this file knowing its name;
 * a BOUND one — the reply does not park on a running turn's durable append, and
-  says in ``admission.detail`` which of the two dispositions the caller got;
+  reports in ``admission.status``/``admission.detail`` what the OWNER said: the
+  owner's own acknowledgement, ``pending`` when it had not answered inside the
+  bound, or ``failed`` when it answered with an error. A failure that lands
+  after a ``pending`` receipt is published on the session's stream, because the
+  receipt is gone by then and the user's text must not vanish into a log line;
 * a STATIC one over the real source, in the spirit of
   ``tests/unit/tui/test_noop_consumers.py`` — the handler must reach its
   decision through the shared helper and must not name a receipt type itself,
@@ -42,7 +46,6 @@ import ast
 import asyncio
 import contextlib
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -52,6 +55,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_sessions
+from local_operator.session import attached as attached_module
 from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
 
 TOKEN = "desktop-goal-admission-token"
@@ -74,6 +78,19 @@ ROUTE_SOURCE = Path(desktop_sessions.__file__).read_text(encoding="utf-8")
 
 def _wire_images() -> list[dict[str, str]]:
     return [{"data_b64": PNG_B64, "mime_type": "image/png"}]
+
+
+async def until(predicate, *, timeout_s: float = 10.0) -> None:
+    """Wait for state the code under test publishes, never on the clock.
+
+    AGENTS.md, "Wait on the event, never on the clock": the deadline here is the
+    cell's deadlock guard rather than the assertion, and the wait lasts exactly
+    as long as the work does — every caller asserts the state it waited for
+    afterwards.
+    """
+    async with asyncio.timeout(timeout_s):
+        while not predicate():
+            await asyncio.sleep(0.001)
 
 
 def _goal_set_receipt(request: str) -> dict[str, Any]:
@@ -115,9 +132,16 @@ class FakeRemote:
     The members the route touches, and the admissions are recorded rather than
     answered away: "did the host submit the request, and how" is the whole
     question these tests ask, and a double that admitted silently would answer it
-    vacuously. ``park`` is the one control a test needs beyond that: an unset
-    event makes the owner's ack hang forever, which is how the "does not park"
-    cells drive the reply that has to come back without it.
+    vacuously.
+
+    THREE CONTROLS, because the route's answer now depends on what the OWNER does
+    and when (review round 2, F1): ``ack_delay_s`` is a REAL wait before the ack
+    — the shape of every socket round trip, and the thing no loop-turn budget can
+    see; ``ack_error`` is the owner answering with a refusal; and ``park`` is an
+    ack that never lands at all, which is how the "does not park" cells drive the
+    reply that has to come back without it. ``fail_after_park`` is the parked ack
+    that fails once the test releases it, i.e. the DETACHED failure the UI has to
+    be told about.
     """
 
     def __init__(self, receipt: dict[str, Any]) -> None:
@@ -125,6 +149,9 @@ class FakeRemote:
         self.binds = 0
         self.is_streaming = False
         self.park: asyncio.Event | None = None
+        self.ack_delay_s: float | None = None
+        self.ack_error: BaseException | None = None
+        self.fail_after_park: BaseException | None = None
         self.routed: list[tuple[str, str]] = []
         self.admissions: list[tuple[str, str]] = []
         self.steered: list[bool] = []
@@ -141,8 +168,51 @@ class FakeRemote:
         self.steered.append(steer)
         if self.park is not None:
             await self.park.wait()
+            if self.fail_after_park is not None:
+                raise self.fail_after_park
+        if self.ack_delay_s is not None:
+            # A real suspension, so the ack cannot land inside any budget
+            # measured in loop turns: this is the socket round trip's shape.
+            await asyncio.sleep(self.ack_delay_s)
+        if self.ack_error is not None:
+            raise self.ack_error
         # The two details the real owner answers with, verbatim.
         return ("steering queued" if steer else "prompt admitted", False)
+
+
+class FakeBridge:
+    """``DesktopSessionBridge``-shaped: the facade AND the lease under it.
+
+    The lease half is not decoration (review round 2, F2). The route must HOLD
+    this bridge for the admission's life, because the pool disposes the facade
+    when its last user releases it and the reader pump then fails every pending
+    request future — the pattern that manufactured this host's own failure out of
+    a POST that happened to be its session's only user. So the double counts the
+    holds and records the frames the route publishes for the UI, and the cells
+    assert both: a hold per command, released exactly once, and an
+    ``admission.failed`` frame for a detached failure.
+    """
+
+    def __init__(self, remote: FakeRemote) -> None:
+        self.remote = remote
+        self.users = 0
+        self.releases = 0
+        self.refreshes = 0
+        self.published: list[tuple[str, dict[str, Any]]] = []
+
+    async def refresh_watch(self) -> None:
+        self.refreshes += 1
+
+    async def acquire(self) -> FakeRemote:
+        self.users += 1
+        return self.remote
+
+    async def release(self) -> None:
+        self.releases += 1
+        self.users -= 1
+
+    def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
+        self.published.append((kind, payload))
 
 
 class FakePool:
@@ -150,23 +220,20 @@ class FakePool:
 
     The real pool's own admissions (the retirement latch) have their own tests;
     what matters here is that the route works THROUGH a bridge facade rather
-    than calling a handler directly. ``refresh_watch`` lives on the BRIDGE and
-    ``bind_runtime`` on the facade it holds, which is the real split and the
-    reason this double yields both.
+    than calling a handler directly. ``refresh_watch`` lives on the BRIDGE (the
+    route calls it there) and ``bind_runtime`` on the facade it holds, which is
+    the real split and the reason this double yields both.
     """
 
     def __init__(self, remote: FakeRemote) -> None:
         self.remote = remote
-        self.refreshes = 0
-
-    async def refresh_watch(self) -> None:
-        self.refreshes += 1
+        self.bridge = FakeBridge(remote)
 
     @contextlib.asynccontextmanager
     async def session(self, session_id: str):
         if session_id != SESSION:
             raise KeyError("Unknown session")
-        yield SimpleNamespace(remote=self.remote, refresh_watch=self.refresh_watch)
+        yield self.bridge
 
 
 @pytest_asyncio.fixture
@@ -184,14 +251,15 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
     remote = FakeRemote(_goal_set_receipt("Preserve one identity"))
-    app.state.desktop_sessions = FakePool(remote)
+    pool = FakePool(remote)
+    app.state.desktop_sessions = pool
     app.include_router(desktop_sessions.router)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
         headers={"Authorization": f"Bearer {TOKEN}"},
     ) as client:
-        yield client, remote
+        yield client, remote, pool.bridge
 
 
 async def _goal(
@@ -225,7 +293,7 @@ async def test_a_goal_command_admits_its_argument_as_a_user_turn(desktop) -> Non
     stored, and the request was dropped — the TUI's single-Enter behaviour on
     the desktop path producing half of itself.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
 
     response = await _goal(client, "Preserve one identity")
 
@@ -248,7 +316,7 @@ async def test_the_receipt_keeps_its_goal_metadata_beside_the_admission(desktop)
     admission is additive: a host that replaced the receipt with its admission
     would leave the desktop composer unable to say the goal was set.
     """
-    client, _remote = desktop
+    client, _remote, _bridge = desktop
 
     response = await _goal(client, "Preserve one identity")
 
@@ -269,7 +337,7 @@ async def test_a_goal_arriving_mid_turn_takes_the_steering_path(desktop) -> None
     answer. It is also what keeps this reply OFF the running turn's ack: ``steer``
     answers on queue insertion where ``prompt`` waits for the durable append.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
     remote.is_streaming = True
 
     response = await _goal(client, "Preserve one identity")
@@ -297,43 +365,184 @@ async def test_a_parked_ack_does_not_park_the_reply(desktop) -> None:
     proof, since an implementation that awaited it would never return. The ten
     seconds are the TEST's deadlock guard, not a product bound — the assertion
     is on the reply's presence and wording, never on how long it took.
+
+    AND THE WORDING IS THE FIX (review round 2, F1). This receipt cannot know
+    whether the owner took the text, so it must not say it did: ``pending``, with
+    a phrase that names the missing acknowledgement. The previous
+    ``admitted; the owner's acknowledgement was still in flight`` asserted the
+    admission in the same breath as admitting it had not been observed, which is
+    the sentence a REFUSED admission was being handed.
     """
-    client, remote = desktop
+    client, remote, bridge = desktop
     remote.park = asyncio.Event()
 
     response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
 
     assert response.status_code == 200, response.text
     admission = response.json()["result"]["result"]["admission"]
-    assert admission["status"] == "admitted"
-    # No turn was running, so this is the "handed over" phrase, not the queued
-    # one: the two must not be confused in either direction.
-    assert admission["detail"] == desktop_sessions.HANDED_OVER_ADMISSION_DETAIL
+    assert admission["status"] == desktop_sessions.PENDING_ADMISSION_STATUS
+    # No turn was running, so this is the idle phrase, not the steer one: the two
+    # must not be confused in either direction.
+    assert admission["detail"] == desktop_sessions.PENDING_ADMISSION_DETAIL
     assert remote.admissions == [("Preserve one identity", REQUEST_ID)]
+    # The admission is still in flight, so it is still HOLDING the bridge — the
+    # whole point of the hold (F2): the pool cannot dispose the connection this
+    # request is using while the reply has already gone out.
+    assert bridge.users == 1
     # Release the parked ack so the detached task is not left pending at teardown.
     remote.park.set()
-    await asyncio.sleep(0)
+    await until(lambda: bridge.users == 0)
+    # It SUCCEEDED, so nothing is announced: the user row is the confirmation.
+    assert bridge.published == []
 
 
 @pytest.mark.asyncio
-async def test_a_parked_ack_mid_turn_is_reported_as_queued(desktop) -> None:
-    """And the queued phrase when a turn WAS running behind the parked ack.
+async def test_a_parked_ack_mid_turn_is_reported_as_pending(desktop) -> None:
+    """And the STEER phrase when a turn was running behind the parked ack.
 
     The distinction is the point of the two phrases: a renderer that promises
-    "sends when this step finishes" needs the queued one, and the same status
-    word covers both.
+    "sends when this step finishes" needs the steer one, and the same status
+    word covers both. Neither claims the owner accepted the text.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
     remote.is_streaming = True
     remote.park = asyncio.Event()
 
     response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
 
     admission = response.json()["result"]["result"]["admission"]
-    assert admission["detail"] == desktop_sessions.QUEUED_ADMISSION_DETAIL
+    assert admission["status"] == desktop_sessions.PENDING_ADMISSION_STATUS
+    assert admission["detail"] == desktop_sessions.PENDING_STEER_ADMISSION_DETAIL
     assert remote.steered == [True]
     remote.park.set()
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_an_ack_that_takes_a_real_step_is_still_reported_verbatim(desktop) -> None:
+    """THE POSITIVE HALF OF F1: a wait, not a loop-turn count.
+
+    The owner's answer here arrives after a REAL suspension — the shape of every
+    ``AttachClient`` socket round trip, and precisely what the loop-turn budget
+    could not observe. The old code therefore fell through to its "still in
+    flight" phrase on every socket answer while claiming a refusal arm existed;
+    this cell fails if the receipt stops waiting for the owner, and the sibling
+    below fails if a refusal that DOES arrive is answered `admitted`.
+
+    Ten milliseconds is not the bound under test — it is long enough that no
+    number of ``sleep(0)`` turns can see it, and short enough that the cell stays
+    a unit test. ``ack_delay_s`` is deliberately not the bound's size: a cell
+    that slept for the bound would assert the bound by waiting it out, which is
+    the one thing the bound exists to avoid.
+    """
+    client, remote, bridge = desktop
+    remote.ack_delay_s = 0.01
+
+    response = await _goal(client, "Preserve one identity")
+
+    assert response.status_code == 200, response.text
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["status"] == desktop_sessions.ADMITTED_ADMISSION_STATUS
+    assert admission["detail"] == "prompt admitted"
+    # Settled inside the bound, so the hold is already given back — exactly once.
+    assert bridge.users == 0 and bridge.releases == 1
+    assert bridge.published == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_after_a_real_step_is_reported_failed_not_admitted(desktop) -> None:
+    """THE REFUSAL CELL: the owner says no, and the receipt passes it on.
+
+    This is review round 2's own repro, as a test: a remote whose ack raises after
+    one real step — a stand-in for any socket round trip — used to be answered
+    ``HTTP 200 status: admitted`` with the failure reaching nothing but a WARNING
+    log, while the user's text went nowhere. Now the caller learns, in the
+    receipt it is holding, that the request was NOT admitted.
+
+    It is deliberately NOT raised into the error arm. A raise would leave this
+    request's receipt unfinished (``DesktopReceipts._claim``), and the caller's
+    retry under the same id would then read "outcome is indeterminate" — the
+    503-then-409 ladder this route exists to remove.
+    """
+    client, remote, bridge = desktop
+    remote.ack_delay_s = 0.01
+    remote.ack_error = ConnectionError("owner socket unreachable: [Errno 61]")
+
+    response = await _goal(client, "Preserve one identity")
+
+    assert response.status_code == 200, response.text
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["status"] == desktop_sessions.FAILED_ADMISSION_STATUS
+    # A vetted sentence, never the transport's text: the errno and the port are
+    # what ``errors()`` refuses to echo for the same reason.
+    assert admission["detail"] == "failed; the session owner could not be reached"
+    assert "Errno 61" not in admission["detail"]
+    # The goal is still set — that part of the command worked — but the turn was
+    # never submitted, which is what the caller now knows.
+    assert bridge.users == 0 and bridge.releases == 1
+    # Settled within the bound, so the caller has it: no frame is needed.
+    assert bridge.published == []
+
+
+@pytest.mark.asyncio
+async def test_a_detached_failure_is_published_where_the_ui_can_see_it(desktop) -> None:
+    """A failure AFTER the receipt reaches the UI, not just the log (F1).
+
+    The receipt has already answered ``pending`` by the time this one lands, so
+    there is no caller left to tell — the failure used to be a ``logger.warning``
+    and nothing else, invisible client-side (an op failure is an error frame to
+    the CALLER, never a frame on the desktop plane). It is now published on the
+    session's own stream, where the mounted viewer reads it.
+    """
+    client, remote, bridge = desktop
+    remote.park = asyncio.Event()
+    remote.fail_after_park = RuntimeError("owner unavailable")
+
+    response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
+
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["status"] == desktop_sessions.PENDING_ADMISSION_STATUS
+    assert bridge.published == []
+
+    remote.park.set()
+    await until(lambda: bridge.published)
+
+    kind, payload = bridge.published[0]
+    assert kind == desktop_sessions.ADMISSION_FAILED_FRAME
+    assert payload == {
+        "request_id": REQUEST_ID,
+        "command": "goal",
+        "status": desktop_sessions.FAILED_ADMISSION_STATUS,
+        # The owner's own ``RuntimeError`` text is NOT echoed: only the two
+        # vetted shapes are (``_admission_failure_detail``).
+        "detail": "failed; the owner did not admit the request",
+    }
+    # And the hold is given back exactly once, on the same path.
+    assert bridge.users == 0 and bridge.releases == 1
+
+
+@pytest.mark.asyncio
+async def test_the_admission_holds_the_bridge_until_it_settles(desktop) -> None:
+    """THE F2 CELL: the reply returning must not release the lease (F2).
+
+    The pool disposes the facade when its last user releases it, and the reader
+    pump then fails every pending request future — so a POST that was its
+    session's only user used to close the connection its own admission was still
+    using, manufacturing a spurious failure and warning out of nothing. The route
+    takes ONE reference per command and gives it back exactly once, which is what
+    the counters here assert in both directions: held while in flight, released
+    after.
+    """
+    client, remote, bridge = desktop
+    remote.park = asyncio.Event()
+
+    response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
+    assert response.status_code == 200, response.text
+    assert bridge.users == 1, "the admission outlived its bridge reference"
+
+    remote.park.set()
+    await until(lambda: bridge.users == 0)
+    assert bridge.releases == 1, "the hold must be given back exactly once"
 
 
 @pytest.mark.asyncio
@@ -346,7 +555,7 @@ async def test_an_agent_clear_carries_no_request_and_starts_no_turn(desktop) -> 
     CALLER's, not the receipt's, so admitting them would open an image-only turn
     nobody asked for, as a paid provider call and a durable row.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
     remote.receipt = _agent_cleared_receipt()
 
     response = await _goal(client, "clear")
@@ -379,7 +588,7 @@ async def test_a_status_notice_with_images_still_starts_no_turn(desktop) -> None
     answers False for a typeless notice too, so the bare inversion would open a
     turn here — a paid provider call for ``/goal`` alone with a pasted image.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
     remote.receipt = {
         "kind": "notice",
         "text": "goal: Preserve one identity",
@@ -402,7 +611,7 @@ async def test_a_receipt_outside_the_vocabulary_never_opens_a_turn(desktop) -> N
     the runtime never stood down for it, so admitting here would be the second
     submission of a command a future client declares as its own.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
     remote.receipt = {
         "kind": "block",
         "text": "",
@@ -441,15 +650,22 @@ async def test_a_type_added_to_the_shared_vocabulary_is_completed_here(
     is asserted beside it rather than assumed. The monkeypatched name is in the
     tuple on purpose: with the vocabulary gate in front of the predicate, an
     added name stays completable by a host that declares the whole list.
+
+    BOTH HALVES ARE EXTENDED, because that is what a real extension does: the
+    declaration this host reads is DEFINED from the vocabulary
+    (``attached.py::ATTACHED_SLASH_CONSUMERS``), so a build that adds a type to
+    one has added it to the other before any request runs. Extending only the
+    vocabulary would describe a state no build can be in and would make this
+    cell assert that the host claims a type its own client declared away —
+    which is the behaviour review round 2's NIT-1 asked for, not a regression.
     """
+    from local_operator.session import attached as attached_module
     from local_operator.session.runtime import types as runtime_types
 
-    monkeypatch.setattr(
-        runtime_types,
-        "SLASH_ACTION_RECEIPTS",
-        (*runtime_types.SLASH_ACTION_RECEIPTS, "synthetic_attached"),
-    )
-    client, remote = desktop
+    extended = (*runtime_types.SLASH_ACTION_RECEIPTS, "synthetic_attached")
+    monkeypatch.setattr(runtime_types, "SLASH_ACTION_RECEIPTS", extended)
+    monkeypatch.setattr(attached_module, "ATTACHED_SLASH_CONSUMERS", extended)
+    client, remote, _bridge = desktop
     remote.receipt = {
         "kind": "notice",
         "text": "attached",
@@ -473,7 +689,7 @@ async def test_every_declared_action_receipt_is_completed_by_this_route(
     point: an entry added to ``SLASH_ACTION_RECEIPTS`` is covered by this cell
     the moment it is added, with no edit here.
     """
-    client, remote = desktop
+    client, remote, _bridge = desktop
 
     assert SLASH_ACTION_RECEIPTS, "the vocabulary is empty; this audit has gone blind"
     for index, receipt_type in enumerate(SLASH_ACTION_RECEIPTS):
@@ -582,6 +798,7 @@ def test_the_shared_helper_is_derived_from_the_shared_vocabulary() -> None:
     and would still leave the runtime completing a subset a future client
     declares.
     """
+    from local_operator.session.attached import ATTACHED_SLASH_CONSUMERS
     from local_operator.session.runtime.types import runtime_must_complete
 
     tree = ast.parse(ROUTE_SOURCE)
@@ -595,8 +812,47 @@ def test_the_shared_helper_is_derived_from_the_shared_vocabulary() -> None:
         "the completion decision must be the shared rule, so this host and the "
         "runtime cannot answer differently about the same receipt"
     )
+    # AND THE DECLARATION IT IS ASKED ABOUT, rather than the vocabulary a second
+    # time. ``runtime_must_complete(t, SLASH_ACTION_RECEIPTS)`` is a constant
+    # False for everything the first clause admits, so the second clause decided
+    # nothing at all (review round 2, NIT-1) — the code was shaped to satisfy
+    # this guard, which cannot see that. Reading the value the client actually
+    # DIALS with makes the clause decide, and the cell below pins the assumption
+    # that used to be unenforceable.
+    assert "ATTACHED_SLASH_CONSUMERS" in _loaded_names(helper), (
+        "the second clause must read the declaration the client dials with; "
+        "passed the vocabulary instead it is inert, and this host would claim a "
+        "submit its own client declared away"
+    )
     # The two directions the route relies on, asserted on the predicate itself:
     # an undeclaring client leaves the submit to the runtime, a declaring one
     # (this host) takes it.
     assert runtime_must_complete("goal_set", []) is True
-    assert runtime_must_complete("goal_set", SLASH_ACTION_RECEIPTS) is False
+    assert runtime_must_complete("goal_set", ATTACHED_SLASH_CONSUMERS) is False
+
+
+def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
+    """The assumption the route's second clause rests on, ENFORCED.
+
+    ``desktop_viewer_must_submit`` answers "this host declared it" by reading
+    ``ATTACHED_SLASH_CONSUMERS`` — the list ``AttachedSession`` really puts in its
+    auth frame. If a future edit narrowed that declaration, this host would stand
+    down for the missing types (correctly) while the docstring still claimed the
+    whole vocabulary, and the symptom would be a receipt nobody completes: the
+    very drop this route was written to repair. A subset declaration is therefore
+    a test failure, from whichever side it is introduced.
+
+    It also pins the DISCOVERY of the previous shape: the declaration must not be
+    written out as a second literal, which is one more list to forget.
+    """
+    from local_operator.session.attached import ATTACHED_SLASH_CONSUMERS
+
+    assert set(SLASH_ACTION_RECEIPTS) <= set(ATTACHED_SLASH_CONSUMERS), (
+        "the attached client must declare every action receipt, or this route "
+        "stands down for a type nothing else completes"
+    )
+    attached_source = Path(attached_module.__file__).read_text(encoding="utf-8")
+    assert "slash_consumers=list(ATTACHED_SLASH_CONSUMERS)" in attached_source, (
+        "the auth frame must declare the shared constant; a second literal here "
+        "is a declaration the route reads but the client does not send"
+    )

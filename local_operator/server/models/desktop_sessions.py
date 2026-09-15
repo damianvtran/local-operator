@@ -158,12 +158,50 @@ class SessionSnapshot(BaseModel):
 
 
 class AdmissionDetail(BaseModel):
-    status: Literal["admitted"]
+    """What a host reports about one request's admission to the owner.
+
+    ``status`` is the ONE-WORD answer to "did the owner take this text", and it
+    is the field a renderer branches on, so it has to be TRUE rather than
+    reassuring: a request nobody has accepted is NOT ``admitted``.
+
+    * ``admitted`` — the owner acknowledged the admission. ``detail`` is
+      normally the owner's own sentence, passed through verbatim.
+    * ``pending`` — the acknowledgement had not arrived when the receipt was
+      sent. The request was written to the owner's connection; whether it was
+      taken is unknown, and the frame a later FAILURE arrives on
+      (``admission.failed``, ``DESKTOP_API.md``) is how the UI learns otherwise.
+    * ``failed`` — the owner (or the transport) answered with an error. The
+      request was NOT admitted, so the caller may issue a new one.
+
+    A host that CANNOT observe an owner acknowledgement — an in-process one, or
+    one whose owner answers synchronously — is free to report only ``admitted``
+    (and raise) rather than pretending to a wait it never made: see
+    ``MessageAdmission`` below for the ``/messages`` route, which awaits its ack
+    in full.
+    """
+
+    status: Literal["admitted", "pending", "failed"]
     duplicate: bool
     detail: str
 
 
-class MessageAdmission(AdmissionDetail):
+class MessageAdmission(BaseModel):
+    """The ``/messages`` route's receipt: ONE disposition, because it waits.
+
+    Deliberately NOT a subclass of :class:`AdmissionDetail`, and the reason is
+    the one thing a subclass would get wrong: narrowing a mutable field's
+    ``Literal`` in a subclass is not a narrowing at all (pyright's
+    ``reportIncompatibleVariableOverride`` says so, and it is right), so the
+    inheritance would advertise ``pending``/``failed`` on a route that awaits its
+    acknowledgement to completion and can therefore answer neither — it returns
+    ``admitted`` or raises the 503 ladder in ``errors()``. A field type here is
+    the API contract for the Electron implementers, so it states what this route
+    can actually produce.
+    """
+
+    status: Literal["admitted"]
+    duplicate: bool
+    detail: str
     command_id: str
     replayed: bool = False
 
