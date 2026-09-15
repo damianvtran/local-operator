@@ -459,10 +459,17 @@ class Usage(BaseModel):
     # (``providers/clients.py``), never on an aggregate -- a turn's folded total
     # and a child's lifetime total leave it None exactly as they already leave
     # ``usd_cost`` unset, because their ``cost_components`` own the provenance.
-    # ``None`` means "unknown moment" and the pricing path then uses the wall
-    # clock, which is what every transcript written before this field existed
-    # degrades to.
-    at_ms: int | None = None
+    #
+    # ``exclude_if`` is load-bearing, not tidiness: this field is stamped on every
+    # wire usage and unset on every aggregate, so a literal ``"at_ms": null`` per
+    # usage costs the attach frame a serialization of 80,000 usages in the
+    # worst-case roster and pushes it past the 1 MiB socket line limit
+    # (``tests/unit/session/test_attach_frame_size``). Omitting it when unset is
+    # also the honest wire shape -- "absent" and "None" mean the same thing to
+    # every reader (``tariff.moment_for`` reads it duck-typed off an object OR a
+    # mapping) -- and it keeps a legacy transcript's bytes identical. Present
+    # when set, so it still travels the wire and the checkpoint.
+    at_ms: int | None = Field(default=None, exclude_if=lambda value: value is None)
     # A record-time table estimate is durable money, but NOT a provider receipt.
     # Keeping the provenance separate lets offline viewers/resumes retain known
     # spend without pretending the provider reported a bill or repricing history.
