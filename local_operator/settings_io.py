@@ -540,6 +540,67 @@ def _validate_openrouter_max_price(value: Any) -> None:
             raise ValueError(f"{name} must be a non-negative number")
 
 
+def _validate_desktop_launch_command(value: Any) -> None:
+    """Reject a click launcher that cannot be run at all, at the moment it is written.
+
+    WRITE-TIME BECAUSE THE CLICK HAS NOWHERE ELSE TO COMPLAIN (UX round 1, U4).
+    ``desktop.launch_command`` REPLACES app discovery rather than leading it —
+    a configured command is the user's own answer and is not second-guessed by
+    a fallback chain — so a typo in it diverts every notification click to a
+    terminal instead, indefinitely, and the handler that would have noticed is
+    a detached process whose only trace was a ``logger.debug``. The value is
+    checked here, where the user is still looking at the field and can be told
+    what is wrong. ``tui.resume_click`` warns at click time as well, which is
+    what covers a value that reached ``config.yml`` by hand.
+
+    THE CHECK IS "CAN THIS BE RUN", NOT "IS THIS SHAPED NICELY". The first word
+    has to resolve to an executable — an existing executable file for a path,
+    a name on ``PATH`` otherwise — because that is precisely the question
+    ``Popen`` answers at click time with an ``OSError``. A launcher that is not
+    installed yet, or whose path has moved, is a click that lands in a
+    terminal, so it is refused while it is still in front of the user.
+
+    EMPTY IS NOT CHECKED: ``""`` is the default and it MEANS "discover the app
+    for me", and ``empty_unsets`` clears the key rather than storing it.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            "expected a command line, e.g. 'local-operator-ui --open-session {session}'"
+        )
+    if not value.strip():
+        return
+    import os
+    import shlex
+    import shutil
+    import sys
+
+    try:
+        # The same grammar the handler reads it with (`resume_click`), so a
+        # value that validates here is one that will parse there: on Windows
+        # the command line is not POSIX-quoted and `shlex` would strip the
+        # backslashes out of every path.
+        parts = shlex.split(value, posix=sys.platform != "win32")
+    except ValueError as error:
+        raise ValueError(f"not a valid command line ({error})") from None
+    if not parts:
+        return
+    executable = parts[0]
+    if os.sep in executable or (os.altsep and os.altsep in executable):
+        if not os.path.exists(executable):
+            raise ValueError(
+                f"{executable} does not exist, so clicks would fall through to a terminal"
+            )
+        if not os.access(executable, os.X_OK):
+            raise ValueError(
+                f"{executable} is not executable, so clicks would fall through to a terminal"
+            )
+        return
+    if shutil.which(executable) is None:
+        raise ValueError(
+            f"{executable} was not found on PATH, so clicks would fall through to a terminal"
+        )
+
+
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
     return (Choice(True, "on", on), Choice(False, "off", off))
 
@@ -2163,8 +2224,13 @@ SETTINGS: tuple[Setting, ...] = (
         # `resume_click.DESKTOP_LAUNCH_COMMAND_DEFAULT`, and
         # `test_every_default_matches_its_consumer` fails if the two part ways.
         default="",
+        # The order in this copy IS the code's order and is asserted against it:
+        # `_launch_desktop` appends `shutil.which(DESKTOP_BIN_NAME)` (the npm
+        # bin) first and the `open -b` bundle second, and `docs/DESKTOP_API.md`
+        # states the same order. It said the reverse here, on the one surface a
+        # user browses to learn it (UX round 1, U3).
         help=(
-            "Empty = discover the app (the packaged bundle, then the npm bin). "
+            "Empty = discover the app (the npm bin, then the packaged bundle). "
             "Otherwise the command to launch it, with {session} where the "
             "session id goes, e.g. 'local-operator-ui --open-session {session}'."
         ),
@@ -2173,6 +2239,11 @@ SETTINGS: tuple[Setting, ...] = (
         # meaning here ("discover it for me"), so it clears the key rather than
         # storing "".
         empty_unsets=True,
+        # THE ONLY PLACE THIS CAN BE REPORTED (UX round 1, U4): the handler runs
+        # detached from the notification, so a launcher that cannot be run turns
+        # every click into a terminal with nothing on screen or in the log
+        # saying why. Rejecting it here keeps the user in front of the field.
+        validate_value=_validate_desktop_launch_command,
     ),
 )
 

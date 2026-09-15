@@ -22,6 +22,7 @@ a frame Textual paints, so the properties are pinned here:
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -666,20 +667,49 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
     assert not any(part in ("--exec", "-e") for part in argv)
 
 
-def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
-    """An unrecognised emulator must not silently swallow the user's click."""
+def test_a_click_with_no_terminal_backend_still_lands_or_says_so(monkeypatch) -> None:
+    """An unrecognised emulator must not silently swallow the user's click.
+
+    THE DEFECT THIS REPLACES (UX round 1, U5): the rung answered True after a
+    detached ``lop --resume`` with no terminal attached, so nothing appeared
+    AND nothing was reported — a click that cannot be told apart from a slow
+    one. It now opens a window it can really open — on darwin the AppleScript
+    Terminal backend LAUNCHES Terminal.app and needs no terminal around this
+    process — or answers False, which is what makes the caller print
+    ``lop --resume <id>``. Both branches and the argv are driven in full in
+    ``tests/unit/tui/test_resume_click.py``; this pins the ladder-level outcome
+    on the notification's own path.
+    """
     from local_operator.tui import resume_click
 
     _no_desktop_app(monkeypatch)
-    launched: list[list[str]] = []
     monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
-    monkeypatch.setattr(
-        "local_operator.proc.spawn_detached",
-        lambda argv, *a, **k: bool(launched.append(list(argv))) or True,
-    )
+    spawned: list[list[str]] = []
 
-    assert resume_click.open_session("abc123def456") is True
-    assert launched and launched[0][-2:] == ["--resume", "abc123def456"]
+    class _Stdin:
+        def write(self, data: bytes) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _Process:
+        stdin = _Stdin()
+
+    def fake_popen(argv, **_kwargs):
+        spawned.append(list(argv))
+        return _Process()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    result = resume_click.open_session("abc123def456")
+    if sys.platform == "darwin":
+        assert result is True
+        assert spawned and spawned[0][0] == "osascript", spawned
+        assert "abc123def456" in spawned[0][2]
+    else:
+        assert result is False
+        assert spawned == []
 
 
 def test_the_built_click_command_actually_runs(tmp_path, monkeypatch) -> None:

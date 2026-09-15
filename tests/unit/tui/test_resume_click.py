@@ -16,17 +16,36 @@ Two properties are load-bearing and both have a silent failure mode:
 - **A live process must never be killed.** The wait is bounded, and a timeout
   means "still running" — treating it as a failure would try the next candidate
   (a second window) or, worse, kill the app the click just launched.
+- **The last rung reports a LANDING, not a spawn (UX round 1, U5).** It used to
+  end in a detached `lop --resume` with no terminal attached: nothing appeared,
+  and the `True` it returned suppressed the receipt the caller prints, so the
+  user was told nothing either. It now opens a window it can really open — the
+  detected backend, then macOS's AppleScript Terminal, which launches
+  Terminal.app and needs no terminal around this process — and answers `False`
+  when none did.
+- **A configured launcher that cannot run is not silent (UX round 1, U4).**
+  `desktop.launch_command` replaces discovery, so a typo diverts every click to
+  a terminal: the writer refuses a value that cannot be executed, and the click
+  logs a WARNING for one that reached `config.yml` by hand.
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
 
 import pytest
+import yaml
 
 from local_operator.tui import resume_click
+
+#: A launcher that really is runnable on any machine, for the tests that have
+#: to WRITE a ``desktop.launch_command``. The write is validated now (U4), so a
+#: made-up name is refused at the writer — which is the point of that fix, and
+#: not what these tests are about.
+_REAL_LAUNCHER = sys.executable
 
 
 class _Launcher:
@@ -372,7 +391,7 @@ def test_an_empty_setting_means_discover(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     setting = settings_io.BY_KEY["desktop.launch_command"]
     manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, setting, "my-app")
+    settings_io.write_setting(manager, setting, _REAL_LAUNCHER)
     settings_io.reset_setting(manager, setting)
 
     assert resume_click._configured_launch_command() == []
@@ -392,8 +411,10 @@ def test_the_configured_command_splits_the_way_a_shell_would(tmp_path, monkeypat
     command line rather than an approximation of one. A quoted word containing a
     space is the case that separates the two.
     """
-    parts = _configured_with(monkeypatch, tmp_path, 'my-app --title "two words, one arg"')
-    assert parts == ["my-app", "--title", "two words, one arg"]
+    parts = _configured_with(
+        monkeypatch, tmp_path, f'{_REAL_LAUNCHER} --title "two words, one arg"'
+    )
+    assert parts == [_REAL_LAUNCHER, "--title", "two words, one arg"]
 
 
 def test_the_click_reader_sees_what_the_settings_page_wrote(tmp_path, monkeypatch):
@@ -421,13 +442,12 @@ def test_the_click_reader_sees_what_the_settings_page_wrote(tmp_path, monkeypatc
     assert "desktop.launch_command" not in settings_io.display_defaults()
 
     manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, setting, 'my-app --title "two words" --open={session}')
+    written = f'{_REAL_LAUNCHER} --title "two words" --open={{session}}'
+    settings_io.write_setting(manager, setting, written)
 
-    assert settings_io.read_setting(manager, setting) == (
-        'my-app --title "two words" --open={session}'
-    )
+    assert settings_io.read_setting(manager, setting) == written
     assert resume_click._configured_launch_command() == [
-        "my-app",
+        _REAL_LAUNCHER,
         "--title",
         "two words",
         "--open={session}",
@@ -440,7 +460,11 @@ def _configured_with(monkeypatch, tmp_path, raw: str) -> list[str]:
     Written with ``settings_io.write_setting`` — the one writer ``/settings``,
     ``PATCH /v1/settings`` and ``lop config edit`` all funnel through — into a
     real ``config.yml`` under a redirected config dir, then read back by the
-    click's own reader with nothing doubled anywhere.
+    click's own reader with nothing doubled anywhere. The value must therefore
+    be one the writer accepts: it validates a launcher that cannot be run (U4),
+    so pass :data:`_REAL_LAUNCHER` rather than an invented name. A value that
+    the writer refuses is a DIFFERENT state, and the tests that need it write
+    ``config.yml`` directly (see ``_hand_written_launcher``).
 
     The helper this replaces patched ``tui.settings.settings_get`` FIRST, which
     is how QA round 2's defect shipped (Q1): the double answered a key the
@@ -456,9 +480,28 @@ def _configured_with(monkeypatch, tmp_path, raw: str) -> list[str]:
     return resume_click._configured_launch_command()
 
 
+def _hand_written_launcher(monkeypatch, tmp_path, raw: str) -> list[str]:
+    """Put ``raw`` in ``config.yml`` DIRECTLY, past the write-time validator.
+
+    Two real states need this: a config written before that validator shipped,
+    and one edited by hand. Both reach the click, so the reader's behaviour on
+    them is what has to be pinned — through the click's own reader, out of a
+    real file, with nothing doubled.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump({"values": {"desktop": {"launch_command": raw}}})
+    )
+    return resume_click._configured_launch_command()
+
+
 def test_an_unparseable_command_line_degrades_to_discovery(monkeypatch, tmp_path):
-    """An unbalanced quote must not kill the click."""
-    assert _configured_with(monkeypatch, tmp_path, "'unbalanced") == []
+    """An unbalanced quote must not kill the click.
+
+    Reached only by a hand-edited file now — the writer refuses it (U4) — which
+    is exactly why the reader still has to tolerate it.
+    """
+    assert _hand_written_launcher(monkeypatch, tmp_path, "'unbalanced") == []
 
 
 def test_the_refusal_stops_the_launch_rung_and_falls_through(monkeypatch, no_viewer):
@@ -491,3 +534,289 @@ def test_the_refusal_is_off_when_the_variable_is_absent(monkeypatch):
 
     assert resume_click._launch_desktop("a1b2c3d4e5f8") is True
     assert launcher.attempts == [["my-app"]]
+
+
+# ---------------------------------------------------------------------------
+# Rung 4: it opens a window, or it says so (UX round 1, U5)
+# ---------------------------------------------------------------------------
+
+
+class _WindowSpawns:
+    """Records every process rung 4 started, and the script fed to its stdin.
+
+    Doubled at ``subprocess.Popen`` because BOTH routes land there: the
+    AppleScript backends write their script to the child's stdin, and the bare
+    detached launch that used to end this rung goes through
+    ``proc.spawn_detached``, which is a ``Popen`` too. One recorder therefore
+    sees which of the two a click actually chose, which is the whole question
+    U5 turns on.
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.argv: list[list[str]] = []
+        self.scripts: list[str] = []
+        recorder = self
+
+        class _Stdin:
+            def write(self, data: bytes) -> None:
+                recorder.scripts.append(data.decode("utf-8"))
+
+            def close(self) -> None:
+                pass
+
+        class _Process:
+            stdin = _Stdin()
+
+        def fake_popen(argv, **_kwargs):
+            recorder.argv.append(list(argv))
+            return _Process()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+
+def _no_terminal_marker(monkeypatch) -> None:
+    """Nothing in this environment identifies a terminal to the registry.
+
+    Doubled at the registry rather than by scrubbing the environment, because
+    what the rung has to do with a ``None`` backend is the contract; that a
+    stripped environment YIELDS ``None`` is `tests/unit/test_spawn.py`'s.
+    """
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
+
+
+def test_the_last_rung_opens_a_window_it_can_really_open(monkeypatch) -> None:
+    """U5: a click must never claim a landing it did not make.
+
+    THE DEFECT, driven. With nothing discoverable the rung fell through to
+    ``spawn_detached(["lop", "--resume", <id>])`` and answered True — and that
+    child has DEVNULL on all three streams and no terminal attached, so no
+    window appeared. True is also what suppresses the receipt, so the user was
+    told nothing either: a click indistinguishable from a slow one, on the one
+    rung whose entire definition is "there is nothing else to try".
+
+    It now ends on a backend that LAUNCHES a terminal instead of requiring one
+    around this process — Terminal.app by AppleScript, which ships with macOS.
+    Asserted as the argv a real spawn would run plus the script on its stdin,
+    and as the ABSENCE of the bare ``lop --resume`` that used to stand in for a
+    window.
+
+    ``sys.platform`` IS FORCED rather than skipped, because the gate this test
+    covers is that constant and the unit job runs on ubuntu only — a skipped
+    regression guard is the shape of guard this whole change exists to remove.
+    Nothing else in the path is platform-specific: the AppleScript backend
+    spawns ``osascript`` with a plain ``Popen``, which the recorder catches
+    wherever it runs.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _no_terminal_marker(monkeypatch)
+    spawns = _WindowSpawns(monkeypatch)
+
+    assert resume_click._spawn_terminal("a1b2c3d4e5f6") is True
+    assert spawns.argv, "nothing was started at all"
+    assert spawns.argv[0][0] == "osascript", spawns.argv
+    assert spawns.scripts and 'tell application "Terminal"' in spawns.scripts[0]
+    # The argv still has to be the resume line: a window that opened somewhere
+    # else is not the landing the user was promised.
+    assert "--resume" in spawns.argv[0][2]
+    assert "a1b2c3d4e5f6" in spawns.argv[0][2]
+    bare = [argv for argv in spawns.argv if argv[:2] == ["lop", "--resume"]]
+    assert not bare, f"the bare detached launch opened no window: {bare}"
+
+
+def test_the_last_rung_reports_failure_where_no_window_can_be_promised(monkeypatch) -> None:
+    """U5, the other half of the contract: False rather than a false landing.
+
+    ``spawn_detached`` reports whether a child STARTED, so it answered True for
+    a click that opened nothing at all. Where no terminal can be launched
+    without one around this process — anywhere but macOS — the honest answer is
+    False, and ``cli.resume-click`` turns it into the receipt the user needs.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    _no_terminal_marker(monkeypatch)
+    spawns = _WindowSpawns(monkeypatch)
+
+    assert resume_click._spawn_terminal("a1b2c3d4e5f6") is False
+    assert spawns.argv == []
+
+
+def test_the_macos_launcher_is_not_offered_over_ssh(monkeypatch) -> None:
+    """An ``osascript`` that cannot reach a window server would LIE, not fail.
+
+    It starts, it accepts the script, and the ``tell application`` inside it is
+    what fails — so the receipt this rung returns would be the very defect it
+    was fixed for, one layer down. ``spawn.fallback`` already draws this exact
+    ssh distinction for its message ("no window server over ssh"), so the
+    answer here is the same one and for the same reason.
+
+    Driven with the platform forced rather than skipped, so the branch is
+    exercised on every platform the suite runs on.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 5000 10.0.0.2 22")
+    _no_terminal_marker(monkeypatch)
+    spawns = _WindowSpawns(monkeypatch)
+
+    assert resume_click._spawn_terminal("a1b2c3d4e5f6") is False
+    assert spawns.argv == []
+
+
+def test_a_detected_backend_that_refuses_still_reaches_the_visible_fallback(monkeypatch) -> None:
+    """A backend that detected and then failed opened NOTHING, so rung 4 has not
+    landed yet.
+
+    The detected backend keeps its priority — the user's own terminal wins when
+    it is recognised — but an unrecognised-or-failed one is not an answer, and
+    an AppleScript that opens Terminal.app is still better than a click that
+    reports failure while a window was one line away.
+    """
+
+    class _Refusing:
+        name = "refusing"
+
+        def spawn(self, launch, env):  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: _Refusing())
+    spawns = _WindowSpawns(monkeypatch)
+
+    assert resume_click._spawn_terminal("a1b2c3d4e5f6") is True
+    assert spawns.argv[0][0] == "osascript", spawns.argv
+
+
+# ---------------------------------------------------------------------------
+# The configured launcher: visible when it cannot be used (UX round 1, U4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_launcher_that_cannot_be_run_is_refused_at_write_time(tmp_path, monkeypatch) -> None:
+    """U4: the typo is caught while the user is still looking at the field.
+
+    ``desktop.launch_command`` REPLACES discovery — a configured command is the
+    user's own answer, not a first try in a chain — so a wrong value sends every
+    click to a terminal instead, and the handler that would have noticed runs
+    detached from the notification where its only trace was a ``logger.debug``.
+
+    Driven through the REAL writer, the one ``/settings``, ``PATCH
+    /v1/settings`` and ``lop config edit`` all funnel through, so no writer can
+    store a value the click cannot run.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    manager = ConfigManager(tmp_path)
+
+    # The operator's own repro: a path that is not there.
+    with pytest.raises(ValueError, match="does not exist"):
+        settings_io.write_setting(
+            manager, setting, "/tmp/ux-h/bin/does-not-exist --open-session {session}"
+        )
+    # A bare name that is not on PATH is the same ``OSError`` at click time,
+    # one ``shutil.which`` earlier.
+    with pytest.raises(ValueError, match="was not found on PATH"):
+        settings_io.write_setting(manager, setting, "not-an-installed-app")
+    # An unbalanced quote parses into nothing, so no candidate is ever built
+    # from it and the click silently discovers instead.
+    with pytest.raises(ValueError, match="not a valid command line"):
+        settings_io.write_setting(manager, setting, "'unbalanced")
+    # NOTHING WAS STORED, so the click still discovers the app rather than
+    # running a launcher the user cannot use.
+    assert settings_io.read_setting(manager, setting) == setting.default
+
+    # ...and a launcher that CAN be run still writes, verbatim.
+    settings_io.write_setting(manager, setting, f"{_REAL_LAUNCHER} --open-session {{session}}")
+    assert resume_click._configured_launch_command() == [
+        _REAL_LAUNCHER,
+        "--open-session",
+        "{session}",
+    ]
+
+
+def test_empty_is_still_the_default_that_means_discover(tmp_path, monkeypatch) -> None:
+    """The validator must not turn "no opinion" into a rejected value.
+
+    ``""`` is the shipped default and it MEANS "discover the app for me", so a
+    validator that demanded an executable would make the default un-writable.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+
+    settings_io.write_setting(manager, setting, "")
+    assert resume_click._configured_launch_command() == []
+
+
+def test_a_configured_launcher_that_cannot_run_warns_instead_of_going_quiet(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """U4's click-time half: a hand-edited ``config.yml`` is still reachable.
+
+    The write-time validator stops the typo at the settings page. A value that
+    entered the file by hand — or before that validator shipped — still diverts
+    every click, so the handler says so at WARNING rather than leaving the only
+    trace in a debug line nobody runs with.
+    """
+    raw = "/nope/gone --open-session {session}"
+    assert _hand_written_launcher(monkeypatch, tmp_path, raw) == [
+        "/nope/gone",
+        "--open-session",
+        "{session}",
+    ]
+    launcher = _Launcher({"/nope/gone": 1}, monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.tui.resume_click"):
+        assert resume_click._launch_desktop("a1b2c3d4e5f9") is False
+
+    assert launcher.attempts == [["/nope/gone", "--open-session", "a1b2c3d4e5f9"]]
+    assert any(
+        record.levelno == logging.WARNING and "/nope/gone" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_an_unparseable_hand_written_command_also_warns(tmp_path, monkeypatch, caplog) -> None:
+    """The other silent diversion: a value that never parses into argv.
+
+    It degrades to discovery — which is the right behaviour — but a user who
+    configured a launcher and is getting something else entirely has to be able
+    to find out why.
+    """
+    assert _hand_written_launcher(monkeypatch, tmp_path, "'unbalanced") == []
+    _Launcher({}, monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.tui.resume_click"):
+        assert resume_click._launch_desktop("a1b2c3d4e5fa") is False
+
+    assert any(
+        record.levelno == logging.WARNING and "not a valid command line" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# The copy on /settings states the order the code takes (UX round 1, U3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_settings_copy_states_the_discovery_order_the_code_takes() -> None:
+    """U3: the one surface a user browses to learn the order had it backwards.
+
+    The cursor on **Desktop app -> launch command** read "the packaged bundle,
+    then the npm bin" while ``_launch_desktop`` appends the npm bin candidate
+    FIRST (``test_the_npm_bin_is_preferred_and_the_flag_shape_is_exact`` pins
+    that order) and ``docs/DESKTOP_API.md`` states it the same way as the code.
+
+    Asserted as the ORDER of the two phrases rather than as a literal sentence:
+    the requirement is that the copy matches the code, and a literal would pass
+    a rewording that flipped it back.
+    """
+    from local_operator import settings_io
+
+    help_text = settings_io.BY_KEY["desktop.launch_command"].help
+    assert "npm bin" in help_text and "bundle" in help_text
+    assert help_text.index("npm bin") < help_text.index("bundle"), help_text
