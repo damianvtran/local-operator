@@ -6669,11 +6669,12 @@ def main() -> int:
 
             if open_session(args.session):
                 return 0
-            # A CLICK THAT DOES NOTHING NEEDS A REASON. Success stays silent —
-            # nobody watches a notification's activation target — but the
-            # failure path is reachable by hand and the fallback spawn
-            # "usually does nothing visible", so without this a user has no
-            # way to find out why the click appeared to do nothing (D17).
+            # A CLICK THAT DOES NOTHING NEEDS A REASON, and on a real click this
+            # is only half of it. The receipt is what a HAND-RUN gets, and it is
+            # what makes the failure path debuggable from a terminal; the click
+            # itself has no terminal (its three streams are /dev/null), so the
+            # ladder raises the same sentence as an out-of-band toast before
+            # returning False (UX round 2, U10).
             print(
                 f"could not open a terminal for session {args.session} — "
                 f"run: lop --resume {args.session}",

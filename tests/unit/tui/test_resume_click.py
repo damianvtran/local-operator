@@ -27,6 +27,11 @@ Two properties are load-bearing and both have a silent failure mode:
   `desktop.launch_command` replaces discovery, so a typo diverts every click to
   a terminal: the writer refuses a value that cannot be executed, and the click
   logs a WARNING for one that reached `config.yml` by hand.
+- **A click that cannot land says so WHERE THE USER IS LOOKING (UX round 2,
+  U10).** The `lop --resume <id>` receipt goes to stderr, and on a real click
+  stderr is `/dev/null`, so the failure branch also raises a best-effort toast
+  carrying the same sentence. The write-time refusal answers the WRITER's PATH
+  question only after asking the user's (agent review round 1, M3).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import logging
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -111,6 +117,138 @@ def no_viewer(monkeypatch):
 
 def _no_configured_command(monkeypatch) -> None:
     monkeypatch.setattr(resume_click, "_configured_launch_command", lambda: [])
+
+
+def _empty_bin(tmp_path: Path, name: str) -> Path:
+    """An empty directory usable as a PATH entry.
+
+    The PATH-shaped tests need a PATH that PROVABLY does not contain the name
+    under test, which the machine's own PATH cannot promise (this developer's
+    homebrew prefix really does hold ``local-operator-ui``). Empty directories
+    make the answer the same on every host.
+    """
+    directory = tmp_path / name
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
+def _fake_launcher(directory: Path, name: str) -> None:
+    """An executable file called ``name`` inside ``directory``."""
+    launcher = directory / name
+    launcher.write_text("#!/bin/sh\nexit 0\n")
+    launcher.chmod(0o755)
+
+
+def _no_login_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Double the login PATH to an empty directory, and the writer's too.
+
+    ``settings_io._user_shell_path`` reads it by running the user's login shell,
+    so a test that lets it run depends on this machine's rc files and pays up to
+    the helper's ten-second bound for the privilege. Doubling it keeps the
+    refusal tests hermetic; the lookup itself is driven for real in
+    :func:`test_a_bare_name_the_writer_cannot_resolve_is_accepted_when_the_user_can`,
+    against a directory this test owns rather than against a shell.
+    """
+    from local_operator import settings_io
+
+    monkeypatch.setattr(settings_io, "_user_shell_path", lambda: None)
+    monkeypatch.setenv("PATH", str(_empty_bin(tmp_path, "no-bin")))
+
+
+def _rung_4_fails(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Force every rung to fail, and record what the click REPORTS.
+
+    Doubled at ``detached_notify`` rather than at the process boundary: what a
+    user gets IS the argument of that call, and the suite-wide notification gate
+    (``tests/conftest.py``) means a call that escaped the double would be a no-op
+    rather than a toast on the operator's screen.
+    """
+    from local_operator.tui import notify
+
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr(resume_click, "_route_to_viewer", lambda session_id, **_kwargs: False)
+    monkeypatch.setattr(resume_click, "_launch_desktop", lambda session_id: False)
+    monkeypatch.setattr(resume_click, "_spawn_terminal", lambda session_id: False)
+    monkeypatch.setattr(
+        notify,
+        "detached_notify",
+        lambda title, body, **kwargs: posted.append((title, body)) or True,
+    )
+    return posted
+
+
+def test_a_click_that_cannot_land_posts_the_receipt_as_a_toast(monkeypatch) -> None:
+    """U10 / M4: the receipt has no reader on a real click, so the ladder talks.
+
+    Driven: the notifier is spawned by ``spawn_detached`` with stdin, stdout and
+    stderr all on ``/dev/null``, and its own ``NSTask`` inherits them — so
+    ``cli.resume_click``'s receipt reached nobody on all three reachable
+    failures (ssh, non-darwin, a typo'd ``desktop.launch_command`` hand-edited
+    into ``config.yml``), and from the chair each was a click that did nothing
+    and said nothing. That is the defect the ladder was rewritten for.
+
+    The sentence is asserted VERBATIM and against the CLI's own wording: two
+    reports of one failure disagreeing would be worse than either alone.
+    """
+    session_id = "sess-target-0001"
+    posted = _rung_4_fails(monkeypatch)
+
+    assert resume_click.open_session(session_id) is False
+
+    assert posted == [
+        (
+            "Local Operator",
+            f"could not open a terminal for session {session_id} — "
+            f"run: lop --resume {session_id}",
+        )
+    ]
+
+
+def test_a_click_that_lands_reports_nothing(monkeypatch) -> None:
+    """The toast belongs to the FAILURE branch, and only to that branch.
+
+    Nobody watches a notification's activation target: a click that opened a
+    window must not also announce itself.
+    """
+    posted = _rung_4_fails(monkeypatch)
+    monkeypatch.setattr(resume_click, "_spawn_terminal", lambda session_id: True)
+
+    assert resume_click.open_session("sess-target-0002") is True
+    assert posted == []
+
+
+def test_the_failure_toast_is_not_clickable_and_cannot_break_the_click(monkeypatch) -> None:
+    """Two properties of the failure toast, both about not making things worse.
+
+    NOT CLICKABLE: passing ``session_id`` is what gives a macOS toast an
+    activation, and the action it would post is this same ladder — which has just
+    failed. A toast that invites a retry loop is worse than one that names the
+    command to run.
+
+    BEST-EFFORT: ``detached_notify`` swallows its own failures, but the ladder
+    must not depend on that — a notifier that raises costs the toast and nothing
+    else, and the click still answers False so the receipt is still printed.
+    """
+    from local_operator.tui import notify
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(resume_click, "_route_to_viewer", lambda session_id, **_kwargs: False)
+    monkeypatch.setattr(resume_click, "_launch_desktop", lambda session_id: False)
+    monkeypatch.setattr(resume_click, "_spawn_terminal", lambda session_id: False)
+    monkeypatch.setattr(
+        notify,
+        "detached_notify",
+        lambda title, body, **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert resume_click.open_session("sess-target-0003") is False
+    assert calls == [{}], "the failure toast must not carry a click action"
+
+    def _raises(*_args, **_kwargs):
+        raise RuntimeError("no notification centre here")
+
+    monkeypatch.setattr(notify, "detached_notify", _raises)
+    assert resume_click.open_session("sess-target-0004") is False
 
 
 def test_a_running_desktop_viewer_wins_and_nothing_is_launched(monkeypatch):
@@ -555,6 +693,7 @@ class _WindowSpawns:
     def __init__(self, monkeypatch) -> None:
         self.argv: list[list[str]] = []
         self.scripts: list[str] = []
+        self.waits: list[float | None] = []
         recorder = self
 
         class _Stdin:
@@ -566,6 +705,14 @@ class _WindowSpawns:
 
         class _Process:
             stdin = _Stdin()
+
+            def wait(self, timeout=None) -> int:
+                # The child's EXIT STATUS is what ``apple.spawn`` reports since
+                # UX round 2 (U11): this double is a real ``osascript`` that
+                # opened the window and exited 0. A double with no ``wait`` would
+                # fail the rung for the wrong reason.
+                recorder.waits.append(timeout)
+                return 0
 
         def fake_popen(argv, **_kwargs):
             recorder.argv.append(list(argv))
@@ -707,15 +854,19 @@ def test_a_launcher_that_cannot_be_run_is_refused_at_write_time(tmp_path, monkey
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     setting = settings_io.BY_KEY["desktop.launch_command"]
     manager = ConfigManager(tmp_path)
+    # The USER's login PATH is doubled to a directory that cannot contain the
+    # names below, so this test does not depend on the machine's login shell (or
+    # pay for one): the refusal has to hold when NEITHER path has the name.
+    _no_login_path(monkeypatch, tmp_path)
 
     # The operator's own repro: a path that is not there.
     with pytest.raises(ValueError, match="does not exist"):
         settings_io.write_setting(
             manager, setting, "/tmp/ux-h/bin/does-not-exist --open-session {session}"
         )
-    # A bare name that is not on PATH is the same ``OSError`` at click time,
+    # A bare name that is on neither PATH is the same ``OSError`` at click time,
     # one ``shutil.which`` earlier.
-    with pytest.raises(ValueError, match="was not found on PATH"):
+    with pytest.raises(ValueError, match="not on PATH"):
         settings_io.write_setting(manager, setting, "not-an-installed-app")
     # An unbalanced quote parses into nothing, so no candidate is ever built
     # from it and the click silently discovers instead.
@@ -732,6 +883,102 @@ def test_a_launcher_that_cannot_be_run_is_refused_at_write_time(tmp_path, monkey
         "--open-session",
         "{session}",
     ]
+
+
+def test_a_bare_name_the_writer_cannot_resolve_is_accepted_when_the_user_can(
+    tmp_path, monkeypatch
+) -> None:
+    """M3: the refusal used to answer the WRITER's PATH question, not the user's.
+
+    Driven on the maintainer's machine: with a homebrew PATH the setting's own
+    help example (``local-operator-ui --open-session {session}``) wrote fine, and
+    with a login-less PATH the SAME value was refused — so a GUI-launched
+    settings page, a ``PATCH /v1/settings`` from a service, or ``lop config
+    edit`` could not store a launcher the click would have run.
+
+    The name is re-checked against the user's login PATH, and only on the branch
+    that is about to refuse (see ``settings_io._user_shell_path``). Both halves
+    are asserted: the value is STORED, and the stored argv is what the click
+    reader builds from it.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    manager = ConfigManager(tmp_path)
+    # The writer's PATH: a directory with nothing in it.
+    monkeypatch.setenv("PATH", str(_empty_bin(tmp_path, "writer-bin")))
+    # The user's login PATH: a directory holding the npm bin the help names.
+    user_bin = _empty_bin(tmp_path, "user-bin")
+    _fake_launcher(user_bin, resume_click.DESKTOP_BIN_NAME)
+    monkeypatch.setattr(settings_io, "_user_shell_path", lambda: str(user_bin))
+
+    settings_io.write_setting(
+        manager, setting, f"{resume_click.DESKTOP_BIN_NAME} --open-session {{session}}"
+    )
+
+    assert settings_io.read_setting(manager, setting) == (
+        f"{resume_click.DESKTOP_BIN_NAME} --open-session {{session}}"
+    )
+    assert resume_click._configured_launch_command() == [
+        resume_click.DESKTOP_BIN_NAME,
+        "--open-session",
+        "{session}",
+    ]
+    # ...and a name on NEITHER path is still refused, which is what keeps the
+    # typo guard (U4) intact while the false refusal is gone.
+    with pytest.raises(ValueError, match="not on PATH"):
+        settings_io.write_setting(manager, setting, "no-such-launcher-anywhere")
+
+
+def test_every_launcher_rejection_names_a_remedy_in_one_readable_line(
+    tmp_path, monkeypatch
+) -> None:
+    """U12 / D13 and D11's budget, asserted on the strings themselves.
+
+    THE REMEDY IS THE POINT (UX round 2, U12). The rejection REPLACES the row's
+    own help while it is on screen, so the sentence that answers "what do I type
+    instead" would otherwise be the one thing the error displaced — and this was
+    the only rejection on the page that named a fault and a consequence but no
+    fix, where the row next door reads "Enter an HTTP or HTTPS server URL…".
+
+    AND IT HAS TO FIT (design round 1, D11). 74 cells is the row's budget at
+    80x24, the narrowest width the page measures, so the ADVICE half — fault,
+    consequence and remedy — is capped there and is therefore never cut at any
+    width the page measures at all. The page sheds the value for that reason
+    (``SettingsView._rejection_render``); what is pinned here is that shedding
+    the value is always ENOUGH, and that the shape the page relies on is the one
+    these messages have.
+    """
+    from rich.cells import cell_len
+
+    from local_operator import settings_io
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _no_login_path(monkeypatch, tmp_path)
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    not_executable = tmp_path / "launcher-not-executable"
+    not_executable.write_text("#!/bin/sh\nexit 0\n")
+    not_executable.chmod(0o644)
+
+    values = [
+        "/tmp/ux-h/bin/does-not-exist --open-session {session}",
+        f"{not_executable} --open-session {{session}}",
+        "local-operator-ui-not-installed-here",
+    ]
+    for value in values:
+        problem = settings_io.validate(setting, value)
+        assert problem, f"{value!r} was accepted"
+        head, sep, advice = problem.partition(settings_io.REJECTION_VALUE_SEP)
+        assert sep, problem
+        # The shape the page's shed opts in on: one token, then the advice.
+        assert len(head.split()) == 1, problem
+        assert cell_len(advice) <= 74, (cell_len(advice), problem)
+        # What went wrong, what it costs, and what to do about it.
+        assert "clicks open a terminal" in advice, problem
+        assert "Clear this to discover the app." in advice, problem
+        assert advice.rstrip().endswith("."), problem
 
 
 def test_empty_is_still_the_default_that_means_discover(tmp_path, monkeypatch) -> None:
@@ -811,12 +1058,28 @@ def test_the_settings_copy_states_the_discovery_order_the_code_takes() -> None:
     FIRST (``test_the_npm_bin_is_preferred_and_the_flag_shape_is_exact`` pins
     that order) and ``docs/DESKTOP_API.md`` states it the same way as the code.
 
-    Asserted as the ORDER of the two phrases rather than as a literal sentence:
-    the requirement is that the copy matches the code, and a literal would pass
-    a rewording that flipped it back.
+    Asserted as the ORDER of the two candidates, keyed to the identifiers the
+    code actually uses rather than to prose: ``DESKTOP_BIN_NAME`` is the npm
+    bin's bin name and must come first, and the bundle candidate exists only on
+    darwin, so the copy has to say so (design round 1, D14). A literal sentence
+    would pass a rewording that flipped the order back AND would keep the vague
+    "the npm bin"/"the packaged bundle" that names neither artifact.
+
+    The BUDGET is asserted against the copy as well: 194 cells of help against a
+    `width − 6` slot that is 94 cells at its widest is dead copy at every width
+    the page measures (design round 1, D12), so the string has to fit the
+    widest one. It is a MINOR here rather than a claim about the frame: the
+    rendered line at 100x30 is asserted in
+    ``tests/unit/tui/test_settings_view.py``.
     """
+    from rich.cells import cell_len
+
     from local_operator import settings_io
 
     help_text = settings_io.BY_KEY["desktop.launch_command"].help
-    assert "npm bin" in help_text and "bundle" in help_text
-    assert help_text.index("npm bin") < help_text.index("bundle"), help_text
+    assert resume_click.DESKTOP_BIN_NAME in help_text, help_text
+    assert "bundle" not in help_text and "npm bin" not in help_text, help_text
+    assert help_text.index(resume_click.DESKTOP_BIN_NAME) < help_text.index("macOS app"), help_text
+    # The widest detail row the page paints: a 100-column terminal less the row's
+    # own six cells (`SettingsView._detail_width`).
+    assert cell_len(help_text) <= 94, (cell_len(help_text), help_text)

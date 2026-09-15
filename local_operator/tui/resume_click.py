@@ -102,9 +102,17 @@ when the notification was posted — the user may have opened a terminal in
 between, which is the common case for "I came back to my desk".
 
 Best-effort, like everything on this path: an unreachable viewer falls through
-to the spawn and nothing here raises. The only report a click makes is the
-receipt the caller prints when the last rung returns False, and the user's
-recourse is the same either way — `lop --resume <id>` in their own terminal.
+to the spawn and nothing here raises. The user's recourse is the same on every
+branch — `lop --resume <id>` in their own terminal.
+
+**A CLICK THAT CANNOT LAND SAYS SO OUT OF BAND, not only on stderr.** The
+receipt the caller prints on the failure branch is right for a hand-run, but a
+real click is handled by a DETACHED helper whose three streams are ``/dev/null``
+(``spawn_detached`` opens them so; the notifier's ``NSTask`` inherits them), so
+that stream has no reader and three reachable failures — ssh, a non-darwin host,
+a hand-edited ``desktop.launch_command`` typo — were clicks that did nothing and
+said nothing, which is the very defect this ladder exists to remove (UX round 2,
+U10). Hence :func:`_notify_click_failed` on that branch.
 
 **AND THE LAST RUNG REPORTS A LANDING, NOT A SPAWN.** It used to end in
 ``spawn_detached(["lop", "--resume", <id>])``, a process with no terminal
@@ -207,8 +215,11 @@ def open_session(session_id: str) -> bool:
     2. **An installed-but-not-running desktop app**, launched into the
        conversation.
     3. **A running TUI viewer**, switched in place.
-    4. **A terminal**, byte-identical to the behaviour that shipped before
-       viewers existed.
+    4. **A terminal** — the rung that did ship before viewers existed, and the
+       last one: it runs the argv it always ran and reports whether a window
+       opened (see :func:`_spawn_terminal`). It is NOT byte-identical to what
+       shipped — that rung ended in a detached ``lop --resume`` that opened
+       nothing and still answered True (UX round 1, U5).
 
     RUNGS 2 AND 3 USED TO BE THE OTHER WAY ROUND, and that is the defect: a TUI
     that happened to be open swallowed every click before discovery ever ran, so
@@ -242,7 +253,53 @@ def open_session(session_id: str) -> bool:
     # "is anything left?" exactly as it did.
     if _route_to_viewer(session_id, surface=None if app_available else TUI_SURFACE):
         return True
-    return _spawn_terminal(session_id)
+    landed = _spawn_terminal(session_id)
+    if not landed:
+        # THE CLICK'S OWN REPORT, out of band. Nothing above can land, so the
+        # only place left to say so is the channel that reached the user in the
+        # first place — see `_notify_click_failed` for why the receipt alone is
+        # not enough on a real click.
+        _notify_click_failed(session_id)
+    return landed
+
+
+def _notify_click_failed(session_id: str) -> None:
+    """Tell the user, out of band, that a click could not take them anywhere.
+
+    THE RECEIPT HAS NO READER ON A CLICK (UX round 2, U10; agent review round 1,
+    M4). `cli.resume_click` prints ``could not open a terminal for session <id>
+    — run: lop --resume <id>`` to STRDERR, which is correct for the hand-run it
+    is reachable by — but the click chain hands the CLI ``/dev/null`` for stdin,
+    stdout AND stderr: `spawn_detached` opens the notifier that way and the
+    notifier's own ``NSTask``/``sh -c`` inherits it, so the line reaches nobody.
+    Driven end to end (``lsof`` on the CLI: ``0r/1w/2w CHR /dev/null``) on all
+    three reachable failures — ssh, non-darwin, and a typo'd
+    ``desktop.launch_command`` written into ``config.yml`` by hand, whose click
+    time WARNING lands on the same stream. From the chair each was a click that
+    did nothing and said nothing, which is the symptom this whole ladder was
+    raised for.
+
+    BEST-EFFORT BY CONTRACT, exactly like every other call on this path:
+    ``detached_notify`` never blocks and never raises, it is a no-op when
+    notifications are disabled, and a failure here costs the toast and nothing
+    else — the receipt is still printed for whoever is reading a terminal.
+
+    THE COPY IS THE RECEIPT'S, so the two reports of one failure agree. The
+    session id is NOT passed as ``session_id``: that argument is what makes a
+    macOS toast CLICKABLE, and the click it would post is this same ladder —
+    which has just failed. A toast that invites a retry loop is worse than one
+    that names the command the user can run themselves.
+    """
+    try:
+        from local_operator.tui.notify import APP_NAME, detached_notify
+
+        detached_notify(
+            APP_NAME,
+            f"could not open a terminal for session {session_id} — "
+            f"run: lop --resume {session_id}",
+        )
+    except Exception:  # noqa: BLE001 — a toast must never outrank the receipt
+        logger.debug("could not post the failed-click toast", exc_info=True)
 
 
 def _desktop_launch_refused() -> bool:
@@ -501,8 +558,12 @@ def _last_resort_backend(env: EnvMap, detected: SpawnBackend | None) -> SpawnBac
     ``osascript`` starts and accepts the script, but the ``tell application``
     inside it fails for want of a window server — so the spawn would report a
     landing that never happened, which is precisely the defect this function
-    exists to fix. ``spawn.fallback`` draws the same ssh distinction for its
-    receipt.
+    exists to fix. ``spawn.fallback`` draws that line from the same fact
+    (``terminals.is_ssh``) and puts it in ITS OWN receipt (``no window server
+    over ssh``); the wording is not shared, because this path does not print
+    that receipt — ``cli.resume_click`` prints its generic "could not open a
+    terminal" for every failing branch, and the rung-4 failure toast repeats
+    that sentence verbatim (:func:`_notify_click_failed`, review round 1, N1).
     """
     if sys.platform != "darwin":
         return None
@@ -539,7 +600,8 @@ def _spawn_terminal(session_id: str) -> bool:
     darwin launcher that needs no detection (:func:`_last_resort_backend`) —
     and returns False when none of them opened a window. False is a real
     answer on this path: ``cli.resume_click`` turns it into the
-    ``lop --resume <id>`` receipt.
+    ``lop --resume <id>`` receipt, and :func:`_notify_click_failed` raises the
+    same sentence as a toast for the click that never sees stderr.
     """
     import shutil
 
@@ -583,9 +645,17 @@ def _spawn_terminal(session_id: str) -> bool:
     if last_resort is not None:
         candidates.append(last_resort)
 
-    # A backend is abandoned only where it opened NOTHING (a missing binary, a
-    # refused socket, an error from its own spawn), which is why falling through
-    # to the next candidate cannot produce two windows.
+    # A backend is abandoned only where it opened NOTHING — a missing binary, a
+    # refused socket, an error from its own spawn — and that is the PREMISE the
+    # fall-through rests on, not a claim the interface guarantees. It holds for
+    # the AppleScript and `spawn_detached` backends, which is why the darwin last
+    # resort can be reached safely; it does NOT hold for `CmuxBackend`, whose
+    # `_spawn_surface` answers False both for a failed send AND for a
+    # surface-creating placement it could not read an id out of — so on that one
+    # path a second candidate can follow a window that already exists (review
+    # round 1, M2). Narrowing the refusal is not available here: the backend
+    # reports a bool and nothing else, and this rung's whole value is that a
+    # click which placed nothing still lands somewhere.
     for candidate in candidates:
         try:
             if candidate.spawn(launch, env):

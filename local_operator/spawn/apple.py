@@ -77,6 +77,14 @@ def osascript_argv(launch: ForkLaunch) -> list[str]:
     return ["osascript", "-", launch_command(launch)]
 
 
+#: How long the AppleScript backends wait for ``osascript``'s EXIT STATUS before
+#: defaulting to "a window opened". A ``tell application`` that the user has
+#: refused (automation consent declined, a locked or foreign GUI session, a
+#: Terminal.app that has been moved) exits non-zero, and ``do script`` returns as
+#: soon as the window is up, so both answers arrive well inside this bound.
+APPLESCRIPT_EXIT_TIMEOUT_S = 2.0
+
+
 class _AppleScriptBackend:
     """Shared spawn half; the subclasses differ only in script and detection."""
 
@@ -89,8 +97,7 @@ class _AppleScriptBackend:
         # because the script has to reach the child on stdin and that helper
         # deliberately points stdin at DEVNULL. Every other property it
         # guarantees is reproduced here: ``start_new_session``, stdout/stderr to
-        # DEVNULL, and no wait — ``communicate`` is never called, so a hung
-        # osascript cannot hold this process.
+        # DEVNULL, and a BOUNDED wait — see below.
         import subprocess
 
         try:
@@ -112,7 +119,25 @@ class _AppleScriptBackend:
             # its own (osascript reading EOF from a closed pipe), and the caller
             # falls through to the receipt.
             return False
-        return True
+        # THE EXIT STATUS IS THE ANSWER, NOT THE SUCCESSFUL WRITE (UX round 2,
+        # U11). Returning True from the write alone reported a landing for a
+        # ``tell application`` that then FAILED inside osascript — automation
+        # consent declined, a foreign GUI session, Terminal.app replaced —
+        # driven with a stub that consumes the script and exits 1:
+        # ``TerminalAppBackend().spawn(...)`` still answered True, and True is
+        # what suppresses the receipt. That is the SAME defect this ladder was
+        # rewritten to remove (a click that claims to have taken you somewhere
+        # it did not), on the rung that is the default destination for anyone
+        # without the desktop app installed.
+        #
+        # BOUNDED, exactly as ``resume_click._launch_once`` waits for the app
+        # launcher twenty lines up in the ladder: a TIMEOUT COUNTS AS SUCCESS so
+        # a live osascript is never killed and never held, which is the property
+        # the previous no-wait version was protecting.
+        try:
+            return process.wait(timeout=APPLESCRIPT_EXIT_TIMEOUT_S) == 0
+        except subprocess.TimeoutExpired:
+            return True
 
 
 class TerminalAppBackend(_AppleScriptBackend):

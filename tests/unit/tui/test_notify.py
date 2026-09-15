@@ -696,6 +696,12 @@ def test_a_click_with_no_terminal_backend_still_lands_or_says_so(monkeypatch) ->
     class _Process:
         stdin = _Stdin()
 
+        def wait(self, timeout=None) -> int:
+            # ``apple.spawn`` reports the child's EXIT STATUS, bounded (U11), so
+            # the double has to answer one: this is an osascript that opened the
+            # window and exited 0.
+            return 0
+
     def fake_popen(argv, **_kwargs):
         spawned.append(list(argv))
         return _Process()

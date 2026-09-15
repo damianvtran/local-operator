@@ -5289,3 +5289,133 @@ async def test_the_effort_row_renders_expands_and_resets(tmp_path: Path) -> None
         view.action_reset()
         await pilot.pause()
         assert "model_effort" not in _values(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The rejection line, and the launcher's help copy (design round 1, D11/D12)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+async def test_a_rejection_whose_length_is_the_user_input_never_clips_unmarked(
+    size: tuple[int, int],
+) -> None:
+    """D11. This branch was the one content on the detail line with no floor.
+
+    The line is a fixed-height ``Static`` with no wrap, so a string handed to it
+    intact is REMOVED rather than shortened — and the new launcher rejection is
+    the first content on the page whose length is the USER'S OWN INPUT. Measured
+    on the designer's frames and re-driven here: a 126-cell path painted 93 cells
+    at 100x30, stopping mid-word at "...does-not-exist does not exist, so clicks",
+    and 76 at 80x24, which lost the fault itself and the entire consequence
+    clause — with no ``…`` either time to say anything had gone.
+
+    So the VALUE sheds first and the advice is pinned: the value is what the user
+    typed and can still read in the row's own value column while the editor is
+    open, and it is the only part of the message that grows with their input.
+    The consequence is therefore readable at every width this page measures.
+    """
+
+    long_path = "/tmp/ux-h/bin/with/a/rather/deep/nested/launcher/dir/does-not-exist"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        _select(view, "desktop.launch_command")
+        await pilot.pause()
+        view.action_activate()
+        await pilot.pause()
+        view._buffer = f"{long_path} --open-session {{session}}"
+        # A real edit leaves the caret at the END, which is also what makes the
+        # value column paint the tail — the state the evidence frames show.
+        view._caret = len(view._buffer)
+        view._commit_edit()
+        await pilot.pause()
+
+        assert view.error_text, "the typo was accepted, so there is no rejection to measure"
+        line = view.render_lines_for_test()[-1]
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), line)
+        # What went wrong is always readable...
+        assert "does not exist" in line, line
+        # ...and so is what it costs, which is the clause the clip used to eat.
+        assert "clicks open a terminal" in line, line
+        # Nothing is cut wordlessly: the line is either the whole message or it
+        # ends in a visible mark, and at these widths it is the advice alone.
+        assert line.endswith("\u2026") or "to discover the app" in line, line
+        # ...including the way out, which is the half the error displaces (U12).
+        assert "Clear this to discover the app." in line or line.endswith("\u2026"), line
+        # The value is the segment that gave way, at both widths.
+        assert long_path not in line, line
+        # And the input is still the user's to fix, on the row that refused it.
+        assert view._editing == "desktop.launch_command", view._editing
+        assert long_path in view._buffer
+
+
+@pytest.mark.asyncio
+async def test_a_prose_rejection_keeps_the_head_that_says_what_happened() -> None:
+    """The shed is opt-in by SHAPE, not a rule about every rejection.
+
+    Only a message that opens with a SINGLE TOKEN before
+    ``settings_io.REJECTION_VALUE_SEP`` is the interpolated-value shape. The
+    page's other rejections open with a phrase ("config.yml is unreadable,
+    nothing was written", "could not save"), and shedding THEIR head would
+    remove the part that says what happened in order to save cells on the part
+    that says what to do — the opposite trade.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        prose = (
+            "config.yml is unreadable, nothing was written \u2014 ValueError: "
+            "values is not a mapping at line 3 column 1"
+        )
+        view._error = prose
+        view._repaint()
+        await pilot.pause()
+
+        line = view.render_lines_for_test()[-1]
+        assert line.startswith("config.yml is unreadable"), line
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), line)
+        assert line.endswith("\u2026"), "a clipped prose notice must still be marked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+async def test_the_launcher_help_is_readable_on_the_page_that_shows_it(
+    size: tuple[int, int],
+) -> None:
+    """D12/D14 as RENDERED, not as a cell count on the registry string.
+
+    The old copy was 194 cells against a slot that is at most 94 (``width − 6``
+    at 100 columns), so its 128-cell second sentence was elided at every width
+    the page measures and the ``{session}`` semantics were dead copy. The
+    replacement names both candidates — the npm bin by its bin name, and the
+    bundle as the macOS app the code makes it (``sys.platform == "darwin"``) —
+    and fits the widest slot whole. At 80 columns the budget is genuinely
+    smaller than any copy that keeps both artifacts, so the line ends in a mark
+    rather than being cut silently.
+    """
+    from local_operator import settings_io
+
+    help_text = settings_io.BY_KEY["desktop.launch_command"].help
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "desktop.launch_command")
+        await pilot.pause()
+
+        line = view.render_lines_for_test()[-1]
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), line)
+        assert help_text[:40] in line, line
+        if help_text in line:
+            assert not line.endswith("\u2026"), line
+        else:
+            assert line.endswith("\u2026"), line
+            # The named bin is what a user comes here to find, so the mark has
+            # to land AFTER it rather than before it.
+            assert "local-operator-ui" in line, line
