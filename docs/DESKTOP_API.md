@@ -539,14 +539,37 @@ records it in `result.admission`. The renderer must not independently re-submit
 that consumed request. A receipt whose `data.request` is empty carries no action
 (a detach, a listing, a status), and staged images do not turn one into a turn.
 
-`admission.status` is `admitted`, and `admission.detail` says which of two
-dispositions the caller got: the owner's own acknowledgement (`prompt admitted`,
-`steering queued`) when it arrived in time, `queued behind the turn already
-running` when a turn was in flight, or `admitted; the owner's acknowledgement was
-still in flight` when it was not. Set `/goal <text>` while a turn is running
-therefore behaves as it does on one Enter in the terminal: the text is steered
-into the turn in flight rather than parked, and the reply is never withheld for
-the running turn's duration.
+`admission.status` is a ONE-WORD answer to "did the owner take this text", and it
+is the field a renderer branches on:
+
+| `status` | means | `detail` |
+|---|---|---|
+| `admitted` | the owner acknowledged the admission | the owner's own sentence (`prompt admitted`, `steering queued`) |
+| `pending` | the acknowledgement had not arrived when the receipt was sent; the request was written to the owner's connection, unacknowledged | `pending; the owner has not acknowledged it`, or `pending; the steer into the turn already running is not acknowledged yet` when the text went to the steer path |
+| `failed` | the owner, or the transport, answered with an error — the request was **not** admitted | a vetted sentence naming the reason (`failed; the owner did not answer in time`, `failed; the session owner could not be reached`, an enumerated admission refusal) |
+
+The wait before `pending` is bounded (2 s, well inside the client's 15 s ack
+deadline) and returns the instant the owner answers, so a receipt is never
+withheld for a running turn's duration and the ack deadline is never reached.
+`admitted` and `pending` are therefore both prompt answers to the same question;
+they differ in whether the owner had answered yet, and neither implies the turn
+completed — the canonical events and durable history remain the authority for
+that. On `failed`, the text was NOT delivered: re-issue it under a NEW request
+id (`pending`/`failed` are honest answers for THIS id, so a retry of the same id
+replays this receipt rather than re-delivering the text).
+
+**A `pending` admission that fails LATER is announced, not logged.** The receipt
+has been sent by then, so the failure has no caller left to reach; the host
+publishes an `admission.failed` frame on the SESSION's stream
+(`{request_id,command,status,detail}`, the same vetted `detail`) where the
+mounted viewer reads it, and a viewer that has not connected yet receives it
+from replay. A `pending` admission that SUCCEEDS announces nothing: the user row
+appearing through the event relay is the confirmation, exactly as for any other
+admitted prompt.
+
+Set `/goal <text>` while a turn is running therefore behaves as it does on one
+Enter in the terminal: the text is steered into the turn in flight rather than
+parked, and the reply is never withheld for the running turn's duration.
 
 ### Admission and retry semantics
 
@@ -610,6 +633,14 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
    advances its receipt cursor.
+6. `admission.failed` carries `{request_id,command,status,detail}` for a
+   `/commands` admission whose receipt answered `pending` and which then failed
+   (see "Every action receipt..." above). It is published LIVE AND RETAINED, so a
+   viewer that connects after the failure still learns the text was not
+   delivered. Like `notification` it is NOT an `AgentEvent` and must not be
+   painted into the transcript — it is a notice about a request, not a turn —
+   and a renderer that does not know the type ignores it and still advances its
+   receipt cursor.
 
 ### The `notification` frame
 

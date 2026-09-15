@@ -10,7 +10,7 @@ import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -77,93 +77,242 @@ from local_operator.slash_commands import slash_command_for
 
 logger = logging.getLogger(__name__)
 
-#: How many event-loop turns a dispatched admission is given to report a DIRECT
-#: refusal before the reply is sent without it. Deliberately the same shape and
-#: size as ``serving.py::_ADMISSION_PRELUDE_TURNS``, and for the same reason:
-#: the refusals worth reporting (a closing session, a full queue, a rejected
-#: reservation) are raised before the owner does any real work, so a few turns
-#: surface them; anything later is a turn that is genuinely under way, which
-#: belongs in the transcript rather than in this receipt. Turns rather than
-#: seconds — see :func:`admit_receipt_request`.
-_ADMISSION_PRELUDE_TURNS = 3
+#: How long a dispatched admission waits for the OWNER'S ACKNOWLEDGEMENT before
+#: the receipt answers PENDING rather than waiting any longer. See
+#: :func:`admit_receipt_request` for the measurement behind it.
+#:
+#: SECONDS RATHER THAN LOOP TURNS, and that is the whole of review round 2's F1.
+#: The sibling's budget (``serving.py::_ADMISSION_PRELUDE_TURNS``) is correct for
+#: its subject — an IN-PROCESS ``prompt``, whose reportable refusals are raised
+#: before its first suspension point — and was the wrong instrument here:
+#: ``bridge.remote`` is an ``AttachedSession`` whose ``admit_prompt`` is an
+#: ``AttachClient`` SOCKET round trip, whose answer arrives on a selector cycle.
+#: Three ``sleep(0)`` turns therefore never saw it, the ``task.done()`` arm below
+#: was dead in practice, and a REFUSED admission was answered ``admitted`` while
+#: the user's text was dropped with a log line as its only trace.
+_ADMISSION_ACK_BOUND_S = 2.0
 
-#: The two phrases this host ADDS to ``admission.detail``. ``status`` is a
-#: one-word literal by contract (``AdmissionDetail``), so the phrase is the only
-#: place a caller can read HOW the owner took the request — the third case being
-#: the owner's own ack, passed through verbatim — and a renderer that promises
-#: "sends when this step finishes" needs exactly that distinction. A started
-#: turn must not be described as queued, or the reverse.
-QUEUED_ADMISSION_DETAIL = "queued behind the turn already running"
-HANDED_OVER_ADMISSION_DETAIL = "admitted; the owner's acknowledgement was still in flight"
+#: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
+#: the ONE-WORD answer to "did the owner take this text", which is why a false
+#: ``admitted`` is not a wording problem: it is the field a renderer branches on.
+#:
+#: * ``admitted`` — the owner acknowledged the admission. ``detail`` is the
+#:   owner's own sentence, passed through verbatim (``prompt admitted``,
+#:   ``steering queued``).
+#: * ``pending`` — the acknowledgement had not arrived inside the bound. The
+#:   request HAS been written to the owner's connection; whether the owner took
+#:   it is unknown at the moment of answering, and this receipt says so. A later
+#:   FAILURE of that admission is published as :data:`ADMISSION_FAILED_FRAME`.
+#: * ``failed`` — the owner answered with an error, or the transport did. The
+#:   request was NOT admitted and the caller may issue a new one.
+ADMITTED_ADMISSION_STATUS = "admitted"
+PENDING_ADMISSION_STATUS = "pending"
+FAILED_ADMISSION_STATUS = "failed"
+
+#: The phrases this host ADDS to ``admission.detail``, one per pending shape.
+#: Two rather than one because the caller must still be able to tell a text
+#: handed to the running turn's steer path from one handed to a session with no
+#: turn running (review round 1, NIT-1) — and neither claims the owner accepted
+#: it, which is what the phrase they replace (``admitted; the owner's
+#: acknowledgement was still in flight``) did.
+PENDING_ADMISSION_DETAIL = "pending; the owner has not acknowledged it"
+PENDING_STEER_ADMISSION_DETAIL = (
+    "pending; the steer into the turn already running is not acknowledged yet"
+)
+
+#: The session-stream frame that carries a DETACHED admission's failure to the
+#: UI. Session-scoped because the failure concerns one session's text, and the
+#: stream is where a viewer is already listening (``DESKTOP_API.md``, "Stream
+#: ordering and lifecycle": a renderer that does not know the type ignores it).
+ADMISSION_FAILED_FRAME = "admission.failed"
 
 
-def _log_detached_admission(task: "asyncio.Task[tuple[str, bool]]") -> None:
-    """Never let a dispatched admission become an unretrieved exception.
+class AdmissionOutcome(NamedTuple):
+    """What :func:`admit_receipt_request` reports: the receipt's own fields."""
 
-    The reply has already been sent by the time this runs, so a failure here
-    has no caller left to reach: it is a log line, and swallowing it silently
-    is what would make the next occurrence undiagnosable. Mirrors
-    ``serving.py::_log_detached_admission``, which exists for the same reason.
+    status: str
+    detail: str
+    duplicate: bool
+
+
+def _admission_failure_detail(error: BaseException) -> str:
+    """A VETTED sentence for an admission that failed, never the transport's.
+
+    The discipline is ``errors()``'s below and for the same reason: an
+    ``AttachClient`` raises bare ``ConnectionError``s carrying socket errors and
+    control ports, and an owner's ``RuntimeError`` carries the owner's own
+    prose. Neither may be echoed at a renderer, so only two shapes are quoted —
+    the enumerated admission refusals, whose wording is rebuilt LOCALLY from a
+    category (``session/errors.py::admission_error``), and the transport
+    distinction a caller acts on. Everything else gets the generic sentence.
     """
-    if task.cancelled():
-        return
-    error = task.exception()
-    if error is not None:
+    from local_operator.session.errors import (
+        AttachmentUnavailable,
+        ProfileRegistryUnavailable,
+        RuntimeRetiring,
+    )
+
+    if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+        # Safe by construction: these carry no owner-supplied text.
+        return f"failed; {error}"
+    if isinstance(error, TimeoutError):
+        # BEFORE the ConnectionError arm: ``OwnerAckTimeout`` subclasses both,
+        # and "the owner is alive but did not answer" is the actionable half.
+        return "failed; the owner did not answer in time"
+    if isinstance(error, ConnectionError):
+        return "failed; the session owner could not be reached"
+    return "failed; the owner did not admit the request"
+
+
+async def _settle_detached_admission(
+    bridge: DesktopSessionBridge,
+    task: "asyncio.Task[tuple[str, bool]]",
+    *,
+    command: str,
+    command_id: str,
+) -> None:
+    """Follow a dispatched admission to its end, and free the bridge it holds.
+
+    THE RECEIPT IS ALREADY SENT when this runs, so a failure here has no caller
+    left to reach — which is exactly why it must not be a log line alone (review
+    round 2, F1): nobody else would ever tell the user their text was dropped,
+    and nothing on the desktop feed would show it either. The failure is
+    therefore published on the session's own stream as
+    :data:`ADMISSION_FAILED_FRAME`, where the mounted viewer reads it, and the
+    log line stays for an operator looking at the process.
+
+    It also OWNS THE BRIDGE REFERENCE the dispatch took (see
+    :func:`admit_receipt_request`), which is why the release is here rather than
+    in the request's ``finally``: the lease must outlive the admission, not the
+    reply.
+    """
+    try:
+        await task
+    except BaseException as error:  # noqa: BLE001 — a failed admission is data here
+        detail = _admission_failure_detail(error)
         logger.warning("a receipt's request failed after admission: %s", error)
+        bridge.publish(
+            ADMISSION_FAILED_FRAME,
+            {
+                "request_id": command_id,
+                "command": command,
+                "status": FAILED_ADMISSION_STATUS,
+                "detail": detail,
+            },
+        )
+    finally:
+        await bridge.release()
 
 
 async def admit_receipt_request(
-    remote: Any, text: str, *, command_id: str, images: list[dict[str, str]]
-) -> tuple[str, bool, bool]:
-    """Admit one receipt's request on the owner without parking the reply.
+    bridge: DesktopSessionBridge,
+    text: str,
+    *,
+    command: str,
+    command_id: str,
+    images: list[dict[str, str]],
+) -> AdmissionOutcome:
+    """Admit one receipt's request on the owner, and report what the OWNER said.
 
-    Returns ``(detail, duplicate, queued)``.
-
-    WHY IT IS DISPATCHED RATHER THAN AWAITED. ``admit_prompt`` is an ack on the
+    WHY IT IS BOUNDED RATHER THAN AWAITED. ``admit_prompt`` is an ack on the
     owner's ``prompt``/``steer`` op, and the ``prompt`` op resolves that ack on
     the DURABLE TRANSCRIPT APPEND, never on queue insertion
     (``serving.py::prompt``: "ACK is the durable transcript append, never
-    insertion into this queue"). Awaiting it while a turn is running therefore
-    parks this reply for the whole of that turn; past the client's
-    ``ACK_TIMEOUT_S`` (15 s) the caller is told the owner is unavailable and, on
-    retry under the same request id, that the outcome is indeterminate — while
-    the goal is set and the turn is queued. That is the failure the sibling host
-    already answers this way (``serving.py::_admit_without_waiting_for_the_turn``):
-    give the admission its prelude so a DIRECT refusal still reaches the caller,
-    then let it run detached and SAY what happened in the receipt.
+    insertion into this queue"). Awaiting it while a turn is running parks this
+    reply for the whole of that turn; past the client's ``ACK_TIMEOUT_S`` (15 s)
+    the caller is told the owner is unavailable and, on retry under the same
+    request id, that the outcome is indeterminate — while the goal IS set and the
+    turn IS queued. That is the failure the sibling host answers the same way
+    (``serving.py::_admit_without_waiting_for_the_turn``).
+
+    WHY THE BOUND IS ``_ADMISSION_ACK_BOUND_S`` AND WHY THAT CANNOT PARK THE
+    CALLER. ``asyncio.wait`` returns the moment the ack lands, so the bound is a
+    CEILING on the wedged case, not a cost every receipt pays. What it has to
+    cover is one socket round trip plus the leg's own work, and the two legs are
+    both short: a STEER (a turn is running) acks on QUEUE INSERTION, and a PROMPT
+    on an idle session acks on the TURN'S OWN START — the drain reaches it
+    immediately because nothing is ahead of it. Measured on the assembled stack
+    (``tests/e2e/test_desktop_goal_mid_turn.py`` prints both legs) at single-digit
+    milliseconds against a 2 s bound, which also covers what the loop-turn budget
+    could not: an owner whose steer bounds images before its first refusal is a
+    thread hop, and a thread hop resolves in milliseconds but never inside three
+    ``sleep(0)`` turns (``serving.py:3427``, measured "not done at 2 sleep(0)s,
+    done by 20"). 2 s is deliberately a seventh of the caller's own ack deadline,
+    so a receipt that waits the whole bound is still answered long before the
+    caller gives up — the park, and the 503-then-409 ladder on retry, stay gone.
+
+    WHAT IT DOES WITH EACH ANSWER. The owner's own acknowledgement is reported
+    VERBATIM under ``admitted``. An error that reaches inside the bound is
+    reported as ``failed`` (:func:`_admission_failure_detail`) — a truthful
+    disposition rather than a raise, because a raise leaves this request's
+    receipt UNFINISHED (``DesktopReceipts._claim``) and the caller's retry under
+    the same id then reads "outcome is indeterminate", which is the ladder this
+    route exists to remove. Silence past the bound is reported as ``pending``:
+    the text is with the owner, unacknowledged, and saying anything stronger
+    would be a claim about a state nobody has observed.
+
+    THE BRIDGE IS HELD ACROSS THE DISPATCH (review round 2, F2).
+    ``bridge.remote`` is a facade the pool DISPOSES when its last user releases
+    it (``DesktopSessionBridge.release`` → ``_detach`` → ``remote.dispose()`` →
+    ``client.close()``), and the reader pump then fails every pending request
+    future. Returning while the call is still in flight therefore handed the
+    pool a promise it could not keep: a POST that was its session's only user
+    closed the connection its own admission was still using, manufacturing this
+    helper's failure — and a spurious warning — out of nothing. One extra
+    reference makes the lease outlive the admission instead, released exactly
+    once, by whichever path settles it; a teardown from anywhere else
+    (``close()``, process shutdown) fails the admission deliberately, and
+    :func:`_settle_detached_admission` reports that failure rather than hiding it.
 
     A turn already running takes the text the way both other hosts take it — the
     TUI's ``_submit_prompt`` and ``serving.py::_complete_unconsumed_action``
     steer when the session is streaming — so ``/goal <text>`` mid-turn behaves
-    here as it does on one Enter in the terminal. That choice also keeps the
-    ack off the turn: ``steer`` answers on queue insertion ("steering queued"),
-    where ``prompt`` would wait for the append.
+    here as it does on one Enter in the terminal. That choice also keeps the ack
+    off the running turn: ``steer`` answers on queue insertion ("steering
+    queued"), where ``prompt`` would wait for the append.
 
-    ``queued`` is the reading of the owner's own state taken before the call,
-    which is what a caller reports: True means a turn was already running, so
-    this text is taken alongside it rather than starting one of its own.
-
-    AN OWNER FROM BEFORE THE ``steer`` OP: the call fails, and — because the
-    failure is not one of the DIRECT refusals the prelude reports — it is logged
-    by :func:`_log_detached_admission` rather than turned into a receipt error
-    for a goal that IS set. The same skew already governs the ``steer`` mode of
+    AN OWNER FROM BEFORE THE ``steer`` OP: the call fails, and the failure is one
+    the caller can see — the owner never acknowledges an op it does not have, so
+    the bound expires and the receipt answers ``pending``, with the refusal
+    itself reported by the detached continuation (log plus
+    :data:`ADMISSION_FAILED_FRAME`) rather than turned into an error for a goal
+    that IS set. The same skew already governs the ``steer`` mode of
     ``/messages``, so this adds no new compatibility surface.
     """
+    remote = bridge.remote
+    assert remote is not None, "the route binds the runtime before admitting"
     queued = bool(getattr(remote, "is_streaming", False))
+    await bridge.acquire()
     task = asyncio.ensure_future(
         remote.admit_prompt(text, command_id=command_id, images=images, steer=queued)
     )
-    for _ in range(_ADMISSION_PRELUDE_TURNS):
-        if task.done():
-            break
-        await asyncio.sleep(0)
-    if task.done():
-        # A direct refusal re-raises here, into the caller's error arm, exactly
-        # as it did while this awaited the ack.
-        detail, duplicate = task.result()
-        return detail, duplicate, queued
-    task.add_done_callback(_log_detached_admission)
-    return (QUEUED_ADMISSION_DETAIL if queued else HANDED_OVER_ADMISSION_DETAIL), False, queued
+    done, _ = await asyncio.wait({task}, timeout=_ADMISSION_ACK_BOUND_S)
+    if not done:
+        # The continuation owns the task AND the bridge reference from here.
+        # ``ensure_future`` rather than a done-callback so the release it owes is
+        # awaited: a callback is sync, and ``release`` is where the pool tears a
+        # facade down.
+        asyncio.ensure_future(
+            _settle_detached_admission(bridge, task, command=command, command_id=command_id)
+        )
+        return AdmissionOutcome(
+            PENDING_ADMISSION_STATUS,
+            PENDING_STEER_ADMISSION_DETAIL if queued else PENDING_ADMISSION_DETAIL,
+            False,
+        )
+    await bridge.release()
+    if task.cancelled():
+        # Not a refusal to report: the session is going away and the receipt is
+        # the least of it. Reported as ``failed`` all the same, because the text
+        # did not reach the owner and a caller must not read that as accepted.
+        return AdmissionOutcome(
+            FAILED_ADMISSION_STATUS, "failed; the admission was cancelled", False
+        )
+    error = task.exception()
+    if error is not None:
+        return AdmissionOutcome(FAILED_ADMISSION_STATUS, _admission_failure_detail(error), False)
+    detail, duplicate = task.result()
+    return AdmissionOutcome(ADMITTED_ADMISSION_STATUS, detail, duplicate)
 
 
 router = APIRouter(tags=["Desktop sessions"], dependencies=[Depends(require_desktop)])
@@ -1189,9 +1338,9 @@ def desktop_viewer_must_submit(receipt_type: Any) -> bool:
     one predicate — :func:`runtime_must_complete`: the RUNTIME submits the
     request only when the dialing client did NOT declare that receipt type as
     its own. The desktop viewer is a DECLARING client — ``AttachedSession``
-    dials with ``slash_consumers=list(SLASH_ACTION_RECEIPTS)`` on every surface,
-    ``desktop`` included — so for the receipts in that vocabulary the runtime
-    deliberately stands down, and the submit is this host's job.
+    dials with ``slash_consumers=list(ATTACHED_SLASH_CONSUMERS)`` on every
+    surface, ``desktop`` included — so for the receipts in that vocabulary the
+    runtime deliberately stands down, and the submit is this host's job.
 
     MEMBERSHIP COMES FIRST, and that clause is load-bearing rather than
     decorative: ``runtime_must_complete`` answers False both for "the client
@@ -1199,14 +1348,16 @@ def desktop_viewer_must_submit(receipt_type: Any) -> bool:
     bare inversion would claim every notice — including one carrying no request —
     as this host's to complete.
 
-    THE ASSUMPTION, named because nothing here can enforce it: this host claims
-    the WHOLE vocabulary because the desktop bridge declares the whole list
-    unconditionally (``session/attached.py``), where the runtime reads a
-    PER-CONNECTION declaration. A future client kind that declares a SUBSET
-    would have the runtime complete a request this route also admits — two user
-    turns from one command. The two sides must keep declaring the same list; the
-    guard file below and ``tests/unit/session/runtime/test_action_receipt_completion.py``
-    pin the halves each can see.
+    THE ASSUMPTION, now readable rather than assumed: this host claims the WHOLE
+    vocabulary because the client it serves declares the whole list. It reads
+    that declaration — ``session/attached.py::ATTACHED_SLASH_CONSUMERS``, the
+    value ``AttachedSession`` actually dials with — rather than the vocabulary
+    itself, so the second half of the predicate decides something: a client kind
+    that declared a SUBSET would have this host stand down for the types it did
+    not declare, instead of racing the runtime into two user turns from one
+    command. "The declaration covers the vocabulary" is pinned by a guard file
+    (``tests/unit/server/test_desktop_goal_admission.py``), so a narrowing edit
+    fails a test rather than double-submitting.
 
     The function-local import is what keeps the drift guard honest: the tuple is
     read AT CALL TIME, so a test that extends the vocabulary watches this answer
@@ -1220,18 +1371,19 @@ def desktop_viewer_must_submit(receipt_type: Any) -> bool:
     and the runtime a desktop session talks to is never older than the client
     that spawned it.
     """
+    from local_operator.session.attached import ATTACHED_SLASH_CONSUMERS
     from local_operator.session.runtime.types import (
         SLASH_ACTION_RECEIPTS,
         runtime_must_complete,
     )
 
     # The two halves of the one rule, read in the order that makes them true:
-    # the type is an action receipt, and this host declared it (so the runtime
-    # stood down and the submit is ours). They coincide today because the
-    # declaration IS the vocabulary; both are stated so a change to either half
-    # has one place to be made and one test to fail.
+    # the type is an action receipt, and this host's client DECLARED it (so the
+    # runtime stood down and the submit is ours). They coincide today because
+    # the declaration IS the vocabulary; both are stated because a change to
+    # either half has one place to be made and one test to fail.
     return receipt_type in SLASH_ACTION_RECEIPTS and not runtime_must_complete(
-        receipt_type, SLASH_ACTION_RECEIPTS
+        receipt_type, ATTACHED_SLASH_CONSUMERS
     )
 
 
@@ -1323,13 +1475,6 @@ async def command(session_id: str, body: Command, request: Request):
             # admission is reported INSIDE that same receipt rather than as a
             # second answer the caller has to correlate.
             #
-            # Two deliberate differences from the TUI path, both inherited from
-            # the attach admissions this branch already served:
-            # * the text submitted is the receipt's own ``request`` — the
-            #   argument as the runtime recorded it — with the body's structured
-            #   images passed straight through. There is no composer here, so
-            #   there is no attachment map to resolve ``[Image #N]`` markers or
-            #   collapsed pastes against, unlike ``_submit_command_prompt``;
             # A NON-EMPTY request is the other half, and images alone are not a
             # substitute for it: an action-less receipt (``/agent clear`` returns
             # ``agent_attached`` with an empty request) carries no ask, and the
@@ -1338,12 +1483,6 @@ async def command(session_id: str, body: Command, request: Request):
             # nobody asked for. Images still ride along with a real request:
             # ``consumed`` is what admits, and they are passed with it.
             #
-            # ORDER, matching the TUI's (``app.py::_cmd_goal``): the goal is
-            # stored and the receipt built BEFORE this admits anything — so
-            # "goal set" describes the state the run began under — and the
-            # admission is reported INSIDE that same receipt rather than as a
-            # second answer the caller has to correlate.
-            #
             # Deliberate difference from the TUI path, documented here: the text
             # submitted is the receipt's own ``request`` — the argument as the
             # runtime recorded it — and the body's structured images are passed
@@ -1351,24 +1490,25 @@ async def command(session_id: str, body: Command, request: Request):
             # no attachment map to resolve ``[Image #N]`` markers or collapsed
             # pastes against, unlike ``_submit_command_prompt``.
             #
-            # The admission is DISPATCHED, not awaited: a reply parked on a
-            # running turn's durable append is answered 503 past the client's
-            # ack deadline and reads as indeterminate on retry while the goal is
-            # set and the turn is queued. ``admit_receipt_request`` carries the
-            # reasoning, the steer choice that matches both other hosts, and the
-            # phrase in ``admission.detail`` that tells a caller which of the two
-            # dispositions it got (queued and started share the same ``status``).
+            # The admission is BOUNDED, not awaited and not fire-and-forget: a
+            # reply parked on a running turn's durable append is answered 503
+            # past the client's ack deadline and reads as indeterminate on retry
+            # while the goal is set and the turn is queued. ``admit_receipt_request``
+            # carries the reasoning, the measurement behind the bound, the steer
+            # choice that matches both other hosts, and the three dispositions
+            # ``admission.status`` can now report.
             if desktop_viewer_must_submit(outcome.data.get("type")) and consumed:
-                detail, duplicate, _queued = await admit_receipt_request(
-                    bridge.remote,
+                admission = await admit_receipt_request(
+                    bridge,
                     str(consumed),
+                    command=spec.name,
                     command_id=body.request_id,
                     images=[image.model_dump() for image in body.images],
                 )
                 result["admission"] = {
-                    "status": "admitted",
-                    "detail": detail,
-                    "duplicate": duplicate,
+                    "status": admission.status,
+                    "detail": admission.detail,
+                    "duplicate": admission.duplicate,
                 }
             return {"command": spec.name, "result": result}
 
