@@ -11,9 +11,16 @@ a fix:
   ``text_delta`` reaching the stream callback. This is the floor: no HTTP, no
   runtime process, no bridge.
 * ``desktop-cold`` — the Electron UI's first message in a session that has no
-  runtime yet. The POST carries the entire cold engage (spawn a child, import
-  the composition root, construct the session, publish a record, bind) before
-  the turn can start.
+  runtime yet. The POST carries the cold engage (spawn a child, import the
+  composition root, construct the session, publish a record, bind) before the
+  turn can start. One honest qualification: the harness opens the SSE
+  subscription and posts ``/watch`` before the measured message, and a visible
+  watch lease arms a speculative warm of its own
+  (``server/utils/desktop_sessions.py``), so this could race a spawn the
+  harness started rather than always performing the engage inline. Both arms
+  race the same way, so the comparison holds; the absolute number is "first
+  message on a session somebody is already looking at", which is the real
+  shape in the app.
 * ``desktop-warm`` — the same UI on a session whose runtime is already up. The
   difference between this and ``desktop-cold`` is exactly what a speculative
   warm buys; the difference between this and ``tui`` is the cost the daemon
@@ -87,6 +94,16 @@ FRAME_TIMEOUT_S = 60.0
 #: one pointing at the real app cache, and a benchmark that silently measured
 #: that (warm, populated by unrelated runs) would report the wrong number.
 _PYCACHE_PREFIX: Path | None = None
+
+#: tiktoken downloads ``cl100k_base.tiktoken`` unless it finds the file, and it
+#: looks in ``$TIKTOKEN_CACHE_DIR`` or else ``<TMPDIR>/data-gym-cache``. This
+#: benchmark gives every run a fresh ``TMPDIR`` for isolation, which silently
+#: turned the first use of the tokenizer into a TLS round trip — 413 ms of
+#: ``SSLSocket.read``, 326 ms inside ``load_tiktoken_bpe`` and 115 ms in
+#: ``getaddrinfo``, measured in a profile of the child. That is a property of
+#: the harness, not of local-operator, so the DATA is pinned to one directory
+#: per invocation the way an operator's machine pins it.
+_TIKTOKEN_CACHE_DIR: Path | None = None
 
 
 def _prime_bytecode_cache() -> None:
@@ -180,7 +197,15 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
     from local_operator.harness.types import StreamTextDelta
-    from local_operator.session_factory import create_session
+    from local_operator.session_factory import create_session, warm_session_imports
+
+    # EXACTLY WHAT THE TUI DOES FIRST, and the reason it is here: the real app
+    # runs this off-loop at boot (``tui/app.py``), and it is the seam that now
+    # carries the tokenizer warm. A benchmark that skipped it would charge the
+    # tokenizer to the first turn — production does not — and would then report
+    # the TUI as unchanged by a change that specifically moves that cost to
+    # boot.
+    await asyncio.to_thread(warm_session_imports)
 
     args = _argparse.Namespace()
     for key, value in {
@@ -424,6 +449,8 @@ async def _one(scenario: str, index: int) -> dict[str, float]:
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     os.environ["TMPDIR"] = str(root)
     os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = secrets.token_hex(32)
+    if _TIKTOKEN_CACHE_DIR is not None:
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE_DIR)
     try:
         if scenario == "tui":
             marks = await _run_tui_child(config_dir, cwd)
@@ -517,6 +544,8 @@ def main() -> int:
     global _PYCACHE_PREFIX
     _PYCACHE_PREFIX = Path(args.pycache_prefix or tempfile.mkdtemp(prefix="lop-ttft-pycache-"))
     _PYCACHE_PREFIX.mkdir(parents=True, exist_ok=True)
+    global _TIKTOKEN_CACHE_DIR
+    _TIKTOKEN_CACHE_DIR = Path(tempfile.mkdtemp(prefix="lop-ttft-tiktoken-"))
     # FORCED for the whole invocation, not just the measured runs: the priming
     # pass below has to populate the same cache the runs will read, and an
     # inherited prefix (the operator's real app cache) would be reported warm.

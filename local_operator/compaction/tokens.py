@@ -219,8 +219,16 @@ def warm_tokenizer_in_background() -> threading.Thread | None:
     """
     if _ENCODING is not None or _ENCODING_FAILED:
         return None
-    thread = threading.Thread(target=warm_tokenizer, name="lop-tokenizer-warm", daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=warm_tokenizer, name="lop-tokenizer-warm", daemon=True)
+        thread.start()
+    except RuntimeError:
+        # `can't start new thread`. The runtime child calls this FIRST in
+        # `main()`, so a refusal here must not become a boot failure: the
+        # contract is that a warm-up is never the thing that breaks, and the
+        # cost simply moves back to where it was.
+        logger.debug("tokenizer prewarm could not start a thread", exc_info=True)
+        return None
     return thread
 
 
