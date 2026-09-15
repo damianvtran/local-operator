@@ -39,6 +39,7 @@ from local_operator.compaction.api import CompactionSettings
 from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.compaction.marker import build_compaction_marker
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import (
     AgentMessage,
@@ -49,7 +50,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.mobile.projection import fold_messages_to_entries
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.session import Session, _is_persistable_message
 from local_operator.session.transcript import Transcript
 

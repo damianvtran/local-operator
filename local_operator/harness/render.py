@@ -9,31 +9,23 @@ function of the transcript — so hoisting it lets an episode render through the
 *same* function the TUI renders through, instead of growing a second
 implementation that drifts from it.
 
-KNOWN INCOMPLETENESS, deliberately not resolved by the move: the vocabulary the
-renderer matches on is spread across four modules. Three of them the runner may
-not import at all — ``local_operator.incidents`` (the four
+The vocabulary this module matches on has ONE neutral home,
+``harness/message_types.py``, and that is what makes the hoist reachable.
+Seven markers used to be defined beside their owning subsystem, and the four of
+those homes a runner may not import — ``local_operator.incidents`` (the four
 ``SESSION_*_MESSAGE_TYPE`` records), ``local_operator.session.peer``
-(``PEER_MESSAGE_MESSAGE_TYPE``) and ``local_operator.tools.builtin``
-(``TODO_REMINDER_MESSAGE_TYPE``) — and the fourth, ``local_operator.harness.comms``
-(``HUB_MESSAGE_TYPE``), is the only one of the four that sits in a package the
-runner may otherwise import: the module itself imports cleanly and its closure
-does not, which is the next paragraph. Seven
-constants, and importing this module leaks **17** modules that
-``tests/unit/evaluation/runner/test_isolation.py`` denies, so the hoist does not
-by itself make the renderer reachable from an episode: giving those constants a
-neutral home is that stage's first move, not this one's.
-
-``harness.comms`` is the home that reads as clean and is not. It imports
-``local_operator.session.peer`` and ``local_operator.session.transcript`` at
-module level for ``PEER_MESSAGE_MESSAGE_TYPE`` and ``TRANSCRIPT_FILENAME``, so
-moving the six constants in ``incidents``, ``session.peer`` and ``tools.builtin``
-still leaks **8**
-(``incidents``, ``paths``, ``session``, ``session.attachments``,
-``session.creation``, ``session.peer``, ``session.spend``,
-``session.transcript``) — all of it through this one import. ``HUB_MESSAGE_TYPE``
-must leave ``harness.comms`` for the neutral module too: that seventh constant
-takes the residual to zero, which is why a plan built on three homes would do
-the move, re-probe, and still find the module unimportable.
+(``PEER_MESSAGE_MESSAGE_TYPE``), ``local_operator.tools.builtin``
+(``TODO_REMINDER_MESSAGE_TYPE``) and ``local_operator.harness.comms``
+(``HUB_MESSAGE_TYPE``) — leaked between them **17** denied modules into this
+module's import closure: 1, 2, 11 and 8 respectively, and the union is the 17
+(``tests/unit/evaluation/runner/test_isolation.py`` is the denylist that
+measures it). ``harness.comms`` is the home that reads as clean and is not — it
+needs ``PEER_MESSAGE_MESSAGE_TYPE`` and ``TRANSCRIPT_FILENAME`` for its own
+replay work, so it imports ``session.peer`` and ``session.transcript`` at module
+level; moving the six obvious constants and leaving ``HUB_MESSAGE_TYPE`` there
+would still have leaked those same 8 through this one import. Moving all seven
+took the closure to zero, and that test now probes this module, so a fresh
+import here cannot put the leak back unnoticed.
 """
 
 from __future__ import annotations
@@ -48,8 +40,22 @@ from local_operator.compaction.marker import (
     render_compaction_marker as _render_compaction_marker,
 )
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-from local_operator.harness.comms import HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+
+# The vocabulary this renderer matches on, from its one neutral home rather
+# than from the four subsystems that own each marker: three of those are barred
+# for a runner and the fourth (``harness.comms``) drags the session package in
+# behind them, which is precisely what made this module unreachable from an
+# episode (see the module docstring). Import nothing heavy into that module.
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    TODO_REMINDER_MESSAGE_TYPE,
+)
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -57,14 +63,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
-from local_operator.incidents import (
-    SESSION_CREDENTIAL_MESSAGE_TYPE,
-    SESSION_INCIDENT_MESSAGE_TYPE,
-    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
-    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
-)
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 
 def _injected_user_message(text: str, entry_id: str) -> Message:

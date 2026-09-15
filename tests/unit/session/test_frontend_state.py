@@ -880,9 +880,9 @@ def test_queued_custom_steers_project_their_human_text() -> None:
     — a blank row for any follower that renders the queue. A peer row keeps
     its raw text in ``details["body"]`` (``details["text"]`` is the
     model-facing envelope); a wake's human text is its ``details["text"]``."""
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
     from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
-    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
     peer = CustomMessage(
         custom_type=PEER_MESSAGE_MESSAGE_TYPE,

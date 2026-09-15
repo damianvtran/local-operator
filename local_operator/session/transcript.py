@@ -45,13 +45,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
 
+from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
     Message,
     TextContent,
 )
-from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.creation import (
     ensure_session_created_at,

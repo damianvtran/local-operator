@@ -19,11 +19,8 @@ from typing import Any, Callable
 
 import pytest
 
-from local_operator.harness.comms import (
-    HUB_MESSAGE_TYPE,
-    SubagentComms,
-    extract_parent_message,
-)
+from local_operator.harness.comms import SubagentComms, extract_parent_message
+from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.subagent import MCP_DENIED_ATTR
 from local_operator.harness.types import (
     AgentEvent,

@@ -6172,14 +6172,6 @@ TODO_STORE: dict[str, list[TodoPhase]] = {}
 #: as a string, so every todo store in this module has one key type.
 _CONTEXT_TODO_STORE: dict[str, list[TodoPhase]] = {}
 
-#: The custom-message type the session's continuation guardrail injects at the
-#: yield boundary (``Session._todo_continuation``). It lives beside the store
-#: because the todo feature owns the vocabulary and session.py imports it —
-#: the same shape as ``HUB_MESSAGE_TYPE`` (harness/comms.py) and
-#: ``WAKE_PROMPT_MESSAGE_TYPE`` (harness/wake.py), neither of which is defined
-#: in the session that renders them.
-TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
-
 #: Statuses that no longer need work. ``blocked`` is NOT here: a blocked item
 #: is unfinished work waiting on someone, and counting it as progress would
 #: let a stalled list read as a finished one.
@@ -12063,11 +12055,26 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
 
 #: What ``wait`` tells the model for each kind of inbound arrival that woke it,
 #: keyed by the producer's ``CustomMessage.custom_type``. Spelled as literals
-#: rather than imported: ``session.session`` and ``harness.comms`` both import
-#: this module, so naming ``PEER_MESSAGE_MESSAGE_TYPE`` / ``WAKE_PROMPT_MESSAGE_TYPE``
-#: / ``HUB_MESSAGE_TYPE`` here would be a cycle. ``test_wait_budget.py`` pins
-#: the three keys against the real constants so a rename cannot silently
-#: demote a kind to the generic fallback wording.
+#: rather than imported — for WEIGHT, not for the cycle this comment used to
+#: assert, which was never there: at the merge base (``de9a9f94f``) importing
+#: this module together with the three homes is clean in either order, because
+#: none of the three homes reaches this module (the 7 modules that join the
+#: process are the control that those imports ran). What held at that base is
+#: that naming them here would put their homes on the import path of every
+#: importer of the tool layer — ``session.peer`` for the peer marker,
+#: ``harness.comms`` with its transcript-replay closure for ``HUB_MESSAGE_TYPE``
+#: — taking this module's denied-module count from 11 to 17 (``incidents``,
+#: ``session.attachments``, ``session.creation``, ``session.peer``,
+#: ``session.spend``, ``session.transcript``). That cost is gone now
+#: (``PEER_MESSAGE_MESSAGE_TYPE`` and ``HUB_MESSAGE_TYPE`` live in the
+#: import-free ``harness/message_types.py``, and ``WAKE_PROMPT_MESSAGE_TYPE`` in
+#: ``harness/wake.py``, which imports only stdlib and pydantic — measured, the
+#: same import together now adds one module and no denied ones), so the literals
+#: are kept for the reason that never depended on it. They are a display table
+#: keyed by the persisted wire value; ``execute_wait`` reads ``"peer_message"``
+#: again as its generic fallback key below; and ``test_wait_budget.py`` pins the
+#: key set against the real constants, so a rename cannot silently demote a kind
+#: to the generic fallback wording.
 _ARRIVAL_NOTES: dict[str, str] = {
     "peer_message": "a message arrived from another session",
     "wake_prompt": "a scheduled wake fired — read the reminder before re-waiting",

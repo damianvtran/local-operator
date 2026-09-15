@@ -31,7 +31,11 @@ from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_message
+from local_operator.harness.comms import extract_parent_message
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+)
 
 # The row DECISIONS both this fold and the TUI's must make identically. They
 # live outside both hosts precisely so neither can own them: every divergence
@@ -86,7 +90,6 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
 logger = logging.getLogger(__name__)
 

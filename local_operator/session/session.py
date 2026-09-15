@@ -71,13 +71,28 @@ from local_operator.compaction.marker import (
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate
-from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
+from local_operator.harness.comms import SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
+
+# The custom-message markers this session journals, renders and allow-lists,
+# imported from their one neutral home: the renderer that turns them back into
+# model-visible messages lives in ``harness/render.py`` and must not reach this
+# module, so the vocabulary cannot be defined here or in the modules that own
+# it (``harness/message_types.py`` carries the full reasoning).
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    TODO_REMINDER_MESSAGE_TYPE,
+)
 
 # Hoisted to the harness so the evaluation runner can render a transcript
 # through this same function without importing session code. Only these two
@@ -146,10 +161,6 @@ from local_operator.harness.wake import (
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
     DELIBERATE_CUT_OFF_CAUSE,
-    SESSION_CREDENTIAL_MESSAGE_TYPE,
-    SESSION_INCIDENT_MESSAGE_TYPE,
-    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
-    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     format_cut_off_notice,
     format_cut_off_raw,
     render_cut_off_reason,
@@ -166,7 +177,6 @@ from local_operator.session.naming import (
     MAX_TITLE_CHARS,
     ConversationName,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,
@@ -190,7 +200,6 @@ from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.tools.builtin import (
-    TODO_REMINDER_MESSAGE_TYPE,
     open_todos,
     restore_todos,
     todo_fingerprint,

@@ -481,7 +481,7 @@ def test_the_incident_type_this_scan_keys_on_is_the_one_incidents_writes() -> No
     banner would quietly degrade to "Stopped with an error" for every failure,
     looking exactly like a session that recorded no incident.
     """
-    from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
     from local_operator.resume import _SESSION_INCIDENT_TYPE
 
     assert _SESSION_INCIDENT_TYPE == SESSION_INCIDENT_MESSAGE_TYPE

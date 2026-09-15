@@ -20,13 +20,10 @@ import os
 
 import pytest
 
+from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.harness.types import StreamEndEvent
 from local_operator.session.retention import session_activity
-from local_operator.session.session import (
-    SESSION_INCIDENT_MESSAGE_TYPE,
-    CustomMessage,
-    _default_convert_to_llm,
-)
+from local_operator.session.session import CustomMessage, _default_convert_to_llm
 
 from .test_session import MODEL, ScriptedStream, make_session
 

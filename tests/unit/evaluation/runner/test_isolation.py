@@ -126,6 +126,29 @@ def test_runner_core_does_not_import_the_application(module: str) -> None:
     assert not leaked, f"{module} leaked application imports: {leaked}"
 
 
+def test_shared_renderer_is_importable_from_an_episode() -> None:
+    """The one renderer an episode calls must not drag the application in.
+
+    The benchmark renders its transcript through the same function the TUI
+    renders through (``harness/render.py``, hoisted out of
+    ``session/session.py``), which puts a HARNESS module on an episode's import
+    path -- nothing above covers one, and the denylist cannot notice on its own:
+    this module used to reach its vocabulary through ``incidents``,
+    ``session.peer``, ``tools.builtin`` and ``harness.comms`` and leaked 17
+    denied modules, so importing the renderer was as barred as importing the
+    session it was hoisted from. The seven markers moving into
+    ``harness.message_types`` is worth exactly as much as this assertion holding:
+    a single heavy import added to that module, or to the renderer, puts an
+    episode back on the operator's own configuration with nothing else to show
+    it. Probed here rather than in ``tests/unit/harness`` because the rule being
+    enforced is this file's, and its ``FORBIDDEN_PREFIXES`` is the list it is
+    enforced against.
+    """
+    imported = _fresh_import_modules("local_operator.harness.render")
+    leaked = _leaked(imported)
+    assert not leaked, f"the shared renderer leaked application imports: {leaked}"
+
+
 def _public_module_names(package: Path) -> set[str]:
     """Module and package names in ``package``, read from the tree.
 

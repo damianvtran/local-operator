@@ -382,7 +382,7 @@ def test_subagent_and_peer_deliveries_are_excluded_too():
     subagent's status report is ordinary history the summarizer may compress;
     preserving it buys no protection and costs the headroom a pass exists for.
     """
-    from local_operator.harness.comms import HUB_MESSAGE_TYPE
+    from local_operator.harness.message_types import HUB_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage
 
     rendered = _default_convert_to_llm(

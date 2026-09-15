@@ -23,8 +23,8 @@ import pytest
 from rich.cells import cell_len
 from rich.text import Text
 
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import PeerMessageDeliveredEvent
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.widgets.tool_card import (

@@ -379,13 +379,13 @@ PREVIEW_SCAN_BYTES = 64_000
 #: every row in the list is pure weight.
 PREVIEW_MAX_CHARS = 200
 
-#: ``incidents.SESSION_INCIDENT_MESSAGE_TYPE``, spelled out rather than
-#: imported. This module's contract (see the module docstring, and
+#: ``harness.message_types.SESSION_INCIDENT_MESSAGE_TYPE``, spelled out rather
+#: than imported. This module's contract (see the module docstring, and
 #: ``tests/unit/test_import_graph.py``) is that importing it drags in nothing —
 #: not the engine, not the providers, not ``asyncio`` — because it is on the
-#: path of ``local-operator --help`` and of every picker row. ``incidents`` is
-#: a cheap module today, but the guard is about the GRAPH, not about today's
-#: cost, and a literal keeps this module's import list empty.
+#: path of ``local-operator --help`` and of every picker row. The vocabulary
+#: module is a cheap module today, but the guard is about the GRAPH, not about
+#: today's cost, and a literal keeps this module's import list empty.
 #:
 #: The duplication is pinned by a test that imports both and asserts they are
 #: equal, so a rename cannot silently turn this scan into one that matches
