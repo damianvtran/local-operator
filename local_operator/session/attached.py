@@ -748,10 +748,43 @@ def _naming_resolved_no_name(spec: FrontendModelSpec) -> bool:
     Used by ``AttachedSession._restored_model_specs``, which adopts a
     checkpoint's display name only when the fresh resolution produced none.
     """
-    from local_operator.model.naming import model_label
+    from local_operator.model.naming import resolved_a_name
 
-    selector = f"{spec.provider}/{spec.model_id}" if spec.model_id else spec.provider
-    return model_label(spec.provider, spec.model_id, str(spec.display_name or "")).full == selector
+    return not resolved_a_name(spec.provider, spec.model_id, str(spec.display_name or ""))
+
+
+def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
+    """Whether THIS process resolved a real budget for the pair, or only a fill.
+
+    THE SIGNAL meaning "this process has a real budget", and the whole of the
+    discrimination between the two populations a restored reading can land in.
+    It is the presence of ``default_context_window`` or ``max_context_window``:
+    the two fields ``context_spec_for_access`` and ``build_model_spec`` write
+    only when a catalogue row or an account actually ANSWERED for this pair.
+    Neither survives a fill, which is what makes it the right question:
+
+    * an UNRESOLVED ACCOUNT takes ``UNKNOWN_CONTEXT_WINDOW`` (128k) with BOTH
+      fields explicitly cleared and ``context_metadata_resolved`` set — which is
+      why the flag is the WRONG signal, and why the gate keyed on it (PR #631)
+      refused exactly this population and painted ``224.6%/128k`` for a
+      conversation holding 287,491 tokens against a 1M budget;
+    * an UNCOVERED LOCAL TAG takes the route default (``DEFAULT_LOCAL_CONTEXT``,
+      4,096) with both fields absent, so a 20,000-token reading from a 32,768
+      checkpoint painted ``488.2%/4k`` while the default was allowed to
+      replace it.
+
+    Both are populations where the fresh spec states NO answer and the
+    checkpoint's window is the only real number in the process, so it is
+    adopted. Where either field IS set, the fresh spec carries the account's or
+    the route's own budget, and the checkpoint's window is the stale one that
+    rule exists to refuse: it can predate an opt-out, a plan change or
+    maximum-context support, and in the opt-out direction it hides an
+    over-budget conversation behind a calm percentage.
+
+    Asked of the CONFIGURED spec — the one this process just resolved — never
+    of the checkpoint's, whose fields are the answer being judged.
+    """
+    return bool(int(spec.default_context_window or 0) or int(spec.max_context_window or 0))
 
 
 class AttachedSession:
@@ -1539,12 +1572,20 @@ class AttachedSession:
           model that will RUN (``reading_identity`` against the effective spec),
           which is the same gate ``_consistent_context`` applies to a checkpoint
           reading. A count measured on another model is not convertible.
-        * ``context_window`` — only from ``reading_window``, which requires a
-          window the spec can VOUCH for: the resolved flag alone is not evidence,
-          because ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with
-          that flag whenever account metadata could not be resolved. Never the
-          spec's 128k placeholder. With no window the strip renders its honest
-          ``window unknown`` state — absolute tokens, no arc.
+        * ``context_window`` — from ``reading_window`` when the receipt can be
+          attributed to this model, else straight from ``denominator_window(spec)``.
+          Both ask the SAME value question (is this a budget or the placeholder),
+          and they differ only in the question ``reading_window`` adds on top of it:
+          whether the reading is ATTRIBUTABLE (a receipt for another model is not
+          this model's reading). A spec's own window is a fact about the model
+          regardless of who measured anything against it, and it is what the band
+          divides by on every later paint, so it is written either way (review
+          round 2, minor 1). The resolved flag alone is NOT evidence, because
+          ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with that flag
+          whenever account metadata could not be resolved — which is why the value
+          rule, not the flag, is the one both callers share. With no window at all
+          the strip renders its honest ``window unknown`` state — absolute tokens,
+          no arc.
         * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced on the
           receipt's own serving identity (a receipt from another model was billed
           at THAT model's rates), and only when the receipt is attributable at
@@ -1883,16 +1924,27 @@ class AttachedSession:
         the same honest degradation it already shows for a model it cannot
         price. The first real turn replaces it with a live reading anyway.
 
-        The gate is ``_restored_pair``, shared with the WINDOW's half of the
-        restore (``_restored_model_specs``) rather than restated here.
+        WHICH MODEL the reading belongs to is ``_restored_pair``, shared with the
+        WINDOW's half of the restore (``_restored_model_specs``) rather than
+        restated here. The DENOMINATOR is not a second question with the same
+        answer: the checkpoint's window is restored only where this process
+        resolved none of its own (``_fresh_spec_states_a_budget``). Where it did,
+        the window is left unset and ``_seed_cold_usage`` fills it from the fresh
+        spec — the number every later paint divides by, and the one the runtime's
+        own attach frame publishes — while the numerator stays, because it is a
+        fact about the conversation either way.
         """
-        if AttachedSession._restored_pair(state, durable) is None:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        return {
+        configured, _stored = pair
+        update: dict[str, Any] = {
             "context_tokens": durable.context_tokens,
             "context_is_estimate": durable.context_is_estimate,
-            "context_window": durable.context_window,
         }
+        if not _fresh_spec_states_a_budget(configured):
+            update["context_window"] = durable.context_window
+        return update
 
     @staticmethod
     def _restored_model_specs(
@@ -1917,38 +1969,59 @@ class AttachedSession:
         tell the user how much room is left. The checkpoint's own spec is the one
         those tokens were measured against, so it is the honest denominator.
 
-        Taken on EXACTLY the gate the numerator is taken on
-        (``_restored_pair``), because the two are one reading: a numerator from
-        the checkpoint under a denominator from anywhere else is a percentage its
-        tokens were never measured against, in either direction. This used to be
-        a METADATA-PRESENCE test — adopt unless the fresh spec reported
-        ``context_metadata_resolved``/``default``/``max`` — which a cold spec
-        built by hand could never satisfy. Resolving the cold pair is what makes
-        that test capable of firing, and it fires on the wrong population: a
-        local provider sets ``context_metadata_resolved`` for the window the
-        ENDPOINT reports now (``providers/local.py``), which is not the window a
-        restored reading was measured against, so a conversation at 20,000 tokens
-        from a 32,768 checkpoint painted ``488.2%/4k`` (review round 1, minor 1).
+        Taken on the SAME-MODEL gate the numerator is taken on
+        (``_restored_pair``), which decides WHICH MODEL the reading belongs to —
+        not, as an earlier revision of this docstring had it, that the pair then
+        always travels together. WHICH WINDOW the restored numerator meets is a
+        separate question (``_fresh_spec_states_a_budget``), and the answer is
+        not the checkpoint's wherever this process resolved a budget of its own.
+        That asymmetry is deliberate and it is the one the runtime's own attach
+        frame already follows — ``frontend_state.refresh_from_session`` pairs
+        ``receipt_context or current.context_tokens`` with the EFFECTIVE spec's
+        window — because the band's percentage predicts when the NEXT request
+        overflows, so a restored numerator under a stale denominator misstates
+        the one number this surface exists to report.
 
-        The NAME rides the same gate for the same reason — it is a fact about
-        THIS model that only a runtime which ran it could resolve — and it is
-        taken on naming's own rule (``_naming_resolved_no_name``) rather than a
-        copy of one of that rule's three refusals (review round 1, minor 2).
+        The checkpoint's window is the wrong answer wherever the fresh spec has
+        one. Measured on this branch while the gate was absent: a conversation
+        whose account GREW from 272k to 872k first-painted ``110.3%/272k``
+        against the live frame's ``34.4%/872k`` (usage overstated threefold), and
+        one whose account opted OUT of the maximum first-painted ``45.9%/872k``
+        against the live ``147.1%/272k`` — a calm reading that HIDES an
+        over-budget conversation on the one surface that exists to warn about it
+        (review round 2, blocker 1; design round 2, D1).
+
+        The populations it must KEEP adopting for, because the fresh spec states
+        no answer there and the checkpoint's window is the only real number in
+        the process: an unresolved account (the 128k placeholder, neither
+        ``default`` nor ``max`` set) and an uncovered local tag (the 4,096 route
+        default, the same two fields absent). Those are the reported
+        ``224.6%/128k`` and review round 1's ``488.2%/4k``.
+
+        The NAME rides the same-model gate for its own reason — it is a fact
+        about THIS model that only a runtime which ran it could resolve — and it
+        is taken on naming's own rule (``naming.resolved_a_name``,
+        ``_naming_resolved_no_name``) rather than a copy of one of that rule's
+        three refusals (review round 1, minor 2; review round 2, nit 1).
         """
         pair = AttachedSession._restored_pair(state, durable)
         if pair is None:
             return {}
         configured, stored = pair
         update: dict[str, Any] = {}
-        window = int(stored.context_window or 0)
-        if window > 0:
-            update.update(
-                {
-                    "context_window": window,
-                    "default_context_window": stored.default_context_window,
-                    "max_context_window": stored.max_context_window,
-                }
-            )
+        # The WINDOW half, on the same rule the state-level half follows
+        # (``_consistent_context``): the checkpoint's window is the answer only
+        # while this process resolved no budget of its own.
+        if not _fresh_spec_states_a_budget(configured):
+            window = int(stored.context_window or 0)
+            if window > 0:
+                update.update(
+                    {
+                        "context_window": window,
+                        "default_context_window": stored.default_context_window,
+                        "max_context_window": stored.max_context_window,
+                    }
+                )
         # The resolved NAME, and why it needs a gate at all: this process resolves
         # a name only as far as the catalogue it can read OFFLINE reaches, so a
         # listing row that answers with the id it was asked about gives it nothing

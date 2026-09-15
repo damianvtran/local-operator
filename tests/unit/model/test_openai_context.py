@@ -233,27 +233,26 @@ async def test_session_adopts_request_metadata_without_changing_compaction(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_cold_resume_takes_the_window_its_tokens_were_measured_against(tmp_path, monkeypatch):
-    """A restored reading's denominator travels with it, not with the account.
+async def test_cold_resume_does_not_restore_pre_maximum_window(tmp_path, monkeypatch):
+    """PR #631's rule, restored: the ACCOUNT's current window governs the first frame.
 
-    This test used to pin the opposite: ``_restored_model_specs`` refused the
-    checkpoint's window whenever the cold spec reported resolved account metadata,
-    on the argument that a restored window "may predate maximum-context support or a
-    changed opt-out setting".
+    A restored reading's ``context_tokens`` were measured against the window the
+    runtime had when it wrote them, and it is tempting to conclude that its
+    denominator must travel with it. It must not, whenever this process resolved a
+    budget of its own: the band's percentage predicts when the NEXT request
+    overflows (``tui.app._context_window``), and the account's own maximum reaches
+    this spec NOW through ``context_spec_for_access``. Adopting the checkpoint's
+    window instead is how the first frame came to say ``110.3%/272k`` on a session
+    the live frame calls ``34.4%/872k`` — and, in the opt-out direction,
+    ``45.9%/872k`` on one the live frame calls ``147.1%/272k`` and paints in danger
+    red (review round 2, blocker 1; design round 2, D1).
 
-    That argument is about the NEXT request's budget; the restored frame's
-    percentage is about the reading it restores, and the two halves of ONE reading
-    cannot be split. The newer rule already says so on the state side —
-    ``_consistent_context`` restores the checkpoint's own pair and
-    ``_seed_cold_usage`` refuses a fresh denominator under a stored numerator
-    (M1, c390be8c1), because those tokens were measured against that window. So
-    the state carried the checkpoint's window while the spec carried the account's:
-    one band, two possible denominators, decided by which paint landed last. The
-    account's current maximum still reaches the band on the LIVE path, where the
-    runtime's own spec is what paints.
-
-    Release history is why this file is the one that has to say it: the spec-level
-    gate came first (#631) and the reading-level rule superseded it.
+    The discrimination is ``_fresh_spec_states_a_budget``: the fresh spec's
+    ``default_context_window``/``max_context_window`` mean the model layer ANSWERED
+    for this pair, and the checkpoint's window is then the stale one. The
+    populations where it did NOT answer are the ones that still adopt, and
+    ``test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominator``
+    below pins that half.
     """
     from local_operator.config import ConfigManager
     from local_operator.providers import failover
@@ -280,22 +279,11 @@ async def test_cold_resume_takes_the_window_its_tokens_were_measured_against(tmp
     durable = FrontendSessionState(
         session_id="cold",
         epoch="old",
-        context_tokens=500_000,
-        context_window=272_000,
         selected_model=FrontendModelSpec(
             provider="openai", model_id="gpt-5.6-sol", context_window=272000
         ),
     )
-    restored = remote._restored_model_specs(state, durable)
-    assert (
-        restored["selected_model"].context_window == 272000
-    ), "the checkpoint's window is the one its tokens were measured against"
-    assert (
-        restored["selected_model"].display_name == state.selected_model.display_name
-    ), "only the window is adopted: the rest of the spec is this process's own resolution"
-    # The opt-out still reaches the spec through the FRESH resolution — this change
-    # is about which stored window a restored reading pairs with, not about how the
-    # account's own limits resolve.
+    assert remote._restored_model_specs(state, durable) == {}
     config.set_config_value("providers", {"openai": {"use_max_context_window": False}})
     state = await remote._synthesise_cold_state(str(tmp_path))
     assert state.selected_model is not None
@@ -357,30 +345,26 @@ def test_api_route_recovers_public_limit_after_unavailable_oauth(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("access_kind", ["offline", "missing-account", "missing-auth"])
-async def test_a_cold_states_window_is_the_one_its_tokens_were_measured_against(
+async def test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominator(
     tmp_path, monkeypatch, access_kind
 ):
-    """A checkpoint's capacity and the tokens measured against it are ONE reading.
+    """The half of the rule that still ADOPTS: the account answered nothing at all.
 
-    The cold frame on this path is an UNRESOLVED account: ``context_spec_for_access``
-    writes ``UNKNOWN_CONTEXT_WINDOW`` (128k) together with
-    ``context_metadata_resolved: True``, so the fresh spec's own window is a
-    placeholder and not a budget. What the checkpoint carries is the window the
-    conversation's tokens were actually measured against — the same model, per
-    ``_restored_pair`` — and the two must be taken together: a numerator from the
-    checkpoint under a denominator from anywhere else is a percentage its tokens
-    were never measured against, in either direction (review round 1, minor 1;
-    ``usage_seed`` refuses the same pairing from the seed side and for the same
-    reason).
+    ``context_spec_for_access`` writes ``UNKNOWN_CONTEXT_WINDOW`` (128k) TOGETHER
+    WITH ``context_metadata_resolved: True`` whenever it could not resolve the
+    account, so neither the flag nor the value can tell this population from a
+    resolved 128k budget. What distinguishes it is that the fresh spec states no
+    ``default_context_window`` and no ``max_context_window`` — nothing ANSWERED
+    for this pair (``_fresh_spec_states_a_budget``) — so the checkpoint's window
+    is the only real denominator in the process and a restored reading keeps it.
 
-    This test previously asserted the opposite — ``_restored_model_specs`` returned
-    ``{}`` whenever the fresh spec reported resolved metadata, which is the
-    METADATA-PRESENCE test ``test_a_cold_openai_session_does_not_divide_by_the_
-    placeholder_window`` still pins at the STATE level. The two levels now say the
-    same thing, and the placeholder refusal lives where it always did: the state's
-    own denominator comes from ``usage_seed.denominator_window``, which refuses
-    128k, while the SPEC adopts the checkpoint's real window. The frame therefore
-    reads ``tokens/1_050_000`` rather than a confident ``tokens/128k``.
+    This is the reported defect's own population: without the adoption, the cold
+    frame divides a restored reading by the 128k placeholder and paints
+    ``224.6%/128k`` where the conversation holds 287,491 tokens against a 1M
+    budget. The value refusal survives where it belongs — ``reading_window``
+    still refuses the placeholder as a receipt's denominator, which is the STATE
+    level of the same paint (see
+    ``test_a_cold_openai_session_does_not_divide_by_the_placeholder_window``).
     """
     from local_operator.config import ConfigManager
     from local_operator.model.configure import UNKNOWN_CONTEXT_WINDOW
@@ -409,6 +393,10 @@ async def test_a_cold_states_window_is_the_one_its_tokens_were_measured_against(
         state.selected_model.context_window == UNKNOWN_CONTEXT_WINDOW
     ), "precondition: an unreachable account resolves to the placeholder, not to a budget"
     assert state.selected_model.context_metadata_resolved
+    assert (
+        state.selected_model.default_context_window is None
+        and state.selected_model.max_context_window is None
+    ), "precondition: nothing ANSWERED for this pair, which is what makes it adopt"
     legacy = FrontendSessionState(
         session_id="cold",
         epoch="legacy",
@@ -419,8 +407,8 @@ async def test_a_cold_states_window_is_the_one_its_tokens_were_measured_against(
     restored = remote._restored_model_specs(state, legacy)
     adopted = restored["selected_model"]
     assert adopted.context_window == 1050000, (
-        "the checkpoint's window is the one its tokens were measured against, so it is the "
-        "denominator that travels with them"
+        "with no budget resolved here, the checkpoint's window is the only real "
+        "denominator in the process"
     )
     assert (adopted.provider, adopted.model_id) == ("openai", "gpt-5.6-sol")
     assert (
