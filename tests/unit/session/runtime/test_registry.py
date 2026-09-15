@@ -412,3 +412,44 @@ def test_a_missing_conversation_directory_is_not_conjured_by_the_marker(
     with pytest.raises(OSError):
         registry.write_stop_marker(conversation, {"session_id": "never-existed"})
     assert not conversation.exists()
+
+
+def test_classify_reports_a_quiet_owner_as_wedged_with_the_measured_age() -> None:
+    """The one owner of the vocabulary, and the whole of what it claims.
+
+    A stale beat with a live pid is ``wedged`` — degraded-responsiveness
+    evidence, NOT a death certificate. The beat is authored by the runtime's own
+    event loop, so a long turn or a starved scheduler produces this exact
+    reading on a session that is demonstrably working (measured on this host at
+    105.8 s and 205.8 s against the 45 s timeout), which is why the surfaces say
+    "not answering" rather than naming a cause. The AGE comes back beside the
+    word so those surfaces do not each re-derive the clamp.
+    """
+    record = make_record()
+    record.heartbeat_at = time.time() - 300
+
+    verdict = registry.classify(record, check_zombie=False)
+    assert verdict.state == "wedged"
+    # The pid exists, and that fact travels WITH the verdict: it is the
+    # difference between "quiet" and "gone", and every caller that words this
+    # state needs it.
+    assert verdict.pid_alive is True
+    assert 299 <= verdict.heartbeat_age_s <= 302
+
+    # A fresh beat is live, and that word claims only that the owner reported.
+    record.heartbeat_at = time.time()
+    fresh = registry.classify(record, check_zombie=False)
+    assert fresh.state == "live"
+    assert fresh.heartbeat_age_s < 1.0
+
+    # The pid decides ``stale``, never the stamp: a record whose process is gone
+    # is reaped by the caller whatever its heartbeat says.
+    dead = make_record(pid=2**22 - 3)  # a pid that does not exist
+    dead.heartbeat_at = time.time()
+    assert registry.classify(dead, check_zombie=False).state == "stale"
+
+    # Clock skew can only make the register QUIETER: a stamp dated in the future
+    # is not evidence against the process.
+    skewed = make_record()
+    skewed.heartbeat_at = time.time() + 60
+    assert registry.classify(skewed, check_zombie=False).heartbeat_age_s == 0.0
