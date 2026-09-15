@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import ToolContext, ToolResult
 from local_operator.tools import lsp
 
 pytestmark = pytest.mark.skipif(lsp.jedi is None, reason="jedi extra not installed")
@@ -402,11 +402,17 @@ def test_an_absent_extra_hides_the_tool_and_answers_in_words(monkeypatch, tree) 
     monkeypatch.setattr(lsp, "jedi", None)
     assert lsp.build_lsp_tool() is None
 
-    result = asyncio.run(
-        lsp.execute_lsp(
+    async def _call() -> ToolResult:
+        # Awaited inside a coroutine rather than handed straight to
+        # ``asyncio.run``: ``execute_lsp`` carries ``@_guard``, whose declared
+        # return is ``Awaitable[ToolResult]`` rather than ``Coroutine``, and
+        # ``asyncio.run`` only accepts the latter. This is what every
+        # production call site does too.
+        return await lsp.execute_lsp(
             "call-1", {"action": "symbols", "path": "pkg/lib.py"}, None, None, _ctx(tree)
         )
-    )
+
+    result = asyncio.run(_call())
     assert result.is_error is True
     assert "jedi is not installed" in result.text
 
