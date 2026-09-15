@@ -31,12 +31,19 @@ The pairing is still load-bearing on the rung that does label: on POSIX
 without an image would ask the kernel to run a file named
 ``Local Operator [session] id=...``.
 
+THE LAST EXCEPTION IS CLOSED HERE: ``secrets/client.py``'s broker spawn kept its
+label with a plain image, justified by the broker reading ``sys.executable``
+nowhere and spawning nothing (#1162's M-c). That is true of today's broker and is
+not a contract to leave on a detached daemon whose failures are silent, so the
+broker now resolves both axes through ``spawn_identity`` with every other site.
+
 Each test drives the REAL spawn function with the image probe forced to fail, and
 reads what the spawn was actually called with.
 """
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -402,3 +409,128 @@ def test_the_installer_labels_when_the_image_exists(branded_image) -> None:
     assert argv[0] == procname.branded_argv0(procname.LABEL_INSTALL)
     assert argv[1:] == ["-m", "pip", "install", "-U", "local-operator"]
     assert executable == sys.executable
+
+
+def test_the_broker_labels_alongside_the_image(
+    branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The secret broker's image axis, which this spawn site did not set before.
+
+    ``_spawn_broker`` passed the interpreter as BOTH the image and (pre-#958)
+    argv, so a broker started from a plain interpreter parent — ``lop`` from a
+    venv python, the common case — left Activity Monitor a row of ``python3.12``
+    with the label only in argv. Resolving both axes through
+    ``procname.spawn_identity`` is what makes the row the product's own name on
+    the axis users read, and this pins the pair rather than the implementation.
+    """
+    from local_operator.secrets import client
+    from local_operator.secrets.keys import secrets_dir
+
+    recorded: dict[str, Any] = {}
+
+    def fake_popen(argv, **kwargs):
+        recorded["argv"] = list(argv)
+        recorded["executable"] = kwargs.get("executable")
+        return _Child()
+
+    monkeypatch.setattr(client.subprocess, "Popen", fake_popen)
+    base = tmp_path / "config"
+    client._spawn_broker(base)
+
+    digest = hashlib.sha256(str(secrets_dir(base)).encode("utf-8")).hexdigest()[:12]
+    assert recorded["argv"] == [
+        procname.branded_argv0(procname.LABEL_BROKER, digest=digest),
+        "-m",
+        "local_operator.secrets.brokerd",
+    ]
+    assert recorded["executable"] == sys.executable
+
+
+def test_the_broker_leaves_the_interpreter_unlabelled(
+    no_branded_image, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rung 2 at THIS site, pinning the rule that used to have an exception here.
+
+    The broker kept its label with a plain image — the last labelled-argv
+    exception in the tree (#1162's M-c) — which costs the child its
+    ``sys.executable`` on Linux. Where there is no image to ride with, the label
+    goes: the exact pre-#958 command line, the interpreter with no
+    ``executable=``.
+    """
+    from local_operator.secrets import client
+
+    recorded: dict[str, Any] = {}
+
+    def fake_popen(argv, **kwargs):
+        recorded["argv"] = list(argv)
+        recorded["executable"] = kwargs.get("executable")
+        return _Child()
+
+    monkeypatch.setattr(client.subprocess, "Popen", fake_popen)
+    client._spawn_broker(tmp_path / "config")
+
+    assert recorded["argv"] == [sys.executable, "-m", "local_operator.secrets.brokerd"]
+    assert recorded["executable"] is None
+
+
+def test_a_broker_branding_failure_falls_back_to_the_unlabelled_command_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Decoration never costs a broker its start — the module's absolute contract.
+
+    Forced by making the branding itself fail rather than by removing the image,
+    because the two paths are different code: the point of this test is that an
+    exception anywhere in ``spawn_identity`` lands on the same command line
+    rung 2 produces. A broker that cannot start is worse than an unnamed one.
+    """
+
+    def explode(*args: Any, **kwargs: Any):
+        raise RuntimeError("branding blew up")
+
+    monkeypatch.setattr(procname, "spawn_identity", explode)
+
+    from local_operator.secrets import client
+
+    recorded: dict[str, Any] = {}
+
+    def fake_popen(argv, **kwargs):
+        recorded["argv"] = list(argv)
+        recorded["executable"] = kwargs.get("executable")
+        return _Child()
+
+    monkeypatch.setattr(client.subprocess, "Popen", fake_popen)
+    client._spawn_broker(tmp_path / "config")
+
+    assert recorded["argv"] == [sys.executable, "-m", "local_operator.secrets.brokerd"]
+    assert recorded["executable"] is None
+
+
+def test_a_broker_child_keeps_a_working_interpreter(no_branded_image, tmp_path: Path) -> None:
+    """The child-side consequence, executed, at the site the blocker was found on.
+
+    #1162's round-one blocker was this spawn site's OWN claim: the eval worker
+    had an empty ``sys.executable`` and ``_spawn_broker`` was the code that died
+    on it. The mechanism is Linux-only (``argv[0]`` → ``sys.executable``), and
+    this test runs the broker's real identity pair rather than inspecting the
+    call, so on CI's ubuntu job — where rung 2 is the only rung — it is the
+    regression test; on macOS it runs rung 1 through the planted link and is
+    true for the reason that hides the bug there.
+    """
+    from local_operator.secrets import client
+
+    argv0, executable = client._broker_identity(tmp_path / "config")
+    assert argv0 == sys.executable
+    assert executable is None
+
+    completed = subprocess.run(
+        [argv0, "-c", "import sys; print(sys.executable or '')"],
+        executable=executable,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    reported = completed.stdout.strip()
+    assert reported, "the broker's command line left the child unable to name its interpreter"
+    assert Path(reported).exists()

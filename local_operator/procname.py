@@ -232,6 +232,15 @@ LABEL_SERVE = "{brand} [serve] port={port}"
 #: inherited the product name with nothing to say it was a broker, and on Linux
 #: `comm` truncates at 15 bytes, which made every branded child identical in
 #: that listing. A daemon that can outlive its starter has to say what it is.
+#:
+#: WHERE THAT LABEL ACTUALLY LANDS, because it is not every platform: a label is
+#: applied only alongside a planted image (`spawn_identity`), and no image can be
+#: planted off macOS — so on Linux a broker's argv is the interpreter plus the
+#: module, and `comm` is what names it (`brokerd.main` calls
+#: `brand_this_process`; 15 bytes, brand only). Nothing reads a broker's argv
+#: text programmatically — `lop secret broker stop` asks the socket for the pid —
+#: so the store digest simply not appearing in a Linux `ps` is the accepted cost
+#: of never handing a child a label without the image that makes it affordable.
 LABEL_BROKER = "{brand} [secret broker] store={digest}"
 #: The four remaining self-spawns that are not a running service, added when the
 #: acceptance bar became "every process this product spawns is named": an EDR

@@ -29,6 +29,7 @@ from typing import cast
 
 import pytest
 
+from local_operator import procname
 from local_operator.secrets import client
 from local_operator.secrets.keys import secrets_dir
 from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
@@ -628,7 +629,7 @@ def test_the_session_end_net_reaps_a_broker_started_after_the_per_test_reap(
 
 
 def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path) -> None:
-    """Issue #958's open question: the branded child in a teardown listing.
+    """Issue #958's open question, and the ruling that closed its last exception.
 
     Every pre-#954 CI teardown listed a bare ``Local Operator`` child and nothing
     said what it was. It was this: `_spawn_broker` launches ``[sys.executable,
@@ -636,16 +637,25 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
     `procname.reexec_branded` — every real ``lop`` launch — ``sys.executable`` IS
     the branded hardlink, so the broker inherited the product name alone.
 
-    Asserted on ``argv``, deliberately, because that is the axis a teardown dump
-    reads and the only one that survives: Linux ``comm`` truncates at 15 bytes,
-    so ``Local Operator`` and every labelled form are indistinguishable there.
-    The argv is read back from the REAL spawned process rather than from
-    `_broker_argv0`, so a label that never reaches the child fails this.
+    Both axes are now resolved as a PAIR (`secrets.client._broker_identity` →
+    `procname.spawn_identity`), which is also what makes the label legal at all:
+    on Linux a labelled ``argv[0]`` leaves the child with an EMPTY
+    ``sys.executable``, so the label rides with the image or not at all (#1162).
+    Both halves are asserted here, read back from the REAL spawned process rather
+    than from the helper, so a label that never reaches the child fails this; and
+    which half is expected is decided by asking the code whether an image can be
+    planted on this host, not by naming the platform.
 
-    The branded-``sys.executable`` precondition is macOS-only (a branded image is
-    only planted there — `procname.branded_link_path` returns None elsewhere), so
-    this test pins the part that holds EVERYWHERE: the label reaches the child's
-    argv whatever the image is. The branded-parent capture is in the PR for #958.
+    Rung 1 — the image is plantable (macOS): the row is the product name on the
+    IMAGE axis, ``ps -o ucomm``, which is what Activity Monitor shows and the axis
+    the complaint was about, plus the label with its store digest in
+    ``ps -o args``, the axis a teardown dump reads.
+
+    Rung 2 — no plantable image (Linux, and any interpreter `branded_link_path`
+    refuses): the argv row is deliberately UNLABELLED, and what names the broker
+    is ``comm``, which ``brokerd.main`` sets itself through
+    `procname.brand_this_process` — 15 bytes, so the brand and nothing else,
+    which is exactly why the store detail lives in argv wherever there is one.
     """
     pid = _start(config_root)
     try:
@@ -661,6 +671,41 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
             text=True,
             timeout=30,
         ).stdout.strip()
+        image = subprocess.run(
+            ["ps", "-o", "ucomm=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        # First, because every rung keeps it: the module must stay in argv, and it
+        # is how the issue's own reopen condition ('argv is not -m
+        # local_operator.secrets.brokerd') is checked.
+        assert "local_operator.secrets.brokerd" in listing, (
+            "the module must stay in argv: it is how the issue's reopen condition "
+            f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
+        )
+        if procname.branded_link_path() is None:
+            # Rung 2. The ABSENCE is the assertion, not an omission: a labelled
+            # argv[0] on a child with no image is the shape that empties its
+            # sys.executable, so it is exactly what must not be here.
+            assert "[secret broker]" not in listing, (
+                "a label was handed to a broker with no image to ride with — on Linux "
+                f"that leaves the daemon unable to name its own interpreter: {listing!r}"
+            )
+            if sys.platform == "linux":
+                # The axis Linux actually has: `brand_this_process` is a
+                # documented no-op off Linux, and `comm` truncates at 15 bytes.
+                comm = subprocess.run(
+                    ["ps", "-o", "comm=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ).stdout.strip()
+                assert comm.startswith(procname.BRAND), (
+                    f"a rung-2 broker is unidentifiable on every axis: comm={comm!r}, "
+                    f"args={listing!r} — this is the unexplained child of issue #958"
+                )
+            return
         assert "[secret broker]" in listing, (
             f"a spawned broker is unidentifiable in `ps`: {listing!r} — this is the "
             "unexplained branded child of issue #958"
@@ -673,12 +718,12 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
             f"the label does not name this broker's store: {listing!r}; expected the "
             f"digest {digest} that also names its runtime directory"
         )
-        # Last, because it is the furthest right and so the first casualty of a
-        # truncating reader — the failure above. The module must stay in argv:
-        # it is how the issue's own reopen condition is checked.
-        assert "local_operator.secrets.brokerd" in listing, (
-            "the module must stay in argv: it is how the issue's reopen condition "
-            f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
+        # The image axis, and the reason this test changed: a broker started from a
+        # plain interpreter parent used to leave Activity Monitor a row of
+        # ``python3.12`` with the label only in argv.
+        assert image == procname.BRAND, (
+            f"the broker's image axis is not branded: `ps -o ucomm` says {image!r} — "
+            "this is the row Activity Monitor shows"
         )
     finally:
         _kill(config_root)
