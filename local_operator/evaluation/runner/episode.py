@@ -928,6 +928,13 @@ class EpisodeRunner:
         forced it -- rather than as a new event kind: the attempt already has
         its full triple and its retryable ``error``, and the evidence model's
         kinds are a closed, versioned vocabulary that readers bucket by.
+
+        One step down is not always one smaller ASK, and a reader must not take
+        it for one: where a route maps its middle rungs to a single budget
+        (DeepSeek's ``low`` and ``high`` both ask 65,536), the second retreat is
+        budget-neutral and only the effort parameter changes. On this route
+        ``max -> high`` is the step that halves the ask; ``high -> low`` is a
+        different rung, not a different budget.
         """
 
         if not getattr(

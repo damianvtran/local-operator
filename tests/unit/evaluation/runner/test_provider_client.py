@@ -1726,10 +1726,12 @@ async def test_every_decision_request_is_bounded_without_naming_a_cap_of_its_own
     -- one measured decision returned ``output_tokens=97189`` with
     ``reasoning_tokens=95098`` (35 of 410 calls above 16K, mean ~52 s). The
     fix for that (agent review round 1, B1) was to declare a flat 16,384 HERE,
-    which turned out to be a second defect: it is BELOW the provider's own
-    effort ladder, so a decision made at effort ``max`` asked for less output
-    than the provider's lowest rung, and three of five episodes on the
-    2026-09-15 canary spent the whole ask thinking and scored zero.
+    which turned out to be a second defect: a NAMED bound wins outright over the
+    provider's ladder, so that one number was asked at every rung -- above
+    ``none``'s 8,192, below the 65,536/65,536/131,072 the other three rungs ask,
+    and so below the ask of the ``max`` rung this arm actually ran on. Three of
+    five episodes on the 2026-09-15 canary spent the whole ask thinking and scored
+    zero.
 
     So what is asserted now is the shape that satisfies both: the arm names
     nothing (``max_tokens_from_policy``), which lets ``_effective_max_tokens``
@@ -3786,13 +3788,14 @@ def _thinking_spec(effort: str = "max") -> ModelSpec:
 async def test_a_decision_request_asks_the_providers_own_budget_for_its_effort(
     effort: str, expected: int
 ) -> None:
-    """The arm must not declare a ceiling BELOW the provider's own ladder.
+    """The arm must not pin the rung with a ceiling of its own.
 
     Three of five episodes on the 2026-09-15 canary scored ZERO on
     ``output_tokens=16384 reasoning_tokens=16384 stop_reason=length
-    tool_call_count=0``: the arm named a flat 16,384, which is below every rung
-    of DeepSeek's published ladder, so a decision made at effort ``max`` asked
-    for less output than the provider's LOWEST rung and the model spent all of
+    tool_call_count=0``: the arm named a flat 16,384, and a named bound overrides
+    the ladder outright, so that number went out at every rung -- 2x ``none``'s
+    8,192, below the 65,536/65,536/131,072 of ``low``/``high``/``max``, and so
+    below the ask of the ``max`` rung the canary ran on. The model spent all of
     it thinking.
 
     What is asserted is the number that reaches the WIRE, through the same

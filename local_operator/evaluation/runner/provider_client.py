@@ -2052,6 +2052,13 @@ class ProviderModelClient:
         stepped to a rung its route rejects -- and an unlisted level is dropped
         by the wire clients (``providers.clients._reasoning_effort``), which
         would turn the retry into a no-op.
+
+        A step down the ladder is NOT always a smaller ask: where a route maps
+        several middle rungs to one budget (DeepSeek's ``low`` and ``high`` both
+        ask 65,536), a second retreat is budget-neutral and only the
+        ``reasoning_effort`` parameter moves. Read a second retreat as a second
+        rung, not as a second budget cut -- ``max -> high`` is the step that
+        changes both.
         """
 
         ladder = tuple(getattr(self._model_spec, "reasoning_efforts", ()) or ())
@@ -2172,10 +2179,16 @@ class ProviderModelClient:
             context_tokens_hint=self._last_provider_context_tokens,
             # ``max_tokens`` is deliberately NOT named here, and the number this
             # replaces is why. The arm used to declare its own ceiling of 16,384
-            # (the OSWorld reference agent's), and that ceiling is BELOW the
-            # provider's own ladder: DeepSeek publishes 8K/64K/64K/128K for
-            # none/low/high/max, so a decision made at effort ``max`` asked the
-            # provider for less output than its LOWEST rung. Measured, on the
+            # (the OSWorld reference agent's), and because a NAMED bound wins
+            # outright over the provider's ladder, that one number overrode it at
+            # every rung: DeepSeek publishes 8K/64K/64K/128K for
+            # none/low/high/max, and this arm asked 16,384 for all four -- above
+            # ``none``'s 8,192 and below the 65,536/65,536/131,072 the other
+            # three rungs ask, the ``max`` rung this canary ran on included. So
+            # the defect is not a number that sat low on the ladder; it is a
+            # hardcoded bound that replaced the ladder, pinning the ask to one
+            # wrong figure instead of tracking the rung the caller requested.
+            # Measured, on the
             # canary of 2026-09-15: three of five episodes (``task_002``,
             # ``task_010``, ``task_012``) each ended after three consecutive
             # replies of ``output_tokens=16384``, ``reasoning_tokens=16384``,
@@ -2195,11 +2208,26 @@ class ProviderModelClient:
             # different product.
             #
             # Deriving a number here instead (``turn_output_budget(spec)``, say)
-            # would NOT reach that: a caller-named bound wins outright over the
-            # provider's ladder, so the arm would ask for the policy ceiling
-            # (up to 393,216 on this route) at every rung -- worse than the cap
-            # it replaces, and the exact ``output_tokens=97189`` shape agent
-            # review round 1 (B1) added the cap for. The runner cannot import
+            # would NOT reach that, and what disqualifies it is rung-INVARIANCE
+            # rather than size: on this route it returns 131,072 --
+            # ``min(DEFAULT_TURN_OUTPUT_TOKENS, advertised)``, i.e. the policy
+            # ceiling itself, never the model's advertised 393,216, which that
+            # function does not return -- and it returns that ONE figure at every
+            # rung. So it is asked at ``none`` too, 16x the 8,192 the provider's
+            # own default asks there, and the ask stops tracking the requested
+            # rung: the same defect as the 16,384 it would replace, at a
+            # different number. (It is asked rather than clamped because a
+            # caller-named bound wins outright over the ladder.)
+            #
+            # What the ladder buys is a bound PER RUNG against the model's
+            # advertised CAPABILITY (393,216 here; the 943,718 shadowed by the
+            # muse-spark spec above), NOT against a long call as such: at
+            # ``max`` this asks 131,072, which is ABOVE the
+            # ``output_tokens=97189`` agent review round 1 (B1) added a cap for.
+            # A single long call at the top rung is affordable by design -- what
+            # was unbounded there was the CAPABILITY being asked for, and what
+            # the retreat bounds is REPEATED spend at a rung that answers with
+            # silence, not one call. The runner cannot import
             # ``local_operator.providers`` to read the ladder itself (see
             # ``tests/unit/evaluation/runner/test_isolation.py``), so naming
             # nothing is also the only reachable spelling of it.
