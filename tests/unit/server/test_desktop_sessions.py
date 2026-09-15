@@ -1156,6 +1156,25 @@ class InterruptClient:
         pass
 
 
+def _publish_roster(bridge: Any, **fields: Any) -> None:
+    """Make a bound bridge carry a canonical roster, the way a follower does.
+
+    ``is_cold`` needs a live client; everything the interrupt route asks about
+    the OWNER (is work running, what survived) it asks the follower's published
+    state. Tests therefore have to publish one, and doing it here keeps the four
+    interrupt cases reading as the states they describe rather than as store
+    construction.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    bridge.remote._frontend_store = FrontendStateStore(
+        FrontendSessionState(session_id=bridge.session_id or "s1", epoch="e1", **fields)
+    )
+
+
 @pytest.mark.asyncio
 async def test_an_interrupt_returns_the_receipt_and_the_roster_counts(tmp_path, monkeypatch):
     """The live half: the owner's own sentence, plus the numbers the UI words
@@ -1176,11 +1195,7 @@ async def test_an_interrupt_returns_the_receipt_and_the_roster_counts(tmp_path, 
     from httpx import ASGITransport, AsyncClient
 
     from local_operator.server.routes import desktop_sessions as routes
-    from local_operator.session.frontend_state import (
-        FrontendSessionState,
-        FrontendStateStore,
-        JobState,
-    )
+    from local_operator.session.frontend_state import JobState
 
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
     app = FastAPI()
@@ -1202,17 +1217,14 @@ async def test_an_interrupt_returns_the_receipt_and_the_roster_counts(tmp_path, 
             owner = InterruptClient(receipt="stopped 1 subagent; 2 background bash jobs untouched")
             remote._client = owner  # type: ignore[assignment]
             remote._ready_for_events = True
-            remote._frontend_store = FrontendStateStore(
-                FrontendSessionState(
-                    session_id=sid,
-                    epoch="e1",
-                    jobs=[
-                        JobState(id="j1", type="task", status="running"),
-                        JobState(id="j2", type="task", status="completed"),
-                        JobState(id="j3", type="bash", status="running"),
-                        JobState(id="j4", type="bash", status="running"),
-                    ],
-                )
+            _publish_roster(
+                bridge,
+                jobs=[
+                    JobState(id="j1", type="task", status="running"),
+                    JobState(id="j2", type="task", status="completed"),
+                    JobState(id="j3", type="bash", status="running"),
+                    JobState(id="j4", type="bash", status="running"),
+                ],
             )
             body = {"request_id": request_id}
             response = await client.post(f"/v1/desktop/sessions/{sid}/interrupt", json=body)
@@ -1251,6 +1263,121 @@ async def test_an_interrupt_returns_the_receipt_and_the_roster_counts(tmp_path, 
             )
             assert other.status_code == 200
             assert owner.ops == ["abort", "abort"]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_on_a_warm_session_with_nothing_to_stop_is_idle(tmp_path, monkeypatch):
+    """A WARM session between turns is ``idle``, and the owner is not dialled.
+
+    ``interrupted`` is a claim that work was stopped. Answering it for a press
+    that found an empty session is the same overstatement the abort receipt
+    itself was rewritten to remove in this release, and it stays invisible for
+    exactly as long as nothing reads the field.
+
+    The running ``bash`` row is the load-bearing part of the fixture: a
+    backgrounded job is deliberately never touched by this rung, so a session
+    whose only live work is one genuinely has nothing to interrupt. If that term
+    ever changes, this test is where it shows up.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+    from local_operator.session.frontend_state import JobState
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient()
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(
+                bridge,
+                streaming=False,
+                jobs=[
+                    JobState(id="j1", type="bash", status="running"),
+                    JobState(id="j2", type="task", status="completed"),
+                ],
+            )
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "idle", result
+            assert result["receipt"] == "", result
+            # The running bash row is REPORTED, not zeroed: nothing was stopped,
+            # so the count describes what is still there — and the UI shows
+            # nothing for an idle answer either way, which is why this has to be
+            # asserted here rather than watched on screen.
+            assert (result["children_running"], result["background_jobs"]) == (0, 1), result
+            assert owner.ops == [], "the owner was dialled for a session with nothing to stop"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_card_with_no_live_turn_is_still_interrupted(tmp_path, monkeypatch):
+    """The ORPHAN case, from the route's side: a card IS work.
+
+    This is the state the predicate must not fold into ``idle``. A question that
+    outlived its turn sits on screen with nothing streaming, and the press that
+    clears it really did something — ``abort`` denies it (``_deny_pending_gates``
+    runs before the turn is cut). Answering ``idle`` here would leave the user
+    staring at a card they had just pressed stop on, which is the defect this
+    release also fixes.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+    from local_operator.session.frontend_state import PendingGateState
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="no turn was running; refused 1 waiting prompt")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            _publish_roster(
+                bridge,
+                streaming=False,
+                pending_gate=PendingGateState(
+                    request_id="abcdef", kind="approval", title="Run bash?"
+                ),
+            )
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "no turn was running; refused 1 waiting prompt"
+            assert owner.ops == ["abort"], "the orphan card was left for the user to dismiss"
     await pool.close()
 
 
@@ -1296,6 +1423,9 @@ async def test_an_unreachable_owner_is_a_503_and_not_a_leak(tmp_path, monkeypatc
             )
             bridge.remote._client = owner  # type: ignore[assignment]
             bridge.remote._ready_for_events = True
+            # There must be work for the route to reach the owner at all: a
+            # press with nothing to stop is answered ``idle`` without dialling.
+            _publish_roster(bridge, streaming=True)
             rid = str(uuid.uuid4())
             response = await client.post(
                 f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": rid}

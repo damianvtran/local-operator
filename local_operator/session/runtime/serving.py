@@ -1560,13 +1560,21 @@ class ServingSessionHandle(SessionHandle):
         if callable(note):
             note()
 
-    def _deny_pending_gates(self) -> None:
+    def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
 
         The clean-exit ordering mirror of OperatorApp.on_unmount (deny gates
         BEFORE dispose): dispose awaits teardown, and a turn parked on an
         unanswered card would never reach it. Resolving False/None here is
-        the same answer a timeout would eventually deliver, minus the wait."""
+        the same answer a timeout would eventually deliver, minus the wait.
+
+        Returns how many cards it settled, because that is a fact the abort
+        receipt has to be able to report: a stop whose ONLY effect was clearing
+        a card that outlived its turn would otherwise look like a stop that did
+        nothing, and the honesty rule this receipt lives under cuts both ways.
+        Callers that ignore the count (``request_stop``) are unaffected.
+        """
+        denied = 0
         for request_id, future in list(self._pending_futures.items()):
             if not future.done():
                 # None answers an ask ("user escaped"); False would be wrong
@@ -1575,7 +1583,9 @@ class ServingSessionHandle(SessionHandle):
                 # the deny answer their timeout would deliver.
                 value = None if request_id in self._pending_question_ids else False
                 self._loop.call_soon_threadsafe(_resolve_gate_future, future, value)
+                denied += 1
         self._pending_futures.clear()
+        return denied
 
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
@@ -2270,7 +2280,7 @@ class ServingSessionHandle(SessionHandle):
         # Sampled BEFORE the turn is cut, because that is the only moment the
         # question has an answer.
         turn_live = self._turn_is_live()
-        self._deny_pending_gates()
+        denied = self._deny_pending_gates()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
@@ -2282,7 +2292,10 @@ class ServingSessionHandle(SessionHandle):
         self._cancel_children("stopped from mobile")
         remaining = await self._settled_children(before)
         return self._abort_receipt(
-            stopped=max(before - remaining, 0), still_running=remaining, turn_live=turn_live
+            stopped=max(before - remaining, 0),
+            still_running=remaining,
+            turn_live=turn_live,
+            denied=denied,
         )
 
     def _cancel_children(self, reason: str) -> int:
@@ -2368,7 +2381,9 @@ class ServingSessionHandle(SessionHandle):
             return True
         return self._goal_loop is not None and self._goal_loop.running
 
-    def _abort_receipt(self, *, stopped: int, still_running: int, turn_live: bool) -> str:
+    def _abort_receipt(
+        self, *, stopped: int, still_running: int, turn_live: bool, denied: int = 0
+    ) -> str:
         """What the abort actually did, including what it deliberately left.
 
         Survivors are named only when there ARE any: unconditional, it is noise
@@ -2380,8 +2395,17 @@ class ServingSessionHandle(SessionHandle):
         sentence a user reads when their stop landed on a screen showing only an
         orphaned card. The children and job clauses are reported identically
         either way, because those facts do not depend on it.
+
+        ``denied`` names the cards this press settled. It is the ORPHAN case's
+        only evidence: with no turn live, refusing a question that outlived its
+        turn is the whole of what the abort did, and a receipt that stayed
+        silent about it would report a stop that found nothing when it in fact
+        cleared the screen. Reported on the same rule as the survivors — a
+        number that is there when it is non-zero, absent when it is not.
         """
         parts = ["stopping this turn" if turn_live else "no turn was running"]
+        if denied:
+            parts.append(f"refused {denied} waiting prompt{'s' if denied != 1 else ''}")
         if stopped:
             parts.append(f"stopped {stopped} subagent{'s' if stopped != 1 else ''}")
         if still_running:
