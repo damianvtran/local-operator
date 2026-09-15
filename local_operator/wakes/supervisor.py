@@ -679,7 +679,7 @@ async def _engage_one(
                 # operator picks deliberately. Which rung reaches which shape is
                 # the ladder's own rule (``control._identity_by_record`` re-reads
                 # a record only while its beat is inside ``HEARTBEAT_TIMEOUT_S``,
-                # so --force can turn no refusal into a stop here) — see
+                # so --force cannot convert a refusal into a stop here) — see
                 # ``info.render.not_answering_clause``.
                 logger.warning(
                     "wedged: skipping %s — a runtime exists (pid %d) and has not "

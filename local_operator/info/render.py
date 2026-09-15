@@ -220,8 +220,8 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
     readable from the ladder itself: ``control._identity_by_record`` re-reads
     the record's own fields only while the beat is INSIDE
     ``HEARTBEAT_TIMEOUT_S``, so on a record :func:`registry.classify` has
-    already called ``wedged`` the forced rung can turn no refusal into a stop —
-    the rung that acts here is the plain one, whose start-time proof
+    already called ``wedged`` the forced rung cannot convert a refusal into a
+    stop — the rung that acts here is the plain one, whose start-time proof
     ``_identity_by_start_time`` admits precisely BECAUSE the beat has lapsed.
     Naming only the forced stop handed the reader a heavier command that cannot
     do more on this state, and it said nothing about what running it costs.

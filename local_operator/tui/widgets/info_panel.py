@@ -774,8 +774,14 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # LIVE pids only, so the figure here would be a measurement that was
         # never taken for this pid, and ``busy`` is the record's PRE-silence
         # flag — a row whose whole purpose is to remove unqualified progress
-        # must not end by asserting activity. The run therefore ends on
-        # ``not answering · last heartbeat Nm ago``.
+        # must not end by asserting activity. At FULL width it nonetheless ends
+        # on the unlabelled uptime appended above (``… last heartbeat 4m ago ·
+        # 2s``), because uptime is appended after the heartbeat clause while the
+        # two sheds below only drop the facts under it; the meta ladder shortens
+        # from the right, so it is the uptime a narrower frame drops first and
+        # the heartbeat clause that those frames then end on. The export closes
+        # the same two facts the other way round, on the age — a recorded
+        # follow-up (design round 3, D8), not a claim this comment settles.
         if sessions.usage_available and line.state != "wedged":
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
@@ -876,7 +882,8 @@ def _fleet_caveats(body: _Body, sessions: SessionsInfo | None) -> None:
         )
     if sessions.wedged:
         # The shared sentence, NOT a second copy: it names the measured age, the
-        # pid and the remedy (``--force``), and the export prints the same text.
+        # pid and the remedy (``lop stop --pid N``, with ``--force`` priced for
+        # the still-beating shape), and the export prints the same text.
         # It replaced a sentence that said only that these counts are stale, and
         # a remedy elsewhere that promised a graceful stop which the ladder may
         # never admit.

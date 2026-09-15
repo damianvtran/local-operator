@@ -4495,8 +4495,8 @@ def wake_command(args: argparse.Namespace) -> int:
         # line describes — is exactly what `_identity_by_start_time` admits, so
         # `lop stop --pid N` is the rung that acts on this state; `--force`
         # re-reads the record only while the beat is still inside
-        # `HEARTBEAT_TIMEOUT_S` (`control._identity_by_record`), so here it can
-        # turn no refusal into a stop. It stays named for the shape it IS for —
+        # `HEARTBEAT_TIMEOUT_S` (`control._identity_by_record`), so here it cannot
+        # convert a refusal into a stop. It stays named for the shape it IS for —
         # an owner that is still beating but silent — with what running it
         # does. "It will not recover on its own" stays gone with it: a stale
         # beat is evidence the owner stopped reporting, not a forecast about a
