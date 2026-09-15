@@ -136,12 +136,23 @@ async def _boot(pilot: Any, app: OperatorApp, messages: MessageWaiter) -> Editor
 async def _settle(pilot: Any, editor: Editor, messages: MessageWaiter) -> None:
     """Observe the deferred Escape, not six guesses at an idle frame.
 
-    The first queue barrier delivers the raw driver events, which can arm an
-    Escape callback. Its observable retirement is a separate condition: queue
-    emptiness alone is not evidence that deferred work ran. The second barrier
-    delivers the resulting StopRequested/picker messages before observing them.
-    These assertions inspect editor state, not settled animation geometry; zero
-    delay keeps the real queue barriers without CPU-idle detection per frame.
+    The two queue barriers are what carry the observation: the first delivers
+    the raw driver events, the second delivers the resulting
+    StopRequested/picker messages before ``_observe`` reads them. They inspect
+    editor state rather than settled animation geometry, and the zero delay
+    keeps the real queue barriers without CPU-idle detection per frame.
+
+    The ``_pending_escape is None`` wait between them is a GUARD, not the
+    barrier these cells are observed through. Measured, the deferral arms AND
+    retires inside the first barrier, so the predicate is already true at its
+    first test on every escape-bearing cell (574/574 in the QA round's
+    instrumentation, 32/32 in the review round's F8 cells) and the wait never
+    blocks there -- the stop reaches observation through the two barriers
+    regardless. It is kept because a future change that made the deferral
+    asynchronous would otherwise pass silently; its live case is exercised
+    deliberately by
+    ``test_settle_waits_for_deferred_escape_before_observing_its_stop``, which
+    holds the callback open. Do not read this wait as load-bearing here.
     """
     await pilot.pause(0)
     await messages.wait_for(
@@ -479,7 +490,14 @@ async def test_settle_waits_for_deferred_escape_before_observing_its_stop(
         original_wait = messages.wait_for
 
         async def observed(predicate: Any, *, description: str, timeout: float = 30.0) -> None:
-            if description == "deferred Escape retired" and not predicate():
+            # Identify the guard by BEHAVIOUR, not by its description prose: a
+            # rename inside ``_settle`` must not degrade this pin into a failure
+            # carrying a misleading message. ``_settle`` makes exactly one wait
+            # while the deferred flush is parked, so a wait whose predicate is
+            # False at entry IS that guard -- and the queue-barrier-only
+            # regression reaches no wait at all, which is what the assertion at
+            # ``waiting.is_set()`` is there to catch.
+            if not predicate():
                 waiting.set()
             await original_wait(predicate, description=description, timeout=timeout)
 

@@ -317,6 +317,15 @@ async def test_message_waiter_cancellation_does_not_steal_another_consumers_edge
     entered = asyncio.Event()
     ready = False
 
+    # ``_pending`` is read directly, deliberately: the property pinned here is
+    # that cancellation removes the CANCELLED consumer's registration, and a
+    # leaked registration has no observable consequence to assert on -- the
+    # hook setting an event nobody awaits is inert, and ``MessageWaiter``
+    # exposes no public registry to assert against. Inventing a public accessor
+    # would rename the private read rather than replace it. The behavioural half
+    # of the claim (the surviving consumer still receives its wake) is the final
+    # ``await second``, which expires its own guard with
+    # ``never became ready: surviving consumer`` if cancellation stole the edge.
     def predicate() -> bool:
         entered.set()
         return ready
