@@ -5781,13 +5781,18 @@ def _suggestion_detail(row: ModelRow) -> str:
     several rows named `claude-opus-5` is this" and "roughly what does it cost",
     which is the same pair `/model`'s own rows carry. Reuses
     `model_picker.format_price_pair` so a price reads identically on both
-    surfaces; the provider leads because two rows can share a model id across a
-    direct provider and an aggregator, and the provider is what tells them
-    apart.
+    surfaces — INCLUDING the time-of-use window: a tariffed row's numbers here
+    are the rates in force, and its tag names the window, for the same reason the
+    picker's are (one renderer, so the two cannot disagree about what a model
+    costs right now). The provider leads because two rows can share a model id
+    across a direct provider and an aggregator, and the provider is what tells
+    them apart.
     """
     from local_operator.tui.widgets.model_picker import format_price_pair
 
-    price = format_price_pair(row.input_price, row.output_price, routed=row.routed)
+    price = format_price_pair(
+        row.input_price, row.output_price, routed=row.routed, tariff=row.time_of_use
+    )
     parts = [row.provider]
     if price:
         parts.append(price)

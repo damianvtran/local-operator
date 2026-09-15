@@ -1100,3 +1100,129 @@ def test_a_clipped_owner_catalogue_says_so_in_the_footer() -> None:
     assert app._owner_catalogue_clipped_note() == ""
     app._session = cast(Any, type("S", (), {"frontend_state": None})())
     assert app._owner_catalogue_clipped_note() == ""
+
+
+def _tou_moment(hour: int) -> Any:
+    from datetime import datetime, timezone
+
+    return datetime(2026, 9, 14, hour, 0, tzinfo=timezone.utc)  # a Monday
+
+
+def _tariffed_row() -> ModelRow:
+    return ModelRow(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        label="DeepSeek Flash",
+        context_window=1_000_000,
+        input_price=0.30,
+        output_price=1.20,
+        aggregated=True,
+        time_of_use="deepseek-tou",
+    )
+
+
+def test_a_tariffed_row_shows_the_rate_in_force_with_the_window_named() -> None:
+    """The stored prices are DeepSeek's PEAK rates, so the pair that means
+    anything to the user is the pair IN FORCE — and the window has to be legible,
+    because a number that halves every few hours without saying why is worse than
+    no number at all.
+    """
+    # 12:00 UTC Monday is off-peak; 07:00 UTC is inside the 06:00-10:00 window.
+    assert format_price_pair(0.30, 1.20, tariff="deepseek-tou", moment=_tou_moment(12)) == (
+        "$0.15/0.6 off-peak"
+    )
+    assert format_price_pair(0.30, 1.20, tariff="deepseek-tou", moment=_tou_moment(7)) == (
+        "$0.3/1.2 peak"
+    )
+    # The scaling is applied to the NUMBERS: the tag is a suffix, and a row with
+    # no schedule renders byte for byte what it rendered before tariffs existed.
+    assert format_price_pair(0.30, 1.20) == "$0.3/1.2"
+    assert format_price_pair(0.30, 1.20, tariff=None, moment=_tou_moment(12)) == "$0.3/1.2"
+    # A name this build does not ship scales by 1.0 and prints no tag: the tariff
+    # module's "never invent a discount" rule, visible at the renderer.
+    assert format_price_pair(0.30, 1.20, tariff="future-schedule", moment=_tou_moment(12)) == (
+        "$0.3/1.2"
+    )
+
+
+def test_a_tariff_cannot_change_the_other_three_price_states() -> None:
+    """`routed`, stated-zero and unknown keep their own meanings.
+
+    `usage-based` is a statement about the ENDPOINT and cannot be outvoted by a
+    schedule; `free` is a quoted zero; and an unknown price stays blank rather
+    than becoming `0.5 × unknown` — the one arithmetic answer that would be a
+    confident lie.
+    """
+    off_peak = _tou_moment(12)
+    assert format_price_pair(-1.0, -1.0, routed=True, tariff="deepseek-tou", moment=off_peak) == (
+        "usage-based"
+    )
+    assert format_price_pair(0.0, 0.0, routed=True, tariff="deepseek-tou", moment=off_peak) == (
+        "usage-based"
+    )
+    assert format_price_pair(0.0, 0.0, tariff="deepseek-tou", moment=off_peak) == "free"
+    assert format_price_pair(-1.0, -1.0, tariff="deepseek-tou", moment=off_peak) == ""
+    assert format_price_pair(0.0, -1.0, tariff="deepseek-tou", moment=off_peak) == ""
+
+
+def test_the_window_tag_is_dropped_with_the_numbers_run_it_belongs_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tag must not be able to push a row over its width budget.
+
+    It is part of the NUMBERS RUN, which the row drops as one unit below
+    ``_NUMBERS_MIN_WIDTH`` — so the narrow case loses the numbers and their label
+    together, never the label alone (a scaled number with no explanation, or an
+    unexplained number a user reads as the peak rate, are both worse). The cells
+    it costs at the widths where it IS painted are pinned here rather than
+    asserted, because this column has a documented history of width regressions.
+    """
+    from local_operator.model import tariff
+
+    monkeypatch.setattr(tariff, "now_utc", lambda: _tou_moment(12))
+    row = _tariffed_row()
+    picker = ModelPicker(lambda chosen: None)
+    picker.set_rows([row], current="deepseek/deepseek-flash", status="")
+
+    assert picker._numbers(row) == "1m  $0.15/0.6 off-peak"
+    assert cell_len(" off-peak") == 9
+    for width in (56, 58, 60, 73, 100):
+        painted = picker._row(0, width).plain
+        assert cell_len(painted) == width, (width, painted)
+        assert "off-peak" in painted, (width, painted)
+        assert "$0.15/0.6" in painted, (width, painted)
+    # Below the numbers-run threshold the whole run goes, tag included.
+    for width in (52, 55):
+        painted = picker._row(0, width).plain
+        assert cell_len(painted) == width, (width, painted)
+        assert "off-peak" not in painted, (width, painted)
+        assert "$0.15" not in painted, (width, painted)
+
+
+def test_the_pickers_price_column_reads_the_rows_own_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The picker paints the row's schedule, at the machine's own clock.
+
+    Asserted through ``_price`` (what the row assembles) rather than through
+    ``format_price_pair`` alone: the pair has to REACH the widget from a
+    ``ModelRow``, which is the hop a renderer-only test would miss.
+    """
+    from local_operator.model import tariff
+
+    row = _tariffed_row()
+    picker = ModelPicker(lambda chosen: None)
+    monkeypatch.setattr(tariff, "now_utc", lambda: _tou_moment(12))
+    assert picker._price(row) == "$0.15/0.6 off-peak"
+    monkeypatch.setattr(tariff, "now_utc", lambda: _tou_moment(7))
+    assert picker._price(row) == "$0.3/1.2 peak"
+    # A row with no schedule is untouched, whatever the clock says.
+    flat = ModelRow(
+        provider="deepseek",
+        model_id="deepseek-chat",
+        label="Deepseek Chat",
+        context_window=64_000,
+        input_price=0.27,
+        output_price=1.10,
+    )
+    assert picker._price(flat) == "$0.27/1.1"

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime
 from typing import Callable
 
 from rich.cells import cell_len
@@ -46,6 +47,7 @@ from local_operator.model.ranking import (
     _version_key,
     rank_rows,
 )
+from local_operator.model.tariff import scale_at, window_label
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -206,7 +208,14 @@ def format_window(tokens: int) -> str:
 ROUTED_PRICE_LABEL = "usage-based"
 
 
-def format_price_pair(input_price: float, output_price: float, *, routed: bool = False) -> str:
+def format_price_pair(
+    input_price: float,
+    output_price: float,
+    *,
+    routed: bool = False,
+    tariff: str | None = None,
+    moment: datetime | None = None,
+) -> str:
     """``$3/15`` per million, ``free``, ``usage-based`` for a router, else ``""``.
 
     FOUR states, and the split matters. A provider that quotes no pricing is NOT
@@ -235,6 +244,27 @@ def format_price_pair(input_price: float, output_price: float, *, routed: bool =
     prints it. It is checked FIRST because it is a statement about the endpoint
     rather than about a number, so it cannot be outvoted by a zero a stale
     listing happens to quote.
+
+    ``tariff`` names the time-of-use schedule the two prices are quoted at
+    (:func:`local_operator.model.tariff.window_label`), and it changes WHAT the
+    two numbers mean: the stored prices are the schedule's PEAK rates, so the
+    numbers rendered are the rates IN FORCE at ``moment`` — a DeepSeek row read
+    during an off-peak hour shows the half it actually costs, where printing the
+    stored peak figure would overstate it by 2x for ~79% of the week. The
+    window's name travels with them because a price that halves every few hours
+    without saying why is worse than no label at all. The tag is part of the
+    NUMBERS RUN, which the row drops as one unit when the width cannot hold it
+    (``_NUMBERS_MIN_WIDTH``) — so a narrow frame loses the numbers and their
+    label together rather than the label being silently stripped from a number
+    the user would then misread as the current rate.
+
+    The scaling is applied to the NUMBERS, never to the formatted string. A
+    stated zero (``free``) and an unknown price (the ``-1.0`` sentinel) are both
+    returned BEFORE any of this and stay unscaled and untagged: `0.5 × unknown`
+    is not a price, and a row whose prices nobody quoted must not carry a tag
+    implying we priced something. So does a name this build does not ship — an
+    unknown schedule scales by 1.0 and prints no label, per the tariff module's
+    "never invent a discount" rule.
     """
     if routed:
         return ROUTED_PRICE_LABEL
@@ -242,7 +272,13 @@ def format_price_pair(input_price: float, output_price: float, *, routed: bool =
         return ""
     if input_price == 0 and output_price == 0:
         return "free"
-    return f"${_trim_price(input_price)}/{_trim_price(output_price)}"
+    label = window_label(tariff, moment)
+    if label is not None:
+        scale = scale_at(tariff, moment)
+        input_price *= scale
+        output_price *= scale
+    pair = f"${_trim_price(input_price)}/{_trim_price(output_price)}"
+    return f"{pair} {label}" if label is not None else pair
 
 
 def _is_parenthesised_tail(name: str) -> bool:
@@ -745,7 +781,16 @@ class ModelPicker(Static):
         return "" if compact else format_window(row.context_window)
 
     def _price(self, row: ModelRow) -> str:
-        return format_price_pair(row.input_price, row.output_price, routed=row.routed)
+        # ``tariff=row.time_of_use`` is what makes the column show the rate in
+        # FORCE; ``moment`` is left to the schedule's own clock (the frame is
+        # painted at open, so "now" is the honest instant — the picker does not
+        # repaint on a timer, which is fine for a row a user reads for seconds).
+        return format_price_pair(
+            row.input_price,
+            row.output_price,
+            routed=row.routed,
+            tariff=row.time_of_use,
+        )
 
     def _footer_rows(self, width: int) -> list[Text]:
         """Count/status rows with the persistent-default instruction protected.

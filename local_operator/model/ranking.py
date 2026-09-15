@@ -93,6 +93,12 @@ class ModelRow:
     #: from the id in this layer would be the second, divergent statement of the
     #: rule that :func:`format_price_pair`'s docstring exists to warn against.
     routed: bool = False
+    #: The time-of-use schedule NAME this row's prices are quoted at, or ``None``
+    #: when they do not vary by time of day (``CatalogueEntry.time_of_use``).
+    #: Keyword-only for ``listing_name``'s reason: rows are built POSITIONALLY all
+    #: over the TUI's tests, and a new field in the middle of that sequence would
+    #: silently re-bind their arguments.
+    time_of_use: str | None = dataclasses.field(default=None, kw_only=True)
 
     @property
     def selector(self) -> str:
