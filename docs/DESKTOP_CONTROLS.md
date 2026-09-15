@@ -96,6 +96,32 @@ All paths start `/v1/desktop/sessions/{id}` unless noted.
   never enter the command receipt database or transcript; only key names are
   journalled by the existing runtime. `/credential <anything>` is rejected rather
   than accidentally recording a secret. Names-only listing does not expose values.
+- `POST /mcp/credentials`: the MCP-only encrypted write, `{name, values:
+  Record<secretId, SecretStr>, confirmed_replace: string[]}`. It is deliberately a
+  SEPARATE route from `POST /credentials` above, which is the provider/session
+  credential surface: this one stores into the encrypted secret store and never
+  touches `credentials.env`, never enters the `/credential` variable store, and
+  therefore never joins the environment of every unrelated `bash` child. Every
+  submitted ID is validated against the named server's own declared `${NAME}`
+  references BEFORE any write, so an unknown server, a config FIELD name
+  (`Authorization`), an undeclared ID, an extra field, an empty value or a
+  missing replacement confirmation returns a coded refusal
+  (`{name, saved_ids, failed_ids, code}`) with the stores unchanged — the
+  `confirmed_replace` gate, the declared-ID check and the per-key validation all
+  run before the first `store.set`. Replacement is confirmation-gated because the
+  same secret can be shared by several bindings and sessions, so overwriting one
+  is a decision the caller has to state. An oversized body never reaches the
+  handler:
+  the request model rejects it and the app answers **422** with
+  `{"detail": "The request has invalid fields."}` (never the rejected input,
+  which is why the app owns that response). One write CAN still land alone: a
+  store failure part-way through a multi-key body returns `code:
+  store_unavailable` with the ids written so far in `saved_ids`, so the caller
+  sees exactly which keys landed rather than a whole-body rollback. The response
+  carries `{name, saved_ids, failed_ids, code}` and never echoes a value. The
+  owner's RPC is a dedicated `mcp_credentials` op, never a `mcp.control` argument
+  — values must not reach the slash argument, the command journal, or a request
+  receipt.
 - `POST /fork`: stable request_id, optional message, boundary=`next_safe`.
   The runtime refuses compaction and uses `Session.request_fork` during a turn;
   otherwise it uses `fork_session`. This is the canonical complete-history fork
@@ -194,9 +220,25 @@ transport does **not** prove Google Workspace account authorization.
 POST the same path accepts the closed `MCPControl` schema:
 
 - `add`: name, scope global/project, either command+args[] or url; optional env,
-  headers and oauth boolean. Env/header values must be `${NAME}` references.
-  URLs reject inline credentials, query and fragment. Command arguments remain an
-  array; no shell evaluation or whitespace splitting. Store secrets separately.
+  headers and oauth boolean. Env/header values must be `${NAME}` references,
+  resolved at connect time from the encrypted secret store; a legacy
+  `credentials.env` value is used ONLY when the reference is definitively absent
+  from that store (never on a denied, locked, corrupt or empty entry). A reference
+  that cannot be resolved fails the connect naming the key; it never
+  reaches the server as text. A doubled `$` (`$${HOME}`) escapes one to literal
+  text. URLs reject inline credentials, query and fragment.
+  Command arguments remain an array; no shell evaluation or whitespace splitting.
+  Store secrets separately, through `POST /mcp/credentials`.
+
+  Each server row also publishes `secret_refs: [{id, bindings: [{field, key}]}]`
+  — the reference IDs its PRISTINE config declares and the destinations they are
+  bound into, deduped by ID. This is metadata only: no template text, no literal
+  fragment and no value. `environment_keys`/`header_keys` remain as INFORMATIONAL
+  map keys and are never secret IDs — writing their values as credentials is the
+  bug this metadata exists to prevent. `probe` additionally answers
+  `secret_refs`, `credential_state: [{id, source: encrypted|legacy|missing|
+  unavailable}]` and `key_submission_supported`; a server declaring no reference
+  gets an honest setup sentence rather than a guessed field binding.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver
   refuses removal of foreign imported definitions and does not shadow them.
 - `reload`, `connect`, `disconnect` use the session's existing manager. Disconnect

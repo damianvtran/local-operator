@@ -29,6 +29,118 @@ opening that repo under a credentialed profile.** Treat an unexpected MCP
 server in a project config the same way you would an unexpected shell command
 in a build script.
 
+## Secrets in `env` and `headers`
+
+A server config is a file: committed, shared, and imported from other tools'
+configs. It therefore carries secret **references**, never secrets. A value in a
+stdio server's `env` or a remote server's `headers` is resolved at the top of
+the connect, **before anything is spawned or sent** — an OAuth server's
+proactive token refresh runs after that point, so a server whose reference
+cannot resolve never spends one:
+
+```json
+{
+  "mcpServers": {
+    "crm": {
+      "type": "http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${CRM_API_KEY}"}
+    },
+    "local": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "some-mcp-server"],
+      "env": {"SOME_API_KEY": "${SOME_API_KEY}"}
+    }
+  }
+}
+```
+
+**The store is the ENCRYPTED secret store** (`<config dir>/secrets/store.db`, the
+one `lop secret` and the MCP key popout write), read **first** and only for the
+IDs a config actually declares. A legacy `<config dir>/credentials.env` — the
+file the desktop Settings > API credentials screen and
+`local-operator credential update NAME` write — is read as a **read-only
+fallback, and only when the ID is definitively ABSENT from the encrypted store**.
+It is never consulted when the encrypted store refused, is locked, is corrupt,
+or holds an empty entry for that ID: those are not absence, and falling back to a
+plaintext copy of the very value the encrypted store would not hand over is the
+one direction this must never take. The legacy file is never written or migrated
+by this path, and unrelated provider credentials are untouched.
+
+It is deliberately **not** the process environment, in either tier: a
+project-scoped `.mcp.json` cannot use a reference to copy an unrelated variable
+out of the running app's environment. Nothing is cached, so a credential added
+while a session is running is picked up by the next connect (`/mcp reload`, or
+the server's reconnect).
+
+Writing one: the MCP key popout sends `POST /v1/desktop/sessions/{id}/mcp/credentials`,
+which validates every ID against the server's own declared references and stores
+in the encrypted store only. `Settings > API credentials` writes the *provider*
+store and is not this path — an MCP key entered there is a different store's
+credential and will not resolve.
+
+**The reference rule.** `NAME` is `[A-Za-z_][A-Za-z0-9_]*`.
+
+| value | result |
+|---|---|
+| no `${` at all (`plain-value`, `$NAME`) | passed through untouched; the store is not read |
+| `${NAME}` as the whole value | the stored value (the only shape the desktop UI's add form accepts) |
+| `Bearer ${NAME}` | each reference substituted, surrounding text kept |
+| `$${NAME}` | the escape: the literal text `${NAME}`, never a reference (no lookup, no refusal) |
+| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
+| a well-formed reference to a name the store does not hold (`${HOME}`, `${PATH}`) | refused, naming the key — the child expands nothing, and the escape `$${HOME}` is how a config that means it literally carries it through |
+| a `${` whose inner text contains a name the store holds, whatever surrounds it (`${hubspot-token}`, `${NAME:-}`, `${NAME-SUB}`, `${NAME#x}`, `${!NAME}`, `${#NAME}`, `${env:NAME}`, `${ NAME }`) | refused: the key exists, so the fragment cannot be a literal, and passing it through would start the server with the reference as its credential |
+| a well-formed reference mixed with a fragment (`${TOKEN}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
+
+**A resolved value is scrubbed at every MCP sink, not just in the transcript.**
+The stdio child's stderr is scrubbed **before** it is split into lines (a value
+can straddle a read boundary, so the filter is stream-aware and line-bounded),
+the retained tail is scrubbed again at read time, the connect error is built
+from scrubbed text, and a logging filter on the root handlers covers records the
+MCP SDK and httpx emit themselves. That matters because an ordinary child that
+prints `invalid API token: <value>` to stderr reaches the MCP log file and the
+raised error **before** anything model-visible — the transcript filter was
+always too late for it (review BI-1). Registration is scrubbing-only: the value
+never enters the session credential map, so it is never injected into an
+unrelated child's environment.
+
+**An unresolvable reference is a refusal, never the literal.** A server whose
+reference names a key the store does not hold (or holds empty) fails to start
+with, verbatim:
+
+```
+MCP server 'crm' needs CRM_API_KEY from the encrypted secret store for headers Authorization — enter it through MCP sign-in, then reconnect (or double the $ to pass it through literally)
+```
+
+(`for <field> <entry>` names the `env` variable or header the reference sits in;
+the `env` form reads `for env SOME_API_KEY`.) The same refusal answers a
+well-formed reference the store does not hold, such as `${HOME}`: it names HOME,
+because a name the child would expand and a name the user meant are the same
+string here. No tool from that server is
+registered, the reference text is never passed to the process or the remote
+server, and values are never logged — the message names the key and the entry,
+not the secret. A config that means the reference **literally** — a project
+`.mcp.json` with `${HOME}`, a Claude Code import relying on the child's own
+variable expansion — carries it through with the escape, `$${HOME}`.
+
+**The escape is `$${`, and only there.** A `$$` that is not followed by `{` is
+ordinary text, so no existing value is rewritten. A `$${` always wins over every
+rule above: it is never looked up and never refused, which is what makes a
+literal expressible at all.
+
+**Three things are deliberately not resolved.** Server `args`: a secret in a
+command line is readable by any other process on the machine through `ps`, which
+is why the UI's add form refuses a literal in `env`/`headers` only. The OAuth
+block's `client_secret` (`auth.client_secret` / `oauth.client_secret`) is **not
+resolved** in this version either — a reference there reaches the token endpoint
+verbatim and the grant fails as an OAuth error (it does not leak the value, it
+simply does not work); it is recorded as deferred in the pull request that
+introduced this rule. And the credential **key** itself must be name-shaped for
+a reference to spell it: the store accepts any key, so `hubspot-token` can be
+stored through the Settings screen but cannot be referenced — rename it to
+`HUBSPOT_TOKEN`, or escape the literal.
+
 ## Runtime behavior
 
 - **Startup gate:** discovery races all connects against a 250 ms gate.

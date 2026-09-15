@@ -92,6 +92,7 @@ async def capabilities():
                 # rather than a boolean with a default.
                 "notification_contract": 1,
                 "mcp": 1,
+                "mcp_auth": 1,
                 "radient": 1,
                 # Session code memory: GET/POST/PATCH/DELETE on
                 # `/v1/desktop/sessions/{id}/variables`, reading and writing a
