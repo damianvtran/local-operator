@@ -37,15 +37,18 @@ class FakeRegistrant:
         self._attaches = attaches
         self.closed = False
         self._boot_build = boot
-        #: ``(reason, to, draining)`` — see the mirror in
-        #: ``test_process_build_bound``: the caller decides the third term.
+        #: ``(reason, to, draining, leaving)`` — see the mirror in
+        #: ``test_process_build_bound``: the caller decides the third term and
+        #: the fourth (the phrase the same call publishes for the fleet).
         self.retiring: list[tuple[str, str, bool]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
 
-    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
-        self.retiring.append((reason, to, draining))
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        self.retiring.append((reason, to, draining, leaving))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -227,7 +230,7 @@ async def test_stamp_flip_announces_then_exits(disk, monkeypatch) -> None:
     await _run_until(stop)
     assert stop.is_set()
     assert reg.retiring == [
-        ("stale-build", NEW.label(), False)
+        ("stale-build", NEW.label(), False, "")
     ], "the idle rung refuses nothing: the frame must not claim it does"
     assert handle.disposed and reg.closed
     await task
