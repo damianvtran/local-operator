@@ -80,7 +80,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
@@ -974,19 +974,24 @@ async def stop_session(
     force: bool = False,
     _root: Path | None = None,
     _command: str = "control.stop_session",
-    _sigterm_grace_s: float | None = None,
+    on_wait: Callable[[str], None] | None = None,
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
 
-    The escalation ladder in order: graceful socket op → a skip when the
+    The escalation ladder in order: a skip when the record says the runtime is
+    ALREADY LEAVING a signal it received → graceful socket op → a skip when the
     record says a turn is in flight → identity-confirmed SIGTERM →
     identity-confirmed SIGKILL, with a refuse when identity cannot be
     confirmed ahead of a signal. See the module docstring for the rules;
     this function is where they are enforced in order.
 
-    The skip sits BETWEEN the socket rung and the identity gate on purpose.
-    A cooperative runtime is stopped deliberately and promptly by the socket
-    op even mid-turn — a stop the user asked for IS a stop they want — and the
+    The first skip is the one exception to the order below, and it has to be
+    first: a draining runtime answers its socket, so every later rung would
+    reach it and stop it promptly — which is the harm. The bottom skip sits
+    BETWEEN the socket rung and the identity gate on purpose, and the
+    distinction it rests on still holds for a target that is merely busy: a
+    cooperative runtime is stopped deliberately and promptly by the socket op
+    even mid-turn — a stop the user asked for IS a stop they want — and that
     skip only applies once that rung has failed, i.e. to a target whose own
     socket will not answer.
 
@@ -994,19 +999,28 @@ async def stop_session(
     answer — the explicit opt-in for a heartbeating-but-starved process the
     refusal rule would otherwise hold forever (see ``_identity_by_record``) —
     and, for the same reason, it is what signals a target that reports a turn
-    in flight instead of skipping it.
+    in flight, or one that is already leaving, instead of skipping it.
 
     ``_root`` is the config root (tests inject one); production callers use
     the ambient ``config_dir()``.
 
-    ``_sigterm_grace_s`` is rung 2's wait and exists ONLY for tests: several
-    unit cells keep a target alive on purpose to force the escalation, and the
-    production grace (``SIGNAL_DRAIN_S`` plus a margin — see the constant) is
-    minutes long by construction, which turned two of them into 153-second
-    tests the moment the receiver learned to drain. Production callers must not
-    pass it: the real value is the one the invariant protects, and a knob here
-    would let a caller shorten the wait until SIGKILL lands mid-drain, which is
-    the failure that constant exists to prevent.
+    ``on_wait`` is told, once, before rung 2's wait — the only silence in this
+    ladder long enough to be mistaken for a hang (``SIGTERM_GRACE_S``, ~150 s
+    for a wedged target). A callback rather than a print because the module is
+    shared by the CLI and the TUI, which paint in different places, and
+    optional because a caller that already shows progress (the TUI's own
+    "waiting for it to answer" block) may not want a second line. Nothing about
+    the wait itself depends on it.
+
+    THERE IS NO GRACE KNOB HERE, deliberately (NIT, PR #1141). One used to
+    exist — ``_sigterm_grace_s`` — for the unit cells that keep a target alive
+    to force the escalation, because the production grace is minutes long by
+    construction and turned two of them into 153-second tests. It was removed
+    for the reason its own docstring gave: it guarded the one constant whose
+    whole purpose is that it cannot be shortened, so a production caller passing
+    it could have landed SIGKILL inside the receiver's drain. The cells now
+    monkeypatch ``SIGTERM_GRACE_S`` itself, as the drain cells already do for
+    ``SIGNAL_DRAIN_S``.
 
     ``_command`` is the front end the stop came from, carried verbatim into
     every rung's stop marker so the artifact can name its author — the tokens
@@ -1020,6 +1034,48 @@ async def stop_session(
     """
     root = _root if _root is not None else config_dir()
     name = record.conversation_name or record.session_id
+
+    # FIRST, AND AHEAD OF RUNG 1 DELIBERATELY: a runtime that has ALREADY been
+    # signalled and is finishing the turn in flight is the one target whose own
+    # graceful stop is destructive.
+    #
+    # WHY THIS ISN'T SATISFIED BY THE BUSY SKIP BELOW. Everything else in this
+    # ladder exists to protect work from signals; the socket rung protects it by
+    # being the user's own deliberate stop, which is prompt BY CONSTRUCTION and
+    # stays that way (rung 1 is unchanged, and the skip below still sits after
+    # it). But a target inside the drain is finishing work a signal asked it to
+    # finish: there, "deliberate and prompt" is exactly what cuts the turn the
+    # drain was saving, and the old ordering could not say so — the busy skip is
+    # unreachable for a cooperative runtime by design. So the one state that has
+    # to be published is the one state that has to skip EARLY (U1/U2, PR #1141).
+    #
+    # WHAT THIS IS NOT: a deferral. Nothing here waits, retries or re-orders
+    # anything — the refusal is immediate and synchronous, the exit is already
+    # scheduled by the runtime itself, and ``--force`` still stops the target
+    # promptly and deliberately, classified `user-stop` as always. The operator
+    # pays one keystroke to convert a lost turn into a finished one, and nothing
+    # is made slower (a MAJOR if that were to change).
+    #
+    # LIVENESS-GATED, because the honest report for a target that has already
+    # gone is the ladder's own "already exited" — a clean resolution, exit 0 —
+    # and not a refusal about a drain that is over. A record can outlive its
+    # process by a moment; that case falls through and rung 1 reports it.
+    # Read defensively, like every probe on this path: the ladder's contract is
+    # that it never raises, and a record-shaped double handed in by a caller (or
+    # one written by a runtime that predates the field) may simply lack it.
+    leaving = getattr(record, "leaving", "") or ""
+    if leaving and not force and registry.pid_alive(record.pid):
+        return StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name=name,
+            method="draining",
+            line=(
+                f'skipped "{name}" (pid {record.pid}) — it was signalled and is leaving '
+                "at its next boundary; stopping it now cuts the turn it is finishing "
+                "(--force to stop it anyway)"
+            ),
+        )
 
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
     # an unreachable socket means already-gone-or-crashed, an error reply
@@ -1072,6 +1128,28 @@ async def stop_session(
     # reaches this branch — rung 1 above stopped it, deliberately and promptly —
     # so by construction this is the case where the socket did NOT answer the
     # request, and for a silent target the record is the only evidence available.
+    #
+    # IT IS ALSO A NARROWER PREDICATE THAN THE RECEIVER'S, and that is a chosen
+    # trade rather than an oversight (M1, PR #1141). The record publishes
+    # ``is_conversationally_active()`` — the spinner bit, whose own docstring
+    # names it the authority for the picker and explicitly NOT ``is_busy()`` —
+    # while the receiver drains on ``is_busy()``, which additionally counts live
+    # subagents, background jobs, MCP grant/reload tasks and retained background
+    # tasks. So a socket-silent runtime holding only, say, a detached ``bash``
+    # job publishes ``busy=False``, is signalled here, and the ladder then waits
+    # out the receiver's drain before rung 2 resolves: bounded extra LATENCY on
+    # the socket-silent tail, never a lost turn, because the receiver's drain is
+    # exactly the mechanism that makes a stale-false safe in either direction.
+    #
+    # Why not widen this to match: the field's primary reader is the picker and
+    # the sessions listing, where the narrow meaning is the load-bearing one
+    # ("this conversation is mid-turn") — widening ``SessionRecord.busy`` would
+    # put a spinner on every session holding a background job. A second,
+    # ladder-only bit on the record is the alternative, and it buys a shorter
+    # wait on a shape whose stop already works; it is not worth a field whose
+    # staleness could then refuse a stop the operator asked for. Stated here so
+    # the difference reads as intended.
+    #
     # It is derived state, stale by up to one heartbeat (15 s), and both
     # directions of that staleness are already covered: stale-true skips a
     # target that has since gone idle (reported, and one command away),
@@ -1167,10 +1245,26 @@ async def stop_session(
     # Rung 2 is a REQUEST, so its wait must outlast the receiver's own drain
     # (``SIGTERM_GRACE_S``). Rung 3's budget is deliberately not this one: see
     # ``SIGKILL_CONFIRM_S``.
+    #
+    # THE WAIT IS ANNOUNCED FIRST. This is the longest silence in the ladder by
+    # two orders of magnitude — a wedged, mid-turn target pays the whole derived
+    # grace (~150 s) before SIGKILL — and a front end that paints its receipts
+    # only at the end leaves the operator unable to tell a working command from a
+    # hung one for that entire time; the natural response to that is Ctrl-C,
+    # which leaves the outcome genuinely ambiguous (U5, PR #1141). The bound is
+    # named because it is the thing being waited on: without it the pause reads
+    # as a stall at whatever it happened to be printing. ``on_wait`` is a
+    # callback rather than a print because this module is shared by the CLI and
+    # the TUI, which paint in different places.
+    if on_wait is not None:
+        on_wait(
+            f'waiting up to {SIGTERM_GRACE_S:.0f}s for "{name}" (pid {record.pid}) '
+            "to drain before SIGKILL"
+        )
     if await _signal_and_confirm(
         record,
         signal.SIGTERM,
-        SIGTERM_GRACE_S if _sigterm_grace_s is None else _sigterm_grace_s,
+        SIGTERM_GRACE_S,
     ):
         wakes = await _park_wakes(record, root)
         _recover_record(record, root)
@@ -1247,6 +1341,7 @@ async def stop_all(
     force: bool = False,
     _root: Path | None = None,
     _command: str = "control.stop_all",
+    on_wait: Callable[[str], None] | None = None,
 ) -> list[StopOutcome]:
     """Stop every OTHER agent on this machine. Never raises.
 
@@ -1278,6 +1373,11 @@ async def stop_all(
     when one wedged runtime sits in front of twelve healthy ones. One at a
     time, healthiest first (scan order), so the common case is fast and the
     wedged tail is paid only by whoever actually needs the signals.
+
+    ``on_wait`` is forwarded to every target unchanged (see
+    :func:`stop_session`), because the sweep has the same silence problem the
+    single stop does — worse, since one wedged runtime sits in front of the
+    rest.
     """
     root = _root if _root is not None else config_dir()
     outcomes: list[StopOutcome] = []
@@ -1300,18 +1400,34 @@ async def stop_all(
             continue
         outcomes.append(
             await stop_session(
-                record, timeout_s=timeout_s, force=force, _root=root, _command=_command
+                record,
+                timeout_s=timeout_s,
+                force=force,
+                _root=root,
+                _command=_command,
+                on_wait=on_wait,
             )
         )
     return outcomes
 
 
 #: Outcomes that count as "the session is no longer running", i.e. the stop
-#: did its job. Everything else (``refused``, ``busy``) is the partial case —
-#: and both are partial for the same reason: the target is still running. Read
-#: by the front ends' exit codes and by :func:`summarize`, so `lop stop --all`
-#: reports the same partial-vs-clean verdict whichever rung declined.
+#: did its job. Everything else (``refused``, ``busy``, ``draining``) is the
+#: partial case — and all three are partial for the same reason: the target is
+#: still running. Read by the front ends' exit codes and by :func:`summarize`,
+#: so `lop stop --all` reports the same partial-vs-clean verdict whichever rung
+#: declined.
 ENDED_METHODS = frozenset({"socket", "sigterm", "sigkill", "gone"})
+
+#: Outcomes where the target is alive and was deliberately left alone, so a
+#: front end has to NAME it: the grouped count can say how many, never which
+#: one, and "which agent did not stop" is the only thing the user can act on.
+#: Two members because the reasons differ and the copy does — a turn in flight
+#: ends and the runtime stays; a drain is already ending it — and both mean the
+#: same thing to the caller's arithmetic (not stopped, not broken). The CLI
+#: needed no set for this: it paints every outcome's own line. The TUI does,
+#: which is what this exists for (M3, PR #1141).
+LEFT_ALONE_METHODS = frozenset({"busy", "draining"})
 
 
 def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) -> str:
@@ -1321,10 +1437,15 @@ def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) ->
     user was told would be stopped, then the rung grouping — the honest
     summary of an escalation is how many stopped cleanly, how many needed a
     signal, how many were already gone, how many were left alone because a
-    turn was in flight and how many were refused, not twelve identical lines.
+    turn was in flight (or because they were already leaving), and how many
+    were refused, not twelve identical lines.
     ``own`` is the caller's in-process outcome (the TUI's own session), folded
     into the total and the ``stopped`` count so the numbers add up on one line
     instead of across three.
+
+    EVERY METHOD THIS LADDER CAN RETURN IS LISTED, and that is a property worth
+    keeping: a group missing from ``order`` is a stopped target the total does
+    not account for (a ``3 sessions:`` line whose parts sum to 2).
     """
     everything = list(outcomes) + ([own] if own is not None else [])
     if not everything:
@@ -1335,6 +1456,7 @@ def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) ->
         ("sigkill", "killed"),
         ("gone", "already exited"),
         ("busy", "left alone (a turn is in flight)"),
+        ("draining", "left alone (it is already leaving)"),
         ("refused", "refused"),
     ]
     parts: list[str] = []
@@ -1371,9 +1493,12 @@ class RefreshOutcome:
 
     ``method`` is the resolution, and the front ends read it rather than the
     prose: ``moved`` (retiring now), ``busy`` (a turn is in flight; it moves
-    when that turn ends), ``current`` (already on the build on disk), ``kept``
-    (the runtime's own refusal, quoted in the line), ``unsupported`` (it
-    predates the op), ``unreachable`` (its control socket did not answer).
+    when that turn ends), ``draining`` (a signal already has it leaving at its
+    next boundary), ``current`` (already on the build on disk), ``unsettled``
+    (the install on disk changed too recently for any runtime to have judged
+    it), ``kept`` (the runtime's own refusal, quoted in the line),
+    ``unsupported`` (it predates the op), ``unreachable`` (its control socket
+    did not answer).
     """
 
     pid: int
@@ -1389,31 +1514,91 @@ class RefreshOutcome:
 #: the one shape that does (``unreachable``) is the partial case a front end
 #: reports as non-zero.
 #:
-#: ``busy`` and ``kept`` are settled rather than partial on purpose, and it is
-#: the whole point of the command: a busy runtime retires BY ITSELF when its turn
-#: ends (the reaper's ``_should_refresh`` branch asks ``may_refresh`` every
-#: ``BUILD_CHECK_S``), so "still busy" is a queued move, not a failure. This is
-#: why no drain bound is needed here — nothing is being killed, so a long turn
-#: can simply be waited out by the process that owns it.
-REFRESH_SETTLED_METHODS = frozenset({"moved", "busy", "current", "kept", "unsupported"})
+#: ``busy``, ``draining`` and ``kept`` are settled rather than partial on
+#: purpose, and it is the whole point of the command: a busy runtime retires BY
+#: ITSELF when its turn ends (the reaper's ``_should_refresh`` branch asks
+#: ``may_refresh`` every ``BUILD_CHECK_S``), so "still busy" is a queued move,
+#: not a failure. This is why no drain bound is needed here — nothing is being
+#: killed, so a long turn can simply be waited out by the process that owns it.
+#: ``draining`` is the same fact with the exit already scheduled (a signal got
+#: there first), which is why it does not need a second ask either.
+#:
+#: ``unsettled`` IS DELIBERATELY ABSENT, and that is the fix rather than an
+#: oversight (D1/M2, PR #1141). It means "the install on disk moved less than
+#: ``BUILD_SETTLE_S`` ago and no runtime has judged it yet" — an honest answer,
+#: but not one a script may read as "the fleet is on the new build". Including
+#: it here would restore exactly the bug: ``lop refresh``'s first run is
+#: ``lop-update``, so it lands INSIDE the settle window for every session on the
+#: machine, and a zero exit would report a rotation that has not started.
+REFRESH_SETTLED_METHODS = frozenset({"moved", "busy", "draining", "current", "kept", "unsupported"})
+
+
+def _build_label(record: SessionRecord) -> str:
+    """``version@ref[:7]`` — the record's own build, as the TUI already names it.
+
+    A VERSION ALONE CANNOT ANSWER THE QUESTION THESE RECEIPTS ARE READ FOR, and
+    the sibling module says why in one line: ``lop-update`` builds from ``main``
+    while ``pyproject.toml`` still names the last release, so two genuinely
+    different builds share one version string — the same-version rebuild is the
+    dominant handover on this host. Labelled by version only, ``running 0.55.0``
+    printed on the row of the runtime LEAVING the old build and on the row of the
+    one already on the new one, which is precisely the distinction the command
+    exists to draw (D2, PR #1141).
+
+    Mirrors ``update.BuildStamp.label()`` — the TUI's build-skew notice prints
+    the same form — but is built from a discovery record, a different object:
+    the record is what the runtime published about ITSELF, and where it carries
+    no ref (a runtime too old to publish one, a PyPI install) the version alone,
+    or the ref alone, is the honest answer rather than an invented pair.
+    """
+    version = record.version or ""
+    ref = record.source_ref or ""
+    if version and ref:
+        return f"{version}@{ref[:7]}"
+    return version or ref[:7] or "an unrecorded build"
 
 
 def _refresh_line(record: SessionRecord, running: str, method: str, detail: str) -> str:
     """The one human receipt line for one rotation, per resolution.
 
-    Every branch names the session, its pid and the build it is running, because
-    the question the caller actually has is "which of these is still on the old
-    build, and what is it doing instead". ``running`` is the record's own build
-    stamp — the runtime's reported build, not an assumption about the disk.
+    Every branch names the session, its pid and the build it is running
+    (``_build_label``), because the question the caller actually has is "which
+    of these is still on the old build, and what is it doing instead".
+    ``running`` is the record's own build stamp — the runtime's reported build,
+    not an assumption about the disk.
+
+    TWO BRANCHES EXIST ONLY TO STOP THIS COMMAND LYING, and both are answers a
+    runtime gives that the old code round-tripped into a stronger claim:
+    ``draining`` (a signal already has it leaving — not "busy, will move when
+    the turn ends") and ``unsettled`` (nobody has judged the install yet — not
+    "already current"). Both are named because an operator's next decision
+    differs: one waits or forces a stop, the other simply asks again.
     """
     name = record.conversation_name or record.session_id
     where = f'"{name}" (pid {record.pid}, running {running})'
     if method == "moved":
-        return f"{where} is retiring now for the build on disk"
+        # The runtime names the build it is leaving FOR (``retiring to <label>``,
+        # from its own committed decision — no second read of a marker that may
+        # have moved again since). An older runtime answers a bare ``retiring``,
+        # and the receipt then says exactly what it said before.
+        target = f" ({detail})" if detail else ""
+        return f"{where} is retiring now for the build on disk{target}"
     if method == "current":
         return f"{where} already runs the build on disk"
     if method == "busy":
         return f"{where} has a turn in flight — it moves when that turn ends"
+    if method == "draining":
+        # The bound is named because its EXISTENCE is the operator's problem, not
+        # its value: without it two minutes of waiting reads as a hang (U2).
+        return (
+            f"{where} was signalled and is finishing the turn in flight — "
+            f"it leaves at its next boundary (up to {SIGNAL_DRAIN_S / 60:.0f} min)"
+        )
+    if method == "unsettled":
+        return (
+            f"{where} has not judged the build on disk yet — the install changed a "
+            "moment ago and may still be settling; ask again in a few seconds"
+        )
     if method == "unsupported":
         return (
             f"{where} cannot be asked to move{detail} "
@@ -1446,7 +1631,7 @@ async def refresh_session(
     runtimes to move) pay for the rare one.
     """
     name = record.conversation_name or record.session_id
-    running = record.version or "an unrecorded build"
+    running = _build_label(record)
     # ``say`` is the build label the receipt quotes back: the record's stamp is
     # what the runtime published about ITSELF, which is the fact under question.
     reply = await _exchange(record, {"op": REFRESH_OP}, reply_timeout_s=timeout_s)
@@ -1463,10 +1648,23 @@ async def refresh_session(
     else:
         answer = str(reply.get("detail") or "")
         # The runtime's own vocabulary, parsed rather than re-derived: ``retiring``
-        # is the retirement it just committed to, and every other answer is one
-        # of its ``kept: <reason>`` refusals (see ``Server._retire_for``).
+        # is the retirement it just committed to (optionally followed by the build
+        # it is leaving FOR), and every other answer is one of its
+        # ``kept: <reason>`` refusals (see ``Server._retire_for``).
+        #
+        # THE NEW ``kept:`` ANSWERS ARE COMPARED AS WHOLE SENTENCES, and both sit
+        # ahead of the generic ``kept`` fallback because each is a state the
+        # caller must not read as its neighbour does: ``already leaving`` is not
+        # busy-with-a-queued-move (the exit is already scheduled), and "the
+        # install on disk has not settled yet" is not "matches" — collapsing
+        # those two into "already current" with a zero exit status IS the D1/M2
+        # defect. A runtime older than these answers never sends them.
         if answer.startswith("retiring"):
-            method, detail = "moved", ""
+            method, detail = "moved", answer.removeprefix("retiring").removeprefix(" to ").strip()
+        elif answer == "kept: already leaving":
+            method, detail = "draining", ""
+        elif answer == "kept: the install on disk has not settled yet":
+            method, detail = "unsettled", ""
         elif answer.startswith("kept: build on disk matches"):
             method, detail = "current", ""
         elif answer == "kept: busy":
@@ -1538,21 +1736,35 @@ def summarize_refresh(outcomes: list[RefreshOutcome]) -> str:
     will move by itself, then what needs nothing. A caller who sees
     ``1 unreachable`` knows exactly which session to look at; a caller who sees
     only counts of the settled ones knows the rotation is done.
+
+    EVERY LABEL CARRIES ITS OWN SINGULAR AND PLURAL FORM, because a count and
+    its noun have to agree — ``1 will move when their turn ends`` was the shipped
+    output, a singular count with a plural possessive, and the per-target line
+    above it ("it moves when that turn ends") was already singular and correct
+    (D3, PR #1141). Only the labels that actually inflect carry two: the rest
+    read the same at any count, and pairing them with themselves keeps ONE list
+    of every method this function knows about.
     """
     if not outcomes:
         return "no live sessions to refresh"
-    order: list[tuple[str, str]] = [
-        ("moved", "retiring now"),
-        ("busy", "will move when their turn ends"),
-        ("current", "already current"),
-        ("kept", "not moved (see above)"),
-        ("unsupported", "too old to ask"),
-        ("unreachable", "unreachable"),
+    # ``(method, singular, plural)``. Every method ``refresh_session`` can return
+    # appears here — a method missing from this list is a target the total counts
+    # and the parts do not (D1's original question: "is the rotation complete"
+    # has to be answerable from the summary alone).
+    order: list[tuple[str, str, str]] = [
+        ("moved", "retiring now", "retiring now"),
+        ("busy", "will move when its turn ends", "will move when their turn ends"),
+        ("draining", "already leaving", "already leaving"),
+        ("current", "already current", "already current"),
+        ("unsettled", "not settled yet — ask again", "not settled yet — ask again"),
+        ("kept", "not moved (see above)", "not moved (see above)"),
+        ("unsupported", "too old to ask", "too old to ask"),
+        ("unreachable", "unreachable", "unreachable"),
     ]
     parts: list[str] = []
-    for method, label in order:
+    for method, one, many in order:
         count = sum(1 for o in outcomes if o.method == method)
         if count:
-            parts.append(f"{count} {label}")
+            parts.append(f"{count} {one if count == 1 else many}")
     total = len(outcomes)
     return f"{total} session{'s' if total != 1 else ''}: " + ", ".join(parts)

@@ -262,6 +262,42 @@ def proves_a_move(boot: "BuildStamp", on_disk: "BuildStamp") -> bool:
     return on_disk.version != boot.version
 
 
+def _settle_elapsed() -> bool:
+    """Has the install marker on disk aged past the settle window?
+
+    The settle term of :func:`build_changed`, extracted because
+    :func:`pending_build` needs the SAME answer to the opposite question. Two
+    readings of one marker that could disagree (one asking "may I act yet", the
+    other "is the move merely young") is exactly the drift ``BUILD_SETTLE_S``
+    exists to prevent, so both go through here.
+
+    ``False`` for an unreadable or missing age — "younger than the settle, or
+    unknowable: the install may still be mid-write" — which is "not settled" in
+    the safe direction: it defers a retirement and describes a refresh as
+    incomplete rather than claiming either is done. There is no retry logic
+    here because none is needed: the marker only gets older, so the next check
+    is the retry.
+    """
+    from local_operator import update as update_mod
+
+    prefix = build_prefix()
+    try:
+        age = update_mod.build_marker_age_s(prefix)
+    except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
+        # The SETTLE read is guarded for the same reason the stamp read in
+        # ``handover_build`` is, and the reason is the consequence rather than
+        # the likelihood: this function is called from a background watcher on
+        # BOTH sides (the daemon's retirement poll and the runtime's refresh
+        # check), and an exception here used to leave that task dead — for the
+        # daemon, a process that never retires, silently (review round 1,
+        # MINOR-3).
+        logger.debug(
+            "build marker age unreadable; treating the install as unsettled", exc_info=True
+        )
+        return False
+    return age is not None and age >= build_settle_seconds()
+
+
 def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     """The build now on disk, if it differs from ``boot`` AND has settled.
 
@@ -272,29 +308,39 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     ``.lop-source`` and a constant version, so they never trip this — by design,
     matching ``design-build-skew.md`` §6.5: a developer's worktree runtime must
     not retire because they touched a file.
+
+    THE LAST TWO SHAPES ARE DIFFERENT FACTS and :func:`pending_build` is how a
+    caller tells them apart; this function answers only "may I act now", which
+    is what both of its callers need.
     """
     newer = handover_build(boot)
     if newer is None:
         return None
-    from local_operator import update as update_mod
-
-    prefix = build_prefix()
-    try:
-        age = update_mod.build_marker_age_s(prefix)
-    except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
-        # The SETTLE read is guarded for the same reason the stamp read above it
-        # is, and the reason is the consequence rather than the likelihood: this
-        # function is called from a background watcher on BOTH sides (the daemon's
-        # retirement poll and the runtime's refresh check), and an exception here
-        # used to leave that task dead — for the daemon, a process that never
-        # retires, silently (review round 1, MINOR-3).
-        logger.debug(
-            "build marker age unreadable; treating the install as unsettled", exc_info=True
-        )
+    if not _settle_elapsed():
         return None
-    if age is None or age < build_settle_seconds():
-        # Younger than the settle, or unknowable: the install may still be
-        # mid-write. Try again next check; the marker only gets older.
+    return newer
+
+
+def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
+    """The build on disk that has MOVED but has not settled yet, or ``None``.
+
+    The complement of :func:`build_changed` on the same two reads, for the one
+    caller that has to report the difference: ``lop refresh`` asks a runtime
+    "are you on the build on disk", and the runtime used to answer
+    ``kept: build on disk matches (or has not settled)`` for both shapes. Inside
+    the settle window that sentence is FALSE about a runtime still on the old
+    build, and the window is not an edge case for that command — its own
+    docstring says its first run is ``lop-update``, i.e. the operator invokes it
+    in exactly those seconds. Telling them "already current" (with a zero exit
+    status) about a fleet that is about to rotate is the kind of wrong answer
+    that stops an operator looking (D1/M2, PR #1141).
+
+    ``None`` for a genuinely-matching install, and for every unreadable-stamp
+    shape ``handover_build`` refuses — in those the settle window is not what is
+    being described.
+    """
+    newer = handover_build(boot)
+    if newer is None or _settle_elapsed():
         return None
     return newer
 

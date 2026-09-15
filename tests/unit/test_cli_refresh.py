@@ -21,9 +21,12 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from local_operator.cli import refresh_command
 from local_operator.session.runtime import control
 from local_operator.session.runtime.control import RefreshOutcome
+from local_operator.session.runtime.types import SessionRecord
 
 _SEEN: dict[str, Any] = {}
 
@@ -51,6 +54,30 @@ class _Record:
         self.control_port = 1
         self.control_key = "k"
         self.version = "0.54.48"
+        self.source_ref = ""
+
+
+def _session_record(version: str = "0.54.48", source_ref: str = "") -> SessionRecord:
+    """A real record, for the cells that call the builders with one.
+
+    The CLI stub above is deliberately narrower (it stands in for the resolver's
+    input), but ``_refresh_line``/``_build_label`` are typed against
+    ``SessionRecord`` and read the record's own published stamps — so the cells
+    that exercise them build the real thing rather than a lookalike that would
+    drift from it.
+    """
+    return SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id="s1",
+        conversation_name="the agent",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        version=version,
+        source_ref=source_ref,
+    )
 
 
 def _outcome(method: str, pid: int = 4242, line: str | None = None) -> RefreshOutcome:
@@ -157,8 +184,71 @@ def test_all_lists_every_outcome_and_summarises(capsys) -> None:
     out = capsys.readouterr().out
     assert "is retiring now" in out
     assert "has a turn in flight" in out
-    assert "3 sessions: 1 retiring now, 1 will move when their turn ends" in out
+    # A singular count takes a singular possessive: the shipped line read
+    # "1 will move when their turn ends" (D3, PR #1141).
+    assert "3 sessions: 1 retiring now, 1 will move when its turn ends" in out
     assert _SEEN["own_pid"] is None, "a CLI caller has no session of its own to exclude"
+
+
+def test_a_draining_target_is_settled_and_says_the_bound(capsys) -> None:
+    """A target already leaving a signal is NOT a failure, and it says why.
+
+    Nothing is owed by the caller — the exit is already scheduled — so the exit
+    code stays 0. What the receipt must carry is the fact itself and the
+    EXISTENCE of a bound: a signalled runtime works on, looking ordinary, for up
+    to ``SIGNAL_DRAIN_S``, and two minutes of unexplained waiting reads as a
+    hang (U2, PR #1141). ``draining`` is in ``REFRESH_SETTLED_METHODS``, and
+    this cell is what pins that it stayed there.
+    """
+    from local_operator.session.runtime.types import SIGNAL_DRAIN_S
+
+    async def _draining(record, *, timeout_s):  # noqa: ANN001, ANN202
+        return _outcome("draining", line='"the agent" was signalled — it is leaving')
+
+    with (
+        patch("local_operator.cli._resolve_stop_target", lambda _a: _single_target()),
+        patch.object(control, "refresh_session", _draining),
+    ):
+        assert refresh_command(_args(target="the agent")) == 0
+    out = capsys.readouterr().out
+    assert "leaving" in out
+    # The claim is about the METHOD, not the stub's own prose: the real line is
+    # built by ``control._refresh_line``, which is where the bound is named.
+    line = control._refresh_line(
+        _session_record(),
+        "0.54.48",
+        "draining",
+        "",
+    )
+    assert "was signalled" in line and "its next boundary" in line
+    assert f"up to {SIGNAL_DRAIN_S / 60:.0f} min" in line
+
+
+def test_an_unsettled_install_is_partial_not_clean(capsys) -> None:
+    """The install has moved but nobody has judged it yet — NOT "already current".
+
+    This is the D1/M2 defect at the exit-code level: the runtime used to fold
+    "the stamp matches" and "the marker has not settled" into one answer, the
+    CLI mapped it to ``current`` (a settled method), and `lop refresh` — whose
+    own documentation says its first run is `lop-update` — therefore exited 0
+    and printed "already runs the build on disk" about a whole fleet that was
+    about to rotate. The unsettled answer must stay OUT of
+    ``REFRESH_SETTLED_METHODS``, so a script cannot read the rotation as done.
+    """
+
+    async def _unsettled(record, *, timeout_s):  # noqa: ANN001, ANN202
+        return _outcome("unsettled", line='"the agent" has not judged the build on disk yet')
+
+    with (
+        patch("local_operator.cli._resolve_stop_target", lambda _a: _single_target()),
+        patch.object(control, "refresh_session", _unsettled),
+    ):
+        assert refresh_command(_args(target="the agent")) == 2
+    out = capsys.readouterr().out
+    assert "has not judged" in out
+    assert "unsettled" not in control.REFRESH_SETTLED_METHODS
+    line = control._refresh_line(_session_record(), "0.54.48", "unsettled", "")
+    assert "ask again in a few seconds" in line
 
 
 def test_all_with_nothing_running_says_so(capsys) -> None:
@@ -202,6 +292,46 @@ def test_json_shape(capsys) -> None:
             "line": 'moved "the agent"',
         }
     ]
+
+
+def test_the_summary_agrees_with_its_count(capsys) -> None:
+    """Both counts, because the bug was the SINGULAR one reading as plural.
+
+    ``1 will move when their turn ends`` shipped (D3, PR #1141): the count noun
+    inflected and the label did not. The plural form is unchanged, so this cell
+    pins both halves of the fix rather than the new one alone.
+    """
+    from local_operator.session.runtime.control import summarize_refresh
+
+    one = summarize_refresh([_outcome("busy")])
+    assert one == "1 session: 1 will move when its turn ends", one
+    three = summarize_refresh([_outcome("busy", pid=p) for p in (1, 2, 3)])
+    assert three == "3 sessions: 3 will move when their turn ends", three
+
+
+@pytest.mark.parametrize(
+    ("version", "ref", "expected"),
+    [
+        ("0.55.0", "aaaaaaa1111111", "0.55.0@aaaaaaa"),
+        ("0.55.0", "", "0.55.0"),
+        ("", "bbbbbbb2222222", "bbbbbbb"),
+        ("", "", "an unrecorded build"),
+    ],
+)
+def test_the_build_label_names_the_ref_that_makes_two_builds_different(
+    version: str, ref: str, expected: str
+) -> None:
+    """``version@ref[:7]``, and the fallbacks (D2, PR #1141).
+
+    The dominant handover on this host is a same-version rebuild — `lop-update`
+    builds from `main` while `pyproject.toml` still names the last release — so
+    a version-only label printed identically on the row LEAVING the old build
+    and the row already on the new one, which is the one distinction the
+    receipts exist to draw. The TUI's build-skew notice already prints this form.
+    """
+    from local_operator.session.runtime.control import _build_label
+
+    assert _build_label(_session_record(version, ref)) == expected
 
 
 def test_a_positive_timeout_is_passed_through(capsys) -> None:

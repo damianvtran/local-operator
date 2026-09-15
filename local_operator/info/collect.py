@@ -379,6 +379,12 @@ def collect_sessions(
                 # lists cleanly rather than raising mid-table.
                 pending=getattr(rec, "pending", None),
                 busy=bool(getattr(rec, "busy", False)),
+                # The runtime's own statement that it is leaving and finishing
+                # work first. Defaulted like the two fields above so a record
+                # written by an OLDER runtime lists cleanly rather than raising
+                # mid-table — `lop sessions` is the surface a host mid-upgrade
+                # is inspected WITH.
+                leaving=getattr(rec, "leaving", "") or "",
                 detached=bool(getattr(rec, "detached", False)),
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
@@ -651,6 +657,19 @@ def session_rows(
             # existence per row.
             "completion_kind": line.completion_kind,
             "completion_reason": line.completion_reason,
+            # WHETHER THIS RUNTIME IS FINISHING A TURN BEFORE LEAVING, and why:
+            # appended at the END for the same reason the two keys above are —
+            # the established key order is a published contract and this EXTENDS
+            # it. Empty string, never ``None``, matching its neighbours so no
+            # consumer branches on key existence per row.
+            #
+            # It rides here rather than only on the record because the record is
+            # the runtime's own file: a consumer diagnosing a fleet (or
+            # scripting a rotation) reads this table or its JSON, and "which of
+            # these is leaving" has to be answerable without opening a config
+            # root per session. ``lop sessions`` also prints it (its own LEAVING
+            # column, present only when some row carries one).
+            "leaving": line.leaving,
         }
         for line in info.lines
     ]

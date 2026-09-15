@@ -66,7 +66,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
-from local_operator.session.runtime.types import SIGNAL_DRAIN_S
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_S,
+)
 
 if TYPE_CHECKING:
     from local_operator.update import BuildStamp
@@ -895,6 +899,7 @@ async def _begin_drain(
         loaded=boot.label() if boot is not None else "<unknown>",
         cause="runtime-retired",
         stagger_s=random.uniform(0, _build_stagger_seconds()),  # noqa: S311 — jitter, not security
+        leaving=LEAVING_FOR_BUILD,
     )
 
 
@@ -922,6 +927,7 @@ async def _commit_to_leaving(
     to: str = "",
     cause: str = "runtime-retired",
     stagger_s: float = 0.0,
+    leaving: str = "",
 ) -> "_Drain | None":
     """Announce a departure, then stop admitting work. ``None``: not ours.
 
@@ -944,6 +950,21 @@ async def _commit_to_leaving(
     write the cut-off cause (that is ``begin_retire``, reached at the boundary
     by :func:`_drain_for`), which is what makes it safe to commit while a turn
     the drain exists to save is still running.
+
+    ``leaving`` IS THE RECORD'S HALF OF THE SAME COMMIT, and passing it here
+    rather than writing the record from the trigger is the reconciliation PR
+    #1108 forced: that PR landed its own drain state, whose ``draining`` flag on
+    the ``retiring`` frame is what the APP paints its notice from at frame
+    receipt, while this branch had added ``SessionRecord.leaving`` for the fleet
+    surfaces (``lop sessions``, ``/info``, the catalogue, the stop ladder's
+    refusal). Two renderings of one fact, so ONE writer: the frame is
+    authoritative for the app and the phrase is authoritative for the fleet,
+    and ``announce_retiring`` writes the phrase and sends the frame in the same
+    call — a trigger cannot publish one without the other, which is what makes
+    a disagreement impossible rather than merely unlikely. A trigger passes its
+    OWN words, because the two reasons are not interchangeable and either
+    phrase would be a lie about the other trigger; the frame's ``reason`` label
+    does the same job on the wire.
 
     A handle without the latch (an older host, a reduced test double) does NOT
     drain. The bound's whole guarantee is that admissions stop; a runtime that
@@ -1162,6 +1183,19 @@ async def _drain_for_signal(
       instead of committing at the signal, because the only latch that existed
       then did both jobs at once.
 
+      WHICH latch that argument is about is worth spelling out, because only one
+      of the two conceivable spellings could do that harm. Calling
+      ``begin_retire`` BEFORE the wait would latch NOTHING: it returns ``False``
+      the moment ``may_refresh()`` is non-empty, and ``may_refresh()`` reports
+      ``"busy"`` whenever ``is_busy()`` is true (``serving.py``) — which is
+      precisely the case this function exists for, since a signal only reaches
+      here with work in flight. That spelling is harmless rather than correct,
+      and saying so is not pedantry: it looks like the fix, and a reader who
+      "simplified" the boundary latch into it would silently lose the cut-off
+      cause for a turn the bound really does destroy. The hazard belongs to a
+      latch that writes the cause directly (``note_cut_off`` plus
+      ``_retiring_cause``), which is the one this path still does not take.
+
       What the early commit costs is stated rather than hidden: work that
       arrives mid-drain is refused (``prompt``) or spooled for the successor
       (``peer_message``) — the same behaviour the build drain has, from the same
@@ -1175,6 +1209,28 @@ async def _drain_for_signal(
       is classified identically whether the drain expired or never ran. Say so
       HERE rather than at the exit line, because the fact that matters
       afterwards is that the BOUND cut this turn and not the signal.
+
+    * THE PENDING EXIT IS PUBLISHED *BEFORE* THE WAIT, unlike the retirement
+      latch — and the two are deliberately not the same moment. The latch is a
+      statement about a turn's OUTCOME (it brands the next end), so it must wait
+      for the boundary; ``leaving`` is a statement about the PROCESS (a signal
+      arrived and is being honoured), which is already true the instant this
+      function starts. Publishing it here is what makes the drain visible at
+      all: without it a signalled-but-working runtime spends up to
+      ``SIGNAL_DRAIN_S`` looking like an ordinary busy one on every surface an
+      operator reads, and the natural remedy for "it is still working" — a
+      plain ``lop stop`` — cuts the very turn the drain is finishing (U1/U2, PR
+      #1141). See ``SessionRecord.leaving``; ``lop stop`` refuses on it too.
+
+    ONE GAP IS DELIBERATE and is stated rather than closed: the last predicate
+    read above and the latch at ``begin_retire`` are separated by the
+    ``announce_retiring`` await, so a ``prompt`` landing inside that window opens
+    a turn which the unconditional ``stop.set()`` then cuts. Re-reading the
+    predicate after the announce would close it and is what ``_refresh_for``
+    does — but there the refusal KEEPS the runtime, whereas here the signal has
+    already decided that this process leaves: a re-read could only relabel the
+    cut, never save the turn. So the window stays, bounded by one socket write,
+    and the label stays honest (``runtime-shutdown``).
 
     The signal name is passed for the log only; the disposal itself stays where
     it is and in the order it already had — ``amain`` owns deny -> dispose ->
@@ -1206,6 +1262,13 @@ async def _drain_for_signal(
             )
             stop.set()
         return
+    # ``leaving=`` is how the pending exit reaches the fleet surfaces, and the
+    # seam is the ONLY writer of both halves of that fact: it publishes the
+    # phrase on the record and sends the ``draining=True`` frame in one call, so
+    # no surface can report a drain another surface does not (see
+    # ``RuntimeServer.announce_retiring``). Best-effort inside that call: a
+    # record that could not be rewritten must not stop a runtime from honouring
+    # the signal it was given.
     drain = await _commit_to_leaving(
         handle,
         runtime,
@@ -1215,6 +1278,7 @@ async def _drain_for_signal(
         detail=f"{sig_name}: drained to the end of the turn in flight",
         loaded=_drain_loaded_label(runtime),
         cause="runtime-shutdown",
+        leaving=LEAVING_ON_SIGNAL,
     )
     if drain is None:
         if stop.is_set() or getattr(handle, "_disposing", False):

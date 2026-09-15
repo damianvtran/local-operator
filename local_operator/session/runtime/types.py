@@ -320,6 +320,37 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #: that the ladder's escalation cannot land inside this window.
 SIGNAL_DRAIN_S = 120.0
 
+#: What a runtime publishes on its record (``SessionRecord.leaving``) the moment
+#: a termination signal arrives and it starts draining, and what it answers a
+#: rotation with while that drain runs.
+#:
+#: WHY A PHRASE AND NOT A BOOL. The field exists to close an INVISIBILITY, and
+#: its reader is an operator looking at a fleet, not a parser: ``lop sessions``
+#: has no room for a legend, so a ``True`` would be a fact nobody could read —
+#: the same reason ``pending`` publishes the word ``approval``. It has to say
+#: both halves of what is happening (something signalled it; it is finishing a
+#: turn rather than ignoring the signal), because either half alone is wrong:
+#: "signalled" reads as wedged, "busy" is indistinguishable from the ordinary
+#: spinner the same record already publishes.
+#:
+#: HERE, in the module the child and the ladder both already import, for the
+#: reason ``SIGNAL_DRAIN_S`` is: the runtime writes it and two front ends read
+#: it, and a copy of the sentence in each would be three places to drift.
+LEAVING_ON_SIGNAL = "signalled; leaving when its turn ends"
+
+#: What a runtime publishes when the departure was forced by THE BUILD ON DISK
+#: rather than by a signal: it has committed to leaving and is finishing the
+#: turn in flight. The same field, the same readers, a different reason — and
+#: the reason has to be the trigger's own words, because "signalled" would be
+#: false here and "leaving" alone would not say why.
+#:
+#: NO BOUND IS NAMED, and that is the one substantive difference:
+#: ``process._drain_for`` waits for this runtime's work and nothing else (the
+#: build path draws no clock), while the signal path is cut by
+#: ``SIGNAL_DRAIN_S`` and says so. A bound in this phrase would be a promise
+#: nothing enforces.
+LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
+
 
 class DiscoveryRecord(Protocol):
     """The members the shared publication path actually touches.
@@ -431,6 +462,22 @@ class SessionRecord:
     #: cost has to be findable — this field is what puts it in `lop sessions`
     #: and sorts it first in the picker.
     pending: str | None = None
+    #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
+    #: first: a short phrase (``LEAVING_ON_SIGNAL``) while that drain runs,
+    #: ``""`` when it is going nowhere. Set by the signal drain
+    #: (``process._drain_for_signal``) and never cleared, because a drain always
+    #: ends in an exit.
+    #:
+    #: WHY IT IS ON THE RECORD. The drain is bounded by ``SIGNAL_DRAIN_S``, so a
+    #: signalled-but-working runtime stays alive — and, before this field, stayed
+    #: ORDINARY — for up to two minutes. Every surface an operator reads
+    #: (``lop sessions``, a picker, a peer's ``lop stop``) saw an unremarkable
+    #: ``live`` row throughout, so the honest reading of that window was
+    #: impossible and the natural remedy was destructive: a plain stop against a
+    #: draining session cuts the very turn the drain exists to save (U1/U2, PR
+    #: #1141). ``busy`` cannot carry it — that is the picker's spinner bit and is
+    #: ``None`` of the fact that a signal has already been received and acted on.
+    leaving: str = ""
 
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same

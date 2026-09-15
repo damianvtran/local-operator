@@ -1022,6 +1022,13 @@ class RuntimeServer:
         #: under an earlier process.
         self._started = False
         self._busy = False
+        #: ``LEAVING_ON_SIGNAL`` once the signal drain has committed this
+        #: runtime to an exit, else ``""``. Held on the server like the other
+        #: live-state fields above so one assignment publishes it, and set from
+        #: the drain (``RuntimeServer.note_leaving``) rather than read off the
+        #: handle: this is the runtime's own decision to leave, which no handle
+        #: predicate knows.
+        self._leaving = ""
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
         #: makes a runtime whose handle cannot report indistinguishable from
@@ -1384,7 +1391,9 @@ class RuntimeServer:
         if not written.wait(timeout=_ANNOUNCE_WRITE_TIMEOUT_S):
             logger.debug("stop announcement did not reach viewers before the teardown")
 
-    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
 
@@ -1414,6 +1423,18 @@ class RuntimeServer:
         byte-identical, and the daemon already handles owner exit by adopting
         the next record it sees.
 
+        ``leaving`` is that same commit's OTHER rendering, and this method is
+        where both are written — which is the reconciliation PR #1108 required.
+        #1108 landed the drain on the runtime's side and made this frame's
+        ``draining`` flag the authoritative word for the APP; this branch had
+        added ``SessionRecord.leaving`` for the FLEET surfaces. Two renderings,
+        one fact, so one writer: the flag stays authoritative for "is a drain in
+        force", the phrase carries the trigger's own words for the surfaces an
+        operator reads, and a caller cannot publish one without the other
+        because the record is written here, before the frame goes out, from the
+        same call that sends it. ``process._commit_to_leaving`` is the only
+        caller that passes both.
+
         Awaited (unlike ``announce_stop``) because its one caller is the
         reaper on the runtime's own loop, which has time to drain: the exit
         follows this frame, and a viewer that receives it late merely goes
@@ -1421,6 +1442,24 @@ class RuntimeServer:
         """
         if self._closed.is_set():
             return
+        if draining and leaving:
+            # RECORD FIRST, FRAME SECOND, and they are one commit rather than
+            # two publications of one fact (PR #1108 reconciliation). The frame's
+            # ``draining`` flag is what the app paints its notice from at frame
+            # receipt; ``SessionRecord.leaving`` is what the fleet surfaces read
+            # (`lop sessions`, ``/info``, the catalogue, the stop ladder's
+            # refusal). Writing the record here — inside the same call that
+            # sends the flag, before the send — is what makes the two impossible
+            # to disagree: every caller that announces a drain for the app has
+            # already published the same drain for the fleet, and the only way
+            # to send the frame is through this method.
+            #
+            # A caller that passes ``draining=True`` and no phrase has nothing
+            # to publish (the fallback paths that never latched do exactly
+            # that); a caller that passes a phrase without the flag announced no
+            # drain and is ignored on purpose — the flag is the authority for
+            # "is a drain in force".
+            self.note_leaving(leaving)
         frame: dict[str, Any] = {
             "op": "retiring",
             "session_id": self._record.session_id,
@@ -2316,6 +2355,28 @@ class RuntimeServer:
         self._busy = busy
         self._republish()
 
+    def note_leaving(self, phrase: str) -> None:
+        """Publish that this runtime has committed to leave, and is finishing
+        work in flight first (``LEAVING_ON_SIGNAL``; see
+        ``SessionRecord.leaving`` for why the record carries it).
+
+        Written THROUGH to the record in the same synchronous step as the
+        assignment, exactly like :meth:`set_record_started`: a reader between
+        here and the next heartbeat must already see it, and the whole point of
+        the field is the window BEFORE the exit — a marker that arrived with the
+        ordinary 15 s heartbeat would leave up to a seventh of the drain
+        invisible, which is most of the window it exists to describe.
+
+        Deduped like :meth:`set_busy`, and it matters more here: the drain calls
+        this once, but a repeat signal or a second drain arm on the same runtime
+        must not put a staged write and rename on the far side of a signal.
+        """
+        if self._leaving == phrase:
+            return
+        self._leaving = phrase
+        self._record.leaving = phrase
+        self._republish()
+
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
 
@@ -2390,6 +2451,7 @@ class RuntimeServer:
             publisher.heartbeat(
                 pending=self._pending,
                 busy=self._busy,
+                leaving=self._leaving,
                 started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
                 subagents_running=self._subagents_running,
@@ -3007,18 +3069,56 @@ class RuntimeServer:
         wrong "retire" aborts nothing (the predicate is idle by construction)
         but costs the user a cold start they did not need, a wrong "keep"
         costs the reaper's next check.
+
+        TWO ANSWERS ARE MORE PRECISE THAN THE QUESTION THEY REPLACE, because
+        the caller reads this answer as a STATE rather than as a verdict:
+
+        * A runtime that is ALREADY DRAINING its own exit says so instead of
+          reporting the ``kept: busy`` its work in flight would otherwise
+          produce. Those are different facts — "still working, moves when it
+          ends" versus "leaving whatever you do next" — and only the second
+          is true of a signalled runtime inside ``SIGNAL_DRAIN_S``.
+        * ``kept: build on disk matches`` is NOT returned for an install that
+          has moved but not settled. This is the answer ``lop refresh`` needs
+          most precisely: its own documentation says its first run is
+          ``lop-update``, so the operator calls it INSIDE the settle window,
+          and calling that "already current" (with a zero exit status) tells a
+          rotating script the fleet is done when every member of it is about
+          to be retired (D1/M2, PR #1141). ``_build_changed`` deliberately
+          folds "same stamp" and "not settled yet" into ``None`` — it answers
+          "may I act" — so ``pending_build`` asks the settle question
+          separately and the two cases answer differently.
         """
+        from local_operator import buildwatch
         from local_operator.session.runtime import process as process_mod
 
+        if self._leaving:
+            return "kept: already leaving"
         newer = process_mod._build_changed(self._boot_build)
         if newer is None:
-            return "kept: build on disk matches (or has not settled)"
+            if buildwatch.pending_build(self._boot_build) is not None:
+                return "kept: the install on disk has not settled yet"
+            return "kept: build on disk matches"
         logger.info(
             "session runtime: viewer asked for a refresh; build on disk is %s, loaded %s",
             newer.label(),
             self._boot_build.label(),
         )
-        return await self._retire_for("stale-build", to=newer.label())
+        answer = await self._retire_for("stale-build", to=newer.label())
+        if answer == "retiring":
+            # NAME THE BUILD IT LEAVES FOR, because "which of these is still on
+            # the old build" is the question this op exists to answer and a
+            # version-only label cannot answer it (same-version rebuilds are
+            # this host's common drift — see ``proves_a_move``). The frame
+            # already carries ``to``; a caller that wanted it previously had to
+            # re-read the marker itself, which is a second, racier read of a
+            # fact this process just committed to. Suffixing rather than
+            # replacing keeps every consumer that reads the ``retiring``
+            # PREFIX working (the TUI's bind-path refresh, and an attach client
+            # passing the answer through verbatim); only ``retire_now``, whose
+            # callers compare the whole string, is left alone.
+            return f"retiring to {newer.label()}"
+        return answer
 
     def _retire_detail(self, to: str) -> str:
         """``" (old → new)"`` for a retirement reason, when both stamps exist.

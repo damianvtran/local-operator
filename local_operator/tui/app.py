@@ -29010,11 +29010,35 @@ class OperatorApp(App[None]):
             f'stopping "{name}" (pid {record.pid})… waiting for it to answer', "info"
         )
         self._append_block(pending)
-        outcome = await control.stop_session(record, _root=config_dir(), _command="/stop")
+
+        def paint_wait(line: str) -> None:
+            """Restate the pending block with the ladder's own bound (U5, PR #1141).
+
+            The block above promises a wait; this is the same promise with the
+            number, painted by the rung that knows it. The SIGTERM grace is the
+            one wait a `lop` command can spend minutes inside, and before this
+            the screen said nothing at all for its whole length — a user who
+            cannot tell waiting from hung reaches for Ctrl-C, which leaves the
+            outcome ambiguous. Restated in place rather than appended, exactly
+            like the outcome below: one promise on screen, not a log of them.
+            """
+            if pending.is_attached:
+                pending.restate(line, "info")
+
+        outcome = await control.stop_session(
+            record, _root=config_dir(), _command="/stop", on_wait=paint_wait
+        )
+        # A stop that did NOT stop is a warning, not a note: the new ``draining``
+        # outcome joins ``refused`` here because both are the user's request
+        # declining to take effect (and both name what it would cost to insist).
+        # ``busy`` keeps the severity it has always had on this surface, where
+        # the group report — not the receipt — is what names it (M3).
         kind: NoticeKind = (
             "error"
             if outcome.method == "sigkill"
-            else "warning" if outcome.method == "refused" else "info"
+            else (
+                "warning" if outcome.method == "refused" or outcome.method == "draining" else "info"
+            )
         )
         if pending.is_attached:
             pending.restate(outcome.line, kind)
@@ -29186,7 +29210,15 @@ class OperatorApp(App[None]):
         # attribute it to another terminal (U4-1).
         self._issued_own_stop = True
         outcomes = await control.stop_all(
-            own_pid=os.getpid(), only_pids=listed, _root=root, _command="/stop --all"
+            own_pid=os.getpid(),
+            only_pids=listed,
+            _root=root,
+            _command="/stop --all",
+            # The sweep is where a silent wait costs the most — one wedged
+            # runtime sits in front of the rest (see ``stop_all``) — so the
+            # ladder's own bound is painted as it is entered, through the same
+            # notice area the outcome lines use (U5).
+            on_wait=lambda line: self._system_notice(line, "info"),
         )
         # Anything that did NOT stop cleanly gets its own line, because the
         # grouped count cannot say WHICH agent was refused or had to be
@@ -29197,6 +29229,18 @@ class OperatorApp(App[None]):
                 self._system_notice(outcome.line, "warning")
             elif outcome.method == "sigkill":
                 self._system_notice(outcome.line, "error")
+            elif outcome.method in control.LEFT_ALONE_METHODS:
+                # A TARGET LEFT ALONE IS NOT A CLEAN STOP, and the grouped count
+                # cannot say WHICH one — the same reason the refusal line above
+                # is painted: it is the one thing the user must act on.
+                # ``busy`` was the third such method and took neither line nor
+                # warning severity, so `/stop all` painted "stopped 2 of 3" and
+                # never named the session it left running (M3, PR #1141);
+                # ``draining`` arrives with the same meaning and the same need.
+                # Read from the shared set rather than listing the methods here,
+                # so a fourth one cannot be added to the ladder and silently
+                # skipped on this surface again.
+                self._system_notice(outcome.line, "warning")
         # Own session LAST, through the in-process branch, which paints its
         # own receipt naming the way back; the report folds it into the
         # total so the numbers reconcile with the listing's promise.

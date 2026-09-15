@@ -728,9 +728,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "signal a target the plain stop leaves alone: one that reports a "
-            "turn in flight, or a heartbeating-but-starved process whose "
-            "socket cannot confirm identity (escalating can cut that turn)"
+            "escalate past a refusal or a skip: signal a target whose socket "
+            "cannot confirm identity, one that reports a turn in flight, or one "
+            "already leaving after a signal — each of those can cut the turn it "
+            "is in. Not needed for a cooperative mid-turn runtime: the plain "
+            "stop ends that one promptly, through its socket"
         ),
     )
 
@@ -3250,6 +3252,14 @@ def sessions_command(args: argparse.Namespace) -> int:
         for row in rows
     }
     show_why = any(why.values())
+    # ONLY WHEN SOMETHING IS LEAVING, on the same rule as WHY and LAST_ACTIVE
+    # above: a healthy fleet's listing must not gain a column of blanks, and the
+    # table is parsed by people. Unlike WHY this says something true about a row
+    # the operator may be about to act on — a signalled runtime is alive and
+    # working for up to ``SIGNAL_DRAIN_S``, and a plain ``lop stop`` on it cuts
+    # the turn the drain is finishing (U1/U2, PR #1141).
+    leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
+    show_leaving = any(leaving.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3260,6 +3270,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'LAST_ACTIVE':>11}"
     if show_why:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
+    if show_leaving:
+        header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3298,6 +3310,12 @@ def sessions_command(args: argparse.Namespace) -> int:
             # fitted wide cell the blanks it never needed; `_pad_cell` is the
             # same CELLS-not-characters rule the three text columns use above.
             line += f" {_pad_cell(cell, WHY_COLUMN_WIDTH)}"
+        if show_leaving:
+            # `_fit_cell` rather than `_clamp_reason_cell`: this column's text is
+            # the harness's own phrase, so a cut only ever needs to be visible —
+            # the reason clamp's marker exists for provider-authored prose.
+            said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
@@ -4610,6 +4628,18 @@ def _state_cell(state: str) -> str:
 WHY_COLUMN_WIDTH = 48
 
 
+#: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
+#:
+#: A phrase, not an enum: the field's whole purpose is to say what is happening
+#: in the words the operator needs ("signalled; leaving when its turn ends"), so
+#: it is bounded like WHY rather than abbreviated to a token nobody could read.
+#: Wide enough for the shipped phrase in full, so the common case is not cut and
+#: a cut one is visibly marked (`_fit_cell`). The column appears only when some
+#: row carries a value, exactly like WHY and LAST_ACTIVE — a listing with no
+#: draining runtime is byte-for-byte what it was before.
+LEAVING_COLUMN_WIDTH = 40
+
+
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.
 #:
 #: Named rather than left as literals inside the format specs because the row
@@ -4813,6 +4843,7 @@ def stop_command(args: argparse.Namespace) -> int:
                 force=args.force,
                 _root=config_dir(),
                 _command="lop stop --all",
+                on_wait=_stop_progress,
             )
         )
         return _report_stops(outcomes, args.json, summary=True)
@@ -4836,9 +4867,29 @@ def stop_command(args: argparse.Namespace) -> int:
             # The artifact's point is naming WHO stopped it, so the CLI records
             # what the user typed rather than the function they reached.
             _command="lop stop",
+            on_wait=_stop_progress,
         )
     )
     return _report_stops([outcome], args.json)
+
+
+def _stop_progress(line: str) -> None:
+    """Paint one progress line the ladder emits while it waits.
+
+    STDERR, not stdout, and that is the whole reason this is a function rather
+    than an inline ``print``: stdout carries the receipts — under ``--json``, a
+    document a caller parses — and a progress line there would either break that
+    parse or force every consumer to filter a line the final receipt supersedes
+    a moment later. Progress about a wait belongs beside it, which is where the
+    disambiguation listing above already goes.
+
+    It exists because the ladder's rung-2 wait is the longest silence a `lop`
+    command produces (~150 s for a wedged mid-turn target) and it used to print
+    nothing at all until it resolved: an operator clearing a wedged session
+    could not tell a working command from a hung one, and the natural response —
+    Ctrl-C — leaves the outcome ambiguous (U5, PR #1141).
+    """
+    print(line, file=sys.stderr)
 
 
 def _resolve_stop_target(
@@ -4929,10 +4980,16 @@ def refresh_command(args: argparse.Namespace) -> int:
     runtime judges its own readiness, so a busy session is reported as moving
     at its next boundary rather than ended.
 
-    Exit codes: **0** every target gave an answer (moved, busy, already
-    current, or its own reason), **1** no target matched, **2** partial — at
-    least one runtime did not answer its control socket, so its move is not
-    going to happen on its own.
+    Exit codes: **0** every target gave an answer (moved, busy, draining,
+    already current, or its own reason), **1** no target matched, **2** partial
+    — at least one runtime did not answer its control socket, so its move is not
+    going to happen on its own, OR the install on disk had not settled and no
+    runtime could judge it yet (``unsettled``). The second case is deliberately
+    partial rather than clean (D1/M2, PR #1141): this command's own run 1 is
+    ``lop-update``, so it lands inside the settle window for a whole fleet, and
+    exiting 0 there would tell a rotating script the rotation is complete when
+    every session on the machine is about to be retired. The receipt says to ask
+    again in a few seconds, which is the honest next step.
 
     Imports stay function-local like every other runtime path here (the CLI
     startup path must stay light — see ``tests/unit/test_import_graph.py``).
@@ -4977,9 +5034,11 @@ def _report_refreshes(outcomes: list[Any], as_json: bool, *, summary: bool = Fal
     """Paint the rotation outcomes and derive the exit code.
 
     0 when every runtime answered (however it answered — "busy" is a queued
-    move, not a failure), 2 when at least one could not be asked at all. The
-    method is the verdict, exactly as in ``_report_stops``: no receipt text is
-    parsed and the two commands cannot disagree about what counts as partial.
+    move, not a failure, and "draining" is that move already scheduled), 2 when
+    at least one could not be asked at all, or could not yet judge the install
+    (``unsettled``, see ``REFRESH_SETTLED_METHODS``). The method is the verdict,
+    exactly as in ``_report_stops``: no receipt text is parsed and the two
+    commands cannot disagree about what counts as partial.
     """
     if as_json:
         import json as _json

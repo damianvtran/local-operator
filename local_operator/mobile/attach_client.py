@@ -1434,8 +1434,10 @@ class AttachClient:
         resume in the seconds after ``lop-update`` binds before the runtime
         has noticed the change, and without this the viewer would either wait
         for it or warn. As with ``retire_if_pristine`` the answer is the
-        runtime's ("retiring", or "kept: …"); an owner too old to know the op
-        answers the unknown-op error, which the caller reads as kept.
+        runtime's (``retiring`` — optionally followed by the label of the build
+        it is leaving FOR, which a caller may quote back — or ``kept: …``); an
+        owner too old to know the op answers the unknown-op error, which the
+        caller reads as kept.
         """
         return await self._request("refresh_if_idle")
 
