@@ -776,6 +776,11 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
     that way asserts a non-delivery this side cannot know (the op is already in
     the owner's socket buffer, and the receiver commits before it acks), and a
     sender who believes it duplicates the steer or the wake.
+
+    The retry half of R4 is asserted too, because the wording alone is not the
+    guarantee: a timed-out dial may have LANDED, so a second submission is the
+    duplicate the sentence warns about. One dial, one failure, no automatic
+    re-send — the sender decides, and the sentence tells them what they know.
     """
     other_pid = os.getppid() + 9999
     with (
@@ -784,10 +789,11 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
         patch(
             "local_operator.mobile.peer_client.send_peer_message",
             side_effect=TimeoutError,
-        ),
+        ) as dial,
     ):
         rc = send_command(_send_args(steer=True))
 
+    assert dial.call_count == 1, dial.call_args_list
     assert rc == 1
     assert red.called
     line = red.call_args[0][0]

@@ -403,13 +403,18 @@ async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
     whose loop was blocked for 0.7 s: the sender's 0.2 s deadline expired, and
     the receiver recorded the delivered steer the moment its loop came back.
     Wrapping the timeout into a ``RuntimeError`` (an earlier draft did) moves
-    that case onto the arm that says nothing was delivered.
+    that case onto the arm that says nothing was delivered. R4's other half is
+    asserted below: the dial is attempted ONCE. A message that may already be
+    queued in the owner's buffer must not be re-submitted automatically, and a
+    tool result is the last place that could happen unnoticed.
     """
     registrant, _alias, _handle = await _start_peer()
+    dials: list[dict[str, Any]] = []
     try:
         import local_operator.mobile.peer_client as peer_client_mod
 
         async def _timeout(*args, **kwargs):
+            dials.append(kwargs)
             raise TimeoutError
 
         monkeypatch.setattr(peer_client_mod, "send_peer_message", _timeout)
@@ -427,6 +432,7 @@ async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
         # Neither confident claim: not "could not deliver", and nothing that
         # invites an automatic retry of a steer that may already have landed.
         assert "could not deliver" not in result.text
+        assert len(dials) == 1, dials
     finally:
         registrant.close()
 
