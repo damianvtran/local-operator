@@ -975,11 +975,13 @@ async def test_the_tight_budget_methods_can_still_corroborate(
 # The promotion rule's PROBE arm, reviewed against the incident it came from:
 # one unanswered question severed the link, `disconnect()` failed every pending
 # future on that worker, and the teardown was announced as "the link silent for
-# 1s" — one second after the peer had spoken. Three properties follow, and each
+# 1s" — one second after the peer had spoken. Four properties follow, and each
 # row below can fail on the pre-fix tree (they are guards, not
 # characterisations): ESCALATION (a second consecutive miss still severs),
-# ISOLATION (one timed-out command fails only itself) and RESTRAINT (nothing is
-# severed while the peer's last frame is inside one ping interval).
+# ISOLATION (one timed-out command fails only itself), RESTRAINT (nothing is
+# severed while the peer's last frame is inside one ping interval) and WINDOW
+# (two misses produced inside ONE observation window are one strike, however
+# many sessions produced them).
 
 
 @pytest.mark.asyncio
@@ -1026,6 +1028,67 @@ async def test_one_unanswered_probe_fails_only_its_own_command(
     # …and the sibling is still answerable, which is what "left alone" means.
     sibling.set_result(Response(id="r-sibling", ok=True, result={"text": "ok"}))
     assert sibling.result().result == {"text": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_timeouts_inside_one_window_are_one_strike(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent commands must not spend the two-strike bar on ONE window.
+
+    The shape this rule exists for is a fleet, so the rule has to hold under the
+    fleet: two sessions whose commands time out at the same moment each run their
+    own probe, and both probes land inside one ``PING_PROBE_TIMEOUT_S`` window.
+    Counting PROBES (the first version) made those two misses one strike each,
+    so the second session's own reply severed the link — the pre-fix single-miss
+    teardown arriving through the new gate. The reviewer reproduced exactly that
+    with misses 0.6 ms apart: `close 4000`, latched, every pending future failed
+    (review R1).
+
+    Both halves are asserted, because the fix must be a window rule rather than
+    an amnesty: one shared window is not two strikes, and a LATER window that
+    still finds the peer mute is.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    # Deliberately wide: that both probes fall inside ONE window is the property
+    # under test, not a timing coincidence to be hoped for.
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.3)
+    service = BridgeService(root=tmp_path)
+    socket = _connected(service, silent_for=1.2)
+
+    async def mute(payload: dict[str, Any], *, wire: Any = None) -> None:
+        return None
+
+    service.link.send = mute  # type: ignore[method-assign]
+    # Different tabs, because the per-tab lock is what serializes two commands on
+    # the SAME one — the concurrency under test is two sessions, not two calls.
+    first, second = await asyncio.gather(
+        service._dispatch_serialized(
+            Request(id="r-burst-1", method="read", params={"tab": "bridge:9:n"})
+        ),
+        service._dispatch_serialized(
+            Request(id="r-burst-2", method="read", params={"tab": "bridge:8:n"})
+        ),
+    )
+    for response in (first, second):
+        body = bytes(response.body).decode().replace(" ", "")
+        assert '"timeout_s":0.05' in body, body
+        assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in body, body
+    assert socket.closed == [], "two misses from one silent window severed the link"
+    assert service.link.websocket is socket
+    assert service.link.probe_strikes == 1, "two overlapping probes are ONE observation window"
+
+    # …and the rule is not an amnesty: a later window that finds the peer still
+    # mute is a second observation, and the second one severs.
+    third = await service._dispatch_serialized(
+        Request(id="r-burst-3", method="read", params={"tab": "bridge:7:n"})
+    )
+    body = bytes(third.body).decode().replace(" ", "")
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value in body, body
+    assert '"phase":"response"' in body
+    assert socket.closed == [4000], "a second distinct silent window must still sever"
 
 
 @pytest.mark.asyncio

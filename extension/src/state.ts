@@ -257,9 +257,11 @@ export const TOUCH_INTERVAL_MS = 10_000;
 // Last SCHEDULED refresh per token, checked and set synchronously (no await
 // between) so two commands of the same tab interleaving after their replies
 // cannot both decide to write. Bounded because tokens accumulate across
-// open/close cycles over a worker's lifetime: past the cap the oldest entry is
-// forgotten, which costs at most one extra write for a surface that is
-// (by insertion order) the one least recently spoken for.
+// open/close cycles over a worker's lifetime: past the cap the OLDEST INSERTED
+// entry is forgotten. Insertion order is not recency, so the token dropped can
+// be one that is actively driven while a never-driven stale one survives — that
+// surface then pays one extra write per interval, i.e. the pre-fix rate for one
+// token, which is why the bound is kept and the ordering not chased.
 const TOUCHED_TOKENS_MAX = 64;
 const touchedAt = new Map<string, number>();
 
