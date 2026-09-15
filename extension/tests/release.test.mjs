@@ -381,6 +381,193 @@ test("promotion refuses a staged revision below 100 percent", async () => {
   );
 });
 
+// The 0.1.12 promotion failed on this gate four more times with a message that
+// named only what the gate WANTED. `distributionChannels` describing the LIVE
+// revision is the shape that has to be distinguishable, from the log alone,
+// from a staged rollout still settling -- so both are pinned below.
+test("promotion refusal quotes the revision the store reported", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        // The live 0.1.10 revision still sitting in the submitted channels:
+        // this script's own history, and the reason the summary prints every
+        // field rather than only the one the gate reads.
+        distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  // The leading text is unchanged, so log greps in the docs and in past runs
+  // still match it.
+  assert.ok(output.includes(`staged revision must contain version ${VERSION} at 100% deployment`), output);
+  assert.ok(
+    output.includes("store said: submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    output,
+  );
+  // A revision the store did not send must read as absent, not as an empty
+  // state that would look like a store-side outage.
+  assert.ok(output.includes("published state=<missing>"), output);
+});
+
+test("promotion refusal reports the staging percentage the store sent", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 50 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(
+    output.includes(`store said: submitted state=STAGED distributionChannels=[crxVersion=${VERSION} deployPercentage=50]`),
+    output,
+  );
+});
+
+test("a submission that is not STAGED reports the state the store sent", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "PENDING_REVIEW",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  // The first gate's leading text, unchanged, now carrying the store's own
+  // state -- the difference between "still in review" and "rejected".
+  assert.ok(output.includes("only an approved STAGED revision can be promoted (store said: submitted state=PENDING_REVIEW"), output);
+  // runRelease asserts the request count, so the single handler above proves
+  // this refusal reached no publish call on its way out.
+});
+
+test("the polling deadline reports the last response instead of guessing", async () => {
+  // The deadline is the third place the script used to fail blind: the publish
+  // call is accepted and the item still never reaches PUBLISHED at 100%.
+  const staged = {
+    itemId: extensionId,
+    submittedItemRevisionStatus: {
+      state: "STAGED",
+      distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+    },
+  };
+  const notYet = {
+    itemId: extensionId,
+    publishedItemRevisionStatus: {
+      state: "STAGED",
+      distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+    },
+  };
+  // One fetchStatus, one publish, then the loop's full twelve polls: this count
+  // is the loop's own, so changing the loop has to change it here too.
+  const error = await runRelease(["promote", VERSION], [
+    () => staged,
+    () => ({ itemId: extensionId, state: "PUBLISHED" }),
+    ...Array.from({ length: 12 }, () => () => notYet),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("was not PUBLISHED at 100% before the polling deadline"), output);
+  // The last poll's own fields, so the reader can see WHICH revision the store
+  // was still holding instead of being told only what the deadline expected.
+  assert.ok(output.includes("last response said:"), output);
+  assert.ok(
+    output.includes("published state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    output,
+  );
+});
+
+// `status` exists because reading the queue otherwise means dispatching `stage`,
+// which -- while an item is in review -- is refused with HTTP 400
+// FAILED_PRECONDITION / NOT_UPDATEABLE. It must be a pure read, and the request
+// count runRelease asserts is what pins that no upload or publish follows it.
+test("status reads the queue without uploading or publishing", async () => {
+  const result = await runRelease(["status"], [
+    (request) => {
+      assert.equal(request.method, "GET");
+      assert.equal(request.url, `${itemPath}:fetchStatus`);
+      return {
+        itemId: extensionId,
+        lastAsyncUploadState: "SUCCEEDED",
+        submittedItemRevisionStatus: {
+          state: "STAGED",
+          distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+        },
+        publishedItemRevisionStatus: {
+          state: "PUBLISHED",
+          distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+        },
+      };
+    },
+  ]);
+  assert.ok(result.stdout.includes(`Chrome Web Store status for extension ${extensionId}:`), result.stdout);
+  assert.ok(
+    result.stdout.includes(`submitted state=STAGED distributionChannels=[crxVersion=${VERSION} deployPercentage=100]`),
+    result.stdout,
+  );
+  // The same rendering the gates attach, so a `status` read and a refused
+  // promotion can be compared line by line.
+  assert.ok(
+    result.stdout.includes("published state=PUBLISHED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    result.stdout,
+  );
+  assert.ok(result.stdout.includes("lastAsyncUploadState=SUCCEEDED"), result.stdout);
+});
+
+test("a rejected status read fails closed with the store's explanation", async () => {
+  const error = await runRelease(["status"], [() => rejectWith(400, IN_REVIEW_BODY)], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("fetchStatus call returned HTTP 400"), output);
+  assert.ok(output.includes("Item is currently in review and cannot be updated."), output);
+  // This mode judges no version, so the message must not invent one.
+  assert.ok(output.includes("v<unknown>"), output);
+});
+
+test("status names the fields the store sent, including shapes the gates do not read", async () => {
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        // `version`/`deployInfos` are the field names a reshaped response would
+        // move this data into. Printing them as themselves is what tells a
+        // release owner the gate asked the wrong question, rather than that the
+        // rollout is still settling.
+        distributionChannels: [
+          { version: "0.1.12", deployInfos: [{ deployPercentage: 50 }] },
+          { lastDeploy: "unrecognised" },
+        ],
+      },
+    }),
+  ]);
+  assert.ok(result.stdout.includes('version=0.1.12 deployInfos=[{"deployPercentage":50}]'), result.stdout);
+  // A channel carrying none of the known fields is echoed as itself instead of
+  // being silently rendered as an empty entry.
+  assert.ok(result.stdout.includes('<unrecognised shape: {"lastDeploy":"unrecognised"}>'), result.stdout);
+});
+
+test("status bounds the channel list instead of dumping it", async () => {
+  // Mirrors STATUS_CHANNEL_LIMIT in chrome-web-store.sh: the summary is one line
+  // by design, so it must not grow with the response.
+  const channels = Array.from({ length: 6 }, (_, index) => ({
+    crxVersion: `0.1.${index}`,
+    deployPercentage: index,
+  }));
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state: "STAGED", distributionChannels: channels },
+    }),
+  ]);
+  assert.ok(result.stdout.includes("crxVersion=0.1.3"), result.stdout);
+  assert.ok(result.stdout.includes("| +2 more"), result.stdout);
+  assert.ok(!result.stdout.includes("0.1.5"), `expected the list to be cut: ${result.stdout}`);
+});
+
 // The required-reviewers check was removed by operator decision on 2026-09-03
 // (see verify-release-environment.sh). Every guard that REMAINS is asserted
 // here one mutation at a time, because a suite that only covers the accept
