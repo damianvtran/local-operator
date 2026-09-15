@@ -291,6 +291,35 @@ def session_dir(root: "Path", session_id: str) -> "Path":
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 
+#: How long a session runtime with WORK IN FLIGHT may defer its own disposal
+#: after a termination signal, before it disposes anyway (the drain in
+#: :func:`~local_operator.session.runtime.process._drain_for_signal`).
+#:
+#: WHY A RUNTIME DEFERS AT ALL: SIGTERM is catchable, so a runtime that receives
+#: one can look at what it is doing. Disposing under a running turn is not a
+#: shutdown, it is data loss — the turn is aborted mid-tool and the transcript
+#: is left with a cut-off — and on 2026-09-14 one broadcast sweep SIGTERM'd 21
+#: runtimes within 6 ms and cut 32 turns off that way. The graceful paths were
+#: always work-aware (``may_refresh``); the signal path was the gap.
+#:
+#: WHY THE DEFERRAL IS BOUNDED, and never an unbounded wait: a wedged or runaway
+#: runtime must stay killable, and "that process ignores SIGTERM" is a worse
+#: failure than losing one turn. On expiry the runtime disposes exactly as it
+#: did before this constant existed. SIGKILL, power loss and a crash are outside
+#: its reach — nothing catchable happens there — and the durable outcome already
+#: reports those honestly.
+#:
+#: WHY IT LIVES HERE, in a module neither side owns: the runtime child
+#: (:mod:`~local_operator.session.runtime.process`) obeys it and the kill ladder
+#: (:mod:`~local_operator.session.runtime.control`) must outlast it, and those
+#: two modules may not import each other — the ladder runs on the CLI startup
+#: path and the child is a ``python -m`` entry point. Same reason
+#: ``HEARTBEAT_TIMEOUT_S`` is published here: one number both ends must agree
+#: on. ``control.SIGTERM_GRACE_S`` is derived from it rather than typed
+#: alongside it, and ``tests/unit/session/runtime/test_signal_drain.py`` pins
+#: that the ladder's escalation cannot land inside this window.
+SIGNAL_DRAIN_S = 120.0
+
 
 class DiscoveryRecord(Protocol):
     """The members the shared publication path actually touches.
