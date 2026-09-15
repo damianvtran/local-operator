@@ -201,6 +201,12 @@ def warm_tokenizer() -> None:
 def warm_tokenizer_in_background() -> threading.Thread | None:
     """Run :func:`warm_tokenizer` on a daemon thread; ``None`` when already warm.
 
+    NEVER RAISES — and that is a contract, not a hope: the runtime child calls
+    it as the FIRST statement of ``main()``, before the log file is configured,
+    so anything escaping here kills a session before it can write down why, and
+    the daemon calls it inside its FastAPI ``lifespan``, where escaping fails
+    startup. The conditions, the thread and the warm itself are each covered.
+
     WHY A THREAD RATHER THAN A CALL. Both callers are processes whose first act
     is to spend 600-2,400 ms constructing a session (imports, tool registry,
     transcript). The tokenizer is not part of that work — nothing reads it
@@ -217,16 +223,22 @@ def warm_tokenizer_in_background() -> threading.Thread | None:
     Returns the thread so a caller — or a test — can join it; ``None`` means
     there is nothing to wait for.
     """
+    try:
+        return _warm_tokenizer_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("tokenizer prewarm skipped", exc_info=True)
+        return None
+
+
+def _warm_tokenizer_in_background() -> threading.Thread | None:
     if _ENCODING is not None or _ENCODING_FAILED:
         return None
     try:
         thread = threading.Thread(target=warm_tokenizer, name="lop-tokenizer-warm", daemon=True)
         thread.start()
     except RuntimeError:
-        # `can't start new thread`. The runtime child calls this FIRST in
-        # `main()`, so a refusal here must not become a boot failure: the
-        # contract is that a warm-up is never the thing that breaks, and the
-        # cost simply moves back to where it was.
+        # `can't start new thread`. See the contract above: the cost simply
+        # moves back to where it was.
         logger.debug("tokenizer prewarm could not start a thread", exc_info=True)
         return None
     return thread

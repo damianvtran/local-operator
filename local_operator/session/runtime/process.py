@@ -1736,9 +1736,18 @@ def main() -> int:
     # time-to-first-token (see ``compaction.tokens.warm_tokenizer``). It is a
     # daemon thread whose failure mode is "the cost moves back to where it was"
     # — never a boot failure.
-    from local_operator.compaction.tokens import warm_tokenizer_in_background
+    #
+    # WRAPPED, INCLUDING THE IMPORT. The callee cannot raise; the import can,
+    # and this sits ABOVE ``configure_file_logging``, so an escaping exception
+    # would kill the child before there is anywhere to write down why — a
+    # failed attach with no traceback, which is the failure shape
+    # ``_spawn_runtime``'s capture file exists to end.
+    try:
+        from local_operator.compaction.tokens import warm_tokenizer_in_background
 
-    warm_tokenizer_in_background()
+        warm_tokenizer_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("tokenizer prewarm unavailable at boot", exc_info=True)
 
     # A child has no terminal and no inherited log stream — without this its
     # warnings (a failed prompt, a dead provider) vanish, which is how a

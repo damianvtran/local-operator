@@ -184,10 +184,10 @@ def test_a_prefix_inside_an_app_bundle_is_refused(
     neither side has to trust the other's sanitising.
     """
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
-    monkeypatch.setattr(
-        sys, "pycache_prefix", str(tmp_path / "Local Operator.app" / "Contents" / "pycache")
-    )
+    bundle = tmp_path / "Local Operator.app" / "Contents"
+    monkeypatch.setattr(sys, "pycache_prefix", str(bundle / "pycache"))
     assert bytecode.warm_bytecode_cache_in_background() is None
+    assert not (bundle / "pycache").exists(), "a declined warm must not have created anything"
 
 
 def test_the_probe_ignores_modules_that_are_not_installed(
@@ -269,3 +269,28 @@ def test_the_compiler_child_is_path_isolated_and_optimisation_matched(
     assert argv.index(SAFE_PATH_FLAG) < argv.index("-c")
     assert "-OO" in argv
     assert argv[-1] == bytecode._CHILD_SOURCE
+
+
+def test_the_compiler_refuses_without_a_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_run_child`` drops the refusal, so it MUST hold the redirect.
+
+    It drops ``PYTHONDONTWRITEBYTECODE`` from the child's environment — it has
+    to, or the child cannot write at all — so a child spawned with no
+    ``PYTHONPYCACHEPREFIX`` would write ``__pycache__`` beside every module it
+    imports, the repo and the venv included. That is the one write the module
+    docstring exists to prevent, and the public entry cannot reach here without
+    a prefix; this is what makes the property true of any caller.
+    """
+    import subprocess as subprocess_mod
+
+    calls: list[int] = []
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    monkeypatch.setattr(
+        subprocess_mod, "run", lambda *a, **k: calls.append(1) or types.SimpleNamespace(stdout=b"0")
+    )
+
+    bytecode._run_child()
+
+    assert calls == [], "the compiler was spawned without a redirect to write into"
