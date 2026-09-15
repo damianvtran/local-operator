@@ -118,6 +118,51 @@ Reproduce:
     --prime-bytecode --json after.json
 ```
 
+### Running the suite has a side effect on this machine
+
+The app's environment (`PYTHONDONTWRITEBYTECODE=1` plus a
+`PYTHONPYCACHEPREFIX` under `~/Library/Application Support/Local Operator`) is
+exported into every shell the app starts, including an agent's. Running
+`tests/e2e` from such a shell boots the TUI, whose boot warm then populates the
+*real* app cache. That is the feature working, but it is user state: redirect
+the prefix (`PYTHONPYCACHEPREFIX=/tmp/…`) when running the suite as a check
+rather than as a use of the product.
+
+## Independent verification (QA round 1)
+
+A separate session re-derived the mechanism from scratch, in isolated
+environments with its own prefixes, and reported:
+
+* **Regression:** `tests/e2e -m e2e -n0` — 156 passed, 7 skipped (22 min);
+  `tests/unit/server tests/unit/session` — 3326 passed;
+  `tests/unit/providers tests/unit/mobile` — 1771 passed. All green.
+* **The mechanism, isolated** — a child-shaped process importing
+  `local_operator.session.runtime.process` under each prefix, interleaved:
+  cold median **2308 ms** against warm median **433 ms** (**5.33x**), with every
+  cold run slower than every warm run. The cold prefix stayed cold throughout
+  (0 `.pyc` written, by design — it cannot write); the primed one held 901.
+* **The end-to-end claim:** pooled over 15 cold and 18 primed runs with the
+  first run of each block discarded, desktop first-token 17388 ms against
+  7580 ms (**2.29x**). Its absolutes are 4-10x the table above because it was
+  contending with load 93-650 on 14 CPUs, and one block died on a full disk —
+  which is the right thing to distrust about any absolute here, and the reason
+the ratio is the claim and the milliseconds are not.
+
+* **Break attempts, all declined without raising:** no prefix; prefix inside an
+  `.app`; prefix on an unwritable directory; `_run_child()` called directly
+  with no redirect; each internal step of the entry point broken in turn
+  (fail-closed); 24 hostile prefix shapes × 3 entry points; both warm entry
+  points raising, and their imports broken, in a real runtime child that then
+  booted, logged and ran a turn.
+* **A live session** against the `test` provider: a real spawned runtime child
+  answering a `/team` turn with the transcript written.
+
+Two things QA flagged that are NOT this change: an e2e MCP test leaves
+`__pycache__` beside sources in `.venv` because the MCP SDK's default child
+environment strips the bytecode flags (pre-existing, 374 files); and this
+machine's disk hit 100% during the run, which is worth knowing before timing
+anything on it again.
+
 ## Deliberately not done
 
 * **A pre-forked ("zygote") runtime pool.** The daemon could hold a warm
