@@ -347,6 +347,32 @@ class EpisodeOutcome:
     truncation_detail: str | None = None
 
 
+#: How many times ONE decision retries a reply that spent its whole output
+#: budget thinking -- an EMPTY ``length`` truncation, no text and no tool calls
+#: -- one effort rung lower before the ordinary rejection path sees it.
+#:
+#: The same mechanism, and the same number, as ``harness/loop.py``'s
+#: ``MAX_EMPTY_TRUNCATION_RETRIES``, which the ordinary session path has had all
+#: along while this arm had none: two covers the observed failure shape (a high
+#: rung, then the rung below it also silent) without burning a budget on a model
+#: that cannot answer today. Its absence here is what scored three of five
+#: episodes ZERO on the 2026-09-15 canary: ``task_002``, ``task_010`` and
+#: ``task_012`` each ended on three consecutive replies of
+#: ``output_tokens=16384 reasoning_tokens=16384 stop_reason=length
+#: tool_call_count=0`` -- every token went to thinking, nothing was emitted, and
+#: the SAME effort was re-prompted until ``max_decision_retries`` sealed the
+#: episode ``model_failure`` after 94/82/55 steps.
+#:
+#: Deliberately SEPARATE from ``EpisodeConfig.max_decision_retries``, and not a
+#: widening of it. That bound counts corrective re-prompts -- billed calls whose
+#: reply was wrong and could be corrected by naming the defect. This one counts
+#: retreats, where there is no reply to correct and the fix is a different
+#: question, so spending it must not eat the allowance for a model that is
+#: genuinely not converging: an episode that hits both still gets its full
+#: corrective budget after the retreat allowance is gone.
+MAX_EMPTY_TRUNCATION_RETRIES = 2
+
+
 class _Cancelled(Exception):
     """Raised inside the step loop to unwind to the cancellation terminal."""
 
@@ -813,7 +839,7 @@ class EpisodeRunner:
                 return
 
     async def _decide(self, observation: Observation) -> Any:
-        """Ask the model until it returns a usable batch, within the retry bound.
+        """Ask the model until it returns a usable batch, within the retry bounds.
 
         A :class:`DecisionRejected` is a BILLED call whose reply failed strict
         parsing (the first paid episode's ``frame_id "1"`` against a published
@@ -826,25 +852,92 @@ class EpisodeRunner:
         retryable ``error`` event naming the defect, so a reader can see the
         correction happen rather than infer it from an extra triple.
 
-        The bound is ``config.max_decision_retries`` corrective re-prompts.
-        Spending it means the model is not converging, and the episode ends
-        as a MODEL failure (``_ModelFailure``) rather than burning the budget
-        on replies that can never execute.
+        TWO bounds, and they are deliberately different ones. ``rejection`` is
+        the ordinary corrective re-prompt and is counted against
+        ``config.max_decision_retries``. A reply that arrived as an EMPTY
+        ``length`` truncation -- ``length`` with no text and no tool calls, the
+        reasoning model that spent its ENTIRE output budget thinking -- is not
+        corrected but RETREATED: the same call is re-issued one effort rung
+        lower (``MAX_EMPTY_TRUNCATION_RETRIES``), because there is no reply to
+        correct and the rung that produced silence will produce silence again.
+        Spending the retreat allowance must not eat the corrective one, so the
+        two counters are separate; only when the retreats are gone does an
+        empty truncation count as an ordinary rejection, which is where the
+        ``model_failure`` verdict comes from.
+
+        Both bounds existing is the difference between this arm and the
+        ordinary harness (``harness/loop.py``), and its absence here is what
+        scored three of five canary episodes ZERO on 2026-09-15: the same
+        effort was re-prompted until the episode was sealed, while an ordinary
+        session on the same route recovered at the rung below.
+
+        The verdict's ``attempts`` is the TOTAL billed calls behind it, retreats
+        included, even though only the corrective ones are what exhaust it.
         """
 
         rejections = 0
+        empty_truncations = 0
+        # Every billed call that produced no usable batch, counted separately
+        # from ``rejections`` because they are no longer the same number: a
+        # retreat is a billed call too, and the ``agent_stop`` event's
+        # ``attempts`` field means exactly this total (see
+        # ``AgentStopPayload``). Reporting the corrective count instead would
+        # make a run that spent two extra calls on a retreat look identical to
+        # the run it replaced -- the one thing this fix must not do.
+        attempts = 0
         while True:
             try:
                 return await self._decide_once(observation)
             except _DecisionRejection as rejection:
+                attempts += 1
+                if empty_truncations < MAX_EMPTY_TRUNCATION_RETRIES and self._retreat(rejection):
+                    empty_truncations += 1
+                    continue
                 rejections += 1
                 if rejections > self._config.max_decision_retries:
                     raise _ModelFailure(
-                        f"model produced no usable decision after {rejections} attempt(s): "
+                        f"model produced no usable decision after {attempts} attempt(s): "
                         f"{rejection.diagnostic}",
                         observation_id=observation.observation_id,
-                        attempts=rejections,
+                        attempts=attempts,
                     ) from rejection
+
+    def _retreat(self, rejection: Any) -> bool:
+        """Retreat this episode's decision effort one rung, or say why not.
+
+        ``True`` means ``decide`` must be called again for the SAME observation
+        and the attempt is a retreat rather than a corrective re-prompt. Every
+        reason for ``False`` ends in the ordinary rejection path, which the
+        caller owns: the reply was not an empty output-limit truncation (a
+        truncation that DID emit text or a call is truncated, not silent -- the
+        line ``harness/loop.py`` draws on the same two fields); or the client
+        has no retreat to offer (``None`` -- no effort ladder, or already at the
+        bottom rung, which is the loop's own ``_lower_effort`` refusal), which
+        is also the honest answer for the scripted and historic clients that do
+        not model effort at all.
+
+        The effort is the CLIENT's to lower, not the runner's: it is the client
+        that holds the model spec and the ladder, and reading the rung off the
+        model's own ladder is what keeps this free of provider vocabulary the
+        runner may not import. The capability is optional in the same way
+        ``model_reply_metadata`` is, so a client that cannot retreat degrades to
+        today's behaviour rather than breaking.
+
+        The retreat is recorded where the campaign reads it -- the NEXT
+        attempt's ``model_request.reasoning_effort``, beside the reply that
+        forced it -- rather than as a new event kind: the attempt already has
+        its full triple and its retryable ``error``, and the evidence model's
+        kinds are a closed, versioned vocabulary that readers bucket by.
+        """
+
+        if not getattr(
+            getattr(rejection, "rejection", rejection), "empty_length_truncation", False
+        ):
+            return False
+        lower = getattr(self._model, "retreat_effort", None)
+        if lower is None:
+            return False
+        return lower() is not None
 
     async def _decide_once(self, observation: Observation) -> Any:
         """One model call, writing request/response/usage in that exact order.
@@ -982,6 +1075,15 @@ class EpisodeRunner:
                 tool_count=getattr(decision, "offered_tool_count", 0),
                 prompt_cache_key=decision.prompt_cache_key,
                 context_tokens=decision.context_tokens,
+                # Read with a default for the same reason as ``tool_count``
+                # above: ``decision`` is not always a ``ModelDecision``. It is
+                # the rung this request was BUILT with (the client reports what
+                # it sent, not what the run was configured with), which is what
+                # makes an emptied-budget retry legible -- a retreat shows as a
+                # later request whose effort is one rung lower, beside the
+                # ``length``/zero-tool-call response that forced it. ``None``
+                # for a client that has no effort at all.
+                reasoning_effort=getattr(decision, "reasoning_effort", None),
             ),
         )
         self._append(
@@ -1085,7 +1187,7 @@ class EpisodeRunner:
                     retryable=True,
                 ),
             )
-            raise _DecisionRejection(rejected.diagnostic) from rejected
+            raise _DecisionRejection(rejected.diagnostic, rejection=rejected) from rejected
         return decision
 
     def _append_batch(
@@ -2127,11 +2229,21 @@ class _DecisionRejection(Exception):
     Raised by ``_decide_once`` AFTER the attempt's triple and its retryable
     ``error`` event are in the journal, so ``_decide`` can count it against
     the retry bound without touching evidence itself.
+
+    ``rejection`` is the client exception this wraps, carried WHOLE rather than
+    reduced to its prose. The bound ``_decide`` applies now depends on one fact
+    about the reply the client measured -- whether it was an EMPTY output-limit
+    truncation, the one shape answered with a lower effort instead of a
+    corrective re-prompt -- and re-deriving that from the diagnostic text here
+    is precisely the string-matching fragility the client-side classification
+    exists to remove. Everything the bundle records still comes from the
+    original attempt; this object is only what the retry loop holds.
     """
 
-    def __init__(self, diagnostic: str) -> None:
+    def __init__(self, diagnostic: str, *, rejection: Any | None = None) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
+        self.rejection = rejection
 
 
 class _ModelFailure(Exception):
