@@ -188,7 +188,7 @@ def test_known_older_versions_are_older(have: str, want: str) -> None:
     ("have", "want"),
     [
         (EXPECTED_EXTENSION_VERSION, EXPECTED_EXTENSION_VERSION),  # equal is not older
-        ("0.1.15", EXPECTED_EXTENSION_VERSION),  # ahead is not behind
+        ("0.1.16", "0.1.15"),  # fixed pair: an extension bump cannot invert this fixture
         ("", EXPECTED_EXTENSION_VERSION),  # nothing reported: unknown
         ("0.1.10-beta", EXPECTED_EXTENSION_VERSION),  # not a dotted numeric version
         ("Chrome/153", EXPECTED_EXTENSION_VERSION),

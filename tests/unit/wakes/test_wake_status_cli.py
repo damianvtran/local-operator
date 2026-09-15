@@ -56,6 +56,26 @@ def _args(**kwargs: object) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+def _status_block(out: str, label: str) -> str:
+    """One `wake status` line, with its hanging-indent continuations joined.
+
+    The surface folds prose at its label column (``_wrap_status``), so a line's
+    payload is spread over several physical lines; joining them keeps an
+    assertion about the SENTENCE rather than about the terminal width. Runs of
+    whitespace are collapsed for the same reason: the fold point moves with the
+    width, and a phrase that straddles it must stay assertable — CI's 80 columns
+    broke "could not reach a runtime" where a wider local terminal did not.
+    """
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(label))
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        if not line.startswith(" "):
+            break
+        block.append(line)
+    return " ".join(" ".join(block).split())
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -308,6 +328,240 @@ def test_an_unsupervisable_store_never_reports_another_stores_supervisor(
     assert payload["supervisor"]["running"] is False
     assert payload["supervisor"]["pid"] is None
     assert payload["installed"] is False
+
+
+def test_status_reports_a_fire_that_could_not_be_delivered(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE SURFACE THE DEFECT NEVER HAD. 510 failed engages on this machine left
+    a WARNING in an unrotated log and nothing on any screen: every other line
+    here rendered such a wake as an ordinary overdue row, which is exactly the
+    reassurance that kept it invisible."""
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "statussess05",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "nightly cleanup", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess05", due, error="unreachable: 180s", now_ms=NOW_MS)
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+
+    retrying = _status_block(out, "retrying:")
+    assert "retrying:" in retrying, f"an owed fire was not reported: {out}"
+    assert "statussess05" in retrying, retrying
+    assert "nightly cleanup" in retrying, retrying
+    assert "retried with backoff" in retrying, retrying
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["retrying"] == 1 and payload["undelivered"] == 0
+    assert payload["deliveries"][0]["session_id"] == "statussess05"
+    assert payload["deliveries"][0]["occurrence_ms"] == due
+    assert payload["deliveries"][0]["attempts"] == 1
+    assert payload["deliveries"][0]["last_error"] == "unreachable: 180s"
+
+
+def test_status_says_an_undelivered_fire_is_still_owed(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Past the report threshold the fire is STILL OWED and still retried.
+
+    The whole point of the fix is that a wake is not dropped when a budget
+    expires, so the surface must not read as "lost" either — it names the
+    attempt count, the age, the last error, and the next attempt.
+
+    The line states what IS true rather than what changed (design round 1, D7:
+    "a fire that cannot be delivered is no longer dropped" is a change-note, and
+    the same columns buy the retry clock the `retrying:` line already printed).
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    # A FRESH CLOCK, not the module-level NOW_MS: that one is captured at import,
+    # and a sharded CI run can execute this file minutes later — long enough to
+    # put the recorded next attempt in the past and turn the "next attempt" fact
+    # into a conversation about how slow the runner was.
+    now = int(time.time() * 1000)
+    due = now - 900_000
+    _arm(
+        tmp_path,
+        "statussess06",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "collect metrics", "next_due_at": due}],
+    )
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "statussess06", due, error="could not reach a runtime", now_ms=now
+        )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+
+    line = _status_block(out, "undelivered:")
+    assert "undelivered:" in line, f"an undelivered fire was not reported: {out}"
+    assert "statussess06" in line, line
+    assert f"{deliveries.UNDELIVERED_AFTER_ATTEMPTS} attempt(s)" in line, line
+    assert "could not reach a runtime" in line, line
+    assert "STILL OWED" in line, line
+    assert "retried with backoff" in line, line
+    # The WHEN clause is not silently dropped when the attempt is already due
+    # (design round 1, D3): this row's next attempt is three minutes out.
+    assert "next attempt in" in line, line
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["undelivered"] == 1
+    assert payload["deliveries"][0]["state"] == deliveries.STATE_UNDELIVERED
+    assert payload["deliveries"][0]["attempts"] == deliveries.UNDELIVERED_AFTER_ATTEMPTS
+    # A NEXT ATTEMPT IS SCHEDULED, asserted on the record rather than only on the
+    # rendered offset: the JSON field is a difference against the read clock, so
+    # the property that matters is that the record carries a next attempt after
+    # its last one.
+    stored = deliveries.read_delivery(tmp_path, "statussess06")
+    assert stored is not None and stored["next_attempt_ms"] > stored["last_attempt_ms"], stored
+    assert payload["deliveries"][0]["next_attempt_in_s"] is not None
+
+
+def test_list_marks_an_owed_fire_as_retrying(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The table's own vocabulary, extended by one word.
+
+    The DUE column is where this listing states why a wake is not firing
+    (`dormant`, `ghost`, `stale`), and an owed fire is a fourth reason with a
+    different consequence: the supervisor is still working on it. Rendering it
+    as `stale` would say the opposite — the legend promises `stale` wakes are
+    left to the session's next open.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - 600_000
+    _arm(
+        tmp_path,
+        "statussess08",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "nightly cleanup", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess08", due, error="unreachable", now_ms=NOW_MS)
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "statussess08" in line)
+    assert "retrying" in line, line
+    assert "overdue" not in line, line
+    assert "still owed" in out, out
+    assert "lop wake status" in out, out
+
+
+def test_list_marks_a_stale_owed_fire_as_undelivered_rather_than_stale(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Past the bound, the owed fire is the STRONGER fact.
+
+    A stale schedule is normally given up on; one with an owed record is still
+    being retried, and that is what the column must say.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(9 * 86400 * 1000)
+    _arm(
+        tmp_path,
+        "statussess09",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "forgotten cleanup", "next_due_at": due}],
+    )
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "statussess09", due, error="could not reach a runtime", now_ms=NOW_MS
+        )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "statussess09" in line)
+    assert "undelivered" in line, line
+    assert "stale" not in line.split("forgotten cleanup")[0], line
+    # And the stale legend is NOT printed for a store whose only old wake is
+    # one the supervisor is still retrying.
+    assert "the supervisor no longer fires these" not in out, out
+
+
+def test_status_counts_a_stale_wake_with_an_owed_fire_as_fireable(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reconcilable counts, and no contradiction between the two lines.
+
+    `scheduled` must still equal fireable + dormant + stale + ghost, so a stale
+    row that is nevertheless being fired belongs in `fireable` — otherwise the
+    same wake would be reported as given up on AND as still owed.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    due = NOW_MS - int(9 * 86400 * 1000)
+    _arm(
+        tmp_path,
+        "statussess10",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "old but owed", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "statussess10", due, error="unreachable", now_ms=NOW_MS)
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stale"] == 0, payload
+    assert payload["retrying"] == 1 and payload["undelivered"] == 0
+    assert payload["unfireable"]["stale"] == []
+    assert (
+        payload["scheduled"]
+        == (len(payload["unscheduled"]) if "unscheduled" in payload else payload["armed"])
+        or payload["armed"] == 1
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "stale:" not in out, out
+    assert "retrying:" in out, out
+
+
+def test_a_record_for_a_different_occurrence_is_not_reported(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ledger names an OCCURRENCE, and the recurrence is a different fire.
+
+    A recurring wake that has already advanced its next due time must not
+    inherit the previous occurrence's failed delivery, or every healthy watch
+    with a single old failure would report an owed fire forever.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    _arm(
+        tmp_path,
+        "statussess07",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "hourly watch", "next_due_at": NOW_MS + 60_000}],
+    )
+    deliveries.note_failure(
+        tmp_path, "statussess07", NOW_MS - 3_600_000, error="old failure", now_ms=NOW_MS - 3_600_000
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "retrying:" not in out and "undelivered:" not in out, out
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deliveries"] == [] and payload["retrying"] == 0
 
 
 # --- The REAL parser ---------------------------------------------------------
@@ -654,3 +908,323 @@ def test_a_future_wake_is_named_even_when_another_is_overdue(
     overdue_line = next(line for line in out.splitlines() if line.startswith("overdue:"))
     assert "late watch" in overdue_line, overdue_line
     assert "late watch" not in next_line, next_line
+
+
+def test_list_gives_each_owed_row_the_age_of_its_fire(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Design round 1, D2: two owed rows must not render identically.
+
+    `WHEN` is dropped below 69 columns (measured: hidden at 68, shown at 69), so
+    `retrying owedstale001` — owed for nine days — and `retrying owedretry001` —
+    owed for four minutes — were the same row shape with no age anywhere. The age
+    goes in the TAIL, where the other bounds already live and where the round-5
+    R6/U16 rule says it is never clamped: the message is what gives, and it is
+    the part of the row the reader already knows.
+
+    Mutation-checked: removing the `, owed …` clause fails this with
+    `both owed rows still render the same shape`.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((60, 24))
+    )
+    now = int(time.time() * 1000)
+    nine_days = now - 9 * 86_400_000
+    four_minutes = now - 240_000
+    _arm(
+        tmp_path,
+        "owedsessage1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "stale but owed", "next_due_at": nine_days}],
+    )
+    _arm(
+        tmp_path,
+        "owedsessage2",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "failed once", "next_due_at": four_minutes}],
+    )
+    deliveries.note_failure(
+        tmp_path, "owedsessage1", nine_days, error="unreachable", now_ms=nine_days
+    )
+    deliveries.note_failure(
+        tmp_path, "owedsessage2", four_minutes, error="unreachable", now_ms=four_minutes
+    )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    stale_row = next(line for line in out.splitlines() if "owedsessage1" in line)
+    fresh_row = next(line for line in out.splitlines() if "owedsessage2" in line)
+
+    assert "owed 9d" in stale_row, f"the aged owed row carries no age: {stale_row!r}"
+    assert "owed 4m" in fresh_row, f"the young owed row carries no age: {fresh_row!r}"
+    assert stale_row != fresh_row, "both owed rows still render the same shape"
+    for line in out.splitlines():
+        assert len(line) <= 60, f"the age pushed a row past the terminal ({len(line)}): {line!r}"
+
+
+def test_status_prints_a_due_retry_rather_than_dropping_the_clause(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Design round 1, D3: `next_attempt_in_s` is signed, and ≤ 0 is a state.
+
+    The rendering guard dropped the WHEN clause whenever the figure was not
+    positive — which is exactly when the attempt is already due — so the line
+    that must answer "is this being retried?" ended at `retried with backoff`
+    with no time at all while the neighbouring `undelivered:` line printed one.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    now = int(time.time() * 1000)
+    due = now - 900_000
+    _arm(
+        tmp_path,
+        "statussess07",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "collect metrics", "next_due_at": due}],
+    )
+    # Recorded ten minutes ago, so its next attempt has long since fallen due.
+    deliveries.note_failure(
+        tmp_path, "statussess07", due, error="could not reach a runtime", now_ms=now - 600_000
+    )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "retry due now" in _status_block(out, "retrying:"), out
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deliveries"][0]["next_attempt_in_s"] <= 0, payload["deliveries"][0]
+
+
+def test_status_says_the_owed_fires_are_part_of_the_overdue_count(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Design round 1, D4: the counts double-reported the same wakes.
+
+    Every owed fire is overdue by construction, so a 5-wake store printed
+    `overdue: 3`, `retrying: 2`, `undelivered: 1` and an operator adding the
+    lines got 6 of 5. The subset is now stated where the counts are, and the JSON
+    says it structurally as well as the line does.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    now = int(time.time() * 1000)
+    retried_due = now - 600_000
+    stalled_due = now - 900_000
+    plain_due = now - 300_000
+    for session, due, message in (
+        ("overduesub001", retried_due, "one failed attempt"),
+        ("overduesub002", stalled_due, "many failures"),
+        ("overduesub003", plain_due, "never attempted"),
+    ):
+        _arm(
+            tmp_path,
+            session,
+            cwd=str(tmp_path),
+            schedules=[{"id": "w1", "message": message, "next_due_at": due}],
+        )
+    deliveries.note_failure(tmp_path, "overduesub001", retried_due, error="x", now_ms=now - 30_000)
+    for _ in range(deliveries.UNDELIVERED_AFTER_ATTEMPTS):
+        deliveries.note_failure(
+            tmp_path, "overduesub002", stalled_due, error="x", now_ms=now - 30_000
+        )
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    overdue_line = _status_block(out, "overdue:")
+    assert "— 1 retrying, 1 undelivered" in overdue_line, overdue_line
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["overdue"] == 3, payload
+    assert payload["owed"] == {
+        "subset_of": "overdue",
+        "total": 2,
+        "retrying": 1,
+        "undelivered": 1,
+    }, payload["owed"]
+
+
+def test_a_ghost_with_an_owed_record_is_not_reported_as_retried(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q1: the frame argued with itself about a ghost.
+
+    The supervisor refuses a ghost before recording any attempt and retires on a
+    ghost-only store, so an owed record for a deleted session is frozen — nothing
+    retries it and nothing will. The frame reported it as "still owed and retried
+    with backoff" beside the `ghost:` line that says nothing can fire it, and
+    `--json` said `retrying: 1` with `overdue: 0`.
+
+    `write_entry` directly, not `_arm`: the point is a session with no transcript.
+
+    Mutation-checked: dropping `and not row["ghost"]` from the owed bucket fails
+    this with `the frozen record is still reported as work in progress`.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    now = int(time.time() * 1000)
+    due = now - 600_000
+    write_entry(
+        tmp_path,
+        "ghostowed001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "orphaned", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "ghostowed001", due, error="unreachable", now_ms=now - 60_000)
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "ghost:" in out, out
+    assert "retrying:" not in out, f"the frozen record is still reported as work in progress: {out}"
+    assert "undelivered:" not in out, out
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ghost"] == 1, payload
+    assert payload["retrying"] == 0 and payload["undelivered"] == 0, payload
+    assert payload["owed"]["total"] == 0, payload["owed"]
+    # The record is still on disk — the operator's to delete — it is simply not
+    # reported as an attempt in progress.
+    assert deliveries.read_delivery(tmp_path, "ghostowed001") is not None
+
+    # AND THE LISTING AGREES WITH IT. The `status` bucket was the reported half;
+    # the table's DUE word said `ghost` while its tail said `owed 1m` and the
+    # `retrying` legend printed under it — the same contradiction one surface
+    # over.
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    listed = capsys.readouterr().out
+    row = next(line for line in listed.splitlines() if "ghostowed001" in line)
+    assert "ghost" in row, row
+    # `, owed ` and not the bare word: the synthetic id itself contains "owed".
+    assert ", owed " not in row, row
+    assert "failed attempts." not in listed, listed
+
+
+@pytest.mark.parametrize("threshold", [3, 5])
+def test_retry_legend_uses_the_actual_failure_threshold(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys, threshold: int
+) -> None:
+    """Two failures are still retrying; the legend must cover the whole bucket.
+
+    Moving the real classifier's threshold also moves the rendered boundary,
+    so a copy-only hardcoded replacement cannot silently drift from state.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    monkeypatch.setattr(deliveries, "UNDELIVERED_AFTER_ATTEMPTS", threshold)
+    now = int(time.time() * 1000)
+    due = now - 600_000
+    session_id = "retrythreshold"
+    _arm(
+        tmp_path,
+        session_id,
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "retry boundary", "next_due_at": due}],
+    )
+    for attempts in range(1, threshold + 1):
+        record = deliveries.note_failure(tmp_path, session_id, due, error="x", now_ms=now)
+        assert record is not None and record["attempts"] == attempts
+        retrying = attempts < threshold
+        assert record["state"] == (
+            deliveries.STATE_RETRYING if retrying else deliveries.STATE_UNDELIVERED
+        )
+        assert wake_command(_args(wake_command="list", json=False)) == 0
+        out = capsys.readouterr().out
+        description = (
+            f"fewer than {threshold} failed attempts."
+            if retrying
+            else f"{threshold}+ failed attempts."
+        )
+        assert description in out, out
+        assert "one failed attempt so far" not in out, out
+
+
+def test_the_owed_legends_come_first_and_share_one_tail(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Design round 1, D5 and D8.
+
+    D5: the two legends repeated ~100 characters of the same sentence three
+    lines apart and buried the clause that separates them, which took `wake
+    list` from 11 rows to 21 at 60 columns — past a standard screen.
+    D8: the order put the two states this PR exists to surface LAST, so a reader
+    scanning for what `retrying` means passed the three that mean the opposite.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    now = int(time.time() * 1000)
+    owed_due = now - 600_000
+    stale_due = now - 9 * 86_400_000
+    _arm(
+        tmp_path,
+        "legendssess1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "still firing", "next_due_at": owed_due}],
+    )
+    _arm(
+        tmp_path,
+        "legendssess2",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "given up", "next_due_at": stale_due}],
+    )
+    deliveries.note_failure(tmp_path, "legendssess1", owed_due, error="x", now_ms=now - 30_000)
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+
+    # The legends are located by their own text rather than by their column
+    # padding: the label width is sized from the words actually rendered (round
+    # 2, D12), so it moves with which states are present.
+    owed_legend = out.index(f"fewer than {deliveries.UNDELIVERED_AFTER_ATTEMPTS} failed attempts.")
+    assert out.index("these are still owed and retried with a backoff") > owed_legend, out
+    # D5: one short clause per word and ONE shared sentence, not the same
+    # ~100 characters restated three lines apart.
+    assert out.count("these are still owed and retried with a backoff") == 1, out
+    assert "('lop wake status' has the attempts and the error)" not in out, out
+    # D8: the owed pair leads the three states that mean the opposite.
+    assert owed_legend < out.index("the supervisor no longer fires these"), out
+
+
+def test_the_when_note_lands_under_the_table_not_under_the_legends(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Design round 1, D6: the note explaining the missing column was 14 rows late.
+
+    At 60 columns it printed after three legend blocks, so the reader who noticed
+    the absent `WHEN` column had to scroll past every legend to learn why.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+    from local_operator.wakes import deliveries
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((60, 24))
+    )
+    now = int(time.time() * 1000)
+    due = now - 600_000
+    _arm(
+        tmp_path,
+        "whennotess01",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "collect metrics", "next_due_at": due}],
+    )
+    deliveries.note_failure(tmp_path, "whennotess01", due, error="x", now_ms=now - 30_000)
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    assert "WHEN hidden" in out, out
+    assert out.index("WHEN hidden") < out.index(
+        f"fewer than {deliveries.UNDELIVERED_AFTER_ATTEMPTS} failed attempts."
+    ), out
