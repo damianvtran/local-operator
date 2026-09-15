@@ -107,6 +107,7 @@ def _fresh_import_modules(module: str) -> set[str]:
 @pytest.mark.parametrize(
     "module",
     [
+        "local_operator.evaluation.runner.action_tool",
         "local_operator.evaluation.runner.episode",
         "local_operator.evaluation.runner.guards",
         "local_operator.evaluation.runner.model",
