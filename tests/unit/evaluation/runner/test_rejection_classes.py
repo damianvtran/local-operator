@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from pydantic import ValidationError
@@ -27,17 +27,22 @@ from local_operator.evaluation.action_surface import (
     LEGACY_ACTION_SURFACE,
     ActionAdmissionError,
 )
+from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, KeyAction
 from local_operator.evaluation.runner.provider_client import (
     _MISPLACED_REPLY_VERSION_MARKER,
     REJECTION_CLASS_UNKNOWN,
+    ActionBatchRefused,
     DecisionParseError,
+    RejectionEvidence,
     _action_schema_lines,
     _decode_leading_json,
     _first_field_path,
     classify_admission_error,
     classify_rejection,
     classify_validation_error,
+    parse_decision,
+    rejection_evidence,
     rejection_hint,
     strip_reasoning_boundary_markers,
     validation_diagnostic,
@@ -648,20 +653,22 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
 
 # --- The structured half of the taxonomy -----------------------------------
 #
-# ``classify_rejection`` reads PROSE, and that is the right design for the
-# envelope path: a sealed bundle has only the message the validator wrote, and a
-# class that could only be derived by re-running the validator would measure a
-# different population than the run it is bucketing. It is the wrong design for a
-# payload the model authored, because ``str(ValidationError)`` renders
-# ``input_value=<head>…<tail>`` and ``validate_for`` interpolates
-# ``action.frame_id`` into its own sentence -- so the payload's own bytes become
-# an input to an ordered substring test, and the model chooses its class (and,
-# for a preserved class, receives that rendering as its correction).
+# ``classify_rejection`` reads PROSE, and for the SEALED path that is the only
+# thing there is: a bundle kept the message the validator wrote, and a class that
+# could only be derived by re-running the validator would measure a different
+# population than the run it is bucketing. It is the wrong design for a payload
+# the model authored and the client still held the exception for, because
+# ``str(ValidationError)`` renders ``input_value=<head>…<tail>`` and
+# ``validate_for`` interpolates ``action.frame_id`` into its own sentence -- so
+# the payload's own bytes become an input to an ordered substring test, and the
+# model chooses its class (and, for a preserved class, receives that rendering as
+# its correction). Both of the live path's raise sites therefore classify from
+# the exception they raised, and round 2's B1 was that the ENVELOPE one did not.
 #
 # The two functions below are the other half of the SAME vocabulary, read from
 # structured data: Pydantic's ``type``/``loc`` entries, which carry no value, and
 # the exception's own type. The class keys they return are the ones above, so a
-# bundle's class table stays comparable whichever path produced it.
+# bundle's class table stays comparable whichever reader produced it.
 
 
 def _validation_error(payload: dict[str, Any]) -> ValidationError:
@@ -687,12 +694,13 @@ def _validation_error(payload: dict[str, Any]) -> ValidationError:
 
 
 def test_the_value_free_diagnostic_keeps_what_its_readers_read() -> None:
-    """The rendering the tool passes instead of ``str(error)``.
+    """The rendering the live path passes instead of ``str(error)``.
 
     Two readers in this module depend on its shape -- ``_first_field_path`` on
-    the location line, ``_VALUE_ERROR_RULE`` on the rule sentence -- and the
-    envelope path's own renderer is untouched, so this rendering exists only for
-    a payload the model wrote. What it drops is exactly the refused value.
+    the location line, ``_VALUE_ERROR_RULE`` on the rule sentence -- and both the
+    tool and the envelope path now hand this rendering to them, so the same
+    helpers read a refusal whichever path refused it. What it drops is exactly
+    the refused value.
     """
 
     # ``observation_id`` is stated so the failure is the KEY NAME's: the real
@@ -803,3 +811,181 @@ def test_an_admission_refusal_is_classified_by_type_and_value_free_prefix() -> N
     # A sentence from a later protocol is RECORDED as unrecognised rather than
     # guessed at from its text: no raise site exists that this build cannot name.
     assert classify_admission_error(ValueError("a rule added later")) == REJECTION_CLASS_UNKNOWN
+
+
+# --- The live reply path, driven through the real parser --------------------
+#
+# Everything above tests a reader in isolation. These drive ``parse_decision``
+# and the consume call the runner actually makes, because round 2's MAJOR (B1)
+# was a WIRING question: both readers were correct and the live path used only
+# one of them. It is the path that writes class keys into bundles today, and the
+# one §6 row 11 re-counts as evidence, so "the payload cannot name its class" has
+# to hold HERE and not only at the tool.
+
+_ROUTE = RouteIdentity(provider_id="provider", route_id="route", model_id="model")
+
+
+def _live_refusal(actions: list[dict[str, Any]]) -> RejectionEvidence:
+    """One refusal through the runtime's own parser, and what it recorded.
+
+    ``observation_id`` is injected exactly as ``parse_decision`` injects it from
+    the observation it was called with, so every carrier below fails for its own
+    reason rather than for a stale binding.
+    """
+
+    current = observation()
+    reply = json.dumps(
+        {"actions": [{"observation_id": current.observation_id, **action} for action in actions]}
+    )
+    with pytest.raises(DecisionParseError) as raised:
+        parse_decision(reply, current, route=_ROUTE)
+    return rejection_evidence(reply, raised.value, current, LEGACY_ACTION_SURFACE, None)
+
+
+#: A phrase per class the text table names, so every one is a phrase a model can
+#: put in a field. The rendering fingerprints are deliberately NOT here: a hint
+#: names the value it refused, so a payload whose value IS ``input_value=`` is
+#: echoed back -- the model reading its own bytes, not a rendering leaking. They
+#: are asserted separately, below.
+_ENVELOPE_CLASS_MARKERS = (
+    "second action batch",
+    "is limited to",
+    "reserved envelope",
+    "outside model-visible frame",
+    "unknown frame_id",
+    "does not bind to the current task",
+    "is not valid JSON",
+    "supports only ASCII",
+    "action_batch requires exactly",
+)
+
+_ENVELOPE_RENDERING_MARKERS = ("input_value=", "input_type=", "[type=", "errors.pydantic.dev")
+
+#: ``(carrier, payload builder, control)``, the same shape as the tool path's own
+#: carrier table: the CONTROL fails the same call for the same reason -- a value
+#: of the same type, in the same position -- so a class that moves is the phrase's
+#: doing rather than a different defect. One extra key is named rather than
+#: valued, because a key NAME lands in the Pydantic LOCATION line.
+_ENVELOPE_CARRIERS: list[tuple[str, Callable[[Any], list[dict[str, Any]]], Any]] = [
+    ("wait.duration_ms", lambda value: [{"kind": "wait", "duration_ms": value}], "123abc"),
+    ("click.x", lambda value: [{"kind": "click", "frame_id": "zzz", "x": value, "y": 1}], "abc"),
+    (
+        "extra key value",
+        lambda value: [{"kind": "wait", "duration_ms": 5, "noun": value}],
+        "note",
+    ),
+    ("extra key name", lambda value: [{"kind": "wait", "duration_ms": 5, value: "note"}], "noun"),
+    ("kind", lambda value: [{"kind": value, "duration_ms": 5}], "right_click"),
+    ("key.keys[0]", lambda value: [{"kind": "key", "keys": [value]}], "zzzz"),
+    (
+        "click.frame_id",
+        lambda value: [{"kind": "click", "frame_id": value, "x": 1, "y": 1}],
+        "zzzz",
+    ),
+]
+
+
+@pytest.mark.parametrize("phrase", _ENVELOPE_CLASS_MARKERS)
+def test_the_live_reply_path_class_is_not_the_payload_s_to_name(phrase: str) -> None:
+    """B1 (review round 2): the shipped reply path, driven end to end.
+
+    Before this, ``parse_decision``'s raise sites handed ``str(error)`` to
+    ``classify_rejection`` -- a rendering that embeds ``input_value=<the model's
+    own bytes>`` -- so a phrase in ``duration_ms`` was recorded as a competing
+    batch (a PRESERVED class, so that rendering was the correction handed back)
+    and a ``frame_id`` spelling "outside model-visible frame" was recorded as an
+    out-of-frame coordinate and then taught the coordinate bounds. Both are on
+    the path whose class table is the canary's evidence, which is why "the model
+    cannot name its class" has to hold for the envelope path and not only for the
+    tool: a class the model can name is not evidence, at either end.
+
+    The invariant is the tool path's own: each phrase lands in the SAME class as
+    the control that fails the same call for the same reason, and no correction
+    carries a rendering.
+    """
+
+    for carrier, build, control in _ENVELOPE_CARRIERS:
+        control_class = _live_refusal(build(control)).class_key
+        refused = _live_refusal(build(phrase))
+        assert refused.class_key == control_class, f"{carrier} carrying {phrase!r} moved the class"
+        for marker in _ENVELOPE_RENDERING_MARKERS:
+            assert marker not in refused.hint, f"{carrier} carrying {phrase!r} leaked a rendering"
+
+
+def test_the_live_path_still_names_the_honest_classes() -> None:
+    """The controls the attack is measured against.
+
+    A fix that flattened every refusal into one class, or one hint, would pass
+    the attack above. These are the causes the taxonomy must keep telling apart,
+    each driven through the same parser: a stale ``frame_id`` (whose correction
+    must not spend the retry on the coordinate bounds), an unknown key NAME (which
+    the correction names), and a reply that really is two batches.
+    """
+
+    stale = _live_refusal([{"kind": "click", "frame_id": "zzz", "x": 1, "y": 1}])
+    assert stale.class_key == "unknown-frame-id"
+    assert "unknown frame_id 'zzz'" in stale.hint
+    assert "x and y" not in stale.hint
+
+    unknown = _live_refusal([{"kind": "key", "keys": ["NOSUCH"]}])
+    assert unknown.class_key == "unknown-key"
+    assert "NOSUCH" in unknown.hint
+
+    current = observation()
+    batch = json.dumps(
+        {"actions": [{"observation_id": current.observation_id, "kind": "wait", "duration_ms": 5}]}
+    )
+    with pytest.raises(DecisionParseError) as raised:
+        parse_decision(batch + batch, current, route=_ROUTE)
+    second = rejection_evidence(batch + batch, raised.value, current, LEGACY_ACTION_SURFACE, None)
+    assert second.class_key == "second-batch"
+    assert "second action batch" in second.hint
+    assert not isinstance(raised.value, ActionBatchRefused), "the decoder's own sentence"
+
+
+@pytest.mark.parametrize("phrase", _ENVELOPE_RENDERING_MARKERS)
+def test_a_live_payload_carrying_a_rendering_marker_still_cannot_move_the_class(
+    phrase: str,
+) -> None:
+    """The strings that make a rendering LOOK like one are values like any other.
+
+    ``input_value=`` and the docs URL are exactly what a preserved class printed
+    verbatim, so a payload carrying one is the case that was worst served. The
+    class is asserted and the hint is not: the correction names the field it
+    refused, so the model's own bytes come back -- that is the model reading
+    itself, which is what the tool path's own split keeps apart too.
+    """
+
+    for carrier, build, control in _ENVELOPE_CARRIERS:
+        control_class = _live_refusal(build(control)).class_key
+        refused = _live_refusal(build(phrase))
+        assert refused.class_key == control_class, f"{carrier} carrying {phrase!r} moved the class"
+
+
+def test_a_two_defect_payload_keeps_the_text_table_class_and_names_the_extra_field() -> None:
+    """F1 (review round 2): one payload, two real defects, one class either way.
+
+    ``{"kind": "key", "keys": ["NOSUCH"], "bogus": 1}`` breaks two rules at once:
+    an unknown key NAME and an extra field. The text table answers ``unknown-key``
+    first, because the key name is the repair the model is asked for -- so the
+    structured reader has to agree, or the class table would depend on which
+    reader saw the payload. A phase split that tested every type code ahead of
+    every rule prefix inverted exactly this pair; the order here is the text
+    table's, marker for marker.
+
+    The second payload reaches the extra-field branch instead (its ``keys`` error
+    is the duplicate-chord sentence, which names no class), and pins that
+    branch's other half: the field named is the one that was actually extra. It
+    used to name ``keys`` -- the one field a ``key`` action does take -- because
+    it read the first location in the rendering rather than the
+    ``extra_forbidden`` entry's own.
+    """
+
+    both = _live_refusal([{"kind": "key", "keys": ["NOSUCH"], "bogus": 1}])
+    assert both.class_key == "unknown-key"
+    assert "NOSUCH" in both.hint
+
+    extra = _live_refusal([{"kind": "key", "keys": ["CTRL", "CTRL"], "bogus": 1}])
+    assert extra.class_key == "extra-action-key"
+    assert '"bogus" is not a field' in extra.hint
+    assert '"keys" is not a field' not in extra.hint

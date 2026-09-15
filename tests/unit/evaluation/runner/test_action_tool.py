@@ -866,7 +866,16 @@ async def test_a_successful_batch_returns_the_rendered_observation_and_the_recei
 
 @pytest.mark.asyncio
 async def test_a_call_with_no_pending_observation_is_refused(tmp_path: Any) -> None:
-    """Before anything is pending there is no screen to bind to, so nothing runs."""
+    """A spent token refuses the call, and nothing reaches the adapter.
+
+    The state built here is a SPENT token, taken by hand -- one of the two
+    production ways to arrive at it, and the simplest to construct. What this
+    pins is the BRANCH: the refusal, its class, and zero executions. The
+    sentence's two disjuncts are each asserted where they really happen, by
+    ``test_two_calls_in_one_turn_execute_once_and_refuse_once`` (a batch spent
+    this turn's token) and ``test_mark_terminal_ends_the_episode`` (the episode
+    ended) -- neither is true in this constructed state.
+    """
     adapter = FakeAdapter(tmp_path, EPISODE)
     session = _session(adapter)
     token = PendingObservationToken(adapter.current)
@@ -881,10 +890,11 @@ async def test_a_call_with_no_pending_observation_is_refused(tmp_path: Any) -> N
 
     assert refused.is_error
     assert (refused.details or {})[REJECTION_CLASS_KEY] == "second-batch"
-    # The sentence IS the correction, so it has to be true HERE, where no batch
-    # ran in this turn at all. It covers the other cause that reaches the same
-    # branch -- an episode that has ended -- in the same breath, which is the
-    # only way one sentence can be honest about both.
+    # The sentence IS the correction, and it has to be true of both causes that
+    # reach this branch, so it is stated once and covers them in the same breath.
+    # It is NOT proved true here: this call spent the token by hand, with no batch
+    # run and no episode end, which is why the two disjuncts are asserted by the
+    # tests that build them (see the docstring).
     text = refused.content[0].text  # type: ignore[union-attr]
     assert "found no observation to bind to" in text
     assert "the episode has ended" in text

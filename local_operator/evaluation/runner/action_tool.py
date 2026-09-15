@@ -370,11 +370,12 @@ def build_action_tool(
         except ValidationError as error:
             # The CLASS comes from the error's structured entries and the TEXT
             # from a rendering that keeps no value the model supplied. Deriving
-            # the class from ``str(error)`` -- which the envelope path does --
-            # would make the payload's own bytes an input to an ordered substring
-            # test, so a model could name its own refusal class by putting a
-            # marker phrase in a field, and, for a preserved class, be handed
-            # back the rendering this module promises never reaches it.
+            # the class from ``str(error)`` would make the payload's own bytes an
+            # input to an ordered substring test, so a model could name its own
+            # refusal class by putting a marker phrase in a field, and, for a
+            # preserved class, be handed back the rendering this module promises
+            # never reaches it. The envelope path's own raise sites classify the
+            # same way, so one class table covers both.
             return _refusal(
                 tool_call_id,
                 validation_diagnostic(error),
