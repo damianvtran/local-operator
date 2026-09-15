@@ -6732,7 +6732,15 @@ class Session:
         return state
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
-        """Acknowledge the observed outcome, never whichever turn is newest now."""
+        """Acknowledge the observed outcome, never whichever turn is newest now.
+
+        ``token`` must be the completion the conversation is CURRENTLY asking
+        about: an older one raises ``SupersededCompletionToken`` (a
+        ``ValueError``) rather than writing a receipt that cannot make the result
+        read. Every caller holds the attention state it rendered, so the remedy is
+        always in its hands -- re-read that state and acknowledge the token it now
+        names (see ``AttentionStore.acknowledge``).
+        """
         from local_operator.session.attention import (
             AttentionStore,
             conversation_identity,

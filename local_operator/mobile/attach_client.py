@@ -1149,16 +1149,27 @@ class AttachClient:
 
     # -- requests ---------------------------------------------------------------
 
+    @staticmethod
+    def _raise_for_reply_error(reply: dict[str, Any]) -> None:
+        """Turn an error frame into the exception this client raises for it.
+
+        Shared by every op reader, because the mapping is a protocol fact (an
+        admission refusal is a typed error, anything else is the owner's own
+        sentence) and a second copy of it is a second place to forget one.
+        """
+        if reply.get("op") != "error":
+            return
+        from local_operator.session.errors import admission_error
+
+        known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
+        if known is not None:
+            raise known
+        raise RuntimeError(str(reply.get("message", "request failed")))
+
     async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
         reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
-        if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+        self._raise_for_reply_error(reply)
         return str(reply.get("detail", ""))
 
     async def request_ack_with_duplicate(self, op: str, **fields: Any) -> tuple[str, bool]:
@@ -1173,13 +1184,7 @@ class AttachClient:
         which reads as False — the pre-idempotency behaviour.
         """
         reply = await self._request_frame(op, **fields)
-        if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+        self._raise_for_reply_error(reply)
         return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
 
     async def _request_frame(
@@ -1322,10 +1327,24 @@ class AttachClient:
     async def abort(self) -> str:
         return await self._request("abort")
 
-    async def acknowledge_attention(self, token: str) -> str:
+    async def acknowledge_attention_state(self, token: str) -> dict[str, Any]:
+        """Acknowledge a completion and return the state the OWNER computed.
+
+        The follower's own projection cannot answer "did my receipt land?": the
+        owner publishes it on the event queue while this ack is written
+        directly, so the ack is resolved a whole writer ahead of the state it
+        produced and an honest receipt reads as a lost one (agent review round
+        1, R4). The owner therefore hands the state back ON the ack (see
+        ``AckDetail`` in ``session.runtime.server``); an owner older than that
+        field sends none, and an empty mapping is the honest answer -- the
+        caller must treat it as INCONCLUSIVE rather than as a verdict.
+        """
         if not self._attention_supported:
             raise RuntimeError("update the owner to acknowledge completions")
-        return await self._request("acknowledge_attention", completion_token=token)
+        reply = await self._request_frame("acknowledge_attention", completion_token=token)
+        self._raise_for_reply_error(reply)
+        attention = reply.get("attention")
+        return dict(attention) if isinstance(attention, dict) else {}
 
     async def request_stop(self) -> str:
         """Ask the owner to stop itself — the follower's bare ``/stop``.

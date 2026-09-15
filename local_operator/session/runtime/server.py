@@ -763,6 +763,25 @@ _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.We
 _TRAJECTORY_PAGE_MAX = 120
 
 
+@dataclass(frozen=True)
+class AckDetail:
+    """An op's ack: the one-line receipt, plus state the CALLER must verify.
+
+    Most ops answer with a sentence and a sentence is all their caller needs.
+    The receipt op cannot be one of them: its caller has to know whether this
+    call actually moved the read watermark, and the projection it would
+    otherwise read cannot tell it. ``frontend_update`` is delivered on the
+    connection's event queue while the ack is written directly, so a follower
+    resolves its ack a whole writer ahead of the state that ack produced -- the
+    honest receipt reads as a lost one (agent review round 1, R4). Carrying the
+    state the owner computed, on the ack itself, is what makes "verify, never
+    assume" possible on an attached session at all.
+    """
+
+    detail: str
+    attention: dict[str, Any]
+
+
 @dataclass
 class _ClientConn:
     """One authenticated control connection in the runtime's registry.
@@ -2671,11 +2690,28 @@ class RuntimeServer:
                     # nothing is appended twice. See
                     # ``ServingSessionHandle.has_admitted_command``.
                     detail = "already admitted"
+                    extra: dict[str, Any] = {}
                 else:
-                    detail = await self._dispatch(op, frame)
+                    outcome = await self._dispatch(op, frame)
+                    # An op may answer with state as well as with a sentence
+                    # (``AckDetail``): the extra fields ride THIS frame rather
+                    # than a follow-up push, because the caller of the receipt op
+                    # has to verify what that op did and its own projection is
+                    # delivered by a different writer.
+                    detail, extra = (
+                        (outcome.detail, {"attention": outcome.attention})
+                        if isinstance(outcome, AckDetail)
+                        else (outcome, {})
+                    )
                 await self._send_to(
                     conn,
-                    {"op": "ack", "req": req, "detail": detail, "duplicate": duplicate},
+                    {
+                        "op": "ack",
+                        "req": req,
+                        "detail": detail,
+                        "duplicate": duplicate,
+                        **extra,
+                    },
                 )
                 if not duplicate:
                     await self._handle.refresh()
@@ -2935,7 +2971,7 @@ class RuntimeServer:
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
 
-    async def _dispatch(self, op: str, frame: dict[str, Any]) -> str:
+    async def _dispatch(self, op: str, frame: dict[str, Any]) -> str | AckDetail:
         from local_operator.mobile.types import validate_control_frame
 
         validate_control_frame(frame)
@@ -2947,9 +2983,14 @@ class RuntimeServer:
             acknowledge = getattr(self._handle, "acknowledge_attention", None)
             if not callable(acknowledge):
                 raise ValueError("completion acknowledgements unavailable; update the owner")
-            await cast(Any, acknowledge)(token)
+            state = await cast(Any, acknowledge)(token)
             self._schedule_push()
-            return "completion acknowledged"
+            # The store's own answer, computed in the same write transaction that
+            # decided the receipt. A handle that returns nothing (a test double,
+            # or an owner whose ack is a bare op) answers with no state rather
+            # than a fabricated one: see ``AckDetail`` for why the caller must
+            # then stay inconclusive.
+            return AckDetail("completion acknowledged", state if isinstance(state, dict) else {})
         if op == "ping":
             return "pong"
         if op == "snapshot":

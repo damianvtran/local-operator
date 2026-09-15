@@ -2416,7 +2416,11 @@ def build_app(daemon: MobileDaemon):
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
-        from local_operator.session.attention import AttentionStore
+        from local_operator.session.attention import (
+            SUPERSEDED_TOKEN_CODE,
+            AttentionStore,
+            SupersededCompletionToken,
+        )
 
         try:
             body = await request.json()
@@ -2430,6 +2434,21 @@ def build_app(daemon: MobileDaemon):
         try:
             state = await asyncio.to_thread(
                 AttentionStore().acknowledge, f"session/{session_id}", token
+            )
+        except SupersededCompletionToken:
+            # A REAL token that a newer completion has replaced. Its own 409
+            # rather than the unknown-token sentence, because the phone's remedy
+            # differs: the completion it is looking at is no longer the one the
+            # conversation is asking about, so re-reading the projection and
+            # acknowledging the token it now names is what clears the mark. The
+            # body carries the machine code for exactly that branch (§ Read APIs
+            # and transports in docs/ATTENTION.md).
+            return JSONResponse(
+                {
+                    "error": "completion token superseded by a newer completion",
+                    "code": SUPERSEDED_TOKEN_CODE,
+                },
+                status_code=409,
             )
         except ValueError:
             return JSONResponse({"error": "unknown completion token"}, status_code=409)

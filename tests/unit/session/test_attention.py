@@ -54,15 +54,115 @@ def test_delayed_duplicate_and_foreign_acknowledgements(tmp_path: Path) -> None:
     a, b = str(uuid.uuid4()), str(uuid.uuid4())
     store.publish("session/a", a, "message-a", "complete")
     store.publish("session/a", b, "message-b", "error")
-    assert store.acknowledge("session/a", a)["unseen"] is True
+    # The stale receipt is REFUSED, not answered with a state it cannot change.
+    # `unseen` is computed against the NEWEST sequence, so a 200 for `a` here
+    # would claim success for a conversation the caller has left unread -- and
+    # that is exactly what both shipped clients latched on, forever.
+    # The refusal TYPE is read by name rather than imported: the name is what
+    # the surfaces key on (`detail.code` / the mobile `code`), and a name check
+    # keeps this module importable against a pre-fix tree, so the assertion that
+    # fails there is about BEHAVIOUR (no refusal, or a moved receipt) rather
+    # than about a symbol having been added.
+    with pytest.raises(ValueError) as refused:
+        store.acknowledge("session/a", a)
+    assert type(refused.value).__name__ == "SupersededCompletionToken", refused.value
+    assert store.state("session/a")["revision"] == [2, 0]
     assert store.acknowledge("session/a", b)["unseen"] is False
     revision = store.state("session/a")["revision"]
+    # Reordered duplicate delivery of the old receipt still converges: the
+    # conversation is already read, so there is nothing left to move and nothing
+    # to refuse. This is the case a buffered phone receipt arrives as.
     assert AttentionStore(path).acknowledge("session/a", a)["revision"] == revision
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as unknown:
         store.acknowledge("session/b", b)
+    # A foreign token is a DIFFERENT refusal from a stale one: "this is not mine"
+    # and "mine has moved on" send the caller to opposite next steps, so the type
+    # has to discriminate even though both are 409 on the wire.
+    assert type(unknown.value).__name__ != "SupersededCompletionToken", unknown.value
     with pytest.raises(ValueError):
         store.publish("session/b", b, "message-b", "error")
     assert store.state("session/a")["revision"] == revision
+
+
+def test_a_superseded_token_is_refused_without_touching_the_receipt(tmp_path: Path) -> None:
+    """The operator's shape: an acknowledged EARLIER outcome, then a new result.
+
+    Reproduces `session/8f0f9c54c057` from the live store: the acknowledgement
+    that pinned the receipt to the older (error) completion, then the completed
+    turn that made the conversation unread again. The refused acknowledgement
+    must leave the receipt exactly where it was -- the defect was a 200 that
+    moved nothing while the caller believed it had read the result.
+    """
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    error_token, complete_token = str(uuid.uuid4()), str(uuid.uuid4())
+    store.publish("session/a", error_token, f"completion-{error_token}", "error")
+    assert store.acknowledge("session/a", error_token)["revision"] == [1, 1]
+    store.publish("session/a", complete_token, "final-assistant-message", "complete")
+    before = store.state("session/a")
+
+    with pytest.raises(ValueError):
+        store.acknowledge("session/a", error_token)
+
+    after = store.state("session/a")
+    assert after == before, "a refused acknowledgement changed the stored state"
+    assert after["unseen"] is True and after["revision"] == [2, 1]
+    # And the honest acknowledgement -- the conversation's CURRENT token -- does
+    # clear it, which is the whole of the fix: a 2xx means read.
+    cleared = store.acknowledge("session/a", complete_token)
+    assert cleared["unseen"] is False and cleared["revision"] == [2, 2]
+
+
+def test_an_absent_store_is_an_unknown_token_not_a_refusal_to_supersede(tmp_path: Path) -> None:
+    """No store on disk must not create one, and must not claim supersession.
+
+    An empty or missing database has nothing to supersede, so the caller hears
+    the same "unknown completion token" it hears for any other token that cannot
+    be looked up. Creating the file here would also make a read-only question
+    write storage, which the read paths deliberately never do.
+    """
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    with pytest.raises(ValueError) as unknown:
+        store.acknowledge("session/a", str(uuid.uuid4()))
+    assert type(unknown.value).__name__ == "ValueError"
+    assert not path.exists()
+
+
+def test_an_acknowledgement_racing_a_newer_publish_never_claims_a_read(tmp_path: Path) -> None:
+    """The race the refusal exists for, on the store's own write lock.
+
+    A caller holds the token it rendered; a publish can land between that read
+    and the acknowledgement. Either order is correct -- the receipt moves and the
+    newer completion stays unseen, or the acknowledgement is refused -- but
+    NEVER "accepted while the conversation reads as unread", which is the state
+    that made a client certain it had read something it had not.
+    """
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    current, newer = str(uuid.uuid4()), str(uuid.uuid4())
+    store.publish("session/a", current, "message-a", "complete")
+
+    def race() -> None:
+        for _ in range(40):
+            try:
+                store.acknowledge("session/a", current)
+            except ValueError:
+                return
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(race),
+            pool.submit(store.publish, "session/a", newer, "message-b", "complete"),
+        ]
+        for future in futures:
+            future.result()
+
+    state = store.state("session/a")
+    assert state["completion_token"] == newer, "the newer completion was lost"
+    assert state["revision"][0] == 2
+    assert state["unseen"] is True, "an acknowledgement of the older token left it read"
+    assert store.acknowledge("session/a", newer)["unseen"] is False
 
 
 def test_concurrent_clients_converge_without_lost_receipts(tmp_path: Path) -> None:
@@ -71,12 +171,37 @@ def test_concurrent_clients_converge_without_lost_receipts(tmp_path: Path) -> No
     tokens = [str(uuid.uuid4()) for _ in range(20)]
     for token in tokens:
         store.publish("session/a", token, token, "complete")
+
+    def acknowledge(token: str) -> dict[str, Any] | None:
+        """One client's attempt with the token it holds, stale or not.
+
+        A refusal is an ANSWER here, not a failure: only the conversation's
+        current completion -- or any token once the conversation is read -- can
+        be acknowledged, and a client holding an older token is told so instead
+        of being handed a state that reads as a successful read.
+        """
+        try:
+            return AttentionStore(path).acknowledge("session/a", token)
+        except ValueError as refused:
+            assert type(refused).__name__ == "SupersededCompletionToken", refused
+            return None
+
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(
-            pool.map(
-                lambda token: AttentionStore(path).acknowledge("session/a", token), reversed(tokens)
-            )
-        )
+        results = list(pool.map(acknowledge, reversed(tokens)))
+    for token, state in zip(reversed(tokens), results):
+        if state is None:
+            continue
+        if state["unseen"]:
+            # Recorded against its own token and nothing further: the receipt
+            # moved to exactly the sequence the client named.
+            assert state["revision"][1] == tokens.index(token) + 1
+        else:
+            # Accepted while already read: the only way a state can read as
+            # `unseen: false` is for the watermark to cover the CURRENT token.
+            assert state["revision"][1] == len(tokens)
+    # The CURRENT token's acknowledgement is never refused -- it is either the
+    # completion being asked about or the conversation is already read -- so the
+    # writers converge on read no matter how they interleaved.
     assert not AttentionStore(path).state("session/a")["unseen"]
     # Replaying the journal after owner restart cannot mint a second completion.
     store.publish("session/a", tokens[-1], tokens[-1], "complete")

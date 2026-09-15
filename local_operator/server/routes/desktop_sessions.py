@@ -56,6 +56,7 @@ from local_operator.server.utils.desktop_sessions import (
     SubagentChildUnavailable,
     resolve_working_directory,
 )
+from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.frontend_state import (
     FrontendSync,
@@ -436,6 +437,13 @@ async def errors() -> AsyncIterator[None]:
         )
 
         if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        if isinstance(error, SupersededCompletionToken):
+            # Stale, not broken: the caller's token is real but no longer current,
+            # and the remedy is to re-read the conversation's attention state and
+            # acknowledge the token it names. The machine code is what lets the
+            # renderer take that path quietly instead of backing off as if the
+            # store had refused (the `code` field of its control error).
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error:
