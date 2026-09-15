@@ -1090,6 +1090,43 @@ async def prompt(session_id: str, body: Prompt, request: Request):
         )
 
 
+def desktop_viewer_must_submit(receipt_type: Any) -> bool:
+    """Whether THIS route owes the request a slash receipt carries.
+
+    The receipt vocabulary is shared with the runtime and the ownership rule is
+    one predicate — :func:`runtime_must_complete`: the RUNTIME submits the
+    request only when the dialing client did NOT declare that receipt type as
+    its own. The desktop viewer is a DECLARING client — ``AttachedSession``
+    dials with ``slash_consumers=list(SLASH_ACTION_RECEIPTS)`` on every surface,
+    ``desktop`` included — so for the receipts in that vocabulary the runtime
+    deliberately stands down, and the submit is this host's job.
+
+    Keyed off the SHARED vocabulary rather than the local two-name tuple this
+    route used to spell out, because that tuple is exactly how ``goal_set`` was
+    lost: #796 taught the runtime and the TUI that a goal submission is a
+    request-carrying receipt, and this route — a THIRD host of the rule — kept
+    admitting ``team_attached``/``agent_attached`` only, so ``/goal <text>``
+    stored the standing goal and dropped the turn with no user row and no error.
+    A type added to ``SLASH_ACTION_RECEIPTS`` is completed here from that moment,
+    and the drift guard in ``tests/unit/server/test_desktop_goal_admission.py``
+    fails loudly if this stops being derived from it.
+
+    The function-local import is what keeps that guard honest: the tuple is read
+    AT CALL TIME, so a test that extends the vocabulary watches this answer
+    change, where a module-level binding would freeze the answer it set out to
+    check.
+    """
+    from local_operator.session.runtime.types import (
+        SLASH_ACTION_RECEIPTS,
+        runtime_must_complete,
+    )
+
+    # ``runtime_must_complete`` is False exactly when the client declared the
+    # type, and the desktop bridge declares the whole list — so the inversion is
+    # this host's half of the same rule, never a second reading of it.
+    return not runtime_must_complete(receipt_type, SLASH_ACTION_RECEIPTS)
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/commands", response_model=CRUDResponse[CommandReceipt]
 )
@@ -1165,11 +1202,31 @@ async def command(session_id: str, body: Command, request: Request):
                     422 if outcome.data["code"] == "loop_invalid" else 409, outcome.text
                 )
             consumed = outcome.data.get("request", "")
-            attached = outcome.data.get("type") in {"team_attached", "agent_attached"}
-            if attached and (consumed or body.images):
-                # The runtime returns attachment metadata, not a started turn.
-                # Match its typed discriminator rather than blindly submitting
-                # any string a listing/picker happens to call a request.
+            # The receipt's typed discriminator is the ONLY thing that decides
+            # whether a request still needs a home — the runtime returns
+            # attachment metadata for an attach and the goal text for a goal,
+            # never a started turn — and it is read through the shared
+            # vocabulary so a newly declared receipt cannot be missed here.
+            # See ``desktop_viewer_must_submit`` for the ownership rule.
+            #
+            # ORDER, matching the TUI's (``app.py::_cmd_goal``): the goal is
+            # stored and the receipt built BEFORE this admits anything — so
+            # "goal set" describes the state the run began under — and the
+            # admission is reported INSIDE that same receipt rather than as a
+            # second answer the caller has to correlate.
+            #
+            # Two deliberate differences from the TUI path, both inherited from
+            # the attach admissions this branch already served:
+            # * the text submitted is the receipt's own ``request`` — the
+            #   argument as the runtime recorded it — with the body's structured
+            #   images passed straight through. There is no composer here, so
+            #   there is no attachment map to resolve ``[Image #N]`` markers or
+            #   collapsed pastes against, unlike ``_submit_command_prompt``;
+            # * a turn already running QUEUES this admission behind it (the
+            #   runtime's ``prompt`` op) where the TUI steers. Queued, never
+            #   dropped, is the behaviour ``/team`` and ``/agent`` already have
+            #   on this path.
+            if desktop_viewer_must_submit(outcome.data.get("type")) and (consumed or body.images):
                 detail, duplicate = await bridge.remote.admit_prompt(
                     str(consumed),
                     command_id=body.request_id,
