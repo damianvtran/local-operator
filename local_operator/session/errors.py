@@ -51,12 +51,21 @@ class RuntimeRetiring(ValueError, RuntimeError):
 
     code = "runtime_retiring"
 
+    #: The sentence, in the halves a viewer needs. ``HEAD`` states the situation,
+    #: ``TAIL`` names the one act left; the owner's own rendering keeps them
+    #: joined by ``REFUSED``, and a viewer with a COMPOSER inserts its claim
+    #: between them instead of bolting it on after the full stop. Measured on the
+    #: appended form (design round 3, D1; UX round 3, U5): two em dashes in one
+    #: paragraph, a fragment opening after a ``.``, a strand at 100 columns and a
+    #: one-word last line (``composer``) at 60 — in the one sentence whose job is
+    #: to say the operator's work is safe. Exposed rather than re-composed so the
+    #: two ends cannot drift.
+    HEAD = "This session is switching to a newer build; the one it loaded is gone from disk."
+    REFUSED = "The message was not admitted"
+    TAIL = "send it again once the session is running again."
+
     def __init__(self) -> None:
-        super().__init__(
-            "This session is switching to a newer build; the one it loaded is gone "
-            "from disk. The message was not admitted — send it again once the "
-            "session is running again."
-        )
+        super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 
 class ProfileRegistryUnavailable(ValueError):

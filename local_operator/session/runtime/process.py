@@ -848,7 +848,14 @@ async def _begin_drain(
     announce = getattr(runtime, "announce_retiring", None)
     if callable(announce):
         try:
-            await cast(Callable[..., Awaitable[None]], announce)("stale-build", to=to)
+            # ``draining=True``: this frame is the operator's ONLY warning
+            # before admissions start being refused, so it must carry the fact
+            # that refusals are in force from the latch below until the drain
+            # empties. A viewer that inferred that from its own state inferred
+            # "cold", which is true of every handover (QA round 3, Q-1).
+            await cast(Callable[..., Awaitable[None]], announce)(
+                "stale-build", to=to, draining=True
+            )
         except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
             logger.debug("retiring announcement failed", exc_info=True)
     if stop.is_set():

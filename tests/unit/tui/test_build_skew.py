@@ -35,7 +35,7 @@ import asyncio
 import pytest
 
 from local_operator.session.protocol import RuntimeLocality
-from local_operator.tui.app import DRAIN_NOTICE, OperatorApp
+from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
 from local_operator.update import BuildStamp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -43,16 +43,6 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 def _notices(app: OperatorApp) -> list[str]:
     return [block._text for block in app.query(NoticeBlock)]
-
-
-#: The drain announcement `_on_runtime_refreshed` paints when the retiring
-#: runtime is still finishing work. The cells below bind what the VERSION note
-#: says, and their viewer is deliberately BUSY (that is what makes the skew
-#: notice paint at all), so each filters this row out rather than asserting
-#: around it. The drain row's own contract — announced when the runtime is
-#: busy, silent when it is idle — is pinned in `test_retiring_refusal.py`.
-def _version_notes(app: OperatorApp) -> list[str]:
-    return [text for text in _notices(app) if text != DRAIN_NOTICE]
 
 
 def _wrapped_rows(block: NoticeBlock) -> list[str]:
@@ -1394,15 +1384,15 @@ async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tm
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
         # The version note's own ink, taken off the same filtered blocks: the
         # drain row is `muted` too, and this asserts what the REFRESH line says.
-        tokens = [b._token for b in app.query(NoticeBlock) if b._text != DRAIN_NOTICE]
+        tokens = [block._token for block in app.query(NoticeBlock)]
 
         # Consumed once: a second engage tail must not repeat it.
         app._announce_refresh_completed()
         await pilot.pause()
-        again = _version_notes(app)
+        again = _notices(app)
 
     assert len(notices) == 1, notices
     assert "0.51.29@2412b1d \u2192 0.51.30@d7f12d3" in notices[0], notices[0]
@@ -1435,7 +1425,7 @@ async def test_an_unchanged_build_after_a_refresh_says_nothing(monkeypatch, tmp_
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert notices == [], notices
 
@@ -1479,7 +1469,7 @@ async def test_a_runtime_too_old_to_name_its_build_is_not_half_announced(
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert notices == [], notices
 
@@ -1767,7 +1757,7 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert notices == [], notices
 
@@ -1807,7 +1797,7 @@ async def test_a_sidebar_switch_cannot_announce_the_previous_session(monkeypatch
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert notices == [], f"session A's stamp answered against session B: {notices}"
 
@@ -1836,7 +1826,7 @@ async def test_a_refresh_rebind_to_the_same_session_still_announces(monkeypatch,
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert len(notices) == 1, notices
     assert "0.51.29@2412b1d \u2192 0.51.30@d7f12d3" in notices[0], notices[0]
@@ -1958,7 +1948,7 @@ async def test_the_refresh_note_keeps_its_version_pair_on_one_row(monkeypatch, t
                 )
                 app._announce_refresh_completed()
                 await pilot.pause()
-                blocks = [b for b in app.query(NoticeBlock) if b._text != DRAIN_NOTICE]
+                blocks = list(app.query(NoticeBlock))
                 assert len(blocks) == 1, (width, name)
                 rows = _wrapped_rows(blocks[0])
 
@@ -1989,7 +1979,7 @@ async def test_the_refresh_note_does_not_restate_the_version_twice(monkeypatch, 
         )
         app._announce_refresh_completed()
         await pilot.pause()
-        notices = _version_notes(app)
+        notices = _notices(app)
 
     assert len(notices) == 1, notices
     assert "0.51.30, aaaaaaa \u2192 bbbbbbb" in notices[0], notices[0]

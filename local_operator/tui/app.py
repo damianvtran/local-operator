@@ -635,24 +635,30 @@ UNSENT_RUNTIME_NOTICE = (
     "send it again to start a new one"
 )
 
-#: The drain notice: what the viewer says the moment a BUSY runtime commits to
-#: leaving for a newer build.
+#: The blank line a restored draft is loaded behind, so the operator's next
+#: thought cannot weld onto it (UX round 3, U2 — see :meth:`_restore_unsent_for`).
+RESTORE_SEAM = "\n\n"
+
+
+#: The drain notice: what the viewer says the moment a runtime commits to
+#: leaving for a newer build WHILE IT STILL HAS WORK.
 #:
 #: THE IDLE REFRESH STAYS SILENT AND THIS ONE MAY NOT, and the difference is
 #: what the window can cost. An idle runtime hands over in about a second, so
-#: the ``retiring`` frame's own re-engage is invisible and the silence there is
-#: right. A runtime that is still finishing work drains first — measured at
-#: ~26 s of ordinary reachable state (UX round 1, U1) — and for all of it the
-#: composer accepts text that will then be refused, which used to be how the
-#: user DISCOVERED the handover. One ``note`` on the frame the viewer already
-#: handles makes it announced instead.
+#: the silence there is right. A runtime that is still finishing work drains
+#: first — measured at ~26 s of ordinary reachable state (UX round 1, U1) — and
+#: for all of it the composer accepts text that will then be refused, which used
+#: to be how the user DISCOVERED the handover. The ``retiring`` frame is sent by
+#: the runtime immediately BEFORE it latches, so a ``note`` painted on the frame
+#: lands ahead of the first refusal instead of 26 s behind the last one
+#: (:meth:`OperatorApp._on_runtime_draining`; UX round 3, U1, QA round 3, Q-1).
 #:
 #: ``note``, not ``warning``: this is the answer to "why is my session behaving
 #: differently", and the matching build-skew notice one seam over uses the same
 #: ink for the same reason. The refusal itself is the row that has to be read.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
-    "first, so a new message will not be admitted until the successor is up"
+    "first, so a new message will not go through until the new build is up"
 )
 
 
@@ -943,6 +949,25 @@ def _is_retiring_refusal(error: BaseException) -> bool:
     if isinstance(error, RuntimeRetiring):
         return True
     return any(marker in str(error) for marker in _RETIRING_REFUSAL_MARKERS)
+
+
+def _retiring_notice_text(error: BaseException) -> str:
+    """The refusal row, with the viewer's claim placed where it READS.
+
+    Two shapes, because only one of the two ends composes the sentence here. The
+    typed category carries its halves, so the operator's own fact goes BETWEEN
+    them: one dash, no fragment opening after a full stop, no strand at 100
+    columns, and a terminal clause that fills the last row at 60 instead of
+    leaving the word ``composer`` alone on it (design round 3, D1; UX round 3,
+    U5). A runtime older than the category answers with text this build did not
+    write and must not restructure, so there the claim is its own sentence —
+    correct to read after a sentence with no terminal punctuation, which is the
+    shape that path arrives in. Its wrap can still end short, and that is a
+    property of a string we do not own (UX round 3, U4 records that window).
+    """
+    if isinstance(error, RuntimeRetiring):
+        return f"{error.HEAD} Your message is back in the composer — {error.TAIL}"
+    return f"{error}. Your message is back in the composer."
 
 
 #: How often the band re-counts running background jobs. Nothing emits an
@@ -5087,8 +5112,16 @@ class OperatorApp(App[None]):
         images: list[ImageContent] | None,
         *,
         accepted: SessionDraft | None = None,
+        seam: bool = False,
     ) -> None:
         restored = accepted or SessionDraft(text=text)
+        # ``seam`` is opt-in per CALLER rather than a property of the restore,
+        # because it shows a new line in the composer and that is a visual
+        # change to a surface: the drain refusal is the branch this round was
+        # filed against (its restore lands inside the submit, measured), and the
+        # runtime-gone and oversize branches keep the frames design round 1
+        # approved. The WELD they share is recorded as out of scope rather than
+        # fixed silently here.
         # No caret is set on `restored`: every draft this funnel builds is a
         # RESTORE, and `_load_editor_draft` lands a caretless draft at the END of
         # the text — the resend gesture's own landing (UX round 3, U2). The
@@ -5110,6 +5143,25 @@ class OperatorApp(App[None]):
             editor = self._editor()
             editor.forget_prompt(text)
             if not self._aside_is_open() and not editor.text and not editor.attachments():
+                if seam:
+                    # A VISIBLE SEAM between the returned draft and whatever the
+                    # operator types next. The restore lands INSIDE the submit,
+                    # so it beats any human keystroke: their next thought arrives
+                    # with nothing between it and the draft, and the two are sent
+                    # as one message that reads like a typo they did not make —
+                    # measured as ``summarise the build staleness fixand the
+                    # deploy notes``, with the composer never empty for the 2 ms
+                    # polling to notice and the park branch below therefore
+                    # unreachable (UX round 3, U2). A blank line is the boundary:
+                    # the composer SHOWS the seam, the caret lands below it, and
+                    # the two thoughts stay separable with one backspace. It
+                    # costs the operator nothing but a paragraph break, which is
+                    # what two separate thoughts are.
+                    restored = SessionDraft(
+                        text=restored.text + RESTORE_SEAM,
+                        attachments=dict(restored.attachments),
+                        shell_mode=restored.shell_mode,
+                    )
                 self._load_editor_draft(restored)
                 return
         elif not source.aside_open and not source.draft.text and not source.draft.attachments:
@@ -8883,6 +8935,13 @@ class OperatorApp(App[None]):
             set_refresh = getattr(session, "set_refresh_callback", None)
             if callable(set_refresh):
                 set_refresh(self._on_runtime_refreshed)
+            # The SAME frame, one event earlier, and the one the operator
+            # actually needs: the runtime announces a DRAINING departure before
+            # it latches, and this is the only moment at which a row can land
+            # ahead of the refusals (UX round 3, U1; QA round 3, Q-1).
+            set_drain = getattr(session, "set_drain_callback", None)
+            if callable(set_drain):
+                set_drain(self._on_runtime_draining)
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
@@ -17441,33 +17500,39 @@ class OperatorApp(App[None]):
             # name, and a half-stated change ("updated to X") reads as an
             # update that came from nowhere, so this one stays silent.
             self._refreshed_from = None
-        # A DRAIN IS ANNOUNCED, AN IDLE HANDOVER IS NOT. The silence above and
-        # through this class is deliberate and stays right for the refresh
-        # nobody can lose anything to: an idle runtime leaves in about a second.
-        # A runtime that retired while it was STILL WORKING drains first, and
-        # for that whole window — measured at ~26 s of ordinary reachable state
-        # (UX round 1, U1) — the composer takes text the runtime will refuse.
-        # The user used to discover the handover by being refused; one `note` on
-        # the frame the viewer is already handling makes it announced instead
-        # (UX round 1, U2).
-        #
-        # ``runtime_idle`` is the VIEWER's reading of the same predicate the
-        # runtime's own gate uses, and it is the product's existing instrument
-        # for exactly this branch (see the build-skew seam, which decides
-        # "ask it to retire" versus "paint the busy notice" off it). An
-        # unreadable probe stays silent: the wrong keep costs one unannounced
-        # handover, never a false claim about a session that is not draining.
-        idle_probe = getattr(session, "runtime_idle", None)
-        draining = False
-        if callable(idle_probe):
-            try:
-                draining = not bool(idle_probe())
-            except Exception:  # noqa: BLE001 — a failed probe keeps the silence
-                logger.debug("idle probe failed; not announcing the drain", exc_info=True)
-        if draining and self._interaction is not None:
-            self._notice_for(self._interaction, DRAIN_NOTICE, "note")
+        # A DRAIN IS ANNOUNCED, AN IDLE HANDOVER IS NOT — and the notice moved
+        # off THIS callback, because this is the wrong end of the handover and
+        # the probe below was the wrong instrument. Measured (QA round 3, Q-1):
+        # this fires when the socket CLOSES, 26.2 s into a 26.1 s drain, i.e.
+        # after the last refusal it was meant to warn about; and ``_go_cold``
+        # clears the client BEFORE invoking this callback, so ``runtime_idle``
+        # answers False for the structural reason that the viewer is already
+        # cold — true of the idle handover too, which put a row about refusals
+        # on a refresh that never refused anything. The notice is painted by
+        # :meth:`_on_runtime_draining` instead, from the runtime's own verdict
+        # in the ``retiring`` frame while it is still alive and still refusing.
+        # What stays here is the work this callback owns: re-engage eagerly so
+        # the band never shows the cold state for a refresh nobody asked for.
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
+
+    def _on_runtime_draining(self) -> None:
+        """A runtime has committed to leaving while it still has work: say so.
+
+        Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
+        which the runtime sends immediately before it latches — so this lands
+        before the first refusal rather than ~26 s after the last one, and only
+        for a handover that will actually refuse (the idle rung sends the same
+        frame with ``draining`` false and never reaches here). The fact is the
+        RUNTIME's, because the viewer cannot hold it: by the time the viewer's
+        own state could be consulted it is cold, and cold is true of both
+        hands (QA round 3, Q-1).
+
+        One row, while the composer still accepts text that will be refused.
+        """
+        if self._interaction is None:
+            return
+        self._notice_for(self._interaction, DRAIN_NOTICE, "note")
 
     def _announce_refresh_completed(self) -> None:
         """One line naming the version change a self-refresh just made.
@@ -24065,10 +24130,10 @@ class OperatorApp(App[None]):
                     # where it is true.
                     self._notice_for(
                         source,
-                        f"{error} — your message is back in the composer",
+                        _retiring_notice_text(error),
                         "warning",
                     )
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -40434,7 +40499,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 119
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 120
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
