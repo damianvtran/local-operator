@@ -29,12 +29,14 @@ session ids are needed beyond the ones it creates.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
 import socket
 import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -45,6 +47,7 @@ from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import (
+    delivery_dir,
     delivery_path,
     desktop_delivery_present,
     reset_cache,
@@ -52,6 +55,23 @@ from local_operator.session.runtime.presence import (
 from local_operator.session.runtime.viewers import ViewerRecord
 
 pytestmark = pytest.mark.e2e
+
+
+def _published_record(root: Path) -> dict[str, Any]:
+    """The ONE presence record this server published, as a dict (review R6).
+
+    A publisher owns a record per PROCESS now, in ``run/desktop/delivery/``,
+    and the legacy ``delivery.json`` is read-only — nothing writes it any more.
+    So the question these tests used to ask of a fixed path — "what did the
+    route just publish?" — has to be asked of the directory.
+
+    Asserting EXACTLY ONE record is the point rather than a convenience: if a
+    single server process ever published two, its own reader would union them
+    and a stale window could outvote the live one.
+    """
+    records = sorted(delivery_dir(root).glob("*.json"))
+    assert len(records) == 1, [path.name for path in records]
+    return json.loads(records[0].read_text())
 
 
 async def _next_frame(lines, predicate, timeout: float = 30.0):
@@ -307,7 +327,12 @@ async def test_the_presence_route_is_bound_to_a_live_subscription(desktop_server
         assert beat.json()["result"]["lease_seconds"] == 45
 
         reset_cache()
-        assert delivery_path(root).exists()
+        # R6: the machine-wide file is NO LONGER WRITTEN. Its absence is half the
+        # fix — while every publisher wrote that one path, the last writer decided
+        # the machine's answer and the first process to exit revoked a live
+        # sibling's lease.
+        assert not delivery_path(root).exists()
+        assert _published_record(root)["pid"] == os.getpid()
         assert desktop_delivery_present(root, "complete") is True
         # The GATE kind is deliberately not covered by the machine-wide lease:
         # the feed carries completions only, so a parked question keeps its
@@ -326,7 +351,7 @@ async def test_the_presence_route_is_bound_to_a_live_subscription(desktop_server
             },
         )
         assert windowless.status_code == 200, windowless.text
-        payload = json.loads(delivery_path(root).read_text())
+        payload = _published_record(root)
         assert payload["session_id"] == ""
 
     # The socket is gone, so the lease is gone with it — the revocation that
@@ -425,3 +450,114 @@ def test_a_stale_desktop_record_never_advertises_a_session_it_cannot_show():
         has_window=False,
     )
     assert json.loads(json.dumps(windowless.to_json()))["has_window"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_window_state_decides_the_banner_over_real_http(desktop_server):
+    """QA round 1's presence matrix, re-run at the layer it was measured on.
+
+    QA reported ``presence-unfocused-same`` and ``presence-hidden-same`` as FAIL:
+    the app's window was showing the SAME conversation the completion was about,
+    but was no longer focused (or no longer visible), and no banner was raised
+    where one is owed. The rule was right and the READ was stale — the decision
+    came off the 2 s presence cache while the probe flipped the window state
+    inside that window, so the answer described focus the user had already given
+    up.
+
+    That reads as a small timing artifact and is not: this decision is TERMINAL.
+    A suppressed completion is never re-decided, and the runtime's own rung 4
+    defers whenever a desktop is reachable — so for that turn no surface raised
+    anything at all. Hence the uncached read, and hence this test, which is the
+    whole matrix through the real route, the real feed and a real completion
+    written by another process.
+
+    The ONE suppressing state is a focused window showing THIS conversation.
+    ``reset_cache`` is deliberately NOT called between cells, because the stale
+    answer is what is under test.
+    """
+    root, client = desktop_server
+    displayed = await _create(client, root, str(uuid.uuid4()))
+    other = await _create(client, root, str(uuid.uuid4()))
+    hidden = {"exists": True, "focused": False, "visible": False, "minimized": False}
+    cells = [
+        # name, window, completion for the DISPLAYED session?, is a banner owed?
+        ("focused-same", {"focused": True, "visible": True}, True, False),
+        ("focused-other", {"focused": True, "visible": True}, False, True),
+        ("unfocused-same", {"focused": False, "visible": True}, True, True),
+        ("unfocused-other", {"focused": False, "visible": True}, False, True),
+        ("hidden-same", {}, True, True),
+        ("hidden-other", {}, False, True),
+        ("no-window-same", {"exists": False}, True, True),
+        ("no-window-other", {"exists": False}, False, True),
+    ]
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda f: f["type"] == "open")
+        subscription = opened["payload"]["subscription_id"]
+        # A READER TASK rather than a bounded read per cell. Cancelling an
+        # `aiter_lines()` iteration closes the response it is reading, which on
+        # the suppressing cell would tear the subscription down and turn the
+        # NEXT cell's presence post into a 404 — a harness failure that reads
+        # exactly like the product bug under test.
+        streamed: list[dict[str, Any]] = []
+
+        async def pump() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed.append(json.loads(line[6:]))
+
+        reader = asyncio.create_task(pump())
+
+        def announced_for(token: str) -> list[dict[str, Any]]:
+            return [
+                frame
+                for frame in streamed
+                if frame["type"] == "notification"
+                and frame["payload"].get("completion_token") == token
+            ]
+
+        async def settle() -> None:
+            # ONE SECOND, and the number is the test. The feed polls at 100 ms, so
+            # this is ten poll intervals — a banner that is coming has arrived,
+            # asserted by the check below rather than assumed. It is ALSO well
+            # inside ``PRESENCE_CACHE_TTL_S`` (2 s), which is what reproduces
+            # QA's probe: it changed the window state and read the answer within
+            # that window, which is the whole reason two of its rows failed. A
+            # longer wait here would expire the cache, the stale read would
+            # repair itself, and this test would pass against the unfixed code.
+            await asyncio.sleep(1.0)
+
+        try:
+            for name, window, same, expected in cells:
+                streamed.clear()
+                beat = await client.post(
+                    "/v1/desktop/presence",
+                    json={
+                        "subscription_id": subscription,
+                        "can_notify": True,
+                        "can_notify_kinds": ["complete", "error"],
+                        "session_id": displayed,
+                        "window": {**hidden, **window},
+                    },
+                )
+                assert beat.status_code == 200, f"{name}: {beat.text}"
+                target = displayed if same else other
+                token = await asyncio.to_thread(_publish, root, target)
+                await settle()
+                # The attention frame for this completion is published in the
+                # same tick as the banner and BEFORE it, so its arrival is what
+                # says the tick ran at all.
+                assert any(
+                    frame["type"] == "attention" and frame.get("session_id") == target
+                    for frame in streamed
+                ), f"{name}: the tick never ran"
+                announced = announced_for(token)
+                assert bool(announced) is expected, f"{name}: {streamed}"
+                if expected:
+                    assert announced[0]["session_id"] == target
+                    assert announced[0]["payload"]["focus_policy"] == "always"
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader

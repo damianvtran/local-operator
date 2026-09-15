@@ -95,6 +95,37 @@ _BUMP_SUPERSEDES = (
     "ON CONFLICT(id) DO UPDATE SET supersedes=mutations.supersedes+1"
 )
 
+#: WHICH conversation a heal touched — the missing half of the counter above
+#: (review round 1, R4).
+#:
+#: `mutations.supersedes` is all `revision()` needs to be a correct change
+#: detector: it proves a heal HAPPENED. It cannot say WHICH record moved, and the
+#: machine-wide feed has to publish a corrected state for exactly that record. A
+#: heal UPDATEs the row in place, so the healed conversation appears in neither
+#: the feed's new-sequence delta nor its changed-acknowledgement delta — the feed
+#: correctly accepted the new revision and then emitted nothing at all, leaving
+#: every subscriber holding the provisional "Interrupted" outcome for a turn that
+#: had actually completed.
+#:
+#: An append-only log rather than a column on `mutations`: two heals landing
+#: between two ticks must BOTH be reported, and a single-row table silently merges
+#: them into whichever was last. Pruned to the newest
+#: `_SUPERSEDE_LOG_RETENTION` rows in the SAME transaction as the write, so it
+#: stays bounded on a store that runs for years. The retention is orders of
+#: magnitude deeper than any reader can fall — a consumer's cursor is never more
+#: than one poll interval behind the write — and the consequence of over-running
+#: it is a missed in-place correction rather than a missed completion, which is
+#: why the bound is safe to hold this loosely.
+_CREATE_SUPERSEDE_LOG = (
+    "CREATE TABLE supersede_log ("
+    "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation TEXT NOT NULL)"
+)
+_SUPERSEDE_LOG_RETENTION = 256
+_APPEND_SUPERSEDE = "INSERT INTO supersede_log(conversation) VALUES(?)"
+_PRUNE_SUPERSEDE_LOG = (
+    "DELETE FROM supersede_log WHERE seq <= " "(SELECT COALESCE(MAX(seq),0) FROM supersede_log) - ?"
+)
+
 
 def conversation_identity(directory: Path) -> str:
     """Use the durable namespace, never the currently selected agent profile."""
@@ -873,6 +904,18 @@ class AttentionStore:
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
                     ).fetchone():
                         conn.execute(_CREATE_MUTATIONS)
+                    # `supersede_log` is additive for the same reason and stays
+                    # out of the probe above for the same reason: a database
+                    # written before this fix legitimately lacks it. NO BASELINE,
+                    # again because it is an EDGE not a LEVEL — readers start
+                    # from "nothing was healed before I connected", and seeding a
+                    # historical set would replay corrections nobody is stale for
+                    # (a reconnect takes a fresh snapshot that already carries the
+                    # healed state).
+                    if not conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
+                    ).fetchone():
+                        conn.execute(_CREATE_SUPERSEDE_LOG)
                     # ``reason``/``cause`` are ADDITIVE and stay out of the probe
                     # above for the reason the two tables do: every database
                     # written before the cut-off taxonomy legitimately lacks
@@ -1036,6 +1079,45 @@ class AttentionStore:
                 )
             ]
 
+    def superseded_since(self, sequence: int) -> list[dict[str, Any]]:
+        """``{conversation}`` entries healed AFTER ``sequence``, oldest first.
+
+        THE FEED'S SECOND DELTA (review round 1, R4). ``revision()`` reports that
+        a heal happened but not which record it moved, and a heal deliberately
+        changes neither ``MAX(sequence)`` nor ``SUM(acknowledged)`` — so both
+        :meth:`published_since` and :meth:`acknowledgement_map` come back empty
+        for it. A consumer following the revision alone therefore advanced its
+        change detector and then published nothing, leaving its subscribers on
+        the stale outcome the heal had just corrected. This read is what turns
+        "a heal happened" into "publish a corrected state for THIS session".
+
+        Read-only and missing-store/missing-table tolerant, exactly like its
+        neighbours: ``supersede_log`` is additive, so a database whose runtime
+        has not reconnected yet legitimately lacks it and must read as "nothing
+        was healed" rather than raising. A reader that raised here would lose
+        in-place corrections for the life of its loop.
+        """
+        if not self.path.exists():
+            return []
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return []
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
+            ).fetchone():
+                return []
+            return [
+                {"sequence": int(row["seq"]), "conversation": row["conversation"]}
+                for row in conn.execute(
+                    "SELECT seq, conversation FROM supersede_log WHERE seq > ? ORDER BY seq",
+                    (int(sequence),),
+                )
+            ]
+
     def acknowledgement_map(self) -> dict[str, int]:
         """``{conversation: acknowledged}`` for every conversation with a receipt.
 
@@ -1161,6 +1243,12 @@ class AttentionStore:
                 # yet counted, or it would cache the new state under the old
                 # revision and then ignore the next real change.
                 conn.execute(_BUMP_SUPERSEDES)
+                # ...and WHICH record moved, inside the same transaction and for
+                # the same reason: a reader must never observe a healed row whose
+                # identity has not been counted yet, or it would cache the healed
+                # state under the old revision and then ignore the next change.
+                conn.execute(_APPEND_SUPERSEDE, (conversation,))
+                conn.execute(_PRUNE_SUPERSEDE_LOG, (_SUPERSEDE_LOG_RETENTION,))
             conn.execute(
                 "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind,reason,cause) "
                 "VALUES(?,?,?,?,?,?)",

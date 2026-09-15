@@ -1668,6 +1668,40 @@ class DesktopSessions:
 
         return await asyncio.to_thread(acknowledge)
 
+    def bridged_notify_sessions(self) -> set[str]:
+        """The FEED's key domain for sessions whose bridge will announce them.
+
+        REVIEW ROUND 1, R10. The feed's ``bridged`` hook compares against
+        ``session/<id>`` keys, and the route used to hand it ``set(pool.bridges)``
+        — bare session ids. The two never intersected, so the exclusion was
+        silently dead and every bridged session got a second, machine-wide
+        banner composed for it. Returning the prefixed form from HERE rather
+        than letting the feed normalise is deliberate: the pool is the thing that
+        knows its own keys, and a conversion at the consumer would have to be
+        repeated for every future consumer that gets it wrong the same way.
+
+        A BRIDGE ALONE IS NOT ENOUGH, and that is the second half of the finding.
+        A pooled bridge can be retained after its last subscriber left — that is
+        what ``BRIDGE_COUNT`` and ``bridge.users`` exist for — and such a bridge
+        publishes to nobody, so excluding it would open a background-notification
+        HOLE where the prefix fix had just closed a duplicate-banner one. The
+        predicate is therefore a LIVE, non-overflowing subscriber that can
+        actually notify: the same filter ``_live_leases`` applies, plus
+        ``can_notify``. Deliberately NOT ``_live_leases`` itself — that one
+        requires ``watch_lock`` and is read under it, while this runs from the
+        feed's poller, which must never take a lock the runtime's watch path can
+        hold.
+        """
+        now = time.monotonic()
+        return {
+            f"session/{session_id}"
+            for session_id, bridge in list(self.bridges.items())
+            if any(
+                not sub.overflow and sub.expires > now and sub.can_notify
+                for sub in list(bridge.subscribers.values())
+            )
+        }
+
     async def claim_notification(self, session_id: str, token: str) -> bool:
         """Claim the right to TOAST ``token``; exactly one surface ever wins.
 

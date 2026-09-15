@@ -1885,6 +1885,8 @@ def test_the_tui_cap_and_the_feed_cap_are_the_same_promise() -> None:
     from local_operator.tui import app as app_module
 
     assert app_module._BACKGROUND_NOTIFY_MAX_PER_TICK == BURST_LIMIT
+
+
 def _stop_reason(rung: str, *, command: str) -> str:
     """The durable sentence a deliberate stop of ``rung`` carries, from the code."""
     from local_operator.incidents import (

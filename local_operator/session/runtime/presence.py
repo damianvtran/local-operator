@@ -57,7 +57,23 @@ from local_operator.session.runtime.registry import pid_alive
 DESKTOP_RUN_DIRNAME = "run/desktop"
 
 #: The aggregate one backend publishes for every process on the host to read.
+#:
+#: LEGACY, AND READ-ONLY SINCE REVIEW ROUND 1 (R6). It is the pre-R6 single-file
+#: layout: ONE path that every serve process on the machine wrote and unlinked,
+#: so two live backends clobbered each other in both directions — the last
+#: WRITER decided the machine's answer (a second server advertising
+#: ``can_notify=False`` revoked a live first server's lease on every beat) and
+#: the first one to EXIT deleted the file out from under the other. Publishers
+#: now own a record each (see :func:`delivery_record_path`) and readers aggregate
+#: them. This name survives because a sibling started before the change still
+#: writes it, and a reader that stopped looking at it would go blind to that
+#: sibling for the life of its process.
 DELIVERY_FILENAME = "delivery.json"
+
+#: The directory of PER-INSTANCE records, beside the legacy file. 0700 like its
+#: parent, and the reason the split is safe: one file per publishing process, so
+#: a publisher can only ever withdraw its own.
+DELIVERY_DIRNAME = "delivery"
 
 #: How long a lease lives with no beat behind it. Matches ``WATCH_TTL``,
 #: ``DESKTOP_WATCH_LEASE_S`` and ``VIEWER_HEARTBEAT_TIMEOUT_S``: "is this
@@ -186,56 +202,142 @@ def desktop_run_dir(root: Path | None = None) -> Path:
 
 
 def delivery_path(root: Path | None = None) -> Path:
-    """Where the backend's aggregate lease lives."""
+    """The LEGACY aggregate lease path. Read-only; see :data:`DELIVERY_FILENAME`."""
     return desktop_run_dir(root) / DELIVERY_FILENAME
 
 
+def delivery_dir(root: Path | None = None) -> Path:
+    """The directory holding one record per publishing backend (R6)."""
+    path = desktop_run_dir(root) / DELIVERY_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def delivery_record_path(instance_id: str, root: Path | None = None) -> Path:
+    """The record ONE publishing backend owns, and may withdraw (R6).
+
+    The instance id is generated per :class:`DesktopDeliveryPublisher` and is
+    never derived from anything a caller passes, so this path can only ever name
+    a file in ``run/desktop/delivery/`` — the same containment the tests in
+    ``tests/unit/session/test_no_session_deletion.py`` assert for every other
+    mutation in this project.
+    """
+    return delivery_dir(root) / f"{instance_id}.json"
+
+
+def _window_of(record: dict[str, Any]) -> dict[str, Any]:
+    """The ``window`` object of one record, typed. Absent/malformed is empty."""
+    raw = record.get("window")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _load_record(path: Path) -> dict[str, Any] | None:
+    """One record, or ``None`` when it is absent, torn, or no longer live.
+
+    The two reaping rules are unchanged from the single-file reader and are
+    ``scan_viewers``' rules: the ``pid`` must be alive and the ``heartbeat_at``
+    must be inside :data:`PRESENCE_TTL_S`. Reaped here rather than unlinked — the
+    file belongs to a process that may be starting up again under the same pid,
+    and unlinking another process's lease is not a reader's business.
+    """
+    try:
+        data: Any = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        pid = int(data.get("pid") or 0)
+        heartbeat = float(data.get("heartbeat_at") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or not pid_alive(pid):
+        return None
+    if time.time() - heartbeat > PRESENCE_TTL_S:
+        return None
+    return data
+
+
+def _record_paths(root: Path | None) -> list[Path]:
+    """Every record a reader must consider: the legacy file, then the per-instance ones.
+
+    Built from the directory rather than through :func:`delivery_path` so that a
+    failure to create it degrades to "no records" instead of raising — this
+    reader runs on the announce path, where an exception would break a turn's
+    completion to answer a banner question.
+    """
+    try:
+        directory = delivery_dir(root)
+        records = sorted(directory.glob("*.json"))
+    except OSError:
+        return []
+    return [directory.parent / DELIVERY_FILENAME, *records]
+
+
 def read_delivery(root: Path | None = None) -> DesktopPresence:
-    """Read and reap the aggregate lease, uncached.
+    """Read and reap every publisher's record, and aggregate them, uncached.
+
+    AN AGGREGATE OVER EVERY LIVE PUBLISHER, NOT ONE FILE (review round 1, R6).
+    Presence is a PER-PROCESS assertion — one serve process owns one set of live
+    feed subscriptions — but it used to be stored in a machine-wide file, so two
+    backends overwrote and revoked each other. Storing it per process and
+    unioning on read is what makes "can this host raise a banner" mean the same
+    thing as "can this host raise a banner for this backend", which is the
+    contract the runtime is actually held to.
 
     Every failure is the absent answer rather than an exception. This runs on
     the runtime's announce path, where a missing or half-written file is
     ordinary (no app paired) and a raise would break a turn's completion for
     the sake of a banner decision.
     """
-    try:
-        data: Any = json.loads(delivery_path(root).read_text())
-    except (OSError, ValueError):
+    live: list[dict[str, Any]] = []
+    for path in _record_paths(root):
+        record = _load_record(path)
+        if record is not None:
+            live.append(record)
+    if not live:
         return NO_DESKTOP_PRESENCE
-    if not isinstance(data, dict):
-        return NO_DESKTOP_PRESENCE
-    try:
-        pid = int(data.get("pid") or 0)
-        heartbeat = float(data.get("heartbeat_at") or 0.0)
-    except (TypeError, ValueError):
-        return NO_DESKTOP_PRESENCE
-    if pid <= 0 or not pid_alive(pid):
-        # A dead writer left its last assertion behind. Reaped here rather than
-        # unlinked: the file belongs to a process that may be starting up
-        # again under the same pid, and unlinking another process's lease is
-        # not a reader's business.
-        return NO_DESKTOP_PRESENCE
-    if time.time() - heartbeat > PRESENCE_TTL_S:
-        return NO_DESKTOP_PRESENCE
-    subscribers = int(data.get("subscribers") or 0)
-    # ANNOTATED ON PURPOSE. `data` is whatever `json.loads` produced, so the
+
+    def heartbeat_of(record: dict[str, Any]) -> float:
+        return float(record.get("heartbeat_at") or 0.0)
+
+    # WINDOW STATE IS SINGULAR, SO IT IS TAKEN RATHER THAN UNIONED: "which
+    # conversation is on screen" has exactly one answer. The freshest beat wins,
+    # which is the same rule the single-writer version already applied among one
+    # process's claims, extended across processes. Records WITH a window are
+    # preferred over windowless ones even when a windowless sibling beats more
+    # recently — taking the freshest unconditionally would blank the session id
+    # of a window that is genuinely on screen, which is a rung-1 signal.
+    windowed = [record for record in live if _window_of(record).get("exists")]
+    newest = max(windowed or live, key=heartbeat_of)
+    # ANNOTATED ON PURPOSE. `newest` is whatever `json.loads` produced, so the
     # window object arrives untyped and the type checker cannot see that the
     # `isinstance` below is what makes every `.get` on it safe. The annotation
     # is the reader's promise that the branch really did run.
-    raw_window = data.get("window")
-    window: dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
-    session_id = str(data.get("session_id") or "")
+    window: dict[str, Any] = _window_of(newest)
+    session_id = str(newest.get("session_id") or "")
     has_window = bool(window.get("exists"))
-    raw_kinds = data.get("can_notify_kinds")
-    kinds = (
-        frozenset(str(entry) for entry in raw_kinds if isinstance(entry, str))
-        if isinstance(raw_kinds, list)
-        else frozenset()
-    )
+
+    # REACHABILITY AND KINDS *ARE* UNIONED. Two live backends are two live
+    # servers, and a banner either of them can raise does reach this machine.
+    # Intersecting would let the weaker sibling veto the stronger one, which is
+    # precisely the clobbering this change removes.
+    kinds: set[str] = set()
+    deliverable = False
+    for record in live:
+        if not bool(record.get("can_notify")):
+            continue
+        if int(record.get("subscribers") or 0) > 0:
+            deliverable = True
+        raw_kinds = record.get("can_notify_kinds")
+        if isinstance(raw_kinds, list):
+            kinds.update(str(entry) for entry in raw_kinds if isinstance(entry, str))
+
     return DesktopPresence(
         present=True,
-        deliverable=bool(data.get("can_notify")) and subscribers > 0,
-        kinds=kinds,
+        deliverable=deliverable,
+        kinds=frozenset(kinds),
         # A windowless app cannot be displaying anything, so its ``session_id``
         # is not evidence of a card on screen. This is the backend half of
         # "clear ``current_session`` when the last window closes": the field
@@ -250,13 +352,30 @@ def read_delivery(root: Path | None = None) -> DesktopPresence:
         attended=has_window
         and bool(window.get("focused") and window.get("visible") and not window.get("minimized")),
         has_window=has_window,
-        pid=pid,
-        heartbeat_at=heartbeat,
+        pid=int(newest.get("pid") or 0),
+        heartbeat_at=max(heartbeat_of(record) for record in live),
     )
 
 
-def desktop_presence(root: Path | None = None) -> DesktopPresence:
-    """The cached aggregate lease. See :data:`PRESENCE_CACHE_TTL_S`."""
+def desktop_presence(root: Path | None = None, *, cached: bool = True) -> DesktopPresence:
+    """The aggregate lease. See :data:`PRESENCE_CACHE_TTL_S`.
+
+    ``cached`` is the default because the ANNOUNCE path asks this question on
+    every turn settle and the answer is decorative there: a 2 s-stale
+    "a desktop is reachable" only costs a deferral the retry ladder re-checks.
+
+    A caller whose decision is TERMINAL passes ``cached=False``, because for it
+    a stale answer is not a delay but a wrong answer nothing revisits. The feed's
+    banner gate is the one such caller today: it reads focus state to decide
+    whether to raise a banner at all, and nothing re-decides that afterwards —
+    the frame is simply not published. Reading it through the cache meant a
+    completion landing within ``PRESENCE_CACHE_TTL_S`` of the user leaving the
+    window was suppressed machine-wide, on the strength of focus the user had
+    already given up. Costs a ``readdir`` plus one small read per candidate
+    banner, which is why only this caller pays it.
+    """
+    if not cached:
+        return read_delivery(root)
     key = str((root or config_dir()))
     now = time.monotonic()
     hit = _CACHE.get(key)

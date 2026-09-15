@@ -1323,8 +1323,11 @@ def feed(request: Request) -> DesktopFeed:
             request.app.state.config_manager.config_dir,
             # Read-only and by reference: the feed needs to know which sessions
             # already have a stream so it never races one, and it must never
-            # ACQUIRE anything of its own — see the module docstring.
-            bridged=lambda: set(pool.bridges),
+            # ACQUIRE anything of its own — see the module docstring. The hook
+            # returns the FEED's key domain (``session/<id>``) and only for
+            # bridges that will actually announce — see
+            # ``DesktopSessions.bridged_notify_sessions``.
+            bridged=pool.bridged_notify_sessions,
         )
         request.app.state.desktop_feed = value
     return value

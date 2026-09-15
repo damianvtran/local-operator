@@ -398,3 +398,181 @@ async def test_the_runtime_reads_the_real_presence_file(
     finally:
         publisher.close()
         await session.dispose()
+
+
+# -- R7: the retry ladder --------------------------------------------------
+#
+# Review round 1 found that the ONLY scheduled attempt was the turn-settled
+# task: a failed spawn released the claim and scheduled nothing, and deferring
+# to a desktop lease that then disappeared ended the task. With no other
+# announcer the completion lost its banner permanently. The round-1 test looked
+# recovered only because it called the arm a second time BY HAND — which is the
+# thing production could not do, so the tests below never call the arm directly.
+
+
+async def _until(predicate, timeout_s: float = 3.0) -> None:
+    """Poll until ``predicate()`` or fail loudly. Avoids asserting on a sleep."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the condition never became true")
+
+
+def _fast_ladder(monkeypatch, *delays: float) -> None:
+    """Compress the ladder's DELAYS, never its shape.
+
+    The real constants are chosen against real timeouts (see
+    ``_COMPLETION_RETRY_DELAYS_S``); asserting them here would spend about 40 s
+    proving arithmetic. What is under test is that a retry happens at all, how
+    it terminates, and that it reaches the same eligibility gate each time.
+    """
+    import local_operator.session.runtime.serving as serving_module
+
+    monkeypatch.setattr(serving_module, "_COMPLETION_RETRY_DELAYS_S", delays or (0.05, 0.05, 0.05))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_spawn_is_retried_without_being_rearmed_by_hand(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """R7's first half: the ladder has to retry a transient rung-4 failure.
+
+    The sink fails its FIRST attempt and succeeds after, so a banner can only
+    appear if something scheduled the second attempt — and nothing in this test
+    does. Under the round-1 code ``calls`` would hold exactly one entry and the
+    completion would be announced by nobody.
+    """
+    _fast_ladder(monkeypatch)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    attempts = {"n": 0}
+
+    def flaky(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+        attempts["n"] += 1
+        calls.append({"title": title, "body": body, "session_id": session_id, "subtitle": subtitle})
+        return attempts["n"] > 1
+
+    monkeypatch.setattr(notify_module, "detached_notify", flaky)
+    try:
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id)
+        handle._schedule_completion_announce()
+        await _until(lambda: len(calls) >= 2)
+        assert attempts["n"] == 2, "the ladder retried more than the failure needed"
+        assert _delivered(session_id, token) is True, "the retry did not land the banner"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_desktop_lease_is_rechecked_once_it_goes_away(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """R7's second half: a DEFERRAL is not a settlement.
+
+    The reviewer's second reproduction: cache a live lease, drop it, settle, and
+    wait — ``fresh_presence_now=False; attempts_after_expiry=0``. The deferral is
+    a read of a CACHED answer, so the only thing that can catch the app leaving
+    is a second attempt after the cache expires.
+
+    Both knobs are compressed and their ORDER is what the test asserts: the
+    retry delay must exceed the cache TTL, or the second attempt re-reads the
+    same stale lease and the ladder burns out inside the window. The real pair
+    is 2 s / 2 s, which is why the first rung of the ladder is exactly the cache
+    TTL rather than an arbitrary round number.
+    """
+    import local_operator.session.runtime.serving as serving_module
+
+    monkeypatch.setattr(serving_module, "_COMPLETION_RETRY_DELAYS_S", (0.25, 0.25, 0.25))
+    monkeypatch.setattr(presence_module, "PRESENCE_CACHE_TTL_S", 0.05)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    publisher = _publish_desktop_presence()
+    try:
+        # Warm the cache while the app is up: the FIRST attempt must defer.
+        assert desktop_delivery_present(config_dir(), "complete") is True
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id)
+        publisher.close()
+
+        handle._schedule_completion_announce()
+        await _until(lambda: len(calls) >= 1)
+        assert calls[0]["session_id"] == session_id
+        assert _delivered(session_id, token) is True
+    finally:
+        publisher.close()
+        presence_module.reset_cache()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_is_bounded_and_stops_when_nothing_can_deliver(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """The bound, asserted rather than assumed.
+
+    A retry that never ends would be the unbounded runtime residency the review
+    forbids, so the ladder has to EXHAUST: with a sink that always fails, the
+    attempt count is exactly ``1 + len(delays)`` and then stops. Nothing further
+    is scheduled, and the durable unseen mark is left alone so the completion
+    still reads as unread everywhere.
+    """
+    import local_operator.session.runtime.serving as serving_module
+
+    _fast_ladder(monkeypatch, 0.05, 0.05)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, state = banners
+    state["delivered"] = False
+    try:
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id)
+        handle._schedule_completion_announce()
+        await _until(lambda: len(calls) >= 3)
+        await asyncio.sleep(0.2)  # any further retry would land inside this
+        assert len(calls) == 3, f"the ladder ran past its bound: {len(calls)} attempts"
+        assert len(serving_module._COMPLETION_RETRY_DELAYS_S) == 2
+        assert _delivered(session_id, token) is False, "a failed banner must not spend the claim"
+        # The event is still visible where it matters most.
+        from local_operator.session.attention import AttentionStore as _Store
+
+        assert (
+            _Store(config_dir() / "attention.db").state(f"session/{session_id}")["unseen"] is True
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_exception_after_the_claim_hands_it_back(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """R7: the release branch must survive a RAISE, not just a ``False``.
+
+    The claim is taken before the raise, so an exception escaping past the
+    ``if not delivered`` branch left the watermark asserting a banner nobody
+    received — a completion that was neither announced nor left claimable by the
+    next surface. The raise is forced through the real ``detached_notify``
+    funnel so the arm's own exception path is the one under test.
+    """
+    _fast_ladder(monkeypatch)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+
+    def exploding(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+        calls.append({"title": title, "body": body, "session_id": session_id, "subtitle": subtitle})
+        raise OSError("no notification helper")
+
+    monkeypatch.setattr(notify_module, "detached_notify", exploding)
+    try:
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id)
+        handle._schedule_completion_announce()
+        await _until(lambda: calls)
+        # Every attempt fails, so the ladder exhausts and the claim is free.
+        await _until(lambda: len(calls) >= 4)
+        assert _delivered(session_id, token) is False, "the claim survived a raise"
+    finally:
+        await session.dispose()
