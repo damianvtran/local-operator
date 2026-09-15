@@ -143,6 +143,7 @@ from local_operator.session.goal_loop import (
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -656,10 +657,52 @@ RESTORE_SEAM = "\n\n"
 #: ``note``, not ``warning``: this is the answer to "why is my session behaving
 #: differently", and the matching build-skew notice one seam over uses the same
 #: ink for the same reason. The refusal itself is the row that has to be read.
+#:
+#: THIS SENTENCE IS ABOUT ONE TRIGGER, so it is only ever painted for that one
+#: (design round 3, D6). Both triggers commit through one seam
+#: (``process._commit_to_leaving``) and both announce with ``draining`` true, so
+#: a runtime SIGTERMed mid-turn — the incident this PR exists for — used to be
+#: told it was switching to a newer build, when the install had not moved and no
+#: successor was coming. See :data:`SIGNAL_DRAIN_NOTICE` and the ``leaving``
+#: phrase the frame now carries.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
     "first, so a new message will not start a turn until the new build is up"
 )
+
+#: The same notice for a runtime that was TERMINATED while it had work in flight
+#: (``LEAVING_ON_SIGNAL``), which is a different departure in every clause: the
+#: install has not moved, no successor is owed, and this session was ended rather
+#: than handed over. What it shares with the build notice is why the row exists —
+#: the composer accepts text that will be refused until the turn in flight ends.
+#: It deliberately promises NOTHING about afterwards: whether the session comes
+#: back on a fresh runtime is the host's decision, not the runtime's, so the one
+#: sentence that is true wherever this frame is read stops at the drain.
+SIGNAL_DRAIN_NOTICE = (
+    "this session was signalled to stop; it is finishing in-flight work first, "
+    "so a new message will not start a turn"
+)
+
+#: The notice for a draining frame whose trigger this build cannot name — a
+#: phrase written by a NEWER runtime than the app reading it. Kept separate from
+#: :data:`DRAIN_NOTICE` on purpose, and it is the whole point of the split: a
+#: sentence about a build must never be painted for a departure nobody has
+#: established was a build, which is the falsehood D6 filed. The fallback says
+#: only what ``draining`` itself establishes.
+DRAIN_NOTICE_OTHER = (
+    "this session is finishing in-flight work first, so a new message will not " "start a turn"
+)
+
+#: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
+#: ``leaving`` phrase the runtime publishes on its record and now sends in the
+#: frame, so the app and the fleet surfaces quote one vocabulary instead of two
+#: readings of the same state. The constants are imported rather than retyped:
+#: a reworded phrase fails loudly at this table instead of silently falling
+#: through to :data:`DRAIN_NOTICE_OTHER`.
+_DRAIN_NOTICES: dict[str, str] = {
+    LEAVING_FOR_BUILD: DRAIN_NOTICE,
+    LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
+}
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -17569,7 +17612,7 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self) -> None:
+    def _on_runtime_draining(self, leaving: str = "") -> None:
         """A runtime has committed to leaving while it still has work: say so.
 
         Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
@@ -17581,11 +17624,24 @@ class OperatorApp(App[None]):
         own state could be consulted it is cold, and cold is true of both
         hands (QA round 3, Q-1).
 
+        ``leaving`` is the frame's phrase — the TRIGGER's own words — and the
+        sentence is chosen from it rather than from ``draining`` alone, because
+        one flag cannot tell a build handover from a termination and the two do
+        not describe the same thing (design round 3, D6). An empty phrase is a
+        runtime older than the key, which announces the build handover and
+        nothing else, so :data:`DRAIN_NOTICE` is the accurate sentence for it;
+        a phrase this build does not know gets the neutral one rather than
+        another trigger's.
+
         One row, while the composer still accepts text that will be refused.
         """
         if self._interaction is None:
             return
-        self._notice_for(self._interaction, DRAIN_NOTICE, "note")
+        if not leaving:
+            notice = DRAIN_NOTICE
+        else:
+            notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        self._notice_for(self._interaction, notice, "note")
 
     def _announce_refresh_completed(self) -> None:
         """One line naming the version change a self-refresh just made.
@@ -28592,11 +28648,30 @@ class OperatorApp(App[None]):
         executes. Confirmation-by-listing rather than a modal, the Esc
         ladder's idiom, because a kill switch that can be dismissed by the
         same key that armed it is one that cannot trap the user.
+
+        NO FLAGS, and a leading one is refused as a flag rather than resolved
+        as a target (UX round 3, U11): ``--force`` belongs to ``lop stop``, and
+        the TUI's only stop is the deliberate one, so ``/stop --force 62181``
+        used to answer "no live session matches '--force 62181'" about a
+        session the panel one keystroke away lists as live and draining.
         """
         session = self._session
         target = arg.strip()
         if target.lower() == "all":
             self._stop_all(notice)
+            return
+        if target.startswith("-"):
+            # The house shape for an argument a surface does not take
+            # (``/info extra`` → "takes no arguments"), with the remedy the
+            # flag was reaching for named where it exists: this ladder stops a
+            # session deliberately and promptly, and it deliberately does NOT
+            # cut a draining turn — only the shell's ``--force`` does.
+            self._system_notice(
+                f"/stop takes no flags — got {target!r}. Send /stop <pid> to stop a session "
+                "deliberately; `lop stop <pid> --force` from a shell is the one that cuts a "
+                "draining turn.",
+                "warning",
+            )
             return
         if not target:
             if session is None:

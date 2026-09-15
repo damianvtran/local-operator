@@ -1224,15 +1224,22 @@ async def _drain_for_signal(
       plain ``lop stop`` — cuts the very turn the drain is finishing (U1/U2, PR
       #1141). See ``SessionRecord.leaving``; ``lop stop`` refuses on it too.
 
-    ONE GAP IS DELIBERATE and is stated rather than closed: the last predicate
-    read above and the latch at ``begin_retire`` are separated by the
-    ``announce_retiring`` await, so a ``prompt`` landing inside that window opens
-    a turn which the unconditional ``stop.set()`` then cuts. Re-reading the
-    predicate after the announce would close it and is what ``_refresh_for``
-    does — but there the refusal KEEPS the runtime, whereas here the signal has
-    already decided that this process leaves: a re-read could only relabel the
-    cut, never save the turn. So the window stays, bounded by one socket write,
-    and the label stays honest (``runtime-shutdown``).
+    ONE GAP IS DELIBERATE and is stated rather than closed: the predicate is
+    read above and then ``announce_retiring`` is awaited, so a ``prompt``
+    landing inside that window is admitted before ``begin_drain`` — the latch
+    adjacent to the announce — starts refusing. What protects a turn taken
+    through that gap is the BOUNDARY latch, not a second read here: ``_drain_for``
+    re-reads the idle gate immediately before ``begin_retire`` (through
+    ``_idle_for_refresh``, the same ``may_refresh`` gate the reaper samples) and
+    skips the commit when work arrived, so such a turn is normally WAITED OUT and
+    ``stop.set()`` cuts it only if ``SIGNAL_DRAIN_S`` expires first (pinned by
+    ``test_process_refresh.py::test_work_arriving_after_the_announce_keeps_the_runtime``).
+    Re-reading the gate at the announce would not close the window — the signal
+    has already decided that this process leaves, so a re-read could only relabel
+    a cut, never save the turn — and the re-read that DOES matter is the one at
+    the boundary, where it can still refuse the exit. So the window stays,
+    bounded by one socket write, and the label stays honest
+    (``runtime-shutdown``).
 
     The signal name is passed for the log only; the disposal itself stays where
     it is and in the order it already had — ``amain`` owns deny -> dispose ->

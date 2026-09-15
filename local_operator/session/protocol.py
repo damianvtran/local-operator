@@ -1253,7 +1253,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Called when the runtime retired itself for a newer build."""
         ...
 
-    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
         """Called the moment the runtime announces a departure that REFUSES work.
 
         The sibling of :meth:`set_refresh_callback` one event earlier: that one
@@ -1261,6 +1261,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ``retiring`` frame while the runtime is still working, and only when
         the frame says the departure is draining. Viewer-only by construction —
         an owner ``Session`` has no wire to hear the frame on.
+
+        ``callback`` takes the frame's ``leaving`` phrase: the trigger's own
+        words (a signal and a replaced build are two different sentences to a
+        reader), empty for a runtime older than the key.
         """
         ...
 

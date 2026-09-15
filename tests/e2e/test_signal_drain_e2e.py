@@ -753,6 +753,15 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
             assert all(row["leaving"] == "" for row in session_rows(config)), session_rows(config)
             log_before = len(_runtime_log(config))
 
+            # THE FRAME THE APP PAINTS FROM, heard on the real wire (D6): the
+            # trigger's own words travel WITH the drain, because the app's notice
+            # is a sentence about the trigger and ``draining`` alone cannot say
+            # which one committed it — which is how a SIGTERM mid-turn came to be
+            # told it was switching to a newer build. Registered before the
+            # signal, on the production viewer the cell already parked.
+            heard: list[str] = []
+            rig.viewers["drainvis01"].set_drain_callback(heard.append)
+
             started = time.monotonic()
             os.kill(rig.children["drainvis01"].pid, signal.SIGTERM)
 
@@ -764,6 +773,13 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
             published = _leaving_of(config, "drainvis01")
             assert published == LEAVING_ON_SIGNAL, published
             assert rig.children["drainvis01"].poll() is None, "the drain is a wait, not a death"
+
+            # The same words reached the viewer's frame, which is the half the
+            # app's sentence is chosen from (D6).
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not heard:
+                await asyncio.sleep(0.1)
+            assert heard == [LEAVING_ON_SIGNAL], heard
 
             # THE OPERATOR'S NEXT MOVE: a plain stop must refuse and say what
             # insisting would cost, rather than cut the turn.

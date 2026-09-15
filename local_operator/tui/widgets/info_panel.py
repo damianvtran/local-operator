@@ -49,6 +49,12 @@ from local_operator.info.model import (
     is_shadowed_install,
 )
 from local_operator.info.render import build_export, not_answering_clause, plural
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_S,
+    bound_text,
+)
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -183,6 +189,31 @@ def _path(value: str, width: int) -> str:
 def _model(value: str, width: int) -> str:
     """Truncate a model id from the RIGHT: the provider and family identify it."""
     return truncate_cells(value, width) if value else "—"
+
+
+#: The drain row's words on the WIDTH FLOOR, and the reason they are their own
+#: strings (design round 3, U10). Below ``_NOTE_MIN`` the meta ladder is shed
+#: WHOLESALE and only ``short_meta`` survives, so a leaving row used to render as
+#: a bare ``● <name>``: the fact that changes what the operator may safely do
+#: next — the one this row's phrase was placed high to protect — was the one
+#: thing the narrow frame dropped, and behind it sat the widest ladder rung in
+#: the panel (the 51-cell phrase ``lop sessions`` sizes its column to).
+#:
+#: Kept as a TABLE keyed by the trigger's own words rather than by cutting the
+#: phrase, because the shelf is ~15 cells and a cut phrase is a fragment:
+#: ``signalled; leav…`` is not a thing a person reads. The bound is not invented
+#: here either — it is ``SIGNAL_DRAIN_S``, the same constant the phrase spells
+#: out in full, so the compact form and the long one cannot disagree. A phrase
+#: this build does not know (written by a newer runtime) falls back to
+#: :data:`_LEAVING_SHORT_OTHER`, which says the irreducible fact rather than
+#: another trigger's words.
+_LEAVING_SHORT: dict[str, str] = {
+    LEAVING_ON_SIGNAL: f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})",
+    LEAVING_FOR_BUILD: "leaving for build",
+}
+
+#: The fallback above: no trigger named, no bound claimed, nothing false.
+_LEAVING_SHORT_OTHER = "leaving"
 
 
 @dataclass
@@ -815,13 +846,20 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # This row's whole point is that a reader can tell it apart from the
         # working session above it, and a bare ``✗`` beside a truncated name
         # does not do that.
-        body.marked(
-            glyph,
-            ink,
-            name,
-            metas=metas,
-            short_meta="not answering" if line.state == "wedged" else "",
-        )
+        #
+        # A LEAVING ROW NEEDS ONE TOO, and it needs its own (design round 3,
+        # U10): the state this row publishes is the one that changes what the
+        # reader may safely do next, and on a narrow frame it used to be the
+        # only state reduced to a bare glyph beside a name. The compact form
+        # carries the bound where the phrase has one, so the narrow reader is
+        # told both that it is leaving and how long that can take.
+        if line.state == "wedged":
+            short_meta = "not answering"
+        elif line.leaving:
+            short_meta = _LEAVING_SHORT.get(line.leaving, _LEAVING_SHORT_OTHER)
+        else:
+            short_meta = ""
+        body.marked(glyph, ink, name, metas=metas, short_meta=short_meta)
     if sessions.build_skew:
         body.note(
             "Live sessions are running more than one build — a change may look "

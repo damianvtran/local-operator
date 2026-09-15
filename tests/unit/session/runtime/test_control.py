@@ -32,8 +32,35 @@ import pytest
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import control, registry
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SessionRecord,
+)
 from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
+
+
+def _bare_record(**overrides: Any) -> SessionRecord:
+    """A resolvable record with no live runtime behind it.
+
+    For the cells that read a record rather than dial it: the ``/info``,
+    ``lop sessions`` and receipt builders take a record and nothing else, and a
+    plain one keeps a wording cell from needing a server to state itself.
+    """
+    fields: dict[str, Any] = {
+        "pid": 4242,
+        "kind": "tui",
+        "session_id": "stub01234567",
+        "conversation_name": "stub",
+        "cwd": "/tmp",
+        "model_label": "test/mock",
+        "control_port": 1,
+        "control_key": "k",
+        "version": "0.55.4",
+        "source_ref": "f4a70b9" + "0" * 33,
+    }
+    fields.update(overrides)
+    return SessionRecord(**fields)
 
 
 def _record_for(server_record: SessionRecord, **overrides: Any) -> SessionRecord:
@@ -1010,6 +1037,64 @@ def test_the_wait_line_names_its_bound_once_and_in_one_unit() -> None:
     # ...and it is the receiver's bound in that sentence, not the sender's: the
     # receipt describes how long the RUNTIME will finish its turn for.
     assert control.SIGNAL_DRAIN_S != control.SIGTERM_GRACE_S
+
+
+@pytest.mark.asyncio
+async def test_the_settle_question_keeps_no_phrase_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D8 is RECORDED, not closed — this cell is the record.
+
+    The design round's D8 measured a draining runtime from the round-1 lineage
+    being answered "ask again", and the temptation is to make ``_settle_question``
+    answer "draining" whenever the record carries a phrase. That branch would be
+    DEAD: ``Server._refresh_if_idle`` returns ``kept: already leaving`` whenever
+    ``_leaving`` is set, and ``announce_retiring`` sets it in the same call that
+    writes the phrase — so a phrase-carrying runtime never routes here at all,
+    while the buildings that DO route here (drain on a signal, publish no
+    phrase) carry nothing the CLI can distinguish "leaving" from "not settled"
+    with. Pinned as a negative so the shortcut is not re-added as a fix: the
+    CLI's answer for that population is the marker's, and the population is
+    named in the function's docstring.
+    """
+    record = _bare_record()
+    monkeypatch.setattr(control, "moved_and_unsettled", lambda *_a, **_k: True)
+
+    assert control._settle_question(record) == ("unsettled", "")
+    assert control._settle_question(_record_for(record, leaving=LEAVING_ON_SIGNAL)) == (
+        "unsettled",
+        "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_drain_reads_as_prose_in_every_receipt() -> None:
+    """D7: one vocabulary, and it carries a verb where a person reads it.
+
+    The record's phrase is a CELL VALUE (lowercase, subject-less) because
+    ``lop sessions`` and ``/info`` print it in a column, so concatenating it
+    into a sentence produced '"name" (pid 12, running …) signalled; leaving when
+    its turn ends' — a fragment with no verb. Both prose slots hang their own
+    subject on one copula supplied by ``_drain_phrase``, so the same words are a
+    cell in one place and a clause in the other.
+    """
+    record = _bare_record()
+    for phrase in (LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD):
+        receipt = control._refresh_line(
+            _record_for(record, leaving=phrase), "0.55.4@f4a70b9", "draining", ""
+        )
+        assert receipt.endswith(f"is {phrase}"), receipt
+
+    handle = _StoppingHandle()
+    server, served = await _serve(handle)
+    target = _record_for(served, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.2, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert f"— it is {LEAVING_ON_SIGNAL};" in outcome.line, outcome.line
+    finally:
+        server.close()
+        registry.unpublish(target.pid)
 
 
 @pytest.mark.asyncio
