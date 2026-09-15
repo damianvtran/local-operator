@@ -1046,7 +1046,9 @@ async def _commit_to_leaving(
             # that refusals are in force from the latch below until the drain
             # empties. A viewer that inferred that from its own state inferred
             # "cold", which is true of every handover (QA round 3, Q-1).
-            await cast(Callable[..., Awaitable[None]], announce)(label, to=to, draining=True)
+            await cast(Callable[..., Awaitable[None]], announce)(
+                label, to=to, draining=True, leaving=leaving
+            )
         except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
             logger.debug("retiring announcement failed", exc_info=True)
     if stop.is_set():
