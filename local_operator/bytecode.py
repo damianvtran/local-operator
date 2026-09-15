@@ -289,9 +289,23 @@ def warm_bytecode_cache_in_background() -> threading.Thread | None:
     subprocess finished, and the daemon that spawned it has already done the
     work by then.
 
+    NEVER RAISES, and for every reason rather than the one: the conditions
+    below, the probe, the thread, and the subprocess are each wrapped. That is
+    load-bearing at the call sites — the daemon runs it inside its FastAPI
+    ``lifespan``, where a raise fails startup, and one of the two TUI callers
+    reaches it from a function documented as never raising.
+
     Returns the thread so a caller (or a test) can join it; ``None`` means
     there was nothing to do and no process was started.
     """
+    try:
+        return _warm_bytecode_cache()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("bytecode cache warm skipped", exc_info=True)
+        return None
+
+
+def _warm_bytecode_cache() -> threading.Thread | None:
     if not sys.dont_write_bytecode:
         # Nothing refuses the write, so the first process to import each module
         # caches it on the way past. There is no cold state to repair.
@@ -309,13 +323,21 @@ def warm_bytecode_cache_in_background() -> threading.Thread | None:
         # shell rc files, so a stray `export` reaches every python the app
         # runs. local-operator-ui sanitises the same value on its side with the
         # same predicate; refusing here means neither has to trust the other.
+        #
+        # BEFORE the writability check, which CREATES the directory: a refusal
+        # that leaves a new empty directory inside a signed bundle is not a
+        # refusal.
         logger.debug("bytecode cache prefix points inside an app bundle; declining")
         return None
-    try:
-        if not cache_is_cold():
-            return None
-    except Exception:  # noqa: BLE001 — an unanswerable probe is not a reason to run
-        logger.debug("bytecode cache probe failed", exc_info=True)
+    if not _prefix_is_writable(sys.pycache_prefix):
+        # AN UNWRITABLE PREFIX IS A PERMANENT COLD STATE, and the probe would
+        # report it cold for ever: every daemon and TUI boot would spawn a
+        # compiler that writes nothing, which is a cost this module invented.
+        # Declining here is the only place that can tell the difference between
+        # "cold, and a write would fix it" and "cold, and no write can land".
+        logger.debug("bytecode cache prefix is not writable; declining")
+        return None
+    if not cache_is_cold():
         return None
 
     try:
@@ -357,8 +379,38 @@ def _child_argv(optimize: int | None = None) -> list[str]:
     return python_argv(*flags, "-c", _CHILD_SOURCE)
 
 
+def _prefix_is_writable(prefix: str) -> bool:
+    """Whether a bytecode write COULD land under ``prefix``.
+
+    Creates the directory on the way, which is not a side effect worth
+    avoiding: CPython makes exactly this directory, lazily, on the first write,
+    and a cold prefix normally does not exist yet — so an ``os.access`` on it
+    would answer "unwritable" for the one case the warm exists to fix. A
+    failure to create it is the answer we actually want (a read-only volume, a
+    denied parent), and it is reported rather than raised.
+    """
+    try:
+        Path(prefix).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(prefix, os.W_OK)
+
+
 def _run_child() -> None:
-    """Spawn the compiler subprocess. Never raises."""
+    """Spawn the compiler subprocess. Never raises.
+
+    REFUSES WITHOUT A REDIRECT, and that refusal is the safety property rather
+    than a formality: this function drops ``PYTHONDONTWRITEBYTECODE`` from the
+    child's environment (it must, or the child cannot write at all), so a child
+    spawned with no ``PYTHONPYCACHEPREFIX`` would write ``__pycache__`` beside
+    every module it imports — the repo and the venv included — which is exactly
+    the write the module docstring exists to prevent. The public entry point
+    cannot reach here without a prefix; this guard is what makes that true of
+    ANY caller, including a future one and a test.
+    """
+    if not sys.pycache_prefix:
+        logger.debug("bytecode cache warm needs a redirect; declining")
+        return
     try:
         import local_operator
 
@@ -374,12 +426,8 @@ def _run_child() -> None:
         # pycache_prefix`` and programmatic callers set only the attribute, and
         # a child that wrote to a DIFFERENT cache than this process reads would
         # be a silent no-op: the compiler would report success and the next
-        # process would still recompile. The guard is unreachable from
-        # :func:`warm_bytecode_cache_in_background`, which returns early when
-        # the prefix is absent; it is here so a future direct caller cannot
-        # bypass the invariant this function depends on.
-        if sys.pycache_prefix:
-            env["PYTHONPYCACHEPREFIX"] = sys.pycache_prefix
+        # process would still recompile.
+        env["PYTHONPYCACHEPREFIX"] = sys.pycache_prefix
         # The child must import THIS local_operator. An editable install or a
         # source checkout reaches it through the parent's ``sys.path`` entry,
         # which ``-c`` does not replicate.

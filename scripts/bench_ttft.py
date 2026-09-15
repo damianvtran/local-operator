@@ -546,12 +546,22 @@ def main() -> int:
     _PYCACHE_PREFIX.mkdir(parents=True, exist_ok=True)
     global _TIKTOKEN_CACHE_DIR
     _TIKTOKEN_CACHE_DIR = Path(tempfile.mkdtemp(prefix="lop-ttft-tiktoken-"))
-    # FORCED for the whole invocation, not just the measured runs: the priming
-    # pass below has to populate the same cache the runs will read, and an
-    # inherited prefix (the operator's real app cache) would be reported warm.
+    # FORCED for the whole invocation, not just the measured runs — and set HERE
+    # rather than in ``_one`` because the priming pass below builds its
+    # environment from ``os.environ``: a prime without the tokenizer's data
+    # directory warms tiktoken into the ambient cache while the measured child
+    # fetches it afresh, which measures the harness's network rather than
+    # local-operator.
+    os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE_DIR)
     os.environ["PYTHONPYCACHEPREFIX"] = str(_PYCACHE_PREFIX)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
-    print(f"bytecode prefix: {_PYCACHE_PREFIX}", flush=True)
+    print(
+        f"bytecode prefix: {_PYCACHE_PREFIX}\n"
+        f"tokenizer cache: {_TIKTOKEN_CACHE_DIR}\n"
+        f"sys.dont_write_bytecode in this process: {sys.dont_write_bytecode} "
+        f"(the arms' CHILDREN always get 1, set in _one)",
+        flush=True,
+    )
     if args.child_tui:
         config_dir = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
         cwd = Path(os.environ["LOP_TTFT_CWD"])
