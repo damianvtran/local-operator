@@ -22,63 +22,20 @@ an MCP recovery. Each has its own custom type and its own formatter for the
 same reason: running them through :func:`classify_incident` would attach a
 failure category and a "this is why the previous turn ended" tail to a
 message that is not about a failure at all.
+
+The MARKERS those four records carry are no longer defined here. They moved to
+:mod:`local_operator.harness.message_types`, the one neutral home that a
+surface barred from importing this module can reach: the shared renderer
+(``harness/render.py``) has to recognise a ``session_incident`` to replay it,
+but an evaluation episode may not import this module — and importing a string
+is enough to pull it in. Nothing in this module reads the markers, so it does
+not re-import them; the values and their per-record notes live in that module.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-
-#: Custom-message type journaled by the session; rendered to a user message
-#: by ``Session._default_convert_to_llm`` so both a live next-turn and a
-#: resumed replay see the same incident.
-SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
-
-#: Custom-message type journaled by the session when a session credential is
-#: stored or forgotten mid-conversation. The ONLY other advertisement of a
-#: stored credential is the ``<session-credentials>`` block in the volatile
-#: system-prompt tail, which the model has no reason to re-read when it
-#: changes — so an operator who runs ``/credential FOO_KEY`` and says "I just
-#: added the key" left the model to guess names until it happened to notice
-#: the tail. This message lands in the LIVE context only, naming the KEY
-#: ONLY: the value must never ride a message the provider sees. It is
-#: deliberately NOT persisted — credentials are process-memory-only, so a
-#: replayed "$FOO_KEY is injected into every bash command" would assert an
-#: env var a restarted session does not have (review round 1, R2). Resume-time
-#: discovery is already served honestly by the ``<session-credentials>``
-#: block, which the prompt tail rebuilds from the (empty) live store each
-#: turn.
-SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
-
-#: Custom-message type journaled by the session when the running model changes
-#: (a deliberate ``set_model``, or a failover fallback to another model).
-#: Rendered to a user message the same way as an incident, so the model NOTICES
-#: it is now answering as a different model rather than only seeing a changed
-#: static "Model:" line in the system prompt. Persisted, so a resumed session
-#: replays the switch history too.
-SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
-
-#: Custom-message type journaled by the session when an MCP server that was
-#: ANNOUNCED BROKEN to the model connects again. The failure half of that pair
-#: has always been model-visible (``McpManager.on_incident`` ->
-#: ``Session._on_mcp_incident`` -> a ``session_incident`` message); the recovery
-#: half was not, so an operator who ran ``/mcp login <server>`` mid-session left
-#: the model holding a death notice — and its ``mcp`` hint, "its tools are gone
-#: ... Do not call its tools" — for a server that had been usable for the rest
-#: of the session. Observed live against ``minerva-qa``.
-#:
-#: It is a DEDICATED type rather than another ``session_incident`` because
-#: ``journal_incident`` runs :func:`classify_incident`, whose ``mcp`` rule
-#: matches the substring "mcp" and would append ``_HINTS["mcp"]`` — precisely
-#: the "its tools are gone" sentence — to a message saying the opposite.
-#:
-#: LIVE CONTEXT ONLY, deliberately not persisted: an MCP connection is
-#: process-scoped (``McpManager._connections`` is instance state and
-#: ``disconnect_all`` runs on dispose), so a replayed "its N tools are
-#: available to you now" would assert a live capability a restarted session may
-#: not have — the same class as the credential record above, and the more
-#: likely case for exactly the servers this serves, whose grants expire.
-SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
 
 #: Provider wordings that mean "this request does not fit", in every phrasing
 #: the vendors actually use (anthropic's "prompt is too long", google's token

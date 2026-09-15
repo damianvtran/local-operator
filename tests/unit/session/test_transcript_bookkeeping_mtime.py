@@ -23,8 +23,8 @@ import os
 
 import pytest
 
+from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.harness.types import CustomMessage, Message
-from local_operator.incidents import SESSION_INCIDENT_MESSAGE_TYPE
 from local_operator.session.transcript import TranscriptEntry
 
 #: A stamp far enough in the past that no filesystem timestamp granularity can

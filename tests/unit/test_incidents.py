@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.incidents import (
+from local_operator.harness.message_types import (
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+)
+from local_operator.incidents import (
     classify_incident,
     format_incident_message,
     format_mcp_recovery_message,

@@ -818,6 +818,7 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
@@ -834,7 +835,6 @@ def project_settled_rows(
         user_row_text,
     )
     from local_operator.tui.app import (
-        PEER_MESSAGE_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
         WAKE_PROMPT_MESSAGE_TYPE,
         AssistantBlock,
