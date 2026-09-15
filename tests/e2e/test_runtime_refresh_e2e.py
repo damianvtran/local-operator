@@ -820,7 +820,17 @@ def _completion_attention(config_dir: Path, session_id: str) -> list[dict[str, A
     durable = (config_dir / "sessions" / session_id / "transcript.jsonl").read_text(
         encoding="utf-8", errors="replace"
     )
-    rows = [json.loads(line) for line in durable.splitlines() if line.strip()]
+    # A FINAL LINE CAN BE HALF-WRITTEN: this reader is polled while the child is
+    # still appending (the warm-up wait below needs the row the moment it
+    # lands), so an unparsable line is a read that lost the race, not a fact.
+    rows = []
+    for line in durable.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return [
         row["payload"]["details"]
         for row in rows
@@ -970,11 +980,16 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         # not a retry (QA round 3; review round 3, MINOR 1) — and the wait is on
         # the turn's own durable COMPLETION rather than on ``streaming``, which
         # is a reading the submit has not yet flipped when this line runs.
-        transcript = config / "sessions" / session_id / "transcript.jsonl"
+        # ... and the wait is on the turn's own durable COMPLETION row, not on
+        # the reply text and not on ``streaming``: the reply landing does not
+        # mean the turn is over, and the first CI run of this cell failed
+        # exactly there — the prompt below arrived while the warm-up turn was
+        # still live, was taken as a STEER into it, and no second turn ever
+        # opened. A completion row is the turn's own record that it is over.
         warm_deadline = time.monotonic() + 120
         while time.monotonic() < warm_deadline:
-            if "Hello from the mock provider!" in transcript.read_text(
-                encoding="utf-8", errors="replace"
+            if any(
+                row.get("kind") == "complete" for row in _completion_attention(config, session_id)
             ):
                 break
             await asyncio.sleep(0.05)
