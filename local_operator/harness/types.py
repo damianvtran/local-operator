@@ -81,6 +81,36 @@ FAULT_KEY = "__fault"
 #: what a test pins.
 FAULT_INVALID_ARGUMENTS = "invalid_arguments"
 
+#: Key under which a SYNTHETIC tool result records that the OUTPUT LIMIT is why
+#: its call never ran. A harness bookkeeping key like ``FAULT_KEY`` above, and
+#: declared in the same place for the same reason: the loop writes it and a
+#: display surface reads it, so one spelling has to hold for both.
+#:
+#: WHAT IT IS FOR. The text of those results is written for the MODEL, and the
+#: one the length arm appends is prose addressed to it ("Reply with the call
+#: itself, not with an explanation of why it cannot be sent"). The same text is
+#: the tool message the transcript persists, so a resumed row used to paint
+#: model-directed instruction as the operator's own receipt (review round 1,
+#: F2). The row therefore takes its words from
+#: ``harness.rows.output_limit_call_receipt`` instead, and this key is the whole
+#: input to that decision — a surface must key on the MARKER, never on the
+#: wording, so a later reword of the model-facing text cannot change what an
+#: operator reads.
+OUTPUT_LIMIT_KEY = "__output_limit"
+
+#: The output limit cut this call's ARGUMENTS mid-dictation: the raw text is a
+#: JSON fragment that never parsed. Only this arm may tell the model its
+#: arguments were oversize and would be cut again.
+OUTPUT_LIMIT_ARGUMENTS = "arguments"
+
+#: ...or the turn ended at the limit with this call's arguments already
+#: COMPLETE, so the call is intact and simply never ran. The two arms are
+#: different facts and must not be collapsed: asserting the first for a call
+#: whose 43-byte arguments were complete sent the model after a size problem it
+#: did not have while the identical arguments executed fine on the next turn
+#: (review F1 == QA Q1).
+OUTPUT_LIMIT_TURN = "turn"
+
 
 class InvalidToolArgumentsError(ValueError):
     """The model emitted an argument this tool cannot parse.

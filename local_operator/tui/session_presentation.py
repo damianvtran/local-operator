@@ -830,6 +830,7 @@ def project_settled_rows(
         gate_timeout_notice,
         is_harness_chrome,
         is_harness_notice_row,
+        turn_cut_tool_call,
         user_row_text,
     )
     from local_operator.tui.app import (
@@ -1161,6 +1162,14 @@ def project_settled_rows(
                 has_tool_calls=bool(tool_calls),
                 stop_reason=getattr(message, "stop_reason", None),
                 provider_payload=getattr(message, "provider_payload", None),
+                # The limit's ARM, from the turn's OWN results: this fold has
+                # them (`results` is keyed by call id), and without it the
+                # notice names a cause the call's own row contradicts -- a
+                # length-stopped turn whose every call arrived complete read
+                # "tool call cut off at the output limit" under a card saying
+                # "turn cut off at the output limit before this call ran"
+                # (design round 1, D1; QA Q-R2-1; review round 2, MINOR-2).
+                cut_tool_call=turn_cut_tool_call(tool_calls, results),
             )
             if notice is not None:
                 reason, severity = notice
@@ -1224,6 +1233,7 @@ def replay_tool_call(
     empty there and killed-mid-turn calls still render ``interrupted``
     exactly as before.
     """
+    from local_operator.harness.rows import output_limit_call_receipt
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
@@ -1343,11 +1353,26 @@ def replay_tool_call(
         card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):
+        # A call the OUTPUT LIMIT kept from running carries a SYNTHETIC result,
+        # and that result's text is addressed to the MODEL ("Reply with the call
+        # itself, not with an explanation of why it cannot be sent"). Painting it
+        # here put a model-directed imperative on the operator's screen, under a
+        # red error row about a file that does not exist (review round 1, F2).
+        # The row takes the harness's own vocabulary instead, selected by the arm
+        # marker the result carries; every OTHER error result is untouched and
+        # keeps its own text.
+        #
+        # The status line AND the expanded body, because the body is that same
+        # model-facing string and leaving it there would only move the prose one
+        # click away. The result keeps its text in the transcript and on the wire
+        # -- this is a display decision, not a rewrite of what the model was
+        # told.
+        receipt = output_limit_call_receipt(details)
         card.restore(
             state="error",
-            result_text=result_text,
+            result_text=receipt or result_text,
             details=details,
-            error=_first_line(result_text),
+            error=receipt or _first_line(result_text),
             duration_s=duration_s,
         )
     else:
