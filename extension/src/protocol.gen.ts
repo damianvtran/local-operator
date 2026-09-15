@@ -4,7 +4,7 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.17' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.18' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the

@@ -19,7 +19,7 @@ export function installWorkerPerformance({ port, id, token, onState = () => {}, 
     tabs: { query: async () => [], get: async () => { throw new Error("No real tabs in fixture"); }, remove: async () => {}, onRemoved: event("tabRemoved"), onReplaced: event("tabReplaced"), onUpdated: event("tabUpdated") },
     windows: { get: async () => ({ id: 1 }), getCurrent: async () => ({ id: 1 }) },
     notifications: { create: async () => {}, clear: async () => {}, onClicked: event("notification") },
-    runtime: { id, getManifest: () => ({ version: "0.1.17" }), getURL: path => `chrome-extension://${id}/${path}`, sendMessage: async () => {}, onStartup: event("startup"), onInstalled: event("installed"), onMessage: event("message"), openOptionsPage() {} },
+    runtime: { id, getManifest: () => ({ version: "0.1.18" }), getURL: path => `chrome-extension://${id}/${path}`, sendMessage: async () => {}, onStartup: event("startup"), onInstalled: event("installed"), onMessage: event("message"), openOptionsPage() {} },
   };
   return { session, local, metrics, listeners };
 }
