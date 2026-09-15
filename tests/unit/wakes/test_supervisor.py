@@ -989,6 +989,16 @@ async def test_a_wedged_runtime_is_named_rather_than_timing_out(
     assert engagements == [], "a wedged session must not burn an engage deadline"
     message = " ".join(r.getMessage() for r in caplog.records)
     assert "wedged" in message and "4242" in message and "312" in message, message
+    # The sentence's own contract, since this log line is the only place a
+    # supervisor operator reads it: the measured age, no forecast about whether
+    # the owner will come back (a stale beat is the runtime's OWN loop falling
+    # behind — ``registry.classify`` — so it supports neither a death nor a
+    # recovery claim), and the remedy named with its cost. ``lop stop --pid N``
+    # on its own asks the socket first and refuses while the beat is fresh, so
+    # promising it would advertise a graceful stop the ladder may never admit.
+    assert "has not reported for 312s" in message, message
+    assert "'lop stop --pid 4242 --force' force-signals that process" in message, message
+    assert "recovers or is stopped" not in message, message
 
 
 def test_the_wedged_probe_reads_the_registry_classification(
