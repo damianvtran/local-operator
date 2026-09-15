@@ -89,6 +89,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+    FrontendModelSpec,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -120,6 +121,7 @@ from local_operator.session.transcript import (
     usages_since_newest_shrink,
 )
 from local_operator.session.usage_seed import (
+    denominator_window,
     reading_identity,
     reading_window,
     seed_reported_usage,
@@ -728,6 +730,28 @@ def frontend_attach_refusal(record: SessionRecord) -> str | None:
             f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
         )
     return None
+
+
+def _naming_resolved_no_name(spec: FrontendModelSpec) -> bool:
+    """Whether the RENDER of this spec's model is its own selector.
+
+    ASK NAMING, DO NOT RE-STATE IT. ``model_label``'s ``full`` form is the
+    selector exactly when it refused every candidate it had: a name that merely
+    echoes the id, a RESELLER's listing name (which cannot say which route is
+    answering), and a name two models answer to. A caller that re-derives one of
+    those refusals — the id-echo case was the one an earlier revision copied —
+    disagrees with the band about any model whose listing name is refused for
+    one of the other reasons, and the disagreement is silent: that model keeps
+    painting its bare id while ``naming`` would have accepted the name the
+    conversation's own checkpoint recorded.
+
+    Used by ``AttachedSession._restored_model_specs``, which adopts a
+    checkpoint's display name only when the fresh resolution produced none.
+    """
+    from local_operator.model.naming import model_label
+
+    selector = f"{spec.provider}/{spec.model_id}" if spec.model_id else spec.provider
+    return model_label(spec.provider, spec.model_id, str(spec.display_name or "")).full == selector
 
 
 class AttachedSession:
@@ -1577,7 +1601,18 @@ class AttachedSession:
         spec = state.effective_model or state.selected_model
         if spec is None:
             return state.model_copy(update=changes) if changes else state
+        # THE SPEC'S OWN DENOMINATOR, read once because more than one path needs
+        # it: the receipt-seeded numerator below (``reading_window`` prefers the
+        # receipt's attested answer and falls back to this), and the checkpoint
+        # numerator whose checkpoint carried no window of its own. It is the same
+        # number ``tui.app._context_window`` divides by on every later paint, and
+        # the same value rule the seed applies — ``denominator_window`` refuses
+        # the 128k placeholder, so an unknown budget stays unknown rather than
+        # becoming confident.
+        spec_window = denominator_window(spec)
         if seed is None:
+            if state.context_tokens is not None and state.context_window is None and spec_window:
+                changes["context_window"] = spec_window
             return state.model_copy(update=changes) if changes else state
         # ONE attribution for both the numerator and the price, so a reading the
         # receipt cannot be attributed to gets neither.
@@ -1598,6 +1633,20 @@ class AttachedSession:
         # numerator computes a percentage the tokens were never measured on
         # (a checkpoint at 500_000/1_050_000 read as 390.6% of the new window).
         # A checkpoint that carried no window still gets one.
+        #
+        # When the RECEIPT cannot vouch a denominator (a spec whose account
+        # metadata was never resolved, or a reading it cannot attribute), the
+        # state still carries the model's own window, because that is the number
+        # every later paint divides by. Leaving it unset did NOT show "unknown":
+        # ``StatusLine.update`` reads ``None`` as leave-alone, so the first paints
+        # kept whatever the PREVIOUS session had painted. Resuming a 1M
+        # conversation from a settled 128k one read
+        # ``287,491/128,000 = 224.6%`` for two paints (QA round 1, Q2), and a
+        # receipt-seeded numerator with no spec-vouched denominator read the
+        # reported ``287.5k/—`` for two paints before the spec's own refresh
+        # landed 18ms later (Q1). Same spec, same number, one source.
+        if window is None:
+            window = spec_window
         if window is not None and state.context_window is None:
             changes["context_window"] = window
         if (
@@ -1790,6 +1839,34 @@ class AttachedSession:
         return list(rows.values())
 
     @staticmethod
+    def _restored_pair(
+        state: FrontendSessionState, durable: FrontendSessionState
+    ) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+        """The two specs a restored reading is only meaningful between, or ``None``.
+
+        ONE RULE, TWO CONSUMERS. ``_consistent_context`` asks it whether the
+        checkpoint's NUMERATOR is this model's, and ``_restored_model_specs``
+        asks it whether the checkpoint's DENOMINATOR is. They cannot be answered
+        separately: the checkpoint's ``context_tokens`` were measured against the
+        checkpoint's own window, so a numerator taken from one side under a
+        denominator taken from the other is a percentage the tokens were never
+        measured against — the wrong-reading class both methods exist to refuse.
+        A third consumer must call this rather than restating the comparison.
+
+        ``None`` when either side carries no spec, or when the two name
+        different models: the user switched models since the checkpoint was
+        written, so the stored reading describes a model that is not about to
+        run and is not convertible into one that is.
+        """
+        configured = state.selected_model
+        stored = durable.selected_model
+        if configured is None or stored is None:
+            return None
+        if configured.provider != stored.provider or configured.model_id != stored.model_id:
+            return None
+        return configured, stored
+
+    @staticmethod
     def _consistent_context(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
@@ -1805,16 +1882,11 @@ class AttachedSession:
         than converted: the band renders ``—`` for an unknown context, which is
         the same honest degradation it already shows for a model it cannot
         price. The first real turn replaces it with a live reading anyway.
+
+        The gate is ``_restored_pair``, shared with the WINDOW's half of the
+        restore (``_restored_model_specs``) rather than restated here.
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        same_model = bool(
-            configured is not None
-            and stored is not None
-            and configured.provider == stored.provider
-            and configured.model_id == stored.model_id
-        )
-        if not same_model:
+        if AttachedSession._restored_pair(state, durable) is None:
             return {}
         return {
             "context_tokens": durable.context_tokens,
@@ -1843,72 +1915,70 @@ class AttachedSession:
         window is how a resumed session painted **268.2%** (design review round
         1, D1) — a number that cannot be true, on the one surface that exists to
         tell the user how much room is left. The checkpoint's own spec is the one
-        those tokens were measured against, so it is the honest denominator,
-        taken ONLY when the configured spec names the same model: if the user
-        switched models since, the configured spec is right and the stale window
-        would be the wrong answer in the other direction. In that case the
-        numerator is dropped instead (see ``_consistent_context``) rather than
-        divided by a window it was never measured against.
+        those tokens were measured against, so it is the honest denominator.
+
+        Taken on EXACTLY the gate the numerator is taken on
+        (``_restored_pair``), because the two are one reading: a numerator from
+        the checkpoint under a denominator from anywhere else is a percentage its
+        tokens were never measured against, in either direction. This used to be
+        a METADATA-PRESENCE test — adopt unless the fresh spec reported
+        ``context_metadata_resolved``/``default``/``max`` — which a cold spec
+        built by hand could never satisfy. Resolving the cold pair is what makes
+        that test capable of firing, and it fires on the wrong population: a
+        local provider sets ``context_metadata_resolved`` for the window the
+        ENDPOINT reports now (``providers/local.py``), which is not the window a
+        restored reading was measured against, so a conversation at 20,000 tokens
+        from a 32,768 checkpoint painted ``488.2%/4k`` (review round 1, minor 1).
 
         The NAME rides the same gate for the same reason — it is a fact about
-        THIS model that only a runtime which ran it could resolve (see the
-        adoption below for the measurement).
+        THIS model that only a runtime which ran it could resolve — and it is
+        taken on naming's own rule (``_naming_resolved_no_name``) rather than a
+        copy of one of that rule's three refusals (review round 1, minor 2).
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        if configured is None or stored is None:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        same_model = (
-            configured.provider == stored.provider and configured.model_id == stored.model_id
-        )
-        if not same_model:
-            return {}
+        configured, stored = pair
         update: dict[str, Any] = {}
-        # Fresh route metadata outranks an old owner's active window (which may
-        # predate maximum-context support or a changed opt-out setting).
-        if not (
-            configured.context_metadata_resolved
-            or configured.default_context_window
-            or configured.max_context_window
-        ):
-            window = int(getattr(stored, "context_window", 0) or 0)
-            if window > 0:
-                update.update(
-                    {
-                        "context_window": window,
-                        "default_context_window": stored.default_context_window,
-                        "max_context_window": stored.max_context_window,
-                    }
-                )
-        # The resolved NAME, on the same terms and for a second reason: this
-        # process resolves a name only as far as the catalogue it can read OFFLINE
-        # reaches, and a listing row that answers with the id it was asked about
-        # gives it nothing — `naming.echoes_id` is the rule for that. Measured
-        # against the reference machine: `openai/gpt-6-astra` resolves here to the
-        # name `gpt-6-astra`, which that rule refuses, so the band painted the BARE
-        # ID on the first frame and healed to `GPT-6-Astra` — the name this
-        # conversation's own row carries, resolved by the runtime that was live —
-        # only when that runtime attached. The row is this model's own record of its
-        # own identity (the gate above is the same-model one), so adopting it can
-        # never assert a name onto a different model.
-        # Imported here rather than at module scope, like `_cold_wakes` below and
-        # for the same reason: `model.naming` pulls the shipped registry tables in
-        # with it, and this function only ever runs on a cold open.
-        from local_operator.model.naming import echoes_id
-
-        configured_name = str(getattr(configured, "display_name", "") or "")
-        if not configured_name or echoes_id(configured_name, configured.model_id):
-            durable_name = str(getattr(stored, "display_name", "") or "")
+        window = int(stored.context_window or 0)
+        if window > 0:
+            update.update(
+                {
+                    "context_window": window,
+                    "default_context_window": stored.default_context_window,
+                    "max_context_window": stored.max_context_window,
+                }
+            )
+        # The resolved NAME, and why it needs a gate at all: this process resolves
+        # a name only as far as the catalogue it can read OFFLINE reaches, so a
+        # listing row that answers with the id it was asked about gives it nothing
+        # and the band paints the BARE ID on the first frame, healing to the
+        # conversation's own recorded name only when its runtime attaches. The row
+        # is this model's own record of its own identity (``_restored_pair`` is the
+        # same-model gate), so adopting it can never assert a name onto a different
+        # model.
+        if _naming_resolved_no_name(configured):
+            durable_name = str(stored.display_name or "")
             if durable_name:
                 update["display_name"] = durable_name
         if not update:
             return {}
         return {
             "selected_model": configured.model_copy(update=update),
+            # The EFFECTIVE spec is patched only when it names the pair the update
+            # was derived from. ``stored`` is the checkpoint's SELECTED model, while
+            # an effective spec can name a pinned fallback route instead
+            # (``Session._restore_active_route``), and copying a selected model's
+            # name and window onto a spec that names another model would caption
+            # the fallback with the selection's identity. The cold state sets both
+            # fields from ONE object, so this is an invariant rather than a path
+            # (review round 1, minor 5).
             "effective_model": (
                 state.effective_model.model_copy(update=update)
                 if state.effective_model is not None
-                else None
+                and state.effective_model.provider == stored.provider
+                and state.effective_model.model_id == stored.model_id
+                else state.effective_model
             ),
         }
 

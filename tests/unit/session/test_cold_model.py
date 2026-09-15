@@ -159,3 +159,79 @@ def test_an_unresolvable_saved_selection_still_answers_its_pair(tmp_path) -> Non
     )
 
     assert (spec.provider, spec.model_id) == ("ollama", "a-tag-no-row-covers")
+
+
+@pytest.mark.asyncio
+async def test_the_cold_state_resolves_a_birth_selection_like_the_runtime(tmp_path) -> None:
+    """Q3: a caller-named pair is a SELECTOR too, and gets the same resolution.
+
+    The third source of a conversation's model. The CLI hands over
+    ``ModelSpec(provider, model_id)`` and nothing else, so a legacy conversation
+    with no journalled selection (and no checkpoint) cold-opened on the pair plus
+    ``ModelSpec``'s own defaults: a 128k placeholder standing in as the band's
+    denominator under a real 287,491-token reading, and no name, ladder or level
+    (QA round 1, Q3 — ``224.6%/128k``, unchanged by the saved-selection fix
+    because this is the branch beside it).
+
+    Asserted against ``build_model_spec`` rather than a literal so the two cannot
+    drift, exactly as the saved-selection test above does.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.cold_model import synthesise_cold_state
+
+    ConfigManager(tmp_path).update_config({"hosting": DIRECT_PROVIDER, "model_name": DIRECT_MODEL})
+    runtime = build_model_spec(DIRECT_PROVIDER, DIRECT_MODEL)
+    assert runtime.display_name, "the shipped registry no longer names this pair"
+
+    state = await synthesise_cold_state(
+        config_dir=tmp_path,
+        # No session directory at all: this is the branch a pair the caller named
+        # takes when the journal has nothing to say (a legacy conversation, or a
+        # fresh one), which is why it cannot be reached through ``_seed_selection``.
+        session_id="",
+        cwd=str(tmp_path),
+        birth_model=ModelSpec(provider=DIRECT_PROVIDER, model_id=DIRECT_MODEL),
+    )
+
+    spec = state.selected_model
+    assert spec is not None and spec.provider == DIRECT_PROVIDER and spec.model_id == DIRECT_MODEL
+    assert spec.display_name == runtime.display_name
+    assert spec.context_window == runtime.context_window
+    assert (
+        spec.context_window != ModelSpec.model_fields["context_window"].default
+    ), "the placeholder window is exactly what this branch used to paint"
+    assert spec.reasoning_efforts == runtime.reasoning_efforts
+    assert spec.reasoning_effort == runtime.reasoning_effort
+
+
+@pytest.mark.asyncio
+async def test_a_birth_selections_own_choices_are_never_replaced(tmp_path) -> None:
+    """FILL ONLY: the desktop preview hands over a spec that already has opinions.
+
+    ``_preview_birth_model`` builds ``build_model_spec``'s result and sets the level
+    its user picked, so replacing the whole spec with this machine's configured
+    answer would put the draft pane and the first turn on different rungs — the R6
+    defect, one module over. A field the caller expressed must survive.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.cold_model import synthesise_cold_state
+
+    ConfigManager(tmp_path).update_config(
+        {
+            "hosting": DIRECT_PROVIDER,
+            "model_name": DIRECT_MODEL,
+            # The machine configures a DIFFERENT level, so a wholesale re-resolution
+            # would answer this and the caller's pick would disappear.
+            "model_effort": "max",
+        }
+    )
+    chosen = build_model_spec(DIRECT_PROVIDER, DIRECT_MODEL)
+    chosen = chosen.model_copy(update={"reasoning_effort": "low"})
+
+    state = await synthesise_cold_state(
+        config_dir=tmp_path, session_id="", cwd=str(tmp_path), birth_model=chosen
+    )
+
+    spec = state.selected_model
+    assert spec is not None
+    assert spec.reasoning_effort == "low", "the caller's chosen level is its own opinion"
