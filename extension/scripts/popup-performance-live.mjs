@@ -109,7 +109,7 @@ try {
   sockets.push(standby);
   const ack = new Promise(resolve => standby.addEventListener("message", event => resolve(JSON.parse(event.data)), { once: true }));
   await bounded(once(standby, "open"), "second socket");
-  standby.send(JSON.stringify({ event: "hello", proto: 1, extension_version: "0.1.16", token, browser: "Synthetic fixture" }));
+  standby.send(JSON.stringify({ event: "hello", proto: 1, extension_version: "0.1.17", token, browser: "Synthetic fixture" }));
   const secondAck = await bounded(ack, "second identity ACK");
   assert.equal(secondAck.role, "standby");
   console.log(JSON.stringify({ step: "second real identity", paired: secondAck.paired, role: secondAck.role }));

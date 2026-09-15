@@ -57,12 +57,37 @@ async function mutate<T>(params: Params, fn: (scope: Scope) => T, create = false
   return withSessionMutation(async () => {
     const [proof, session, generation] = identity(params);
     const all = await scopes();
+    // Taken BEFORE the scope is materialized below: creating one IS a mutation,
+    // so a `before` captured after it would make the create look like a no-op
+    // and silently drop the new scope (the trap this ordering exists for).
+    const before = JSON.stringify(all);
     let scope = all[proof];
     if (!scope && create) scope = all[proof] = { session, generation, allocations: {} };
     if (!scope || scope.session !== session || scope.generation !== generation) {
       throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved");
     }
+    // The READ must stay inside the lane: the proof/session/generation check
+    // above IS the fencing decision, and reading outside it would let a
+    // concurrent mutation land between the check and the write.
+    //
+    // The WRITE must not happen when the op changed nothing. Every owned
+    // command funnels through `mutate(params, value => value, ...)` in
+    // `withOwnership` — that call is a pure read whose only job is to validate
+    // the scope and (for the create-able methods) materialize it — yet it
+    // re-wrote the whole `ownerScopes` map on every command of every session.
+    // That read-modify-write is serialized on the same module-global lane every
+    // other session's mutation queues behind, which is the measured
+    // `get/set(ownerScopes)` stall: the fleet's commands paid for a write that
+    // provably could not change the stored bytes. Comparing the serialized map
+    // before and after is cheap next to a storage round trip, and it is the
+    // WHOLE map rather than `scope` because an op may mutate nested
+    // `allocations` entries, add a scope (`create`) or delete a field.
+    //
+    // A skipped write is not a deferred one: nothing else consumes these bytes
+    // before their next writer, and the value left on disk is byte-identical to
+    // what the op would have written.
     const result = fn(scope);
+    if (JSON.stringify(all) === before) return result;
     await deadline(
       chrome.storage.session.set({ ownerScopes: all }),
       CHROME_API_DEADLINE_MS,

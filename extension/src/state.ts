@@ -234,15 +234,64 @@ export function removeSurface(token: string): Promise<void> {
 }
 
 /**
- * Refresh a surface's ``lastUsedAt`` — only if it is still in the map.
+ * How long a surface's ``lastUsedAt`` may go unwritten before another refresh
+ * is worth a whole-map read-modify-write.
+ *
+ * This is the fix for the measured fleet-wide stall: the refresh used to run
+ * inside ``requireSurface``, i.e. on EVERY command's critical path, so a
+ * read-class command paid one extra ``get(surfaces)`` plus one full-map
+ * ``set(surfaces)`` — two of its three session-storage round trips — and every
+ * one of those mutations is serialized through the ONE module-global store
+ * lane (``withStore``). Four concurrent commands measured a
+ * 603/1004/1405/1807 ms staircase against an artificial per-op delay: the
+ * latency was proportional to how many sessions were talking at once, not to
+ * the work. The value only ORDERS the `tabs` listing for a human, so a few
+ * seconds of staleness is invisible to every reader (nothing branches on it),
+ * while a continuously driven tab drops from one write per command to at most
+ * one per interval. Deliberately coarse rather than tuned: any value in this
+ * range fixes the fan-out, and a tighter one would buy nothing anyone can
+ * observe.
+ */
+export const TOUCH_INTERVAL_MS = 10_000;
+
+// Last SCHEDULED refresh per token, checked and set synchronously (no await
+// between) so two commands of the same tab interleaving after their replies
+// cannot both decide to write. Bounded because tokens accumulate across
+// open/close cycles over a worker's lifetime: past the cap the OLDEST INSERTED
+// entry is forgotten. Insertion order is not recency, so the token dropped can
+// be one that is actively driven while a never-driven stale one survives — that
+// surface then pays one extra write per interval, i.e. the pre-fix rate for one
+// token, which is why the bound is kept and the ordering not chased.
+const TOUCHED_TOKENS_MAX = 64;
+const touchedAt = new Map<string, number>();
+
+/**
+ * Refresh a surface's ``lastUsedAt`` — only if it is still in the map, and at
+ * most once per {@link TOUCH_INTERVAL_MS}.
+ *
+ * Call this AFTER a command has replied (``worker.ts``'s dispatch tail), never
+ * on the command's critical path: it is best-effort bookkeeping whose own
+ * comment always said so, and putting it in front of the reply made every
+ * session pay for it.
  *
  * An unconditional put could resurrect an entry a concurrent prune (tabs /
  * status run under a different daemon lock key) just removed, leaving a dead
  * surface counting toward the cap until the next prune (review finding m5).
  * The presence check runs inside the store queue, so it cannot interleave
  * with the prune's own read-modify-write.
+ *
+ * The timestamp is recorded as SCHEDULED, before the queued write settles: a
+ * storage failure is not retried here (a recency stamp is never worth a retry
+ * storm), and the next command past the interval simply writes again.
  */
 export function touchSurface(token: string, at: number): Promise<void> {
+  const previous = touchedAt.get(token) ?? 0;
+  if (at - previous < TOUCH_INTERVAL_MS) return Promise.resolve();
+  if (touchedAt.size >= TOUCHED_TOKENS_MAX) {
+    const oldest = touchedAt.keys().next().value;
+    if (oldest !== undefined) touchedAt.delete(oldest);
+  }
+  touchedAt.set(token, at);
   return withStore(async () => {
     const surfaces = await getSurfaces();
     const surface = surfaces[token];

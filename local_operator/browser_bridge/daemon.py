@@ -122,6 +122,38 @@ LINK_CLOSE_TIMEOUT_S = LINK_SEND_TIMEOUT_S
 #: to cover a pathologically slow loop turn, which is the same generosity
 #: argument `LINK_SEND_TIMEOUT_S` already makes.
 PING_PROBE_TIMEOUT_S = 5.0
+#: Consecutive unanswered liveness PROBES on one link before the daemon severs it.
+#:
+#: ONE unanswered question is not evidence of a dead peer. The probe rides the
+#: same event loop and the same socket as the command that timed out, so a miss
+#: is also the shape a GC pause, a slow renderer or a starved loop produces —
+#: and severing on the first miss failed every OTHER pending future on that
+#: worker, i.e. one slow `read` destroyed three sessions' in-flight work and
+#: logged it as "silent for 1s" one second after the peer had spoken. Two
+#: consecutive misses on a link already proven, with the peer's last frame at
+#: least one ping interval back, is the bar. Not a tuned number: 2 is the
+#: smallest count that distinguishes "did not answer once" from "is not
+#: answering", and the strike counter resets on any frame the peer sends, so a
+#: live link can never accumulate its way to a teardown.
+#:
+#: "Consecutive" here means consecutive OBSERVATIONS, not consecutive probes: a
+#: second miss only counts when its probe began after the window of the previous
+#: one closed (`note_probe_strike`). Two sessions whose commands time out at the
+#: same moment are the shape this rule is FOR, and they produce two misses
+#: inside one window — counting those as two would spend the whole bar on one
+#: silent instant and sever, which is the single-miss teardown again (review R1:
+#: misses 0.6 ms apart, `close 4000`).
+PROBE_STRIKES_BEFORE_SEVER = 2
+#: How late one ping-tick cycle may be relative to `PING_INTERVAL_S` before the
+#: daemon says so at WARNING. A late tick is the daemon's own event loop failing
+#: to run, which produces the SAME silence measurement a mute peer does — the
+#: ambiguity that made the original incident take hours to localise — so it has
+#: to be visible in the log the operator actually gets (`~/*/log/browser-bridge.log`
+#: holds WARNING and above: no code path here configures the root logger below
+#: that, so an INFO line about the lag would be written nowhere). One second is
+#: well above a healthy tick's jitter and far below the multi-second starvation
+#: that produces a failed probe.
+PING_TICK_LAG_WARN_S = 1.0
 #: How often the daemon re-reads the pairing file to notice an out-of-process
 #: revoke. Short enough that "Unpair" feels immediate, cheap enough to poll.
 REVOKE_WATCH_S = 3.0
@@ -767,6 +799,20 @@ class ExtensionLink:
         # peer to speak instead of polling `last_frame_at`. Used only by the
         # liveness probe (`_peer_answers_a_solicited_ping`).
         self.frame_event = asyncio.Event()
+        # Unanswered liveness probes on THIS socket that each observed a
+        # DISTINCT window; any frame the peer sends clears both fields.
+        # Link-scoped rather than service-scoped on purpose: a replacement
+        # socket is a new object, so a reconnect can never inherit the strikes
+        # of the mute link it replaced. See `PROBE_STRIKES_BEFORE_SEVER` for why
+        # one miss is not enough to act on and `note_probe_strike` for why the
+        # count is of windows rather than of probes.
+        self.probe_strikes = 0
+        # Monotonic instant at which the window that produced the latest counted
+        # strike closed; 0.0 before any. A probe that began BEFORE this is
+        # overlap of that same observation and is not counted again — the rule
+        # that keeps N commands timing out together from spending the two-strike
+        # budget in one silent window (review R1).
+        self.probe_window_closed_at = 0.0
         self.extension_id = ""
         self.browser = ""
         # The peer's own protocol version and reported extension version, both
@@ -862,6 +908,55 @@ class ExtensionLink:
         """Latch WHY the link was severed, for as long as that stays true."""
         self.silent_drop_at = time.monotonic()
         self.silent_drop_silence_s = silence_s
+
+    def note_probe_strike(self, observed_from: float) -> tuple[int, bool]:
+        """Count an unanswered liveness probe that observed a window of its own.
+
+        ``observed_from`` is when the probe BEGAN. A miss is only counted as a
+        new strike when that instant is at or after the close of the window that
+        produced the previous one; otherwise this probe overlapped the earlier
+        observation and cannot establish anything it did not.
+
+        Without that rule the counter measures probes, not windows, and probes
+        overlap by construction under exactly the traffic the rule exists for:
+        N sessions whose commands time out at the same moment run N probes
+        inside ONE ``PING_PROBE_TIMEOUT_S`` window, so N=2 met the two-strike bar
+        on a single silent window and severed the link — the pre-fix behaviour,
+        reproduced by review R1 with two misses 0.6 ms apart (`close 4000`,
+        latched, every pending future failed). Folding them into one strike is
+        the fix; the second call returns the same total and reports that it
+        opened no window, so the caller can say so in its log line instead of
+        silently re-counting.
+
+        The boundary is the window's own close, stamped here AFTER the wait,
+        rather than the reviewer's suggested ``now - last_strike_at >=
+        PING_PROBE_TIMEOUT_S``. Both stop the concurrent burst; the elapsed gap
+        between two misses is a proxy for overlap and is wrong in the other
+        direction too — two probes that began a full interval apart but resolved
+        close together did NOT share a window, and a solicitation that could not
+        be delivered at all fails in microseconds, which an interval-long
+        required gap would read as the same window forever.
+
+        Returns ``(running total, opened_a_window)``.
+        """
+        if observed_from < self.probe_window_closed_at:
+            return self.probe_strikes, False
+        self.probe_strikes += 1
+        self.probe_window_closed_at = time.monotonic()
+        return self.probe_strikes, True
+
+    def clear_probe_strikes(self) -> None:
+        """The peer spoke, so nothing is left to corroborate.
+
+        Called when a probe is ANSWERED (the receive loop sets `frame_event` on
+        every frame, not only on a pong), which is what keeps the strike count a
+        measure of CONSECUTIVE misses rather than a tally: a link that answers
+        once, ever, is back to zero — and so is the window boundary, so the next
+        miss after a frame opens a fresh window instead of being folded into the
+        one that preceded it.
+        """
+        self.probe_strikes = 0
+        self.probe_window_closed_at = 0.0
 
     def clear_unproven_drop(self) -> None:
         """Forget the latched reason: a link this daemon did not sever.
@@ -1107,6 +1202,13 @@ class BridgeService:
 
         self._ping_task: asyncio.Task[None] | None = None
         self._revoke_task: asyncio.Task[None] | None = None
+        # Ping-tick cadence, for the loop-lag record: when the previous tick
+        # landed and what lag it measured. Kept on the SERVICE rather than on a
+        # link because the loop is the daemon's, not a socket's — a starvation
+        # spans reconnects, which is exactly the case it exists to describe
+        # (`_note_ping_tick_lag`).
+        self._ping_tick_at = 0.0
+        self._ping_tick_lag_s = 0.0
         # Consecutive failed discovery-file writes, so recovery can be logged
         # once rather than on every tick (see publish_safely).
         self._publish_failures = 0
@@ -1629,8 +1731,56 @@ class BridgeService:
         self.publish_safely()
         await asyncio.sleep(state_store.HEARTBEAT_INTERVAL_S)
 
+    def _note_ping_tick_lag(self) -> None:
+        """Record how late this ping tick is, and say so when it matters.
+
+        A teardown for silence and a daemon whose own event loop was starved
+        produce the SAME evidence — nothing heard from the peer — and, before
+        this, the same log line. The difference is whether the daemon actually
+        got to ASK: a lagging tick means the question itself was late. Publishing
+        the tick's own lateness beside the peer's silence is what makes the two
+        tellable apart, which is why the original incident took hours to localise
+        (every log line said the browser had gone quiet; none said the daemon had
+        stopped running).
+
+        The lag is `observed cycle − PING_INTERVAL_S`, i.e. this tick's body plus
+        whatever the loop and scheduler added on either side. A tick that FAILED
+        (the supervisor's backoff before it re-runs) shows up here as lag too,
+        and that is the right reading rather than a false positive: during the
+        backoff this loop was not evaluating liveness either, which is the exact
+        distinction the line exists to publish. LEVELS ARE
+        DELIBERATE: the daemon runs at WARNING in production (`browser serve`
+        configures no logging, and the launchd/supervisor log it writes to is
+        WARNING-and-above), so a per-tick INFO line would be written nowhere. The
+        per-tick record is therefore DEBUG for anyone who enables it, the lag is
+        announced at WARNING when it crosses `PING_TICK_LAG_WARN_S`, and it also
+        rides on every unproven-drop warning (`_drop_unproven_link`), which is
+        the line a reader actually meets during an incident.
+        """
+        now = time.monotonic()
+        previous = self._ping_tick_at
+        self._ping_tick_at = now
+        if previous <= 0.0:
+            # First tick: there is no interval to be late for yet.
+            return
+        lag = (now - previous) - PING_INTERVAL_S
+        self._ping_tick_lag_s = max(0.0, lag)
+        silent = self.link.silent_for()
+        logger.debug(
+            "browser bridge ping tick: peer silent %.1fs, daemon loop lag %.2fs",
+            silent,
+            lag,
+        )
+        if lag > PING_TICK_LAG_WARN_S:
+            logger.warning(
+                "browser bridge ping tick ran %.1fs late (loop lag); peer silent %.1fs",
+                lag,
+                silent,
+            )
+
     async def _ping_tick(self) -> None:
         await asyncio.sleep(PING_INTERVAL_S)
+        self._note_ping_tick_lag()
         # EVERY attached link, not just the driver's. A standby receives no
         # commands, so a ping is the ONLY traffic it ever sees; without one its
         # liveness would decay past LINK_SILENCE_TIMEOUT_S within the first
@@ -1749,7 +1899,101 @@ class BridgeService:
             await asyncio.wait_for(self.link.frame_event.wait(), PING_PROBE_TIMEOUT_S)
         except asyncio.TimeoutError:
             return False
+        # Answered: forget any earlier miss, so a link that recovers never walks
+        # its way to the sever threshold on misses accumulated minutes apart.
+        self.link.clear_probe_strikes()
         return True
+
+    async def _probe_verdict(self, method: str) -> str | None:
+        """Whether one failed liveness probe justifies severing, and the reason to.
+
+        Returns ``None`` when the evidence is NOT enough — the caller then answers
+        its OWN command with its own timeout and leaves the link, every sibling
+        future, and every other session's in-flight command untouched. That
+        asymmetry is the whole point of this method: a timed-out command is the
+        only caller the daemon has a positive result for, and failing the fleet is
+        not a remedy for one slow page.
+
+        Two guards, both from a live multi-session incident:
+
+        * **Recent speech.** An unanswered probe on a link whose last frame is
+          younger than ``PING_INTERVAL_S`` establishes that one question went
+          unanswered, nothing more. The silence a teardown reports is measured at
+          the COMMAND's timeout, so severing on the probe alone announced
+          "the link silent for 1s" — a drop one second after the peer had spoken,
+          which no reader can reconcile with a browser that is plainly alive.
+          The guard reads ``silent_for()`` AFTER the wait, so its reach is one
+          full ping interval of silence AT THE MOMENT OF THE VERDICT — about 15 s
+          measured at probe start, since the ≤ ``PING_PROBE_TIMEOUT_S`` probe sits
+          between the two (QA Q2). That ordering is the correct one and is kept:
+          a guard measured at probe start would allow severing a peer that spoke
+          15 s before the verdict, which is the same defect with a bigger number,
+          while measuring at the verdict means the silence the reader is shown is
+          the silence the decision was made on. The effective window is stated
+          here rather than in a claim about a bare ``PING_INTERVAL_S``.
+        * **Strikes, from distinct windows.** ``PROBE_STRIKES_BEFORE_SEVER``
+          consecutive misses are required, and "consecutive" is counted over
+          observation WINDOWS, not probes: a miss is only a strike when its probe
+          began after the previous window closed (``note_probe_strike``). Link-
+          scoped and cleared by any frame the peer sends, so a link that answers
+          even once is back to zero and a replacement socket starts clean (see
+          ``clear_probe_strikes``).
+
+        The silence in the returned reason is measured HERE, after the probe, so
+        the number the reader is shown is the number the decision was made on —
+        including the ``PING_INTERVAL_S`` guard above, which reads the same value.
+        """
+        # The instant this observation BEGAN, captured before the probe so the
+        # strike can be folded into the window it actually belongs to: the answer
+        # to "is this a new observation?" is a fact about when the question was
+        # asked, not about when it gave up.
+        probed_from = time.monotonic()
+        answered = await self._peer_answers_a_solicited_ping()
+        silent = self.link.silent_for()
+        if answered:
+            return None
+        strikes, fresh = self.link.note_probe_strike(probed_from)
+        if not fresh:
+            # A miss from inside the window that already struck: the peer has
+            # now been asked twice inside one silent instant, which is what
+            # CONCURRENT commands produce (review R1). It corroborates nothing
+            # the first probe did not, so the count does not move and nothing is
+            # severed — the next strike needs a window of its own.
+            logger.warning(
+                "browser bridge probe unanswered inside the window of strike %d/%d "
+                "for %s (concurrent command, not a new observation)",
+                strikes,
+                PROBE_STRIKES_BEFORE_SEVER,
+                method,
+            )
+            return None
+        if silent < PING_INTERVAL_S:
+            logger.warning(
+                "browser bridge probe unanswered but the peer spoke %.1fs ago "
+                "(strike %d for %s, not severing)",
+                silent,
+                strikes,
+                method,
+            )
+            return None
+        if strikes < PROBE_STRIKES_BEFORE_SEVER:
+            logger.warning(
+                "browser bridge probe %d/%d unanswered with the link silent for "
+                "%.0fs (not severing yet, %s)",
+                strikes,
+                PROBE_STRIKES_BEFORE_SEVER,
+                silent,
+                method,
+            )
+            return None
+        # `strikes` counts observation WINDOWS, not probes (see the docstring's
+        # "Strikes, from distinct windows"), so the reason must not report it as
+        # a probe count: concurrent command timeouts inside one window strike
+        # once, and a reader told "3 probes" would look for three probes.
+        return (
+            f"{method} unanswered with the link silent for {silent:.0f}s "
+            f"({strikes} silent windows)"
+        )
 
     def _wire_loss(self, expected: tuple[WebSocket | None, int]) -> str:
         """Classify why the wire a command captured is no longer the live one.
@@ -1839,7 +2083,11 @@ class BridgeService:
             logger.debug("browser bridge skipped a stale teardown: %s", reason)
             return False
         websocket = current[0]
-        logger.warning("browser bridge dropped an unresponsive extension: %s", reason)
+        logger.warning(
+            "browser bridge dropped an unresponsive extension: %s (daemon loop lag %.2fs)",
+            reason,
+            self._ping_tick_lag_s,
+        )
         # Latch WHY, and how long the peer had been quiet, BEFORE the teardown
         # nulls the socket: this is the answer `_drop_unproven_link` is about to
         # give, and without the latch it would be gone by the time anyone (the
@@ -2501,6 +2749,12 @@ class BridgeService:
                 # cannot reach here at all.
                 link.last_frame_at = time.monotonic()
                 link.frame_event.set()
+                # The same frame proves there is nothing left to corroborate, so
+                # the two-strike probe's counter resets here rather than only on
+                # a pong: a peer that is talking is listening, whatever it is
+                # doing about the command that timed out (see
+                # `PROBE_STRIKES_BEFORE_SEVER`).
+                link.clear_probe_strikes()
                 if frame.get("event") == "pair":
                     try:
                         pair = PairRequest.model_validate(frame)
@@ -3235,19 +3489,40 @@ class BridgeService:
             # record added it for — `read`/`snapshot`/`screenshot` all time out
             # at 20 s (review R2-3 / QA Q2-4 measured the change: the frozen
             # worker returned `internal {timeout_s: 20.0}` where round 1 returned
-            # `extension_unresponsive`). The OR below is the fix for that, and it
-            # is deliberately NOT a lower threshold: a threshold below the
-            # healthy sawtooth is what review R1-2 reproduced, because the daemon
-            # is the only party that solicits speech. Asking the peer directly
-            # instead of inferring from a clock gives a definitive answer inside
-            # whatever budget the method has, so the rule fires for the tight
-            # methods without re-opening the false positive. The already-answered
-            # case short-circuits on the OR before probing.
-            if silent > PING_INTERVAL_S * 1.5 or not await self._peer_answers_a_solicited_ping():
-                dropped = await self._drop_unproven_link(
-                    f"{request.method} unanswered with the link silent for {silent:.0f}s",
-                    expected=wire,
-                )
+            # `extension_unresponsive`). Probing instead of inferring is the fix
+            # for that, and it is deliberately NOT a lower threshold: a threshold
+            # below the healthy sawtooth is what review R1-2 reproduced, because
+            # the daemon is the only party that solicits speech. Asking the peer
+            # directly gives a definitive answer inside whatever budget the
+            # method has, so the rule fires for the tight methods without
+            # re-opening the false positive.
+            #
+            # The PROBE arm is two-strike over DISTINCT observation windows and
+            # refuses to sever at all while the peer has spoken recently — see
+            # `_probe_verdict` for both guards and the incident that produced
+            # them. The short version: one unanswered
+            # question used to sever the link and fail EVERY pending future on
+            # that worker, so a single slow `read` answered three sessions with
+            # "the extension stopped answering" and destroyed their in-flight
+            # work. What is NOT relaxed: the 1.5× clock arm above still severs on
+            # its own evidence, and a link whose silence the daemon can
+            # corroborate still goes `close 4000` → refuse-fast → alarm re-dial.
+            #
+            # Either arm produces the reason the teardown is announced with; the
+            # one that did NOT fire contributes nothing, so `reason` being None
+            # means this command answers ALONE and every sibling future is left on
+            # the link, intact, to finish or time out on its own budget. The
+            # replaced-wire test below is deliberately outside the arm: a reply
+            # that never arrived on a connection the extension has since replaced
+            # is a fact about THIS command, and stays sayable whether or not the
+            # arm decided to sever.
+            reason = (
+                f"{request.method} unanswered with the link silent for {silent:.0f}s"
+                if silent > PING_INTERVAL_S * 1.5
+                else await self._probe_verdict(request.method)
+            )
+            if reason is not None:
+                dropped = await self._drop_unproven_link(reason, expected=wire)
                 if not dropped and self._wire_loss(wire) == "replaced":
                     # Same fence as the send deadline: nothing of ours is left to
                     # sever, so the honest answer is the one the failed future
@@ -3268,6 +3543,20 @@ class BridgeService:
                     ErrorCode.EXTENSION_UNRESPONSIVE,
                     f"{request.method} was delivered but the extension stopped answering",
                     {"phase": "response", "link_silent_s": self._drop_silence(silent)},
+                )
+            if self._wire_loss(wire) == "replaced":
+                # A reply that never arrived on a connection the extension has
+                # since replaced must still NAME the replacement, whether or not
+                # the probe arm decided to sever anything (it no longer does on a
+                # single miss, or while the replacement is still talking).
+                # "read timed out" would hide a fact the reader can act on — the
+                # browser is open and reconnected — behind a symptom.
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_DISCONNECTED,
+                    f"{request.method} was delivered on a connection the extension "
+                    "has since replaced",
+                    {"phase": "replaced"},
                 )
             code = (
                 ErrorCode.NAV_TIMEOUT if request.method in ("open", "goto") else ErrorCode.INTERNAL

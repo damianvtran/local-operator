@@ -482,11 +482,52 @@ bounded send (§5.4).
 
 The promotion rule fires when a command exhausted its budget while the link was
 ALSO silent for **1.5 ping intervals** (> 30 s), **or** when a direct, bounded
-liveness solicitation goes unanswered. Bounded, but NOT inside the method's own
+liveness solicitation goes unanswered **twice over, from two distinct
+observation windows, on a link whose last frame is at least one ping interval
+back**. Bounded, but NOT inside the method's own
 budget: the probe starts after the budget has already expired, so the typed
 answer lands one probe window later — **budget + `PING_PROBE_TIMEOUT_S`**, i.e.
 ≤ 25 s on a 20 s method (measured 25.009 s, reproduced 25.007 s; QA Q2-4/Q3-2).
 Size any downstream budget from THAT figure, not from the method's own timeout.
+
+**The solicitation arm counts WINDOWS, not probes, and declines entirely while
+the peer has spoken recently.** (Review R1: the first version counted every
+unanswered probe, so two sessions whose commands timed out at the same moment —
+the multi-session shape this rule exists for — ran two probes inside ONE
+`PING_PROBE_TIMEOUT_S` window and severed the link on a single silent instant,
+which is the pre-fix teardown arriving through the new gate; measured: two misses
+0.6 ms apart → `close 4000`, latched, every pending future failed.) A miss now
+counts only when its probe began after the previous observation's window closed,
+so overlapping probes fold into one strike and the second strike really is a
+second look at a peer that is still not answering. The counter lives on the LINK,
+is cleared by ANY frame the peer sends, and a replacement socket starts at
+zero — a recovering bridge therefore cannot accumulate its way to a teardown. The
+recent-speech guard reads `silent_for()` AFTER the probe, so its reach is one full
+ping interval of silence **at the moment of the verdict** — ≈15 s as measured at
+probe start, with the ≤ 5 s probe in between (QA Q2). The verdict-side reading is
+the one the guard needs: the silence named in the teardown line is then the
+silence the decision was made on, and a peer that spoke seconds before the verdict
+cannot be severed. Reading it at probe start would restore that defect with a
+bigger number attached.
+
+**What that costs, stated honestly.** The detector is unchanged: `proven` →
+`close 4000` → refuse-fast → alarm re-dial still fires, the 1.5 × clock arm still
+severs on its own evidence, and the ping-tick `proven` gate and the `rpc()` gate
+still sever on silence alone, so a mute peer cannot hide behind the strike rule.
+What MOVED is the delay in ONE shape: a genuinely mute peer with a single command
+in flight is no longer severed by that command's own unanswered probe, so the
+teardown falls to the next tick or the `rpc()` gate — up to
+`LINK_SILENCE_TIMEOUT_S` + one ping interval, i.e. **~50–70 s rather than the
+~25 s (budget + one probe window) this shape used to take** (review R4). Bounded,
+and the intended trade: the failing command answers ITSELF with its own typed
+timeout, and every sibling session keeps its futures and its tab handles.
+
+**The daemon publishes its own loop lag per tick**, because a starved daemon loop
+and a mute peer produce the same silence measurement and — before this — the same
+log line, which is why the original incident took hours to localise. Every ping
+tick records peer silence and loop lag together (DEBUG), announces the lag at
+WARNING past `PING_TICK_LAG_WARN_S = 1 s`, and carries the lag on the
+unproven-drop warning that a reader actually meets during an incident.
 
 **Why the threshold alone was not enough (recorded from review R2-3 / QA Q2-4).**
 The slack above is the same reasoning the 50 s threshold uses, and it is
