@@ -9,6 +9,7 @@
 import { clearPrivateSessionStorage } from "./private-storage";
 import type {
 	CommandOp,
+	CompletionAttention,
 	Directories,
 	ModelEntry,
 	PastSession,
@@ -104,8 +105,20 @@ export function startSession(input: {
 	});
 }
 
-/** A receipt names what was rendered, not whichever completion exists on arrival. */
-export function markSessionSeen(sessionId: string, completionToken: string): Promise<{ ok: boolean }> {
+/**
+ * A receipt names what was rendered, not whichever completion exists on arrival.
+ *
+ * The `attention` the daemon answers with is the whole verdict of the handshake,
+ * so it is typed here rather than left for the caller to read out of an untyped
+ * body: 2xx means the conversation is READ (`unseen: false`) and nothing else
+ * does. An older daemon answered a superseded token with a 200 whose body still
+ * said `unseen: true`, and a caller that took the resolved call for a read
+ * latched on a completion that never cleared (see docs/ATTENTION.md).
+ */
+export function markSessionSeen(
+	sessionId: string,
+	completionToken: string,
+): Promise<{ ok: boolean; attention?: CompletionAttention }> {
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/seen`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },

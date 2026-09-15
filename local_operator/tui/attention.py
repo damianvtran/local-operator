@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -103,3 +104,42 @@ def terminal_is_foreground(env: Mapping[str, str] | None = None) -> bool:
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         _discovered_socket.cache_clear()
         return False
+
+
+def focus_is_measurable(env: Mapping[str, str] | None = None) -> bool:
+    """Whether :func:`terminal_is_foreground` MEASURES focus in this terminal.
+
+    Stated as its own predicate because one caller uses it as a FENCE. The
+    receipt contract only lets a completion be acknowledged by a foreground
+    interface, and the probe is the sole machine-checkable evidence of that on
+    macOS cmux. Elsewhere the probe answers from the environment instead of from
+    a measurement -- with no `CMUX_SURFACE_ID` it returns True precisely when no
+    `CMUX_*` variable is set, which says nothing about whether the terminal is
+    in front of the user -- so a fence that trusted it would mark results read on
+    a terminal sitting behind another window. Those terminals keep the stricter
+    evidence: a real focus report from Textual. Same reason the probe refuses a
+    surface id it cannot check on a non-darwin host.
+    """
+    env = os.environ if env is None else env
+    return bool(env.get("CMUX_SURFACE_ID")) and sys.platform == "darwin"
+
+
+#: Maximum time to finish viewing the EXACT completion witnessed at a key or
+#: mouse-down edge. This is an expiry of token-bound evidence, not a foreground
+#: grace period: an input for A must never authorize B, even a millisecond later.
+#: A catalogue click may carry the already-observed token through asynchronous
+#: transcript loading, but the result must still be visibly rendered at receipt.
+#: Explicit blur and session switches revoke evidence; a measurable host retains
+#: its independent foreground check. Quiet future results on unmeasurable hosts
+#: require a fresh input or a genuine terminal focus report.
+ATTENTION_INPUT_EVIDENCE_S = 120.0
+
+
+def input_evidence_is_fresh(observed_at: float) -> bool:
+    """Whether an input edge observed at ``observed_at`` still counts.
+
+    Its own function because the caller re-asks the question across ``await``
+    boundaries and after other evidence may have arrived, and because the window
+    is only an additional fence: freshness cannot replace token identity.
+    """
+    return bool(observed_at) and (time.monotonic() - observed_at) <= ATTENTION_INPUT_EVIDENCE_S
