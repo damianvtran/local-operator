@@ -16,6 +16,7 @@ serializations any harness uses to wrap a function call.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Mapping, Sequence, get_args
 from urllib.parse import unquote
@@ -24,9 +25,14 @@ from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import canonical_bytes, canonical_digest
 from local_operator.evaluation.protocol import ComputerAction
 from local_operator.evaluation.receipts import RedactionSet
-from local_operator.logger import get_logger
 
-logger = get_logger(__name__)
+# stdlib logging rather than ``local_operator.logger``: that module imports
+# ``local_operator.paths``, which resolves the operator's config directory, and
+# the runner's import graph is held to the isolation rule in
+# ``tests/unit/evaluation/runner/test_isolation.py``. The logger OBJECT is the
+# same either way — ``get_logger`` is ``logging.getLogger`` — so records still
+# reach whatever handlers the entry point configured.
+logger = logging.getLogger(__name__)
 
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
 
