@@ -406,9 +406,9 @@ test("promotion refusal quotes the revision the store reported", async () => {
     output.includes("store said: submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
     output,
   );
-  // A revision the store did not send must read as absent, not as an empty
-  // state that would look like a store-side outage.
-  assert.ok(output.includes("published state=<missing>"), output);
+  // A revision the store did not send reads as absent -- a different answer
+  // from an empty channel list, which prints as `[]`.
+  assert.ok(output.includes("published <absent>"), output);
 });
 
 test("promotion refusal reports the staging percentage the store sent", async () => {
@@ -566,6 +566,111 @@ test("status bounds the channel list instead of dumping it", async () => {
   assert.ok(result.stdout.includes("crxVersion=0.1.3"), result.stdout);
   assert.ok(result.stdout.includes("| +2 more"), result.stdout);
   assert.ok(!result.stdout.includes("0.1.5"), `expected the list to be cut: ${result.stdout}`);
+});
+
+test("status bounds every value, not only the nested ones", async () => {
+  // The first cut bounded the channel count and `deployInfos` but rendered state,
+  // crxVersion and lastAsyncUploadState with a bare `tostring`, so a 3 MiB `state`
+  // was measured at 3,145,904 bytes of run log -- the flood this summary exists to
+  // prevent, arriving through the one field the first gate reads.
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      lastAsyncUploadState: "S".repeat(50_000),
+      submittedItemRevisionStatus: {
+        state: "R".repeat(3_000_000),
+        distributionChannels: [{ crxVersion: "C".repeat(200_000), deployPercentage: 100 }],
+      },
+    }),
+  ]);
+  assert.ok(result.stdout.length < 4_000, `expected a bounded line, got ${result.stdout.length} characters`);
+  assert.ok(result.stdout.includes("state=RRR"), result.stdout);
+  assert.ok(!result.stdout.includes("R".repeat(200)), "the unbounded state reached the log");
+  assert.ok(!result.stdout.includes("C".repeat(200)), "the unbounded crxVersion reached the log");
+});
+
+test("one unreadable shape cannot blank the rest of the summary", async () => {
+  // Every case here aborted the single jq program and collapsed the whole line to
+  // `<status response carried no readable fields>`, discarding the `state` the
+  // first gate reads -- the one field the diagnosis cannot do without -- and, in
+  // the middle case, a good entry standing beside the bad one.
+  const cases = [
+    {
+      name: "channels that are not an array",
+      status: { state: "STAGED", distributionChannels: "nonsense" },
+      expect: ["submitted state=STAGED", '<not an array: "nonsense">'],
+    },
+    {
+      name: "a scalar entry beside a good one",
+      status: {
+        state: "STAGED",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }, "junk"],
+      },
+      expect: [`crxVersion=${VERSION} deployPercentage=100`, '<unrenderable entry: "junk">'],
+    },
+    {
+      name: "a revision that is not an object",
+      status: "STAGED",
+      expect: ["submitted state=<unrenderable state>"],
+    },
+  ];
+  for (const { name, status, expect } of cases) {
+    const result = await runRelease(["status"], [
+      () => ({ itemId: extensionId, submittedItemRevisionStatus: status }),
+    ]);
+    assert.ok(result.stdout.includes("submitted"), `${name}: the revision went missing:\n${result.stdout}`);
+    assert.ok(
+      !result.stdout.includes("<status response carried no readable fields>"),
+      `${name}: one bad shape blanked the whole summary:\n${result.stdout}`,
+    );
+    for (const fragment of expect) {
+      assert.ok(result.stdout.includes(fragment), `${name}: expected ${JSON.stringify(fragment)} in:\n${result.stdout}`);
+    }
+  }
+});
+
+test("an absent revision and an empty channel list are reported differently", async () => {
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state: "STAGED", distributionChannels: [] },
+    }),
+  ]);
+  assert.ok(result.stdout.includes("submitted state=STAGED distributionChannels=[]"), result.stdout);
+  // Not the same thing as a revision the store never sent.
+  assert.ok(result.stdout.includes("published <absent>"), result.stdout);
+});
+
+test("the status summary redacts the access token, not only the error body", async () => {
+  // `status` prints the summary and nothing else, so the body-only redaction left
+  // this path able to echo the bearer token straight back through a field of the
+  // response. Deleting the redaction from the summary kept the suite green before
+  // this test existed.
+  const token = "ya29.a0AfB_status-summary-secret-value";
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: `rejected request authorized by ${token}`,
+        distributionChannels: [],
+      },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token), "the access token must never reach the log");
+  // Redaction must not cost the diagnosis: the rest of the field still shows.
+  assert.ok(output.includes("rejected request authorized by <redacted CWS_ACCESS_TOKEN>"), output);
+});
+
+test("status refuses arguments it cannot act on", async () => {
+  // `status VERSION` reads like a check of that version; silently ignoring the
+  // argument would let a caller believe it had been verified. No handler is
+  // registered, so a run that asked the store anything would fail the request
+  // count instead of passing quietly.
+  await assert.rejects(
+    runRelease(["status", VERSION], []),
+    /status takes no arguments/,
+  );
 });
 
 // The required-reviewers check was removed by operator decision on 2026-09-03

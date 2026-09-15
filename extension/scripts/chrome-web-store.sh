@@ -18,13 +18,25 @@ set -euo pipefail
 #       the two promote gates attach to a refusal. Nothing is uploaded, nothing
 #       is published and no store state is touched, so the review queue can be
 #       read without a stage dispatch -- which, while an item is in review,
-#       draws HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE. Takes no further
-#       arguments, and exits non-zero on a non-2xx response like every other
-#       mode. No WORKFLOW dispatches it yet: the store credentials exist only
-#       inside the protected environments, so exposing it needs a dispatch path
-#       of its own, which is a release-process decision rather than a diagnostic
-#       one (docs/store/release-record.md states the same: there is no
-#       status-only workflow to dispatch).
+#       draws HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE. Takes no arguments
+#       beyond the mode (and refuses any it is given, rather than ignoring an
+#       argument a caller believes it is acting on), and exits non-zero on a
+#       non-2xx response like every other mode. No workflow dispatches it yet:
+#       the store credentials exist only inside the protected environments, so
+#       exposing it needs a dispatch path of its own, which is a release-process
+#       decision rather than a diagnostic one (docs/store/release-record.md
+#       states the same: there is no status-only workflow to dispatch).
+#
+# What the summary says, and why those fields. Per revision:
+#   submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]
+# -- the state the first gate reads, and every field of every
+# distributionChannels[] entry, under the name the store used. A revision the
+# store did not send reads `<absent>`, an empty list reads `[]`, and a list that
+# is not an array or an entry of an unexpected type is reported as itself rather
+# than silently dropped, because telling those apart is the entire diagnosis.
+# Every value is bounded (160 characters) and the list is cut after four entries,
+# so the summary stays one line whatever the store returns, and no single bad
+# field can blank it.
 #
 # Why both promote gates print the store's own fields. Promoting the 0.1.12
 # staged revision was refused with nothing but "staged revision must contain
@@ -167,60 +179,92 @@ fetch_status() {
     || fail "status response identified a different extension"
 }
 
-# Bounds on the compact status summary. A distributionChannels[] entry is a
-# small object and a healthy response carries a handful of them, so these only
-# ever bite on a payload nobody expects -- and an unbounded rendering would work
-# against the readability the summary exists to deliver, exactly as an unbounded
-# error-body echo would (see BODY_PRINT_LIMIT below).
+# Bounds on the compact status summary. distributionChannels[] is a list whose
+# length and whose fields' sizes come from the store, so every rendered value is
+# bounded individually and the whole line is bounded by arithmetic rather than by
+# trusting the payload: 2 revisions x 4 channels x 4 fields x (limit + "..."),
+# plus fixed text. The reasoning is BODY_PRINT_LIMIT's -- the summary exists to
+# make a failure readable, and an unbounded echo works against exactly that -- and
+# a value-level bound is what stops one absurd field from defeating it (a 3 MiB
+# `state` rendered as 3,145,904 bytes of run log when only deployInfos was cut).
 STATUS_CHANNEL_LIMIT=4
-STATUS_DEPLOY_INFOS_LIMIT=160
+STATUS_VALUE_LIMIT=160
 
 # Print the store's own status fields for one fetchStatus response, compactly
 # enough to sit inside a refusal message or to be the whole output of `status`.
-# It must never fail: it is called on paths that are already failing, so a jq
-# error here would replace the diagnosis with a syntax error of our own.
+#
+# Every shape is handled where it is read, never by one guard over the whole
+# summary: this runs on a path that is already failing, and a refusal that blanks
+# itself is worse than no refusal at all. A revision that is not an object, a
+# distributionChannels that is not an array, or a single entry of the wrong type
+# must cost only its own field -- never the `state` the first gate reads, and
+# never a good neighbour in the same list. A value that makes no sense to the
+# renderer is shown as `<unrecognised shape: ...>` rather than dropped, which is
+# what makes a store-side shape change legible instead of silent.
 summarize_status() {
   local file=$1
   local summary
-  # Every scalar is rendered as `key=value` and every entry of
-  # distributionChannels[] keeps the field names the STORE uses, so a shape
-  # change is legible as itself (a `version=` where crxVersion was expected)
-  # instead of looking like an absent field. deployInfos is the one nested value
-  # the response defines, so it is truncated rather than dumped.
+  # Scalars are rendered as `key=value` and every channel entry keeps the field
+  # names the STORE uses, so a shape change is legible as itself (a `version=`
+  # where crxVersion was expected) instead of looking like an absent field.
   summary=$(jq -r \
     --argjson channel_limit "$STATUS_CHANNEL_LIMIT" \
-    --argjson deploy_infos_limit "$STATUS_DEPLOY_INFOS_LIMIT" \
+    --argjson value_limit "$STATUS_VALUE_LIMIT" \
     '
     def bounded($text; $limit):
       if ($text | length) > $limit then $text[0:$limit] + "..." else $text end;
-    def channel:
-      ([ (["crxVersion", "version", "deployPercentage"][]) as $key
-         | select(.[$key] != null) | "\($key)=\(.[$key] | tostring)" ]
-       + [ select(.deployInfos != null)
-           | "deployInfos=" + bounded((.deployInfos | tojson); $deploy_infos_limit) ]) as $fields
+    # `tostring` is total in jq (it renders any value, objects and arrays
+    # included) but `length` is not, so the cut is taken on the string form and
+    # anything that still fails is replaced rather than allowed to propagate.
+    def scalar($value):
+      try bounded($value | tostring; $value_limit) catch "<unrenderable>";
+    def entry($channel):
+      try
+        ([ (["crxVersion", "version", "deployPercentage"][]) as $key
+           | select($channel[$key] != null)
+           | "\($key)=\(scalar($channel[$key]))" ]
+         + [ select($channel.deployInfos != null)
+             | "deployInfos=\(scalar($channel.deployInfos | tojson))" ]) as $fields
       | if ($fields | length) == 0
-        then "<unrecognised shape: " + bounded(tojson; $deploy_infos_limit) + ">"
+        then "<unrecognised shape: \(scalar($channel | tojson))>"
         else $fields | join(" ")
-        end;
-    def channels:
-      (.distributionChannels // []) as $all
-      | if ($all | length) == 0 then "<none>"
-        else ($all[0:$channel_limit] | map(channel) | join(" | "))
-             + (if ($all | length) > $channel_limit
-                then " | +\(($all | length) - $channel_limit) more"
-                else "" end)
-        end;
-    def revision($label):
-      $label + " state=" + (.state // "<missing>" | tostring)
-      + " distributionChannels=[" + channels + "]";
-    [
-      ((.submittedItemRevisionStatus // {}) | revision("submitted")),
-      ((.publishedItemRevisionStatus // {}) | revision("published")),
-      (if .lastAsyncUploadState != null
-       then "lastAsyncUploadState=\(.lastAsyncUploadState | tostring)"
-       else empty end)
-    ] | join("; ")
+        end
+      # A scalar or an array where an object was expected lands here, and only
+      # this entry is lost: the surrounding list and the revisions survive.
+      catch "<unrenderable entry: \(scalar($channel | tojson))>";
+    def channels($list):
+      # An absent key, an empty array and a non-array are three different
+      # answers, and telling them apart is the point of the summary.
+      if ($list | type) != "array" then "<not an array: \(scalar($list | tojson))>"
+      elif ($list | length) == 0 then "[]"
+      else "[" + ($list[0:$channel_limit] | map(entry(.)) | join(" | "))
+           + (if ($list | length) > $channel_limit
+              then " | +\(($list | length) - $channel_limit) more"
+              else "" end) + "]"
+      end;
+    def revision($label; $status):
+      if $status == null then $label + " <absent>"
+      else $label + " state=" + (try scalar($status.state) catch "<unrenderable state>")
+        + " distributionChannels="
+        # The brackets belong to the renderer, not to the caller: wrapping a
+        # non-array (or an empty list) in another pair printed `[[...]]`, which
+        # reads as a list containing a list.
+        + (try channels($status.distributionChannels // [])
+           catch "<unrenderable channels>")
+      end;
+    . as $root
+    | (try
+        ([ revision("submitted"; $root.submittedItemRevisionStatus),
+           revision("published"; $root.publishedItemRevisionStatus),
+           (if $root.lastAsyncUploadState != null
+            then "lastAsyncUploadState=\(scalar($root.lastAsyncUploadState))"
+            else empty end)
+         ] | join("; "))
+       catch "<unreadable status response: \(scalar($root | tojson))>")
     ' "$file" 2>/dev/null) || summary=""
+  # Reachable only when jq itself fails -- an unparseable response. Every shape
+  # INSIDE the payload is handled per field above, because falling back to one
+  # sentence here would discard the readable fields along with the bad one.
   [[ -n "$summary" ]] || summary="<status response carried no readable fields>"
   # Redacted for the same reason report_api_error redacts its body: this text is
   # echoed into a public run log, and although the summary is derived rather than
@@ -309,6 +353,11 @@ else
   # `status`: read the queue, mutate nothing. MODE was validated above, so this
   # is the only branch left; `request` handles a non-2xx by way of
   # report_api_error, which is what makes the read fail closed.
+  # Refused rather than ignored: an argument this mode cannot act on would
+  # otherwise look honoured, and `status VERSION` reads like a check of that
+  # version.
+  [[ -z "$ZIP_PATH" && -z "$EXPECTED_VERSION" ]] \
+    || fail "status takes no arguments (usage: chrome-web-store.sh status)"
   fetch_status "$tmp_dir/status.json"
   printf 'Chrome Web Store status for extension %s: %s\n' \
     "$CWS_EXTENSION_ID" "$(summarize_status "$tmp_dir/status.json")"
