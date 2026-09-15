@@ -37,13 +37,15 @@ class FakeRegistrant:
         self._attaches = attaches
         self.closed = False
         self._boot_build = boot
-        self.retiring: list[tuple[str, str]] = []
+        #: ``(reason, to, draining)`` — see the mirror in
+        #: ``test_process_build_bound``: the caller decides the third term.
+        self.retiring: list[tuple[str, str, bool]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
 
-    async def announce_retiring(self, reason: str, *, to: str = "") -> None:
-        self.retiring.append((reason, to))
+    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
+        self.retiring.append((reason, to, draining))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -224,7 +226,9 @@ async def test_stamp_flip_announces_then_exits(disk, monkeypatch) -> None:
     disk["build"] = NEW  # lop-update ran
     await _run_until(stop)
     assert stop.is_set()
-    assert reg.retiring == [("stale-build", NEW.label())]
+    assert reg.retiring == [
+        ("stale-build", NEW.label(), False)
+    ], "the idle rung refuses nothing: the frame must not claim it does"
     assert handle.disposed and reg.closed
     await task
 
@@ -240,8 +244,8 @@ async def test_work_arriving_after_the_announce_keeps_the_runtime(disk, monkeypa
     reg = FakeRegistrant()
     handle = FakeHandle()
 
-    async def announce(reason: str, *, to: str = "") -> None:
-        reg.retiring.append((reason, to))
+    async def announce(reason: str, *, to: str = "", draining: bool = False) -> None:
+        reg.retiring.append((reason, to, draining))
         if len(reg.retiring) == 1:
             handle._busy = True  # a turn starts between announce and exit, ONCE
 

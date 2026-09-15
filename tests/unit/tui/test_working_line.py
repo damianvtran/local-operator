@@ -32,6 +32,7 @@ how the app routes messages internally.
 from __future__ import annotations
 
 import time
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -62,6 +63,7 @@ from local_operator.tui.events import (
     TurnStarted,
 )
 from local_operator.tui.widgets import tool_card as card_mod
+from local_operator.tui.widgets import transcript as transcript_mod
 from local_operator.tui.widgets.tool_card import format_duration
 from local_operator.tui.widgets.transcript import (
     DEFAULT_ACTIVITY,
@@ -71,6 +73,27 @@ from local_operator.tui.widgets.transcript import (
 )
 
 from .test_app_pilot import FakeSession, _factory
+
+
+@pytest.fixture
+def working_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Control only display consumers, never asyncio/Textual's shared time.
+
+    Replacing these module references rather than ``time.monotonic`` preserves
+    real parser deadlines, framework timers, startup and message dispatch.
+    """
+    clock = SimpleNamespace(wall=1_700_000_000.0, tick=1_000.0)
+    source = SimpleNamespace(time=lambda: clock.wall, monotonic=lambda: clock.tick)
+    monkeypatch.setattr(card_mod, "time", source)
+    monkeypatch.setattr(transcript_mod, "time", source)
+    # The converter captures its default clock at definition time. Bind its
+    # existing injection point, keeping the real epoch conversion under test.
+    monkeypatch.setattr(
+        card_mod,
+        "monotonic_from_epoch",
+        partial(card_mod.monotonic_from_epoch, clock=source.monotonic),
+    )
+    return clock
 
 
 def _clock_seconds(text: str) -> float:
@@ -553,7 +576,7 @@ async def test_the_band_reports_the_true_age_of_a_tool_it_can_date() -> None:
 
 @pytest.mark.asyncio
 async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
-    monkeypatch: pytest.MonkeyPatch,
+    working_clock: SimpleNamespace,
 ) -> None:
     """The operator's report names TWO clocks; this is the non-tool one.
 
@@ -570,7 +593,7 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
     its own zero rather than reporting an age belonging to another phase.
     """
     aged = 27.0
-    session = _PhaseSession("thinking", time.time() - aged)
+    session = _PhaseSession("thinking", working_clock.wall - aged)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -583,7 +606,7 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         assert line.activity == DEFAULT_ACTIVITY
         # The frame after a switch back: the age is the model call's.
         shown = _clock_seconds(line._clock_text())
-        assert aged <= shown < aged + 30, line._clock_text()
+        assert shown == aged, line._clock_text()
 
         # Converted ONCE, not per refresh — asserted with the clock ADJUSTED,
         # because on a healthy clock a re-seed is arithmetically a no-op and the
@@ -594,36 +617,32 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         # would move the anchor by the ADJUSTMENT, and a row 27s into a model
         # call would report an hour; the monotonic zero taken once does not.
         seeded = line._clock_from
-        jumped = SimpleNamespace(time=lambda: time.time() + 3600.0, monotonic=time.monotonic)
-        monkeypatch.setattr(card_mod, "time", jumped)
+        working_clock.wall += 3600.0
         app._refresh_working_activity()
         app._refresh_working_activity()
         assert line._clock_from == seeded, "the phase's anchor moved on a repaint"
-        assert _clock_seconds(line._clock_text()) == pytest.approx(
-            shown, abs=2.0
+        assert (
+            _clock_seconds(line._clock_text()) == shown
         ), "a wall-clock jump moved a counter that is supposed to be immune to one"
+        working_clock.tick += 3.0
+        assert _clock_seconds(line._clock_text()) == shown + 3.0
 
         # A fold that disagrees with the derived phase supplies nothing, so the
         # row is back to its phase zero. The instant belongs to the phase it was
         # folded in, and using it here would print a true number about the WRONG
         # thing — the failure mode the whole design round guards.
-        session.phase = ("responding", time.time() - aged)
+        session.phase = ("responding", working_clock.wall - aged)
         app._refresh_working_activity()
-        # RELATIVE to the seed, not an absolute second count. The row has fallen
-        # back to its OWN zero, so this reading IS the wall time the test has
-        # spent since that switch — which a contended suite stretches to seconds
-        # and which an absolute bound therefore turns into a red gate on a busy
-        # machine (this assertion read 5.0s inside a full-suite run on a loaded
-        # host and passed 8/8 in isolation). Half the 27 s seed keeps the
-        # discrimination this assertion exists for: the defect it guards reports
-        # the FOREIGN phase's age, ~27 s, twice this bound, so a row that did not
-        # fall back still fails. Still a bound, not an equality — the reading
-        # keeps growing while the test runs.
-        assert _clock_seconds(line._clock_text()) < aged / 2, line._clock_text()
+        # The derived phase is still thinking: its own zero is the viewer's
+        # arrival, exactly three controlled seconds ago, not the foreign seed.
+        assert line._clock_from_epoch is None
+        assert _clock_seconds(line._clock_text()) == 3.0
 
 
 @pytest.mark.asyncio
-async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> None:
+async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed(
+    working_clock: SimpleNamespace,
+) -> None:
     """Review round 1, R1: the fallback arm must ask for the phase it DERIVED.
 
     ``compacting context`` and ``retrying (attempt N)`` are whole-turn labels
@@ -642,11 +661,8 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
     there the label and the folded phase ARE the same string; asserted first,
     so a fix cannot pass by withholding every fallback.
     """
-    aged = 27.0  # the reviewer's probe used 10m to make the number unmissable;
-    # any seed older than the relative bound below fails the same way, and `27s`
-    # keeps `_clock_seconds` reading the row's own grammar (a 10m reading is
-    # `10m`, not `600s`).
-    session = _PhaseSession("thinking", time.time() - aged)
+    aged = 27.0  # Distinct from a new phase's exact zero, in the row's seconds grammar.
+    session = _PhaseSession("thinking", working_clock.wall - aged)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -659,7 +675,7 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
         assert _activity(app) == DEFAULT_ACTIVITY
         # The ordinary case: label == folded phase, so the seed is the row's own
         # and must still be used.
-        assert _clock_seconds(line._clock_text()) >= aged
+        assert _clock_seconds(line._clock_text()) == aged
         # ``compacting context``: the fold has no such phase, so its zero is NOT
         # this label's and must not be handed over. The row then counts from the
         # phase it just entered — the start of the pass — which is the honest
@@ -668,27 +684,22 @@ async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> 
         await pilot.pause()
         assert _activity(app) == "compacting context"
         shown = _clock_seconds(line._clock_text())
-        # `aged / 2`, not `5`: this reading is the test's own elapsed wall time
-        # since the pass began (see the sibling clock assertions above), so an
-        # absolute second bound measures the machine rather than the product.
-        # The number it must be distinct from is the 27 s seed, so half of it
-        # still separates the two by 2x while tolerating seconds of contention.
-        assert shown < aged / 2, (
+        assert line._clock_from_epoch is None
+        assert shown == 0.0, (
             f"a freshly started `compacting context` row reads {shown}s: the fold's "
             "thinking zero was supplied for a label the fold does not derive"
         )
 
         # ``retrying (attempt N)`` is the same shape and over-reported by the
         # whole failed attempt, which is a real misread of "is this stuck".
+        working_clock.tick += 4.0
+        assert _clock_seconds(line._clock_text()) == 4.0
         app.post_message(RetryStarted(2, "upstream exploded", None))
         await pilot.pause()
         assert _activity(app) == "retrying (attempt 2)"
         shown = _clock_seconds(line._clock_text())
-        # Same relative bound, same reason: this row counts from the retry's own
-        # start, which is inside this test body, so an absolute second bound
-        # would be measuring the suite's load. Half the seed still separates the
-        # retry's zero from the failed attempt's age by 2x.
-        assert shown < aged / 2, (
+        assert line._clock_from_epoch is None
+        assert shown == 0.0, (
             f"a freshly started retry row reads {shown}s: the previous attempt's "
             "zero was supplied for a label the fold does not derive"
         )

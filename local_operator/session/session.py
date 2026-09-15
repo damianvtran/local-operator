@@ -55,14 +55,13 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeGuard
+from typing import TYPE_CHECKING, Any, Literal
 
 from local_operator.compaction.cutpoint import (
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
-    RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
@@ -71,7 +70,7 @@ from local_operator.compaction.marker import (
     replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
-from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE, ApprovalGate
+from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
@@ -79,6 +78,17 @@ from local_operator.harness.jobs import (
     AsyncJobManager,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
+
+# Hoisted to the harness so the evaluation runner can render a transcript
+# through this same function without importing session code. Only these two
+# names are re-exported, and each has a caller here: ``_default_convert_to_llm``
+# is what the session, its tests and ``session_factory``'s thin alias resolve
+# through this module, and ``_is_todo_reminder`` is called only by
+# ``Session._live_todo_reminders``, far below in this module (no guardrail is
+# defined in this region). ``_injected_user_message`` is renderer-internal —
+# the renderer calls it and nothing outside needs it — so it is deliberately NOT
+# reachable from ``local_operator.session.session``.
+from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
@@ -678,166 +688,6 @@ def _callable_accepts_one_positional(func: Callable[..., Any]) -> tuple[bool, bo
     return False, True
 
 
-def _injected_user_message(text: str, entry_id: str) -> Message:
-    """A user-role message minted from a harness aside, stamped as such.
-
-    The stamp is compaction's provenance signal. Once this function has run,
-    an injected delivery and an operator prompt are both a plain
-    ``Message(role="user")`` and no structural test can separate them — which
-    is precisely how a preserved-turn block on a real session came to be 160
-    injections against 11 genuine turns (see
-    :data:`~local_operator.compaction.cutpoint.RENDERED_INJECTION_KEY`).
-
-    It rides ``provider_payload``, which the wire builders never ship as
-    content, so this is invisible to the model and to every provider.
-    """
-    message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
-    message.provider_payload = {RENDERED_INJECTION_KEY: True}
-    return message
-
-
-def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
-    """Default transcript→LLM rendering.
-
-    ``compaction_summary`` markers become a user message carrying the summary;
-    a snapcompact archive in ``preserve_data`` is rendered back into
-    text_head → imaged middle → text_tail blocks (base64 ``ImageContent``
-    between ``TextContent`` edges). ``fork_boundary`` and ``wake_prompt``
-    deliveries become user messages of their formatted text, and the newest
-    ``todo_reminder`` (only the newest) becomes one too; other custom entries
-    are dropped (bookkeeping never enters LLM context). ``provider_payload``
-    rides along untouched.
-
-    ``gate_timed_out_unattended`` is rendered from its STRUCTURED payload
-    rather than a ``text`` field, because the same fact is phrased differently
-    for the three audiences that need it (the model here, the transcript
-    notice, the picker's parked row). It must never be dropped: an expiry that
-    reads as a plain denial makes the next turn re-plan around a decision
-    nobody made.
-
-    Every user-role message minted HERE from a ``CustomMessage`` is stamped
-    with :data:`RENDERED_INJECTION_KEY` (see :func:`_injected_user_message`).
-    That stamp is compaction's only reliable way to tell a harness injection
-    from an operator prompt once both are plain user messages, which is what
-    they both are the moment this function has run.
-    """
-    out: list[Message] = []
-    # Only the NEWEST todo reminder survives the render. An earlier one asserts
-    # a todo list that has since changed, so replaying it would hand the model a
-    # stale — and by then actively false — claim about its own state, and
-    # re-argue a nudge it has already answered. The pruning belongs here because
-    # the renderer is a pure function of the whole list and reminders are never
-    # persisted, so nothing downstream could do it. Older ones simply fall
-    # through to the allow-list's drop.
-    newest_reminder = -1
-    for index in range(len(messages) - 1, -1, -1):
-        if _is_todo_reminder(messages[index]):
-            newest_reminder = index
-            break
-    for index, message in enumerate(messages):
-        if isinstance(message, Message):
-            out.append(message)
-        elif message.custom_type == "compaction_summary":
-            # Pass the ORIGINAL entry id through the render: the transcript
-            # persists custom entries with their CustomMessage.id, so a
-            # compaction cut landing on a rendered marker can still locate
-            # ``first_kept_entry_id`` on replay.
-            out.append(_render_compaction_marker(message, entry_id=message.id))
-        elif message.custom_type in (
-            SESSION_INCIDENT_MESSAGE_TYPE,
-            SESSION_MODEL_SWITCH_MESSAGE_TYPE,
-            SESSION_CREDENTIAL_MESSAGE_TYPE,
-            SESSION_MCP_RECOVERY_MESSAGE_TYPE,
-            "session_state",
-        ):
-            # An incident rides the sender's preformatted text (the classifier
-            # already wrote category + suggested action), exactly like a wake
-            # delivery: it must reach the model as a user turn or the session
-            # stays blind to why its last run died. A model-switch record uses
-            # the same path so the model becomes aware it is now answering as a
-            # different model (a deliberate switch or a failover fallback),
-            # rather than only seeing a changed static "Model:" system line.
-            # A credential record rides the same path so a mid-session
-            # ``/credential`` is ANNOUNCED to the model rather than only
-            # changing the prompt tail, which the model has no reason to
-            # re-read (the failure behind session 835fbcafdc27).
-            # An MCP-recovery record rides it for the symmetric reason: the
-            # FAILURE reaches the model as a ``session_incident`` user turn, so
-            # the recovery that supersedes it has to arrive on the same surface
-            # or the model keeps believing the older, more emphatic claim.
-            out.append(_injected_user_message(message.details.get("text", ""), message.id))
-        elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
-            # An unattended gate that expired is NOT a user decision, and the
-            # difference is the whole reason the row exists: without it the
-            # next turn reads a plain denial and re-plans around a choice
-            # nobody made. Rendered here rather than carrying a `text` field
-            # like the branches below because the payload is structured (tool,
-            # description, waited_s) — the picker and the transcript notice
-            # each phrase it for their own audience, and this is the model's.
-            details = message.details or {}
-            tool = str(details.get("tool") or "a tool")
-            description = str(details.get("description") or "").strip()
-            subject = f"{tool} ({description})" if description else tool
-            # An `ask` is a QUESTION, and an unanswered question was not
-            # "denied" — the approval gate's vocabulary describes a refusal
-            # nobody issued, and a model told its question was denied re-plans
-            # around that phantom decision. `tui/app.py`'s parked-gate summary
-            # already branches here for the HUMAN (D12's copy note); this is
-            # the same row rendered for the model, and until #868 made the ask
-            # gate reachable it could only ever carry an approval.
-            #
-            # The ask arm ends the way ``ASK_UNANSWERED_TEXT`` does, on
-            # purpose: an expiry and a user pressing `esc` are both "no answer
-            # came back", so the two must leave the model in the same place
-            # rather than one nudging it to decide and the other implying it
-            # was refused.
-            kind = str(details.get("kind") or "approval").strip().lower()
-            if kind == "ask":
-                text = (
-                    f"[system] The question for {subject} was never answered: nobody "
-                    "was attached to this session and it expired. No decision was "
-                    "made — this was a timeout, not a choice by the user. Decide "
-                    "yourself (take your recommended option where you gave one), then "
-                    "say in one line what you assumed and carry on."
-                )
-            else:
-                text = (
-                    f"[system] The approval request for {subject} expired with "
-                    "nobody attached to this session and was denied automatically. "
-                    "This was a timeout, not a decision by the user."
-                )
-            out.append(_injected_user_message(text, message.id))
-        elif message.custom_type in (
-            "fork_boundary",
-            WAKE_PROMPT_MESSAGE_TYPE,
-            HUB_MESSAGE_TYPE,
-            JOB_RESULT_MESSAGE_TYPE,
-            PEER_MESSAGE_MESSAGE_TYPE,
-        ):
-            # A hub message renders exactly like a wake delivery: the sender
-            # already formatted ``details["text"]``, and it must reach the
-            # model as a user turn or the agent it was addressed to never
-            # sees it. A peer message (`lop send` from another local session)
-            # rides the same path: it MUST be listed here or the human sees the
-            # cross-session transcript row but the model never does. Unlisted
-            # custom types are dropped (bookkeeping), which is precisely the
-            # trap a new aside type falls into.
-            out.append(_injected_user_message(message.details.get("text", ""), message.id))
-        elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE and index == newest_reminder:
-            # The continuation guardrail's nudge (``Session._todo_continuation``)
-            # reaches the model as a user turn or it does nothing at all: this
-            # allow-list is the trap a new aside type falls into, and a dropped
-            # reminder would make the loop re-enter with nothing to react to.
-            out.append(
-                Message(
-                    role="user",
-                    content=[TextContent(text=message.details.get("text", ""))],
-                    id=message.id,
-                )
-            )
-    return out
-
-
 def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
     """The nudge the continuation guardrail injects (``_todo_continuation``).
 
@@ -861,20 +711,6 @@ def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
         "decision is the user's to make, put it to them with the `ask` tool.\n"
         "</system-reminder>"
     )
-
-
-def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
-    """Is ``message`` a live continuation nudge (``_todo_continuation``)?
-
-    One predicate for the three places that have to agree about it — the
-    renderer's newest-only rule, the expiry scan
-    (:meth:`Session._live_todo_reminders`) and the compaction render
-    (:meth:`Session._render_for_compaction`). The ``isinstance`` half is
-    load-bearing rather than defensive: a RENDERED reminder is a plain
-    ``Message`` carrying the same text, and a predicate that matched that too
-    would read compaction's own output back as a fresh nudge.
-    """
-    return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
 
 
 #: ``CustomMessage`` types that belong in the transcript as message entries.
@@ -4615,6 +4451,11 @@ class Session:
             self._variables, self.journal_credential_change, action, key, value
         )
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.mcp.credentials import MCPCredentials, store_credentials
+
+        return await store_credentials(self, MCPCredentials.model_validate(body))
+
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:
@@ -5596,11 +5437,15 @@ class Session:
             return
         for line in lines:
             try:
-                # The quiet mailbox shape, never a wake: these were spooled
-                # as quiet notes, and a drain that opened a turn per row
-                # would turn "read this when you run" into "start work now".
+                # The row's own ``wake``, never a guess: a row spooled by a
+                # runtime that was leaving a replaced build carries what its
+                # sender asked for, and ``send --wake`` asked for a turn. Rows
+                # written before the field existed read as notes, unchanged.
                 await self.receive_peer_message(
-                    line.text, mode="mailbox", wake=False, sender=line.sender
+                    line.text,
+                    mode="mailbox",
+                    wake=bool(getattr(line, "wake", False)),
+                    sender=line.sender,
                 )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
@@ -6727,7 +6572,15 @@ class Session:
         return state
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
-        """Acknowledge the observed outcome, never whichever turn is newest now."""
+        """Acknowledge the observed outcome, never whichever turn is newest now.
+
+        ``token`` must be the completion the conversation is CURRENTLY asking
+        about: an older one raises ``SupersededCompletionToken`` (a
+        ``ValueError``) rather than writing a receipt that cannot make the result
+        read. Every caller holds the attention state it rendered, so the remedy is
+        always in its hands -- re-read that state and acknowledge the token it now
+        names (see ``AttentionStore.acknowledge``).
+        """
         from local_operator.session.attention import (
             AttentionStore,
             conversation_identity,
@@ -6852,6 +6705,19 @@ class Session:
         For per-frame readiness checks only; see the store's own property.
         """
         return self._frontend_state_store.pending_gate
+
+    @property
+    def has_running_job(self):  # type: ignore[no-untyped-def]
+        """Whether any child is still running, without the state clone.
+
+        The third member of this family (``pending_gate``, ``epoch``): the
+        retention predicate that decides whether a leased viewer may be disposed
+        asks this as a boolean on every delta of every source, and it could only
+        answer through the whole-state clone before. See the store's own method
+        for why sharing the frozen roster is safe where sharing a model-valued
+        field is not.
+        """
+        return self._frontend_state_store.has_running_job()
 
     @property
     def epoch(self):  # type: ignore[no-untyped-def]
@@ -11569,6 +11435,173 @@ class Session:
         self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
+    def retire_wakes_to_inbox(self) -> None:
+        """From now on, a fired wake is SPOOLED for whoever opens next.
+
+        Called when this session's runtime has committed to leaving for a build
+        it can no longer be trusted to run (``ServingSessionHandle.begin_drain``,
+        driven by ``process._BuildWatch``'s bound or its files-gone probe). The
+        invariant it holds is the one the wake layer would otherwise break: a
+        wake that comes due while the runtime is draining must not open a turn
+        against a build whose files are being replaced, and must not be silently
+        DROPPED either — by the time the scheduler delivers an occurrence it has
+        already advanced and persisted the schedule, so a wake swallowed here is
+        a reminder the user never gets and never hears about.
+
+        The inbox is the vehicle because it is the one channel that survives the
+        handover: ``process._drain_inbox_into`` reads it at the successor's boot,
+        BEFORE the control socket listens, so the row lands ahead of anything a
+        client can send.
+
+        TWO SHAPES, chosen by whether the fire RETIRED its schedule
+        (``due.final``), and both end with the successor RUNNING the occurrence
+        rather than filing it as text — see :meth:`_spool_wake_to_inbox` for why
+        the distinction is not cosmetic.
+
+        Overwrites the resume catch-up shim if one is installed, deliberately: a
+        runtime that is leaving does not owe a catch-up of its own — the
+        successor loads the same index and folds the same overdue wakes.
+        """
+        #: One-shot schedules this drain swallowed, written to the index by
+        #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
+        #: ``__init__`` because a session that never drains never has any, and
+        #: the hook that fills it is installed on this same line.
+        self._wake_rearms: list[WakeSchedule] = []
+        self._wake_deliver_hook = self._spool_wake_to_inbox
+
+    async def _spool_wake_to_inbox(self, due: DueWake) -> None:
+        """The draining hook: hand one fired wake to the successor. Never raises.
+
+        A fire that RETIRED its schedule (``due.final``: a one-shot, or the last
+        occurrence of a ``limit``/``until_at`` series) leaves nothing that can
+        engage a runtime. The index row the wake supervisor raises its errand
+        from goes with the schedule, and no errand is raised for a schedule that
+        has already fired — so spooling the text alone would keep the reminder
+        and never run the work until a human opened the conversation. That is
+        the ''scheduled work silently not running'' shape this whole change is
+        about (review round 1, MINOR 3), so the occurrence is RE-ARMED as a
+        one-shot due now and :meth:`hand_wakes_to_successor` writes it at the
+        exit: the supervisor then starts a runtime for the session, which folds
+        it as an overdue occurrence and runs it on the new build.
+
+        A fire that left a NEXT occurrence needs none of that — the schedule is
+        still in the index, so the supervisor engages the session on its own
+        when the next occurrence comes due. The fired text is spooled with
+        ``wake=True``, so the successor RUNS the occurrence that was missed when
+        it boots rather than filing it as a note it might never act on.
+
+        Loud on failure rather than silent, and the re-arm has the spool as its
+        fallback: a wake that ended up in neither place is lost work the user is
+        waiting on, and a log line is the only trace it existed
+        (``design-runtime-autorefresh`` §5.3).
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        if due.final and self._queue_wake_rearm(due):
+            return
+        text = format_wake_delivery_text(due)
+        missed_note = self._missed_delivery_note(due)
+        if missed_note:
+            text = f"{missed_note}\n\n{text}"
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            logger.warning(
+                "wake %s fired while draining and could not be spooled (no session dir)",
+                due.schedule.id,
+            )
+            return
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(text=text, sender={}, mode="mailbox", written_at=time.time(), wake=True),
+            )
+        except Exception:  # noqa: BLE001 — a drain must not die on a spool write
+            logger.warning(
+                "wake %s could not be spooled while draining", due.schedule.id, exc_info=True
+            )
+            return
+        if not written:
+            logger.warning("wake %s could not be spooled while draining", due.schedule.id)
+
+    def _queue_wake_rearm(self, due: DueWake) -> bool:
+        """Queue the one-shot that replaces a schedule this fire retired.
+
+        Same id, same message, due NOW and no longer repeating: what the
+        successor owes is this occurrence, not a new automation, and keeping the
+        id is what lets the user cancel the thing they scheduled by the handle
+        they know. ``fired_count`` is left alone — the delivery the successor
+        makes IS this occurrence, and the count moves when it lands.
+
+        False when there is nowhere to queue it, so the caller spools the text
+        instead: the one outcome this path must not produce is an occurrence
+        that exists neither as a schedule nor as a spooled reminder.
+        """
+        queued = getattr(self, "_wake_rearms", None)
+        if queued is None:
+            return False
+        try:
+            queued.append(
+                due.schedule.model_copy(
+                    update={
+                        "next_due_at": int(time.time() * 1000),
+                        "every_ms": None,
+                        "until_at": None,
+                        "limit": None,
+                    }
+                )
+            )
+        except Exception:  # noqa: BLE001 — the caller falls back to the spool
+            logger.warning(
+                "wake %s could not be re-armed for the successor", due.schedule.id, exc_info=True
+            )
+            return False
+        logger.info(
+            "session runtime: wake %s re-armed for the successor (its fire retired the schedule)",
+            due.schedule.id,
+        )
+        return True
+
+    async def hand_wakes_to_successor(self) -> int:
+        """Write the wakes this drain swallowed. Returns how many.
+
+        Called by ``process._drain_for`` at the EXIT, not by the deliver hook,
+        for two reasons that are both about the scheduler owning schedule state:
+        the hook runs inside ``WakeScheduler.pump``'s write lock, where this
+        write would deadlock against its own lock, and the pump persists its
+        post-retire list moments later, which would overwrite a write made from
+        the hook. At the exit that persist has landed, so what lands here is what
+        the index keeps.
+
+        The write goes through ``_persist_wake_schedules`` — transcript first,
+        then the derived index — for the same reason every other schedule change
+        does: the transcript is the source of truth, and a re-arm that existed
+        only in the index would be erased by the successor's own open-time
+        ``_rebuild_wake_index_entry`` before it could fire. The list written is
+        this session's LIVE schedules plus the re-armed ones, with any live copy
+        of a re-armed id dropped: the one-shot supersedes it, and the index must
+        not carry the same id twice.
+
+        Never raises: a runtime that has already stopped admitting work must not
+        be held by a failed handover, and the failure is loud because it means a
+        wake the user is waiting on is now only in the log.
+        """
+        pending = list(getattr(self, "_wake_rearms", []) or [])
+        if not pending:
+            return 0
+        self._wake_rearms = []
+        superseded = {schedule.id for schedule in pending}
+        live = [schedule for schedule in self._wake.schedules if schedule.id not in superseded]
+        try:
+            await self._persist_wake_schedules([*live, *pending])
+        except Exception:  # noqa: BLE001 — the exit must not wait on a handover
+            logger.warning(
+                "could not hand %d draining wake(s) to a successor", len(pending), exc_info=True
+            )
+            return 0
+        logger.info("session runtime: handed %d draining wake(s) to the successor", len(pending))
+        return len(pending)
+
     def _prepare_missed_wake_catchup(self) -> None:
         """Snapshot the overdue schedules load() just adopted and compose the
         single aggregated catch-up prompt for them. Runs in ``__init__`` so the
@@ -11764,7 +11797,26 @@ class Session:
         the index is rebuilt on the next open regardless, and a supervisor
         that failed to install costs nothing that was not already lost (the
         live session still fires its own wakes).
+
+        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` queues the
+        one-shot that replaces a schedule its fire retired, and the caller that
+        queues it IS the scheduler's deliver hook — so the persist the pump
+        runs immediately after that delivery is this method, and merging the
+        queue here is what makes the occurrence durable in the same breath as
+        the fire (review round 2, MINOR 1). Queuing it for the exit left it in
+        memory for as long as the drain's wait, which is deliberately unbounded
+        — the work it is waiting for is this change's own premise — so a socket
+        ``stop``, a SIGTERM, a dispose or a crash in that window lost the
+        occurrence with no schedule left to retry it (the pump had already
+        persisted the retire). The exit write stays as the retry: an id already
+        in the queue is dropped from the list being written, so merging is
+        idempotent, and until the queue is cleared nothing that comes through
+        here can drop it.
         """
+        pending = list(getattr(self, "_wake_rearms", []) or [])
+        if pending:
+            superseded = {schedule.id for schedule in pending}
+            schedules = [*[s for s in schedules if s.id not in superseded], *pending]
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},

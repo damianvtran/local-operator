@@ -1,15 +1,34 @@
 # Browser tool
 
-The `browser` tool drives the **cmux embedded browser** — the browser panel
-inside the terminal the operator is already running in. It is the only browser
-backend, and it is advertised only when a cmux CLI can be reached.
+The `browser` tool drives a **real browser the user already has**, through one of
+three **browsable hosts**, picking on a fresh `open` in this order:
 
-Implementation: the `browser` section of `local_operator/tools/builtin.py`.
-Tests: `tests/unit/tools/test_browser_tool.py`.
+1. **The Local Operator desktop app's browser tab** (`local-operator-ui`), which
+   speaks the same loopback session leg as the extension and publishes its own
+   discovery record (see `local_operator/ui_browser/`).
+2. **The paired Local Operator browser extension**, driving the user's real
+   Chromium profile through a bridge daemon on `127.0.0.1:4099`.
+3. **The cmux embedded browser** — the browser panel inside the terminal the
+   operator is running in — which is a first-class fallback, not the only host.
+
+An already-open surface PINS its host in the handle prefix (`ui:`, `bridge:`) for
+the surface's whole life, so a browser opening or closing mid-session can never
+move an agent to a different browser. The extension and desktop-app hosts share
+their wire protocol and their host-free policy modules (generated for the app by
+`local_operator/browser_bridge/gen_ts.py`); cmux shares nothing and is driven by
+its CLI.
+
+Implementation: the `browser` section of `local_operator/tools/builtin.py`;
+the per-host clients in `local_operator/browser_bridge/backend.py` and
+`local_operator/ui_browser/backend.py`.
+Tests: `tests/unit/tools/test_browser_tool.py`,
+`tests/unit/browser_bridge/test_tool_selection.py`.
 
 ## Site approval scopes
 
-The browser extension denies new sites by default. The popup offers three
+The non-cmux hosts deny new sites by default, and each shows the prompt in its
+own chrome: the extension in its toolbar popup, the desktop app in its browser
+tab. The extension popup offers three
 scopes: **All pages on this domain** (the registrable domain, covering every
 subdomain, both schemes, and any port), **Only this site** (exact origin,
 including scheme and port), and **Just this once** (one navigation within
@@ -25,6 +44,11 @@ Settings skips the prompt entirely; it requires a confirmed dialog and is
 off by default.
 
 ## Actions
+
+The non-cmux hosts answer the same 20 wire methods; cmux can serve a subset, and
+the rest (`scroll`, `logs`, `tabs`, the site-approval trio) degrade with a typed
+error naming the hosts that can. The table below is the CMUX mapping (the full
+list is the docstring of `BROWSER_ACTIONS`).
 
 | action | what it does | cmux command underneath |
 |---|---|---|
@@ -79,10 +103,32 @@ Signals measured inside a real cmux session on this host (2026-08-06):
 | `CMUX_BUNDLED_CLI_PATH` | path into the app bundle | **Yes** — an executable path, checked as the PATH fallback. |
 | `which cmux` | `/opt/homebrew/bin/cmux` | **Yes** — the primary signal. |
 
-Degrading is silent to the MODEL. No cmux means `build_browser_tool()` returns
-`None` and the tool is never advertised (the *createIf* convention, same as
-`wake`). Nothing raises, and session start is unaffected. If a host forces the
-tool on anyway, every action returns one clear error.
+Degrading is silent to the MODEL. With **no browsable host at all** — no cmux
+CLI, no advertising extension daemon, no desktop-app browser host —
+`build_browser_tool()` returns `None` and the tool is never advertised (the
+*createIf* convention, same as `wake`). Nothing raises, and session start is
+unaffected. If a host forces the tool on anyway, every action returns one clear
+error. A host with only some of the three keeps the tool: the per-action path
+decides which surface serves it, and an action cmux cannot serve degrades with a
+typed error naming the hosts that can.
+
+**Every host answers the same four availability questions**, because
+`_execute_browser` branches on all of them and a host that answered three and
+guessed the fourth would make the decision and the diagnostic disagree:
+
+| question | cmux | extension bridge | desktop app |
+|---|---|---|---|
+| cheap file/`PATH` probe, no socket | `cmux_browser_available()` | `bridge_browser_available()` | `ui_browser_available()` |
+| tool GATING (accepts a stale-but-alive host) | same as above | `bridge_browser_advertisable()` | `ui_browser_advertisable()` |
+| browser PATH (one bounded `/health` to acquit a stale record) | n/a — the probe is the `PATH` lookup | `bridge_browser_reachable()` | `ui_browser_reachable()` |
+| which discovery record it reads | its CLI | `run/browser/bridge.json` | `run/ui-browser/host.json` (own namespace, 0600 under 0700) |
+
+The two non-cmux hosts also own surfaces for a session's whole life, which is
+what the handle prefixes (`bridge:`, `ui:`) pin — and the ownership lane
+(`recover`/`retain`/`release`) is selected per host with the same prefix, so a
+session driving the app's tab never sends ownership verbs to a daemon it is not
+using. On a host with no ownership host at all those three verbs are refused with
+a typed code rather than falling through to the screenshot branch.
 
 It is not silent to the LOG. A session carrying cmux's `CMUX_*` markers — so
 plainly running inside cmux — that still resolves no CLI is the one anomalous

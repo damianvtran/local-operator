@@ -746,7 +746,18 @@ def test_noop_refresh_consumes_no_sequence_for_model_list_fields() -> None:
 
 
 def test_rotated_trajectory_ships_replacement_and_follower_stays_bounded() -> None:
-    """N2: past TRAJECTORY_CAP the delta is a replacement, never endless appends."""
+    """N2: past TRAJECTORY_CAP the delta is a replacement, never endless appends.
+
+    REPLACEMENT *for these rows*, and the reason is now a property of the rows
+    rather than of the cap: the classifier proves a rotation row for row from the
+    rows' ``_lo_seq`` stamps, so a STAMPED rotation ships the appended tail with no
+    marker (see ``test_frontend_row_window``, ``_capped_overlap_tail``). These rows
+    carry no stamp, nothing about the overlap can be proven, and the delta keeps
+    the replacement it has always sent. The precondition is asserted rather than
+    assumed so this cell cannot drift into the proven-tail case and quietly stop
+    covering the fallback it exists for.
+    """
+    from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
     from local_operator.harness.subagent import TRAJECTORY_CAP
 
     owner = FrontendStateStore(_state(jobs=[]))
@@ -764,6 +775,10 @@ def test_rotated_trajectory_ships_replacement_and_follower_stays_bounded() -> No
     follower.apply_update(seed)
     for round_no in range(1, 4):
         rotated = [{"type": "e", "n": index + round_no} for index in range(TRAJECTORY_CAP)]
+        assert all(TRAJECTORY_SEQ_KEY not in row for row in rotated), (
+            "stamping these rows makes the rotation provable, which ships a tail "
+            "instead of a replacement -- this cell is the unprovable fallback"
+        )
         update = owner.mutate(jobs=[JobState(id="child", type="task", trajectory=rotated)])
         assert update is not None
         assert update.job_trajectory_replacements == ["child"]
@@ -1512,3 +1527,44 @@ def test_the_phase_pair_rides_the_wire_and_is_not_durable() -> None:
     )
     # The pair is a scalar the turn-end fold clears, so it is not stripped.
     assert payload["state"]["activity_phase"] == "thinking"
+
+
+def test_a_restored_runtime_publishes_the_directory_IT_works_in() -> None:
+    """The checkpoint says where a session USED to work; the runtime says where it does.
+
+    ``/move`` (and the desktop's move route) rewrites the durable marker, and the
+    canonical frontend checkpoint keeps naming the directory the PREVIOUS runtime
+    worked in. A successor that restored ``cwd`` from the checkpoint published a
+    ``frontend.cwd`` for a directory the session had LEFT: the receipt, the marker
+    and a real ``bash pwd`` all named the new one while the stream named the old
+    one — and the renderer's own rule is that the stream is authoritative, so it
+    kept showing it until something forced a refresh (QA Q1 on the desktop move).
+    """
+    stored = _state(cwd="/evidence/before")
+    owner = SimpleNamespace(
+        session_id="s1",
+        cwd="/evidence/after",
+        _transcript=_CheckpointTranscript(stored),
+    )
+
+    restored = FrontendStateStore.from_checkpoint(owner).state
+
+    assert restored.cwd == "/evidence/after"
+    # Everything else the row carries is still the conversation's own durable
+    # state; this is about one field, not a licence to drop the restore.
+    assert restored.conversation_title == stored.conversation_title
+    assert restored.cumulative_parent_cost == stored.cumulative_parent_cost
+
+
+def test_a_host_with_no_directory_of_its_own_restores_the_checkpoints() -> None:
+    """The fallback half: a reduced host restores exactly as it did before.
+
+    ``_owner_over`` exposes neither ``cwd`` nor ``_cwd``, which is the shape every
+    test double and any host that does not model a directory has — there the
+    checkpoint's own value is still the only answer available.
+    """
+    stored = _state(cwd="/evidence/before")
+
+    restored = FrontendStateStore.from_checkpoint(_owner_over("s1", stored)).state
+
+    assert restored.cwd == "/evidence/before"

@@ -1726,8 +1726,20 @@ class SessionRow(NamedTuple):
 
     #: ``"busy"`` (a turn is running), ``"idle"`` (resident, warm),
     #: ``"attached"`` (another terminal is watching), ``"wedged"`` (a live pid
-    #: whose heartbeat went stale), or ``""`` for a cold session.
+    #: that has stopped reporting — see below), or ``""`` for a cold session.
     live_state: str = ""
+    #: How long ago the owning process last wrote its discovery heartbeat, or
+    #: ``None`` for a cold row with no record.
+    #:
+    #: A QUALIFIER, not a state: it is what turns ``live_state == "wedged"`` into
+    #: the honest sentence a reader needs. The beat is authored by the runtime's
+    #: own event loop, so the same reading covers a frozen process and a
+    #: perfectly healthy one starved by a long turn, and the only defensible
+    #: thing to say about it is that the owner has not reported for this long
+    #: (``registry.classify`` owns the rule; this is its number). Defaulted
+    #: exactly like the live-state fields above, so every construction site but
+    #: the live-decorating one renders as before.
+    heartbeat_age_s: float | None = None
     #: ``"approval"`` / ``"ask"`` when the session is waiting for a PERSON.
     #: The needs-you marker, and the reason a row sorts first.
     pending: str | None = None

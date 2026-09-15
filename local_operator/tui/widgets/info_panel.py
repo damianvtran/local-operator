@@ -48,7 +48,7 @@ from local_operator.info.model import (
     format_duration,
     is_shadowed_install,
 )
-from local_operator.info.render import build_export, plural
+from local_operator.info.render import build_export, not_answering_clause, plural
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -288,6 +288,7 @@ class _Body:
         *,
         metas: Sequence[str] = (),
         labels: Sequence[str] = (),
+        short_meta: str = "",
     ) -> None:
         """A glyph-led row: session lines and subagent tree nodes.
 
@@ -300,12 +301,32 @@ class _Body:
         for ``busy`` at 80 columns — the ``8.8k thin`` defect the existing
         ``/session`` screen has, which this screen must not inherit. Dropping a
         whole item is legible; half of one is not.
+
+        ``short_meta`` is the rung that survives the WIDTH FLOOR, and it exists
+        because the floor is blunter than the fit test: below ``_NOTE_MIN``
+        every meta is shed, so a row whose meta is its only statement of a
+        CONDITION degrades to a bare glyph at exactly the widths where the
+        glyph's meaning is least obvious. It is drawn only when ``_fit_pair``
+        says it fits — the floor exists to prevent a half-painted item, and a
+        rung that has been tested for fit cannot cause that. Same shape as
+        :meth:`header`'s ``short``: the last rung must be the irreducible fact,
+        which for a session that has stopped answering is the words "not
+        answering".
         """
         row = Text()
         row.append("  " + " " * indent, style=semantic_style("dim"))
         row.append(f"{glyph} ", style=semantic_style(ink))
         candidates = list(metas) or ([meta] if meta else [])
         lead = row.cell_len
+
+        # THE WIDTH FLOOR bites on the CANDIDATES, not on the paint: below
+        # ``_NOTE_MIN`` a row carries its ``short_meta`` or nothing. Shedding
+        # here rather than at the append below keeps ONE answer to "what does
+        # this row say at this width" — and it is what stops the label being
+        # squeezed for a meta rung that will never be drawn, which at 70 columns
+        # cost the name column its whole tail.
+        if self.width < _NOTE_MIN:
+            candidates = [short_meta] if short_meta else []
 
         # The label and the meta are negotiated TOGETHER, not one after the
         # other. Sizing the label against the WIDEST meta rung charged it for a
@@ -337,7 +358,7 @@ class _Body:
             meta_shown = _fit_pair(shown, candidates, self.width, lead) or ""
 
         row.append(shown, style=semantic_style("fg"))
-        if meta_shown and self.width >= _NOTE_MIN:
+        if meta_shown:
             # Pad to the meta COLUMN, never to the card's right edge — see
             # ``_MARK_LABEL_CELL``. One space minimum, so an over-long label
             # still separates from its meta rather than running into it.
@@ -710,6 +731,14 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         )
         return
     meta = f"{sessions.live} live · {sessions.total} total"
+    # The condition, on the header where the fleet is enumerated: a runtime that
+    # has stopped reporting is one of the ``total`` beside it and NOT one of the
+    # ``live``, and naming it here is what stops a reader reading "1 live · 2
+    # total" as a rounding error. The header's meta is shed from the right on a
+    # narrow frame, which is why the row below carries the same fact again —
+    # before the uptime and memory that a reader can do without.
+    if sessions.wedged:
+        meta += f" · {sessions.wedged} not answering"
     body.header("Sessions on this machine", meta, f"{sessions.live} live")
     if not sessions.lines:
         body.note("No other lop sessions are running on this machine.")
@@ -725,21 +754,54 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             glyph, ink = IDLE_MARKER, "muted"
         # Built widest-first and shed WHOLE ITEMS from the right, because the
         # rightmost facts are the least identifying: which session it is and
-        # whether it is wedged must survive to the narrowest frame, while the
-        # memory figure is the one a reader can do without.
+        # whether it is not answering must survive to the narrowest frame,
+        # while the memory figure is the one a reader can do without.
         bits = ["this session"] if line.is_self else []
         if line.state != "live":
-            bits.append(line.state)
+            # The STATE token is kept for the machine surface (the export's
+            # ``[wedged]``, ``--json``), but a person reads the word: "not
+            # answering" is what a stale heartbeat establishes, and "wedged"
+            # both invites a diagnosis the evidence does not support and hides
+            # the fact that the process is still there.
+            bits.append("not answering" if line.state == "wedged" else line.state)
+        # The measurement, ahead of uptime and memory for the same reason: on
+        # this row the age is the reason the reader is looking at it at all.
+        if line.state == "wedged":
+            bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
         bits.append(format_duration(line.uptime_s))
-        if sessions.usage_available:
+        # BOTH of these are shed on a row that is not answering, not merely
+        # ordered after the facts (design round 2, D4): usage is sampled for
+        # LIVE pids only, so the figure here would be a measurement that was
+        # never taken for this pid, and ``busy`` is the record's PRE-silence
+        # flag — a row whose whole purpose is to remove unqualified progress
+        # must not end by asserting activity. At FULL width it nonetheless ends
+        # on the unlabelled uptime appended above (``… last heartbeat 4m ago ·
+        # 2s``), because uptime is appended after the heartbeat clause while the
+        # two sheds below only drop the facts under it; the meta ladder shortens
+        # from the right, so it is the uptime a narrower frame drops first and
+        # the heartbeat clause that those frames then end on. The export closes
+        # the same two facts the other way round, on the age — a recorded
+        # follow-up (design round 3, D8), not a claim this comment settles.
+        if sessions.usage_available and line.state != "wedged":
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
             bits.append(f"needs {line.pending}")
-        elif line.busy:
+        elif line.busy and line.state != "wedged":
             bits.append("busy")
         metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
         name = line.conversation_name or line.session_id or f"pid {line.pid}"
-        body.marked(glyph, ink, name, metas=metas)
+        # ``short_meta`` below the note floor: the WORDS survive to the
+        # narrowest frame, where the meta ladder is otherwise shed wholesale.
+        # This row's whole point is that a reader can tell it apart from the
+        # working session above it, and a bare ``✗`` beside a truncated name
+        # does not do that.
+        body.marked(
+            glyph,
+            ink,
+            name,
+            metas=metas,
+            short_meta="not answering" if line.state == "wedged" else "",
+        )
     if sessions.build_skew:
         body.note(
             "Live sessions are running more than one build — a change may look "
@@ -773,7 +835,7 @@ def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
 #: The ONE implementation, imported rather than reimplemented: the screen and
 #: the export must not inflect the same fact differently, and they did until
 #: the export's addends were found reading ``1 sessions + 1 subagents``.
-#: ``/info`` pluralises everywhere else (``3 keys``, ``1 session is wedged``),
+#: ``/info`` pluralises everywhere else (``3 keys``, ``1 session is not answering``),
 #: so an unpluralised count reads as unfinished rather than as house style, and
 #: a single-window host is the state every fresh install starts in.
 _plural = plural
@@ -819,14 +881,13 @@ def _fleet_caveats(body: _Body, sessions: SessionsInfo | None) -> None:
             "the fleet total is a lower bound."
         )
     if sessions.wedged:
-        one = sessions.wedged == 1
-        # The possessive inflects with the subject too: "1 session is wedged;
-        # their counts" switched number mid-sentence.
-        body.note(
-            f"{_plural(sessions.wedged, 'session')} {'is' if one else 'are'} wedged; "
-            f"{'its' if one else 'their'} counts are as of "
-            f"{'its' if one else 'their'} last heartbeat."
-        )
+        # The shared sentence, NOT a second copy: it names the measured age, the
+        # pid and the remedy (``lop stop --pid N``, with ``--force`` priced for
+        # the still-beating shape), and the export prints the same text.
+        # It replaced a sentence that said only that these counts are stale, and
+        # a remedy elsewhere that promised a graceful stop which the ladder may
+        # never admit.
+        body.note(not_answering_clause(sessions))
 
 
 def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) -> None:
@@ -937,9 +998,13 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         # The header's runtime count broken down. Both numbers name a live
         # pid — that is why the header adds them — and the split is what tells
         # the reader how much of the tally is coming from quiet processes.
+        # The state word is ``not answering``, matching the export's copy of
+        # this line and the caveat below it: the split is a reading of the
+        # records, and which of them stopped reporting is what the numbers say.
         body.kv(
             "Runtimes",
-            f"{sessions.live} live" + (f" · {sessions.wedged} wedged" if sessions.wedged else ""),
+            f"{sessions.live} live"
+            + (f" · {sessions.wedged} not answering" if sessions.wedged else ""),
         )
         # Same rule as the header, one row down. Three zeros in a row
         # (``0 total — 0 sessions + 0 subagents``) under a visible running tree

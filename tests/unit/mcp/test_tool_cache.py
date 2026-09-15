@@ -73,8 +73,16 @@ def test_discover_and_load_defaults_a_config_dir_cache(tmp_path: Path, monkeypat
     captured: list[object] = []
 
     class FakeManager:
-        def __init__(self, cwd, tool_cache, auth_store=None):
+        def __init__(
+            self, cwd, tool_cache, auth_store=None, *, secret_base=None, register_secret=None
+        ):
             captured.append(tool_cache)
+            # The owner config root and the redaction sink are forwarded, not
+            # defaulted away: a loader that dropped them would resolve `${NAME}`
+            # against the wrong store and register nothing for the sinks to
+            # scrub, and this double exists to catch exactly that at the call
+            # site (`mcp/secret_refs.py`).
+            assert secret_base is None and register_secret is None
 
         async def discover_and_connect(self):
             from local_operator.mcp.manager import McpLoadResult

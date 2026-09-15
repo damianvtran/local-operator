@@ -1385,6 +1385,8 @@ async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tm
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)
+        # The version note's own ink, taken off the same filtered blocks: the
+        # drain row is `muted` too, and this asserts what the REFRESH line says.
         tokens = [block._token for block in app.query(NoticeBlock)]
 
         # Consumed once: a second engage tail must not repeat it.

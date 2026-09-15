@@ -2488,7 +2488,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #: * `created_at` is immutable for the life of a session (#800 makes it the
     #:   ordering key precisely because it never moves), so it cannot differ
     #:   between two ticks of one open picker.
-    _SIGNATURE_EXCLUDED = ("mtime", "created_at")
+    #: * `heartbeat_age_s` is a LIVE fact this widget never paints, and it is the
+    #:   one signal here that is guaranteed to CHANGE every second while the
+    #:   state it qualifies holds. It renders in the sidebar's hover tooltip
+    #:   (`session.catalog.CatalogEntry.status`), which reads the row on each
+    #:   repaint it already does; putting it in the signature would repaint the
+    #:   whole list once a second for the length of an owner's silence, which is
+    #:   the cost this whole mechanism exists to avoid. The ROW STATE that
+    #:   matters — `live_state` — IS compared, so entering and leaving the
+    #:   condition still repaints on the frame it happens.
+    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s")
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form
     # checked only that every signature NAME is a real field, which catches a
