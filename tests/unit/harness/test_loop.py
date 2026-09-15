@@ -17,6 +17,7 @@ import pytest
 import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
+    LENGTH_ENDED_CALL_RESULT_TEXT,
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
     TRUNCATED_RESULT_TEXT,
@@ -26,9 +27,16 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
-from local_operator.harness.rows import assistant_stop_notice, is_harness_chrome
+from local_operator.harness.rows import (
+    assistant_stop_notice,
+    is_harness_chrome,
+    output_limit_call_receipt,
+)
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
+    OUTPUT_LIMIT_ARGUMENTS,
+    OUTPUT_LIMIT_KEY,
+    OUTPUT_LIMIT_TURN,
     AbortSignal,
     AgentEndEvent,
     AgentTool,
@@ -460,7 +468,16 @@ async def test_length_pairs_but_does_not_execute():
     # A bare "aborted" read as an unexplained failure and a model that had just
     # emitted a large `write` declined to retry it, so the file was never written
     # (QA round 1, Q2).
-    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+    #
+    # Which text is the COMPLETE-arguments arm of the limit, and that is the arm
+    # this stream is in: `args="{}"` is a two-character argument object that
+    # parses, so nothing about this call was cut. The size framing belongs to
+    # ``TRUNCATED_RESULT_TEXT`` and to calls that were actually cut -- see
+    # ``test_length_arms_are_distinguished`` -- because telling a call whose
+    # arguments arrived complete that they were oversize sent the model after a
+    # problem it did not have while the identical arguments ran fine on the next
+    # turn (review round 1, F1 == QA Q1).
+    assert tool_messages[0].text == LENGTH_ENDED_CALL_RESULT_TEXT
     # And the user is told the limit was hit, on the surface that renders the
     # loop's own events.
     assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
@@ -468,6 +485,103 @@ async def test_length_pairs_but_does_not_execute():
         "— nothing was executed; re-asking it to "
         "re-emit the call in smaller pieces"
     ]
+
+
+@pytest.mark.asyncio
+async def test_length_arms_are_distinguished():
+    """ONE limit, TWO arms, and each call is told only what is true of it.
+
+    The length arm appends its placeholder to EVERY call in the turn, and not
+    every one of them was cut: a turn can finish dictating a call — or two — and
+    then spend whatever budget is left on a third. Telling a call whose
+    arguments arrived complete that they "were larger than the output limit
+    allows" and "will be cut again" asserts two things that are false there, and
+    measurably so: re-issuing such a call's identical arguments on the next turn
+    runs them and writes the file (review round 1, F1 == QA round 1, Q1).
+
+    Nothing pinned this before. Both the old wording and the new one were green
+    on this file, because every assertion compared the result against the
+    imported constant — so a revert, or the two arms collapsing back into one,
+    would pass CI (QA round 1, Q2). This test is that pin, and it asserts the
+    operator-facing RECEIPT as well as the model-facing text, because the two
+    are separate audiences with separate vocabularies (review F2): the row a
+    resume paints for a cut call must never be the prose addressed to the model.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                # Three calls in one turn that the cap ends, one per arm boundary:
+                #   1. NO argument deltas at all -- a zero-argument call, which
+                #      is complete by definition and must not be told to shrink;
+                #   2. arguments that finished arriving and PARSE -- the QA Q1
+                #      shape, where the size claim is measurably false;
+                #   3. arguments cut mid-dictation, left as a JSON fragment that
+                #      never parses -- the only arm the size claim is true of.
+                tool_call_delta(0, id="c_none", name="echo"),
+                tool_call_delta(1, id="c_full", name="echo", args='{"text": "hi"}'),
+                tool_call_delta(2, id="c_cut", name="echo", args='{"text": "'),
+                StreamEndEvent(stop_reason="length"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    async for _ in loop.run([Message.user("go")], context, make_config(stream), None):
+        pass
+
+    # No arm executes: the batch is paired with placeholders either way.
+    assert executed == []
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c_none", "c_full", "c_cut"]
+    assert all(m.is_error for m in tool_messages)
+
+    # The text follows the arm, and only the cut call gets the size claim.
+    assert [m.text for m in tool_messages] == [
+        LENGTH_ENDED_CALL_RESULT_TEXT,
+        LENGTH_ENDED_CALL_RESULT_TEXT,
+        TRUNCATED_RESULT_TEXT,
+    ]
+    assert "oversize" in tool_messages[2].text and "cut again" in tool_messages[2].text
+    assert all("oversize" not in m.text and "cut again" not in m.text for m in tool_messages[:2])
+
+    # The arm also rides in ``details``, because that MARKER -- not the wording
+    # -- is what a display surface reads. Keying a row on a string the loop is
+    # free to reword is a row whose text changes for a copy edit, and it cannot
+    # tell the two arms apart at all.
+    payloads = [m.provider_payload or {} for m in tool_messages]
+    # Indexed rather than `.get`: a placeholder is minted by ``_synthetic_result``,
+    # which always stamps ``details``, and a row that lost its marker must fail
+    # loudly here rather than read as "no limit" in the assertions below.
+    details = [p["details"] for p in payloads]
+    assert [d[OUTPUT_LIMIT_KEY] for d in details] == [
+        OUTPUT_LIMIT_TURN,
+        OUTPUT_LIMIT_TURN,
+        OUTPUT_LIMIT_ARGUMENTS,
+    ]
+
+    # And the RECEIPT the operator reads is neither of those model-facing
+    # strings: model-directed prose must not reach the row (review round 1, F2).
+    receipts = [output_limit_call_receipt(d) for d in details]
+    assert receipts == [
+        "turn ended at the output limit before this call ran",
+        "turn ended at the output limit before this call ran",
+        "tool call cut off at the output limit (nothing ran)",
+    ]
+    assert all(r not in (TRUNCATED_RESULT_TEXT, LENGTH_ENDED_CALL_RESULT_TEXT) for r in receipts)
+    # The cut call's own row and the turn's notice use the same words, which is
+    # the whole reason the receipt is named rather than spelled twice -- a cut
+    # call used to read one way in the notice and another on its row.
+    assert assistant_stop_notice(
+        text="", has_tool_calls=True, stop_reason="length", provider_payload=None
+    ) == (receipts[2], "warning")
+
+    # Every other result keeps its own text: the substitution is keyed on the
+    # marker, not on the shape of an error row.
+    assert output_limit_call_receipt({"__synthetic": True}) is None
+    assert output_limit_call_receipt(None) is None
 
 
 @pytest.mark.asyncio
@@ -483,9 +597,15 @@ async def test_length_with_prose_and_a_call_takes_the_answer_arm():
     turn and it IS incomplete.
 
     The call half is not lost by that. It is still not executed (the
-    placeholder below keeps Q2's fix), and the model still learns why from
-    ``TRUNCATED_RESULT_TEXT`` -- which says the call did not run on its own row,
-    where a reader looks for that fact rather than in a notice about the answer.
+    placeholder below keeps Q2's fix), and the model still learns why from the
+    limit result -- which says the call did not run on its own row, where a
+    reader looks for that fact rather than in a notice about the answer.
+
+    The call here is COMPLETE (``args="{}"`` parses), so the arm is
+    ``LENGTH_ENDED_CALL_RESULT_TEXT``: a turn can stream prose and a finished
+    call and still hit the cap, and this call is not the thing that ran out of
+    room. Nothing about it needs shrinking, which is exactly what the other arm
+    would have told the model to do.
     """
     executed: list[str] = []
     stream = ScriptedStream(
@@ -513,7 +633,7 @@ async def test_length_with_prose_and_a_call_takes_the_answer_arm():
     ]
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert len(tool_messages) == 1 and tool_messages[0].is_error
-    assert tool_messages[0].text == TRUNCATED_RESULT_TEXT
+    assert tool_messages[0].text == LENGTH_ENDED_CALL_RESULT_TEXT
 
     # And the fold reads the same turn the same way: content, not "a call was
     # cut". If this ever diverges, the live row and the replayed row disagree

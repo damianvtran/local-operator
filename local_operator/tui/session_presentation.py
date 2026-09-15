@@ -1224,6 +1224,7 @@ def replay_tool_call(
     empty there and killed-mid-turn calls still render ``interrupted``
     exactly as before.
     """
+    from local_operator.harness.rows import output_limit_call_receipt
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
@@ -1343,11 +1344,26 @@ def replay_tool_call(
         card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):
+        # A call the OUTPUT LIMIT kept from running carries a SYNTHETIC result,
+        # and that result's text is addressed to the MODEL ("Reply with the call
+        # itself, not with an explanation of why it cannot be sent"). Painting it
+        # here put a model-directed imperative on the operator's screen, under a
+        # red error row about a file that does not exist (review round 1, F2).
+        # The row takes the harness's own vocabulary instead, selected by the arm
+        # marker the result carries; every OTHER error result is untouched and
+        # keeps its own text.
+        #
+        # The status line AND the expanded body, because the body is that same
+        # model-facing string and leaving it there would only move the prose one
+        # click away. The result keeps its text in the transcript and on the wire
+        # -- this is a display decision, not a rewrite of what the model was
+        # told.
+        receipt = output_limit_call_receipt(details)
         card.restore(
             state="error",
-            result_text=result_text,
+            result_text=receipt or result_text,
             details=details,
-            error=_first_line(result_text),
+            error=receipt or _first_line(result_text),
             duration_s=duration_s,
         )
     else:

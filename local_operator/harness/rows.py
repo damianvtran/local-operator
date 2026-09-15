@@ -609,8 +609,75 @@ def assistant_stop_notice(
         if text:
             return "answer cut off at the output limit", "warning"
         if has_tool_calls:
-            return "tool call cut off at the output limit (nothing ran)", "warning"
+            return _CUT_CALL_RECEIPT, "warning"
         return "no answer: the model spent its whole output budget", "warning"
     if not text and not has_tool_calls and stop_reason in ("error", "aborted"):
         return ("turn failed" if stop_reason == "error" else "interrupted"), "error"
+    return None
+
+
+#: The receipt for a call the OUTPUT LIMIT cut mid-arguments. Named rather than
+#: spelled twice because TWO surfaces say it about one event: the turn notice
+#: above (``assistant_stop_notice``), and the failed-call card a resume paints
+#: for the call itself (``output_limit_call_receipt`` below). A cut call used to
+#: read one way in the notice and another on its own row, which is the
+#: two-voices class this module exists to keep closed.
+_CUT_CALL_RECEIPT = "tool call cut off at the output limit (nothing ran)"
+
+#: The receipt for the OTHER limit arm: a call whose arguments arrived COMPLETE
+#: in a turn the limit ended before it could run. Deliberately not the line
+#: above — nothing about this call was cut, so reusing it would put a cause the
+#: loop has not established on the operator's row (and, before this arm had its
+#: own model-facing text, on the model's too: review round 1, F1 == QA Q1).
+#:
+#: Operator voice, not model voice: it is a RECEIPT for someone reconstructing
+#: what happened, so it says what did not happen and stops there. No imperative,
+#: no "reply with the call", no instruction the loop means for the model.
+_LIMIT_ENDED_TURN_RECEIPT = "turn ended at the output limit before this call ran"
+
+
+def output_limit_call_receipt(details: Mapping[str, Any] | None) -> str | None:
+    """The row's own words for a call the OUTPUT LIMIT kept from running.
+
+    ``None`` means "this result says nothing about an output limit", which is
+    every result a tool actually produced — the ordinary case, and the one that
+    must keep painting its own text.
+
+    WHY A ROW NEEDS ITS OWN WORDS AT ALL. A call the limit stopped never runs,
+    so its result is SYNTHETIC: the loop appends a placeholder the model is
+    meant to read, and the message it persists is that same text. So the row a
+    resume paints for the call is the text ADDRESSED TO THE MODEL — measured on
+    this branch, the operator's screen carried "Reply with the call itself, not
+    with an explanation of why it cannot be sent." (review round 1, F2). The
+    marker (``harness.types.OUTPUT_LIMIT_KEY``) says which arm wrote it; the
+    words come from here, where every other operator-facing receipt lives.
+
+    Read the MARKER, never the model-facing wording: keying a row on a string
+    the loop is free to reword is a row whose text changes for a copy edit, and
+    it cannot tell the two arms apart at all.
+
+    The arm is not decoration. A complete-arguments call in a limit-ended turn
+    is a call that fits and only needs re-issuing, and telling its reader the
+    call was cut is the false cause F1/Q1 measured; the two arms therefore
+    carry two different lines rather than one hedged one.
+    """
+    # Imported HERE rather than at module scope: this module's contract is that
+    # it imports no harness type at module scope (see the header), and the keys
+    # live beside ``FAULT_KEY`` in ``harness.types`` because that is where the
+    # harness declares the bookkeeping it writes into ``ToolResult.details``.
+    # Cheap enough for the fold path: after the first call it is a `sys.modules`
+    # lookup. The same shape as ``harness_chrome_prompts`` above.
+    from local_operator.harness.types import (
+        OUTPUT_LIMIT_ARGUMENTS,
+        OUTPUT_LIMIT_KEY,
+        OUTPUT_LIMIT_TURN,
+    )
+
+    if not isinstance(details, Mapping):
+        return None
+    arm = details.get(OUTPUT_LIMIT_KEY)
+    if arm == OUTPUT_LIMIT_ARGUMENTS:
+        return _CUT_CALL_RECEIPT
+    if arm == OUTPUT_LIMIT_TURN:
+        return _LIMIT_ENDED_TURN_RECEIPT
     return None

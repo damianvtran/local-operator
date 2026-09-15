@@ -44,6 +44,7 @@ from local_operator.harness.rows import (
     gate_timeout_notice,
     is_harness_chrome,
     is_harness_notice_row,
+    output_limit_call_receipt,
     user_row_text,
     wake_receipt_headline,
 )
@@ -925,10 +926,21 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
             entry = tool_rows.get(message.tool_call_id or "")
             if entry is not None:
                 entry.tool_state = "failed" if message.is_error else "done"
-                if message.is_error:
-                    entry.error = _compact(message.text, 200)
                 payload = message.provider_payload or {}
                 result_details = payload.get("details")
+                # A call the OUTPUT LIMIT kept from running persists a SYNTHETIC
+                # result whose text is addressed to the MODEL, so the failed row
+                # used to carry an imperative meant for the agent ("Reply with
+                # the call itself…") as the operator's own receipt, and carried
+                # it twice: as the row's error line and, clipped, in the
+                # expand-on-tap output (review round 1, F2). Both take the
+                # harness's vocabulary for this condition instead, from the arm
+                # marker on the result. EVERY other tool message keeps its text
+                # untouched — this is keyed on the marker, never on the wording.
+                receipt = output_limit_call_receipt(result_details) if message.is_error else None
+                result_text = receipt or message.text
+                if message.is_error:
+                    entry.error = _compact(result_text, 200)
                 duration = payload.get("duration_s")
                 if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                     entry.elapsed_s = float(duration)
@@ -937,7 +949,7 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
                 details = _tool_row_details(
                     tool_args.get(message.tool_call_id or "", {}),
-                    message.text,
+                    result_text,
                     result_details if isinstance(result_details, dict) else None,
                 )
                 # The expansion flag is set on the CALL and must survive the

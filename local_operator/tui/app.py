@@ -89,7 +89,7 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -11750,11 +11750,20 @@ class OperatorApp(App[None]):
             card.restore(state="interrupted", duration_s=duration_s)
             return
         if getattr(result, "is_error", False):
+            # Symmetric with `replay_tool_call`'s error arm, including the
+            # receipt substitution: this settles a card that was already on
+            # screen (a viewer that watched the call being dictated and then
+            # reconnected after the turn ended), and the SAME call must not read
+            # one way there and another in a cold resume — see the long note in
+            # `session_presentation.replay_tool_call` for why a row takes the
+            # harness's vocabulary rather than the model-facing text
+            # (review round 1, F2).
+            receipt = output_limit_call_receipt(details)
             card.restore(
                 state="error",
-                result_text=result_text,
+                result_text=receipt or result_text,
                 details=details,
-                error=_first_line(result_text),
+                error=receipt or _first_line(result_text),
                 duration_s=duration_s,
             )
         else:
