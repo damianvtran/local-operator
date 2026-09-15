@@ -89,6 +89,10 @@ async def test_an_idle_stale_runtime_announces_and_retires(stale) -> None:
     assert [f["_recipient"] for f in retiring] == ["attach"], "the phone daemon never sees it"
     assert retiring[0]["reason"] == "stale-build"
     assert retiring[0]["from"] == OLD.label() and retiring[0]["to"] == NEW.label()
+    # The WIRE field the viewer's notice is gated on, on the rung that refuses
+    # NOTHING: an idle refresh must not claim admissions are closing (QA round 3,
+    # Q-1 — the notice painted here for a handover that refused nothing).
+    assert retiring[0]["draining"] is False, retiring[0]
     assert handle.probes == 2, "re-asked after the announce (the one await before the stop)"
 
 

@@ -658,7 +658,7 @@ RESTORE_SEAM = "\n\n"
 #: ink for the same reason. The refusal itself is the row that has to be read.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
-    "first, so a new message will not go through until the new build is up"
+    "first, so a new message will not start a turn until the new build is up"
 )
 
 
@@ -5117,11 +5117,15 @@ class OperatorApp(App[None]):
         restored = accepted or SessionDraft(text=text)
         # ``seam`` is opt-in per CALLER rather than a property of the restore,
         # because it shows a new line in the composer and that is a visual
-        # change to a surface: the drain refusal is the branch this round was
-        # filed against (its restore lands inside the submit, measured), and the
-        # runtime-gone and oversize branches keep the frames design round 1
-        # approved. The WELD they share is recorded as out of scope rather than
-        # fixed silently here.
+        # change to a surface. Every branch that hands a refused message back
+        # while the operator is not looking passes it — oversize, the drain, and
+        # the runtime's death — because the weld they share is ONE behaviour:
+        # leaving one route protected while its sibling welded the operator's
+        # next sentence onto their returned draft is the inconsistency UX round
+        # 4 filed, and it is not fixable by argument once the drain route shows
+        # the boundary. The undeliverable-steer restore further down this file
+        # still passes nothing, and that residual is recorded in the PR body
+        # rather than guessed at here.
         # No caret is set on `restored`: every draft this funnel builds is a
         # RESTORE, and `_load_editor_draft` lands a caretless draft at the END of
         # the text — the resend gesture's own landing (UX round 3, U2). The
@@ -5157,11 +5161,11 @@ class OperatorApp(App[None]):
                     # the two thoughts stay separable with one backspace. It
                     # costs the operator nothing but a paragraph break, which is
                     # what two separate thoughts are.
-                    restored = SessionDraft(
-                        text=restored.text + RESTORE_SEAM,
-                        attachments=dict(restored.attachments),
-                        shell_mode=restored.shell_mode,
-                    )
+                    # ``replace``, not a rebuilt draft: `SessionDraft` has 18
+                    # fields and this branch knows about 3 of them, so the next
+                    # field a restore must preserve would have been dropped here
+                    # silently (review round 4, NIT 2).
+                    restored = replace(restored, text=restored.text + RESTORE_SEAM)
                 self._load_editor_draft(restored)
                 return
         elif not source.aside_open and not source.draft.text and not source.draft.attachments:
@@ -24097,7 +24101,7 @@ class OperatorApp(App[None]):
                     # D5). On the common branch it loads the composer directly
                     # and appends nothing, so this only reorders the case that
                     # has two rows to order.
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 elif _is_retiring_refusal(error):
                     # THE DRAIN REFUSED A MESSAGE THAT WAS NEVER DELIVERED, and
                     # that is the whole reason this branch exists rather than
@@ -24157,7 +24161,7 @@ class OperatorApp(App[None]):
                     # press — three copies of one message and two warnings,
                     # measured (QA round 2, U6).
                     self._withdraw_user_echo_for(source)
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                     go_cold = getattr(session, "_go_cold", None)
                     if callable(go_cold):
                         go_cold()

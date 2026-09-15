@@ -845,6 +845,15 @@ async def _begin_drain(
         detail,
         os.getpid(),
     )
+    if stop.is_set():
+        # BEFORE the announce, and that order is the point: ``draining=True``
+        # tells the operator that admissions are about to be refused, and a stop
+        # that has already landed means nothing will refuse — the drain row
+        # would claim a state the session is not in, on a row that stays in the
+        # transcript (review round 4, MINOR 3). The re-check below still covers a
+        # stop that arrives DURING the announce; the announce-first order itself
+        # is invariant (iii) and unchanged.
+        return None  # its path owns the exit
     announce = getattr(runtime, "announce_retiring", None)
     if callable(announce):
         try:
