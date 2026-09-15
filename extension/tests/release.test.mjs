@@ -198,10 +198,34 @@ test("a transport failure is named as one, not reported as an HTTP status", asyn
   assert.doesNotMatch(output, /returned HTTP/);
 });
 
-// Mirrors BODY_PRINT_LIMIT in chrome-web-store.sh. The straddle test below has
-// to know where the cut falls, which is the one thing about the bound a test
-// cannot discover from the outside.
-const BODY_PRINT_LIMIT = 4000;
+// Every bound these tests measure against is read OUT of chrome-web-store.sh
+// rather than mirrored by hand, including the error-body one whose cut position the
+// straddle tests below have to know. A hand-written mirror drifts silently and the
+// fixtures stop measuring the moment it does: with STATUS_VALUE_LIMIT raised to 400,
+// the two token fixtures passed while 400 characters of the credential reached the
+// log, because their own sensitivity guards were comparing the fixture against the
+// stale mirror. Reading the script keeps them inside the band they probe.
+//
+// A drift fails HERE, before any test registers. Measured: with the constant
+// reformatted in the script, an assert.ok inside the fixtures surfaced as four
+// unrelated test failures while 43 tests silently did not run, and a plain throw
+// became one uncaughtException wrapping the message. Exiting is the only shape that
+// reports exactly what is wrong and runs nothing, which matters because these
+// constants are a precondition for every fixture in this file rather than for the
+// one test that happens to read them first.
+const SCRIPT = await readFile(new URL("../scripts/chrome-web-store.sh", import.meta.url), "utf8");
+function scriptConstant(name) {
+  const match = new RegExp(`^${name}=(\\d+)$`, "m").exec(SCRIPT);
+  if (!match) {
+    console.error(`release tests: ${name} must be a plain integer assignment in chrome-web-store.sh`);
+    process.exit(1);
+  }
+  return Number(match[1]);
+}
+const BODY_PRINT_LIMIT = scriptConstant("BODY_PRINT_LIMIT");
+const STATUS_VALUE_LIMIT = scriptConstant("STATUS_VALUE_LIMIT");
+const STATUS_CHANNEL_LIMIT = scriptConstant("STATUS_CHANNEL_LIMIT");
+const VALUE_PRINT_LIMIT = scriptConstant("VALUE_PRINT_LIMIT");
 
 test("an oversized error body is bounded and its truncation is disclosed", async () => {
   // An unbounded echo floods the run log -- a single 400 was measured at
@@ -379,6 +403,479 @@ test("promotion refuses a staged revision below 100 percent", async () => {
     ]),
     new RegExp(`must contain version ${VERSION.replaceAll(".", "\\.")} at 100% deployment`),
   );
+});
+
+// The 0.1.12 promotion failed on this gate four more times with a message that
+// named only what the gate WANTED. `distributionChannels` describing the LIVE
+// revision is the shape that has to be distinguishable, from the log alone,
+// from a staged rollout still settling -- so both are pinned below.
+test("promotion refusal quotes the revision the store reported", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        // The live 0.1.10 revision still sitting in the submitted channels:
+        // this script's own history, and the reason the summary prints every
+        // field rather than only the one the gate reads.
+        distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  // The leading text is unchanged, so log greps in the docs and in past runs
+  // still match it.
+  assert.ok(output.includes(`staged revision must contain version ${VERSION} at 100% deployment`), output);
+  assert.ok(
+    output.includes("store said: submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    output,
+  );
+  // A revision the store did not send reads as absent -- a different answer
+  // from an empty channel list, which prints as `[]`.
+  assert.ok(output.includes("published <absent>"), output);
+});
+
+test("promotion refusal reports the staging percentage the store sent", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 50 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(
+    output.includes(`store said: submitted state=STAGED distributionChannels=[crxVersion=${VERSION} deployPercentage=50]`),
+    output,
+  );
+});
+
+test("a submission that is not STAGED reports the state the store sent", async () => {
+  const error = await runRelease(["promote", VERSION], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "PENDING_REVIEW",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+      },
+    }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  // The first gate's leading text, unchanged, now carrying the store's own
+  // state -- the difference between "still in review" and "rejected".
+  assert.ok(output.includes("only an approved STAGED revision can be promoted (store said: submitted state=PENDING_REVIEW"), output);
+  // runRelease asserts the request count, so the single handler above proves
+  // this refusal reached no publish call on its way out.
+});
+
+test("the polling deadline reports the last response instead of guessing", async () => {
+  // The deadline is the third place the script used to fail blind: the publish
+  // call is accepted and the item still never reaches PUBLISHED at 100%.
+  const staged = {
+    itemId: extensionId,
+    submittedItemRevisionStatus: {
+      state: "STAGED",
+      distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+    },
+  };
+  const notYet = {
+    itemId: extensionId,
+    publishedItemRevisionStatus: {
+      state: "STAGED",
+      distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+    },
+  };
+  // One fetchStatus, one publish, then the loop's full twelve polls: this count
+  // is the loop's own, so changing the loop has to change it here too.
+  const error = await runRelease(["promote", VERSION], [
+    () => staged,
+    () => ({ itemId: extensionId, state: "PUBLISHED" }),
+    ...Array.from({ length: 12 }, () => () => notYet),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("was not PUBLISHED at 100% before the polling deadline"), output);
+  // The last poll's own fields, so the reader can see WHICH revision the store
+  // was still holding instead of being told only what the deadline expected.
+  assert.ok(output.includes("last response said:"), output);
+  assert.ok(
+    output.includes("published state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    output,
+  );
+});
+
+// `status` exists because reading the queue otherwise means dispatching `stage`,
+// which -- while an item is in review -- is refused with HTTP 400
+// FAILED_PRECONDITION / NOT_UPDATEABLE. It must be a pure read, and the request
+// count runRelease asserts is what pins that no upload or publish follows it.
+test("status reads the queue without uploading or publishing", async () => {
+  const result = await runRelease(["status"], [
+    (request) => {
+      assert.equal(request.method, "GET");
+      assert.equal(request.url, `${itemPath}:fetchStatus`);
+      return {
+        itemId: extensionId,
+        lastAsyncUploadState: "SUCCEEDED",
+        submittedItemRevisionStatus: {
+          state: "STAGED",
+          distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }],
+        },
+        publishedItemRevisionStatus: {
+          state: "PUBLISHED",
+          distributionChannels: [{ crxVersion: "0.1.10", deployPercentage: 100 }],
+        },
+      };
+    },
+  ]);
+  assert.ok(result.stdout.includes(`Chrome Web Store status for extension ${extensionId}:`), result.stdout);
+  assert.ok(
+    result.stdout.includes(`submitted state=STAGED distributionChannels=[crxVersion=${VERSION} deployPercentage=100]`),
+    result.stdout,
+  );
+  // The same rendering the gates attach, so a `status` read and a refused
+  // promotion can be compared line by line.
+  assert.ok(
+    result.stdout.includes("published state=PUBLISHED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]"),
+    result.stdout,
+  );
+  assert.ok(result.stdout.includes("lastAsyncUploadState=SUCCEEDED"), result.stdout);
+});
+
+test("a rejected status read fails closed with the store's explanation", async () => {
+  const error = await runRelease(["status"], [() => rejectWith(400, IN_REVIEW_BODY)], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("fetchStatus call returned HTTP 400"), output);
+  assert.ok(output.includes("Item is currently in review and cannot be updated."), output);
+  // This mode judges no version, so the message must not invent one.
+  assert.ok(output.includes("v<unknown>"), output);
+});
+
+test("status names the fields the store sent, including shapes the gates do not read", async () => {
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: "STAGED",
+        // `version`/`deployInfos` are the field names a reshaped response would
+        // move this data into. Printing them as themselves is what tells a
+        // release owner the gate asked the wrong question, rather than that the
+        // rollout is still settling.
+        distributionChannels: [
+          { version: "0.1.12", deployInfos: [{ deployPercentage: 50 }] },
+          { lastDeploy: "unrecognised" },
+        ],
+      },
+    }),
+  ]);
+  assert.ok(result.stdout.includes('version=0.1.12 deployInfos=[{"deployPercentage":50}]'), result.stdout);
+  // A channel carrying none of the known fields is echoed as itself instead of
+  // being silently rendered as an empty entry.
+  assert.ok(result.stdout.includes('<unrecognised shape: {"lastDeploy":"unrecognised"}>'), result.stdout);
+});
+
+test("status bounds the channel list instead of dumping it", async () => {
+  // Sized from the script's own limit: the summary is one line by design, so it
+  // must not grow with the response.
+  const channels = Array.from({ length: STATUS_CHANNEL_LIMIT + 2 }, (_, index) => ({
+    crxVersion: `0.1.${index}`,
+    deployPercentage: index,
+  }));
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state: "STAGED", distributionChannels: channels },
+    }),
+  ]);
+  assert.ok(result.stdout.includes("crxVersion=0.1.3"), result.stdout);
+  assert.ok(result.stdout.includes("| +2 more"), result.stdout);
+  assert.ok(!result.stdout.includes("0.1.5"), `expected the list to be cut: ${result.stdout}`);
+});
+
+test("status bounds every value, not only the nested ones", async () => {
+  // The first cut bounded the channel count and `deployInfos` but rendered state,
+  // crxVersion and lastAsyncUploadState with a bare `tostring`, so a 3 MiB `state`
+  // was measured at 3,145,904 bytes of run log -- the flood this summary exists to
+  // prevent, arriving through the one field the first gate reads.
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      lastAsyncUploadState: "S".repeat(50_000),
+      submittedItemRevisionStatus: {
+        state: "R".repeat(3_000_000),
+        distributionChannels: [{ crxVersion: "C".repeat(200_000), deployPercentage: 100 }],
+      },
+    }),
+  ]);
+  assert.ok(result.stdout.length < 4_000, `expected a bounded line, got ${result.stdout.length} characters`);
+  assert.ok(result.stdout.includes("state=RRR"), result.stdout);
+  assert.ok(!result.stdout.includes("R".repeat(200)), "the unbounded state reached the log");
+  assert.ok(!result.stdout.includes("C".repeat(200)), "the unbounded crxVersion reached the log");
+});
+
+test("one unreadable shape cannot blank the rest of the summary", async () => {
+  // Every case here aborted the single jq program and collapsed the whole line to
+  // `<status response carried no readable fields>`, discarding the `state` the
+  // first gate reads -- the one field the diagnosis cannot do without -- and, in
+  // the middle case, a good entry standing beside the bad one.
+  const cases = [
+    {
+      name: "channels that are not an array",
+      status: { state: "STAGED", distributionChannels: "nonsense" },
+      expect: ["submitted state=STAGED", '<not an array: string value="nonsense">'],
+    },
+    {
+      name: "a scalar entry beside a good one",
+      status: {
+        state: "STAGED",
+        distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }, "junk"],
+      },
+      expect: [`crxVersion=${VERSION} deployPercentage=100`, '<not an object: string value="junk">'],
+    },
+    {
+      name: "a revision that is not an object",
+      status: "STAGED",
+      // The offending type and value are named, so this is distinguishable from
+      // the same field arriving as a number or an array.
+      expect: ['submitted <not an object: string value="STAGED">'],
+    },
+  ];
+  for (const { name, status, expect } of cases) {
+    const result = await runRelease(["status"], [
+      () => ({ itemId: extensionId, submittedItemRevisionStatus: status }),
+    ]);
+    assert.ok(result.stdout.includes("submitted"), `${name}: the revision went missing:\n${result.stdout}`);
+    assert.ok(
+      !result.stdout.includes("<status response carried no readable fields>"),
+      `${name}: one bad shape blanked the whole summary:\n${result.stdout}`,
+    );
+    for (const fragment of expect) {
+      assert.ok(result.stdout.includes(fragment), `${name}: expected ${JSON.stringify(fragment)} in:\n${result.stdout}`);
+    }
+  }
+});
+
+test("an absent key, a null, an empty list and a wrong type are four answers", async () => {
+  // These all used to render identically or nearly so, which is how a store-side
+  // shape change (or a field the store never filled in) stayed invisible. `state`
+  // in particular is what the first gate reads.
+  const cases = [
+    { name: "absent revision key", status: undefined, expect: ["submitted <absent>"] },
+    { name: "null revision", status: null, expect: ["submitted <null>"] },
+    { name: "absent channels key", status: { state: "STAGED" }, expect: ["submitted state=STAGED distributionChannels=<absent>"] },
+    { name: "null channels", status: { state: "STAGED", distributionChannels: null }, expect: ["distributionChannels=<null>"] },
+    { name: "empty channels", status: { state: "STAGED", distributionChannels: [] }, expect: ["distributionChannels=[]"] },
+    { name: "absent state", status: { distributionChannels: [] }, expect: ["submitted state=<absent>"] },
+    { name: "null state", status: { state: null, distributionChannels: [] }, expect: ["submitted state=<null>"] },
+    { name: "state of a type it cannot hold", status: { state: { nested: true }, distributionChannels: [] }, expect: ['submitted state=<not a string: object value={"nested":true}>'] },
+  ];
+  const rendered = new Set();
+  for (const { name, status, expect } of cases) {
+    const body = status === undefined
+      ? { itemId: extensionId }
+      : { itemId: extensionId, submittedItemRevisionStatus: status };
+    const result = await runRelease(["status"], [() => body]);
+    for (const fragment of expect) {
+      assert.ok(result.stdout.includes(fragment), `${name}: expected ${JSON.stringify(fragment)} in:\n${result.stdout}`);
+    }
+    rendered.add(result.stdout);
+  }
+  // Seven inputs, and no two of them may read the same on the line a release
+  // owner is diagnosing from.
+  assert.equal(rendered.size, cases.length, "two different shapes rendered identically");
+});
+
+test("revisions of different unexpected types render different markers", async () => {
+  // One constant marker for all three made a string, a number and an array
+  // indistinguishable, which loses the very shape the marker exists to report.
+  const rendered = new Map();
+  for (const [name, status] of [["string", "STAGED"], ["number", 7], ["array", ["STAGED"]]]) {
+    const result = await runRelease(["status"], [
+      () => ({ itemId: extensionId, submittedItemRevisionStatus: status }),
+    ]);
+    assert.ok(result.stdout.includes(`<not an object: ${name} value=`), `${name}: ${result.stdout}`);
+    rendered.set(name, result.stdout);
+  }
+  assert.equal(new Set(rendered.values()).size, 3, "the three revisions rendered identically");
+});
+
+test("the status summary redacts the access token, not only the error body", async () => {
+  // `status` prints the summary and nothing else, so the body-only redaction left
+  // this path able to echo the bearer token straight back through a field of the
+  // response. Deleting the redaction from the summary kept the suite green before
+  // this test existed.
+  const token = "ya29.a0AfB_status-summary-secret-value";
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: {
+        state: `rejected request authorized by ${token}`,
+        distributionChannels: [],
+      },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token), "the access token must never reach the log");
+  // Redaction must not cost the diagnosis: the rest of the field still shows.
+  assert.ok(output.includes("rejected request authorized by <redacted CWS_ACCESS_TOKEN>"), output);
+});
+
+test("a token longer than the value bound is redacted before the cut", async () => {
+  // The bound used to run BEFORE the substitution, so this token lost its tail to
+  // the cut and the surviving 160-character prefix no longer matched the
+  // substitution -- it went into a public run log. 185 characters, offset 0. The
+  // short-token test above cannot see that ordering: it is redacted either way.
+  const token = "ya29." + "STRADDLE-PREFIX-LONG-" + "Z".repeat(STATUS_VALUE_LIMIT + 25);
+  assert.ok(
+    token.length > STATUS_VALUE_LIMIT,
+    `the token must exceed the bound to measure anything (${token.length} vs ${STATUS_VALUE_LIMIT})`,
+  );
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state: token, distributionChannels: [] },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token.slice(0, 8)), `the token's prefix reached the log:\n${output}`);
+  assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), output);
+});
+
+test("a token straddling the value bound is redacted before the cut", async () => {
+  // The same ordering, one character either side of the cut: bounding first left
+  // the leading half of the credential behind, and a half is still a leak.
+  const token = "ya29.STRADDLE-SECRET-TOKEN-VALUE-ABCDE";
+  // DERIVE the padding from the bound rather than hardcoding it, so the fixture
+  // keeps straddling if the bound moves.
+  const pad = STATUS_VALUE_LIMIT - Math.floor(token.length / 2);
+  const state = "P".repeat(pad) + token + "Q".repeat(400);
+  const start = state.indexOf(token);
+  assert.ok(
+    start < STATUS_VALUE_LIMIT && start + token.length > STATUS_VALUE_LIMIT,
+    `the token must straddle the cut to measure anything (start ${start}, limit ${STATUS_VALUE_LIMIT})`,
+  );
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state, distributionChannels: [] },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token.slice(0, 8)), `the token's prefix survived truncation:\n${output}`);
+  // No `redacted` marker assertion here on purpose: the substitution makes the
+  // field longer, so the bound can cut the MARKER too. The secret is gone either
+  // way, which is the property under test.
+});
+
+test("status refuses arguments it cannot act on", async () => {
+  // `status VERSION` reads like a check of that version; silently ignoring the
+  // argument would let a caller believe it had been verified. No handler is
+  // registered, so a run that asked the store anything would fail the request
+  // count instead of passing quietly.
+  await assert.rejects(
+    runRelease(["status", VERSION], []),
+    /status takes no arguments/,
+  );
+});
+
+test("a value carrying newlines still renders one line", async () => {
+  // Third-party text can carry newlines, and an unescaped one turns a single
+  // refusal into as many lines as the value likes -- 3 million newlines in `state`
+  // rendered 161 lines -- which is a refusal nobody greps for.
+  const state = "STAGED\nREJECTED\r\nTA BBBED";
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state, distributionChannels: [] },
+    }),
+  ]);
+  assert.equal(result.stdout.trimEnd().split("\n").length, 1, `expected one line:\n${result.stdout}`);
+  assert.ok(result.stdout.includes("state=STAGED\\nREJECTED\\r\\nTA BBBED"), result.stdout);
+});
+
+// The three stage refusals echo a store-supplied scalar, and they used to echo it
+// verbatim: a synthetic 200-character token came out whole on every one of them,
+// and a single oversized value produced a 200,066-byte line. Same class as the
+// summary's redaction, in the same file, fixed the same way -- substitute first,
+// then bound, which is what report_api_error has always done for the error body.
+test("the stage refusals redact the store's values", async () => {
+  // The token is LONGER than the refusal helper's bound on purpose: with a token
+  // the bound cannot touch, this test passes whichever order the helper uses, so
+  // it would not see the ordering bug at all. Sized from the script's own
+  // VALUE_PRINT_LIMIT for the same reason the fixtures above read the renderer's.
+  const token = "ya29." + "STAGE-ECHO-TOKEN-" + "E".repeat(VALUE_PRINT_LIMIT + 5);
+  assert.ok(token.length > VALUE_PRINT_LIMIT, "the fixture must exceed the bound to measure the order");
+  const straddling = "P".repeat(VALUE_PRINT_LIMIT - Math.floor(token.length / 3)) + token;
+  const cases = [
+    {
+      name: "upload ended in unexpected state",
+      handlers: [() => ({ itemId: extensionId, uploadState: token })],
+      expect: "upload ended in unexpected state",
+    },
+    {
+      // Straddling the refusal helper's cut, one character either side of it.
+      name: "upload ended in unexpected state, token straddling the cut",
+      handlers: [() => ({ itemId: extensionId, uploadState: straddling })],
+      expect: "upload ended in unexpected state",
+    },
+    {
+      name: "store accepted version",
+      handlers: [() => ({ itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: token })],
+      expect: "store accepted version",
+    },
+    {
+      name: "staged submission returned unexpected state",
+      handlers: [
+        () => ({ itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: VERSION }),
+        () => ({ itemId: extensionId, state: token }),
+      ],
+      expect: "staged submission returned unexpected state",
+      expectRedaction: true,
+    },
+    {
+      // The escaping this helper shares with the renderer was asserted only by its
+      // own comment: deleting it left the suite green while a value carrying
+      // newlines rendered a 53-line refusal. `expect` here is the escaped form, and
+      // the line count is asserted below.
+      name: "upload ended in unexpected state, newlines escaped",
+      handlers: [() => ({ itemId: extensionId, uploadState: "A\nB\rC\tD\n".repeat(20) })],
+      expect: "upload ended in unexpected state A\\nB\\rC\\tD\\n",
+      // No token in this value: it is here for the escaping and the line count.
+      expectRedaction: false,
+    },
+  ];
+  for (const { name, handlers, expect, expectRedaction = true } of cases) {
+    const error = await runRelease(["stage", "local-operator-extension.zip", VERSION], handlers, {
+      token,
+      expectFailure: true,
+    });
+    const output = error.stdout + error.stderr;
+    assert.ok(output.includes(expect), `${name}: ${output}`);
+    assert.ok(!output.includes(token.slice(0, 8)), `${name}: the token reached the log:\n${output}`);
+    if (expectRedaction) {
+      assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), `${name}: ${output}`);
+    }
+    // The refusal goes to stderr and must be exactly one line whatever the value
+    // carries: `validate-store-zip.sh` prints its own line to stdout first, so the
+    // count is taken from stderr, where every refusal lands.
+    assert.equal(
+      error.stderr.trimEnd().split("\n").length,
+      1,
+      `${name}: the refusal rendered ${error.stderr.trimEnd().split("\n").length} lines:\n${error.stderr}`,
+    );
+  }
+});
+
+test("an oversized store value in a stage refusal is bounded", async () => {
+  const filler = "X".repeat(200_000);
+  const error = await runRelease(["stage", "local-operator-extension.zip", VERSION], [
+    () => ({ itemId: extensionId, uploadState: filler }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("upload ended in unexpected state"), output);
+  assert.ok(output.length < 4_000, `expected a bounded refusal, got ${output.length} characters`);
+  assert.ok(output.includes("X".repeat(VALUE_PRINT_LIMIT)), `expected the value cut at ${VALUE_PRINT_LIMIT}`);
+  assert.ok(!output.includes("X".repeat(VALUE_PRINT_LIMIT + 1)), "the value was not cut at the limit");
 });
 
 // The required-reviewers check was removed by operator decision on 2026-09-03
