@@ -30,13 +30,16 @@ set -euo pipefail
 # What the summary says, and why those fields. Per revision:
 #   submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]
 # -- the state the first gate reads, and every field of every
-# distributionChannels[] entry, under the name the store used. A revision the
-# store did not send reads `<absent>`, an empty list reads `[]`, and a list that
-# is not an array or an entry of an unexpected type is reported as itself rather
-# than silently dropped, because telling those apart is the entire diagnosis.
-# Every value is bounded (160 characters) and the list is cut after four entries,
-# so the summary stays one line whatever the store returns, and no single bad
-# field can blank it.
+# distributionChannels[] entry, under the name the store used. Three answers are
+# kept apart because collapsing them hides a store-side shape change: a key the
+# store did not send reads `<absent>`, one it sent as null reads `<null>`, and a
+# value of a type the field cannot hold reads `<not a string: object value={...}>`
+# (and its siblings) rather than being dropped. An empty list reads `[]`. Every
+# value is bounded (160 characters) and the list is cut after four entries, so the
+# summary stays one line whatever the store returns, and no single bad field can
+# blank it. The token substitution runs inside the renderer, before that cut,
+# since a redaction applied to the finished line cannot see a token the bound has
+# already shortened.
 #
 # Why both promote gates print the store's own fields. Promoting the 0.1.12
 # staged revision was refused with nothing but "staged revision must contain
@@ -198,9 +201,16 @@ STATUS_VALUE_LIMIT=160
 # itself is worse than no refusal at all. A revision that is not an object, a
 # distributionChannels that is not an array, or a single entry of the wrong type
 # must cost only its own field -- never the `state` the first gate reads, and
-# never a good neighbour in the same list. A value that makes no sense to the
-# renderer is shown as `<unrecognised shape: ...>` rather than dropped, which is
-# what makes a store-side shape change legible instead of silent.
+# never a good neighbour in the same list.
+#
+# Absent, null and wrong-type are three different answers, and the markers say
+# which: `<absent>` for a key the store did not send, `<null>` for one it sent as
+# null, `<not a string: object value={...}>` and its siblings for a value of a type
+# the field cannot hold, and `<unrecognised shape: ...>` for an object carrying
+# none of the fields the gate reads. Collapsing any two of those is how a
+# store-side shape change stays invisible, which is the failure this whole
+# summary exists to end; `state` in particular is read by the first gate, so a
+# missing state and a null one must not look the same.
 summarize_status() {
   local file=$1
   local summary
@@ -211,64 +221,100 @@ summarize_status() {
     --argjson channel_limit "$STATUS_CHANNEL_LIMIT" \
     --argjson value_limit "$STATUS_VALUE_LIMIT" \
     '
-    def bounded($text; $limit):
-      if ($text | length) > $limit then $text[0:$limit] + "..." else $text end;
-    # `tostring` is total in jq (it renders any value, objects and arrays
-    # included) but `length` is not, so the cut is taken on the string form and
-    # anything that still fails is replaced rather than allowed to propagate.
-    def scalar($value):
-      try bounded($value | tostring; $value_limit) catch "<unrenderable>";
-    def entry($channel):
-      try
-        ([ (["crxVersion", "version", "deployPercentage"][]) as $key
-           | select($channel[$key] != null)
-           | "\($key)=\(scalar($channel[$key]))" ]
-         + [ select($channel.deployInfos != null)
-             | "deployInfos=\(scalar($channel.deployInfos | tojson))" ]) as $fields
-      | if ($fields | length) == 0
-        then "<unrecognised shape: \(scalar($channel | tojson))>"
-        else $fields | join(" ")
+    (env.CWS_ACCESS_TOKEN // "") as $token
+    | def bounded($text; $limit):
+        if ($text | length) > $limit then $text[0:$limit] + "..." else $text end;
+      # Redaction runs HERE, before the cut, and that order is load-bearing. Doing
+      # it afterwards on the assembled line -- as this script used to -- cannot
+      # see a token the bound has already shortened: the surviving prefix no
+      # longer matches the substitution, so a 185-character token put its first
+      # 160 characters into a public run log, and a token straddling the cut
+      # leaked everything before it. `split`/`join` rather than `gsub`, because
+      # the gsub pattern is a regex and a credential is not one. The token arrives
+      # through the environment (jq reads env) and never as an argument, so it
+      # stays out of the jq process argv, where `ps` would show it.
+      def redact($text):
+        if $token == "" then $text
+        else ($text | split($token) | join("<redacted CWS_ACCESS_TOKEN>"))
+        end;
+      # `tostring` is total in jq (it renders any value, objects and arrays
+      # included) but `length` is not, so the cut is taken on the string form and
+      # anything that still fails is replaced rather than allowed to propagate.
+      def scalar($value):
+        try bounded(redact($value | tostring); $value_limit) catch "<unrenderable>";
+      # A field of a status object, with the three answers that used to collapse
+      # into one: absent, present-and-null, or a type the field cannot hold. The
+      # offending type and its (redacted, bounded) value are named so the marker
+      # says which of the three this is.
+      def field($obj; $key; $want):
+        if ($obj | has($key) | not) then "<absent>"
+        elif $obj[$key] == null then "<null>"
+        elif ($obj[$key] | type) != $want
+          then "<not a \($want): \($obj[$key] | type) value=\(scalar($obj[$key] | tojson))>"
+        else scalar($obj[$key])
+        end;
+      def entry($channel):
+        if ($channel | type) != "object"
+          then "<not an object: \($channel | type) value=\(scalar($channel | tojson))>"
+        else
+          try
+            ([ (["crxVersion", "version", "deployPercentage"][]) as $key
+               | select($channel[$key] != null)
+               | "\($key)=\(scalar($channel[$key]))" ]
+             + [ select($channel.deployInfos != null)
+                 | "deployInfos=\(scalar($channel.deployInfos | tojson))" ]) as $fields
+          | if ($fields | length) == 0
+            then "<unrecognised shape: \(scalar($channel | tojson))>"
+            else $fields | join(" ")
+            end
+          catch "<unrenderable entry: \(scalar($channel | tojson))>"
+        end;
+      def channels($list):
+        if ($list | length) == 0 then "[]"
+        else "[" + ($list[0:$channel_limit] | map(entry(.)) | join(" | "))
+             + (if ($list | length) > $channel_limit
+                then " | +\(($list | length) - $channel_limit) more"
+                else "" end) + "]"
+        end;
+      def channels_field($status):
+        if ($status | has("distributionChannels") | not) then "<absent>"
+        elif $status.distributionChannels == null then "<null>"
+        elif ($status.distributionChannels | type) != "array"
+          then "<not an array: \($status.distributionChannels | type) value=\(scalar($status.distributionChannels | tojson))>"
+        else channels($status.distributionChannels)
+        end;
+      def revision($label; $status):
+        if $status == null then $label + " <absent>"
+        elif ($status | type) != "object"
+          then $label + " <not an object: \($status | type) value=\(scalar($status | tojson))>"
+        else $label + " state=" + field($status; "state"; "string")
+          + " distributionChannels=" + channels_field($status)
+        end;
+      . as $root
+      | if ($root | type) != "object"
+        then "<unreadable status response: not an object: \($root | type) value=\(scalar($root | tojson))>"
+        else (try
+            ([ revision("submitted"; $root.submittedItemRevisionStatus),
+               revision("published"; $root.publishedItemRevisionStatus),
+               # Optional field: omitted when the store never sent the key, but
+               # `<null>` when it sent one that is null, since those differ too.
+               (if ($root | has("lastAsyncUploadState"))
+                then "lastAsyncUploadState=" + (if $root.lastAsyncUploadState == null
+                     then "<null>" else scalar($root.lastAsyncUploadState) end)
+                else empty end)
+             ] | join("; "))
+          catch "<unreadable status response: \(scalar($root | tojson))>")
         end
-      # A scalar or an array where an object was expected lands here, and only
-      # this entry is lost: the surrounding list and the revisions survive.
-      catch "<unrenderable entry: \(scalar($channel | tojson))>";
-    def channels($list):
-      # An absent key, an empty array and a non-array are three different
-      # answers, and telling them apart is the point of the summary.
-      if ($list | type) != "array" then "<not an array: \(scalar($list | tojson))>"
-      elif ($list | length) == 0 then "[]"
-      else "[" + ($list[0:$channel_limit] | map(entry(.)) | join(" | "))
-           + (if ($list | length) > $channel_limit
-              then " | +\(($list | length) - $channel_limit) more"
-              else "" end) + "]"
-      end;
-    def revision($label; $status):
-      if $status == null then $label + " <absent>"
-      else $label + " state=" + (try scalar($status.state) catch "<unrenderable state>")
-        + " distributionChannels="
-        # The brackets belong to the renderer, not to the caller: wrapping a
-        # non-array (or an empty list) in another pair printed `[[...]]`, which
-        # reads as a list containing a list.
-        + (try channels($status.distributionChannels // [])
-           catch "<unrenderable channels>")
-      end;
-    . as $root
-    | (try
-        ([ revision("submitted"; $root.submittedItemRevisionStatus),
-           revision("published"; $root.publishedItemRevisionStatus),
-           (if $root.lastAsyncUploadState != null
-            then "lastAsyncUploadState=\(scalar($root.lastAsyncUploadState))"
-            else empty end)
-         ] | join("; "))
-       catch "<unreadable status response: \(scalar($root | tojson))>")
     ' "$file" 2>/dev/null) || summary=""
   # Reachable only when jq itself fails -- an unparseable response. Every shape
   # INSIDE the payload is handled per field above, because falling back to one
   # sentence here would discard the readable fields along with the bad one.
   [[ -n "$summary" ]] || summary="<status response carried no readable fields>"
-  # Redacted for the same reason report_api_error redacts its body: this text is
-  # echoed into a public run log, and although the summary is derived rather than
-  # copied, it is derived from a response an intermediary could have written.
+  # The substitution above is the load-bearing one; this is the outer net, kept
+  # for the text that never passed through scalar() -- the markers this script
+  # composes itself -- and for a jq too old to expose `env`, where the inner
+  # redaction silently does nothing and this is all there is. It cannot see a
+  # token the bound has already shortened, which is why it cannot be the only one.
   printf '%s' "${summary//"$CWS_ACCESS_TOKEN"/<redacted CWS_ACCESS_TOKEN>}"
 }
 
