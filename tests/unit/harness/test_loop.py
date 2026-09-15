@@ -952,7 +952,7 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     user's screen. The real session renderer is pinned in
     ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
     """
-    from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
+    from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 
     reminder = CustomMessage(
         custom_type=TODO_REMINDER_MESSAGE_TYPE,

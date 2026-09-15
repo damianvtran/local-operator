@@ -721,7 +721,7 @@ def test_history_fold_pairs_tool_calls_with_results() -> None:
 
 
 def test_history_fold_maps_peer_message_to_its_own_kind() -> None:
-    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
     fold = make_fold()
     sender = {"pid": 42, "conversation_name": "peer", "model_label": "test/model"}

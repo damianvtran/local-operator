@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -103,7 +104,6 @@ from local_operator.session.frontend_state import (
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,

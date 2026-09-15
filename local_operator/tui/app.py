@@ -89,6 +89,7 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
@@ -141,7 +142,6 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
 from local_operator.slash_commands import (
     PERSIST_HINT,

@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import (
     CustomMessage,
@@ -28,7 +29,6 @@ from local_operator.session.history_window import (
     display_window,
     wire_payload,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import (

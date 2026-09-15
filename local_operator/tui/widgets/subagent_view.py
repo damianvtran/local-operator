@@ -68,10 +68,10 @@ from textual.widgets import Static
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.comms import (
     HUB_COMMUNICATION_CUSTOM_TYPE,
-    HUB_MESSAGE_TYPE,
     extract_parent_message,
 )
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
+from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,

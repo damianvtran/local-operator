@@ -6172,14 +6172,6 @@ TODO_STORE: dict[str, list[TodoPhase]] = {}
 #: as a string, so every todo store in this module has one key type.
 _CONTEXT_TODO_STORE: dict[str, list[TodoPhase]] = {}
 
-#: The custom-message type the session's continuation guardrail injects at the
-#: yield boundary (``Session._todo_continuation``). It lives beside the store
-#: because the todo feature owns the vocabulary and session.py imports it —
-#: the same shape as ``HUB_MESSAGE_TYPE`` (harness/comms.py) and
-#: ``WAKE_PROMPT_MESSAGE_TYPE`` (harness/wake.py), neither of which is defined
-#: in the session that renders them.
-TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
-
 #: Statuses that no longer need work. ``blocked`` is NOT here: a blocked item
 #: is unfinished work waiting on someone, and counting it as progress would
 #: let a stalled list read as a finished one.

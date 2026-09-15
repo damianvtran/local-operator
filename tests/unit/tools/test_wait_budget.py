@@ -34,11 +34,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from local_operator.harness.comms import HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import AbortSignal, ToolContext
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.tools.builtin import (
     _ARRIVAL_NOTES,
     WaitParams,

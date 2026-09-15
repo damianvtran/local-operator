@@ -56,7 +56,6 @@ from local_operator.compaction.cutpoint import (
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import (
-    HUB_MESSAGE_TYPE,
     PARENT_MESSAGE_CLOSE_TAG,
     PARENT_MESSAGE_TAG,
     TO_CHILD_INSTRUCTIONS,
@@ -65,6 +64,7 @@ from local_operator.harness.loop import (
     LENGTH_ENDED_CALL_RESULT_TEXT,
     TRUNCATED_RESULT_TEXT,
 )
+from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import (
     assistant_row_text,
     assistant_stop_notice,
