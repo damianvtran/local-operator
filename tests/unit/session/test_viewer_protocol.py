@@ -1153,9 +1153,33 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # can be in owner recovery at all — an owner `Session` has no lost owner to
     # recover from, so the member is viewer-only by construction rather than by
     # placement.
-    assert len(viewer_only) == 53, (
+    #
+    # 53 → 54 is the same direction again: the desktop move route needs the
+    # directory the session WORKS in — to resolve a relative target against it
+    # (``/move ../sibling``) and to recognise a no-op — and that is a viewer's
+    # field. An owner ``Session`` cannot usefully answer it: its directory is the
+    # one its process was constructed in and no seam moves it, so there is
+    # nothing for an owner to report back about where it works.
+    #
+    # 54 → 56 is the same direction twice more, from the move remediation.
+    # ``supports_exclusive_move`` is asked of the OWNER ABOVE this facade —
+    # whether it can retire under the exclusivity fence rather than ignoring the
+    # flag while a sibling client is attached — and an owner ``Session`` has no
+    # owner above it, so the question does not exist for it at all.
+    # ``set_local_cwd_callback`` installs the host that repaints after a locally
+    # accepted move (the desktop bridge's ``frontend.replace``); an owner session
+    # has no host above it to repaint, so it must not grow that callback either.
+    # Both are ADDITIONS in the direction the aggregate floor does not guard, and
+    # the figure is exact on purpose — edited deliberately, never relaxed.
+    #
+    # 56 → 57 is the drain notice's own seam: the app paints the row that says a
+    # handover is REFUSING work from the runtime's ``retiring`` frame, so it
+    # reads ``set_drain_callback`` off a duck-typed binding. Viewer-only for the
+    # same reason as the rest of this block — an owner session has no wire to
+    # hear that frame on, and the frame is the only honest source for the fact.
+    assert len(viewer_only) == 57, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 53, and the aggregate floor is set at 40 against that number. A "
+        "says 57, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1788,6 +1812,18 @@ def test_the_quoted_isinstance_member_count_is_still_true() -> None:
     from local_operator.tui.app import _is_viewer
 
     walked = len(_get_protocol_attrs(ViewerSessionProtocol))
+    # THE LINEAGE IS PROSE, and it is the line a rebase moves: the parenthetical
+    # history in `protocol.py` stops at a figure that has to equal the walk too,
+    # or the docstring recites a chain ending one member short of the count it is
+    # defending (review round 5, NIT 4 — 116→117 was exactly this line).
+    lineage = re.search(r"past it \((.*?)\), so", ViewerSessionProtocol.__doc__ or "", re.S)
+    assert lineage, "the count lineage is missing or was reworded"
+    tail = max(int(n) for n in re.findall(r"\d+", lineage.group(1)))
+    assert tail == walked, (
+        f"the count lineage ends at {tail} but a positive check walks {walked}: "
+        "the docstring's own rule is that a member added or removed without "
+        "updating the prose is a failure rather than a slow lie"
+    )
     for doc, where in (
         (ViewerSessionProtocol.__doc__ or "", "session/protocol.py"),
         (_is_viewer.__doc__ or "", "tui/app.py::_is_viewer"),

@@ -28,7 +28,7 @@ import { BridgeCommandError } from "./errors";
 // at each call site so the timeout-chain invariant stays readable as one table:
 //
 //   extension per-call deadline (5-15 s)
-//     < extension nav settle (30 s, below - unchanged)
+//     < extension nav settle (30 s, src/settle.ts)
 //     < daemon COMMAND_TIMEOUTS (20-30 s, protocol.py)
 //     < daemon awaiting_origin extension (+65 s)
 //     < session client timeout (base + 65 + 5)

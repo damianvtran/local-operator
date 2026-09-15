@@ -89,7 +89,7 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -120,6 +120,7 @@ from local_operator.model.effort import (
 )
 from local_operator.providers.catalogue import picker_rows
 from local_operator.session import naming
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
     ACTIVITY_PHASE_QUEUED,
@@ -634,6 +635,32 @@ UNSENT_RUNTIME_NOTICE = (
     "send it again to start a new one"
 )
 
+#: The blank line a restored draft is loaded behind, so the operator's next
+#: thought cannot weld onto it (UX round 3, U2 — see :meth:`_restore_unsent_for`).
+RESTORE_SEAM = "\n\n"
+
+
+#: The drain notice: what the viewer says the moment a runtime commits to
+#: leaving for a newer build WHILE IT STILL HAS WORK.
+#:
+#: THE IDLE REFRESH STAYS SILENT AND THIS ONE MAY NOT, and the difference is
+#: what the window can cost. An idle runtime hands over in about a second, so
+#: the silence there is right. A runtime that is still finishing work drains
+#: first — measured at ~26 s of ordinary reachable state (UX round 1, U1) — and
+#: for all of it the composer accepts text that will then be refused, which used
+#: to be how the user DISCOVERED the handover. The ``retiring`` frame is sent by
+#: the runtime immediately BEFORE it latches, so a ``note`` painted on the frame
+#: lands ahead of the first refusal instead of 26 s behind the last one
+#: (:meth:`OperatorApp._on_runtime_draining`; UX round 3, U1, QA round 3, Q-1).
+#:
+#: ``note``, not ``warning``: this is the answer to "why is my session behaving
+#: differently", and the matching build-skew notice one seam over uses the same
+#: ink for the same reason. The refusal itself is the row that has to be read.
+DRAIN_NOTICE = (
+    "this session is switching to a newer build; it is finishing in-flight work "
+    "first, so a new message will not start a turn until the new build is up"
+)
+
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
 #: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
@@ -898,6 +925,51 @@ def _is_runtime_gone(error: BaseException) -> bool:
     return any(marker in text for marker in _RUNTIME_GONE_MARKERS)
 
 
+#: The wording an OLDER runtime uses for the drain refusal it raises with no
+#: category attached — the pre-``RuntimeRetiring`` sentence, whose only stable
+#: part is this prefix (the cause token after it is the runtime's own).
+#:
+#: MATCHED AS WELL AS THE TYPE, because the two parties here are separate builds:
+#: a viewer that has just been updated still binds the runtime that was resident
+#: before it, and that runtime answers the refusal as a bare ``RuntimeError``. A
+#: type-only test would leave the operator's text dropped, and their row standing
+#: as if delivered, for exactly the mixed-build window this whole PR is about.
+_RETIRING_REFUSAL_MARKERS = ("the session runtime is retiring",)
+
+
+def _is_retiring_refusal(error: BaseException) -> bool:
+    """Whether this failure is a DRAINING runtime refusing the message.
+
+    The typed category is the authority wherever it survives the transport —
+    which is the whole reason it exists, and what the viewer branches on to
+    decide it owns the user's text. The marker above covers the older runtime
+    that cannot send it, so the recovery is not conditional on both ends being
+    this build.
+    """
+    if isinstance(error, RuntimeRetiring):
+        return True
+    return any(marker in str(error) for marker in _RETIRING_REFUSAL_MARKERS)
+
+
+def _retiring_notice_text(error: BaseException) -> str:
+    """The refusal row, with the viewer's claim placed where it READS.
+
+    Two shapes, because only one of the two ends composes the sentence here. The
+    typed category carries its halves, so the operator's own fact goes BETWEEN
+    them: one dash, no fragment opening after a full stop, no strand at 100
+    columns, and a terminal clause that fills the last row at 60 instead of
+    leaving the word ``composer`` alone on it (design round 3, D1; UX round 3,
+    U5). A runtime older than the category answers with text this build did not
+    write and must not restructure, so there the claim is its own sentence —
+    correct to read after a sentence with no terminal punctuation, which is the
+    shape that path arrives in. Its wrap can still end short, and that is a
+    property of a string we do not own (UX round 3, U4 records that window).
+    """
+    if isinstance(error, RuntimeRetiring):
+        return f"{error.HEAD} Your message is back in the composer — {error.TAIL}"
+    return f"{error}. Your message is back in the composer."
+
+
 #: How often the band re-counts running background jobs. Nothing emits an
 #: event when a job settles, so the subagent segment either polls or goes
 #: stale while the user watches it; a 1 Hz pass over a dict of at most a few
@@ -1090,6 +1162,20 @@ TERMINAL_GATE_TIMEOUT_S = 30.0
 #: hidden events can still leave it underfilled. The post-projection fill
 #: measures actual laid-out rows and reserves a viewport above the reader.
 RESUME_RENDER_MESSAGES = 80
+
+#: How often a completion poller with no observed focus edge may re-ask the host
+#: whether this terminal is in the foreground.
+#:
+#: It exists because the focus EDGE is not guaranteed to arrive at all: Textual
+#: learns focus from the terminal's own focus reports, and a terminal that was
+#: already focused when the reports were enabled sends none, so an app that
+#: starts focused would otherwise never acknowledge anything it displays. 30 s
+#: is a compromise in the safe direction — long enough that a background
+#: terminal pays one host probe per half minute instead of one per tick, short
+#: enough that a result the operator just opened is receipted while they are
+#: still looking at it. Only terminals where the probe actually MEASURES focus
+#: (see `focus_is_measurable`) use it; everywhere else the fence is unchanged.
+ATTENTION_FOCUS_REFRESH_S = 30.0
 
 #: Raw messages per yielded render slice. A request fills a rendered viewport
 #: buffer across as many slices as needed; it is not one tiny RPC per notch.
@@ -5026,8 +5112,22 @@ class OperatorApp(App[None]):
         images: list[ImageContent] | None,
         *,
         accepted: SessionDraft | None = None,
+        seam: bool = False,
     ) -> None:
         restored = accepted or SessionDraft(text=text)
+        # ``seam`` is opt-in per CALLER rather than a property of the restore,
+        # because it shows a new line in the composer and that is a visual
+        # change to a surface. The three SOCKET-refusal routes pass it —
+        # oversize, the drain, and the runtime's death — because the weld they
+        # share is ONE behaviour: leaving one protected while its sibling welded
+        # the operator's next sentence onto their returned draft is the
+        # inconsistency UX round 4 filed, and it is not fixable by argument once
+        # the drain route shows the boundary. The undeliverable-STEER handback
+        # further down this file is a fourth route and passes nothing: a steer
+        # was never admitted and its return is a different story, which is
+        # recorded in the PR body's "Not addressed here" rather than guessed at
+        # here (review round 5, MINOR 3 — the sentence that used to be here
+        # claimed a body entry that did not exist).
         # No caret is set on `restored`: every draft this funnel builds is a
         # RESTORE, and `_load_editor_draft` lands a caretless draft at the END of
         # the text — the resend gesture's own landing (UX round 3, U2). The
@@ -5049,6 +5149,35 @@ class OperatorApp(App[None]):
             editor = self._editor()
             editor.forget_prompt(text)
             if not self._aside_is_open() and not editor.text and not editor.attachments():
+                if seam:
+                    # A VISIBLE SEAM between the returned draft and whatever the
+                    # operator types next. The restore lands INSIDE the submit,
+                    # so it beats any human keystroke: their next thought arrives
+                    # with nothing between it and the draft, and the two are sent
+                    # as one message that reads like a typo they did not make —
+                    # measured as ``summarise the build staleness fixand the
+                    # deploy notes``, with the composer never empty for the 2 ms
+                    # polling to notice and the park branch below therefore
+                    # unreachable (UX round 3, U2). A blank line is the boundary:
+                    # the composer SHOWS the seam, the caret lands below it, and
+                    # the two thoughts stay separable with one backspace. It
+                    # costs the operator nothing but a paragraph break, which is
+                    # what two separate thoughts are.
+                    # ``replace``, not a rebuilt draft: `SessionDraft` has 19
+                    # fields and this branch knows about 3 of them, so the next
+                    # field a restore must preserve would have been dropped here
+                    # silently (review round 4, NIT 2).
+                    #
+                    # AND ONLY ONCE. A press that follows the notice's own "send
+                    # it again" re-restores through this same funnel, and the
+                    # draft it is handed already ends in the seam it put there,
+                    # so appending unconditionally grew the composer by a blank
+                    # line per press — one row became three, and the transcript
+                    # paid a row for each attempt (design round 5, D1). The
+                    # guard is what keeps a boundary a boundary instead of a
+                    # tally of attempts.
+                    if not restored.text.endswith(RESTORE_SEAM):
+                        restored = replace(restored, text=restored.text + RESTORE_SEAM)
                 self._load_editor_draft(restored)
                 return
         elif not source.aside_open and not source.draft.text and not source.draft.attachments:
@@ -5859,10 +5988,69 @@ class OperatorApp(App[None]):
 
         subscribe = getattr(source.session, "subscribe_frontend", None)
         if source.unsubscribe_frontend is None and callable(subscribe):
-            subscription = subscribe(
-                lambda _update: self.call_later(self._source_frontend_changed, source)
-            )
+            subscription = subscribe(lambda _update: self._on_source_frontend_updated(source))
             source.unsubscribe_frontend = cast(FrontendSubscription, subscription).unsubscribe
+
+    def _on_source_frontend_updated(self, source: SessionInteraction) -> None:
+        """Schedule ONE change callback per source per loop turn.
+
+        The current session's own subscription has coalesced this way since
+        ``_on_frontend_update`` gained its scheduled-bit guard (the reason is
+        recorded there: a burst publishes several ordered deltas before Textual's
+        next turn, and scheduling every intermediate one repeats work that only
+        the LAST state can answer). The per-SOURCE path had none, so a burst cost
+        N ``call_later`` timers and N retention predicates — each of them a whole
+        decision about whether this source may be released — for one answer.
+
+        The bit lives on the SOURCE rather than on the app: the app has one
+        current session, and N leased sidebar sources each carry their own
+        pending callback. It is cleared by the callback alone (below), which is
+        why the clear is the first statement there and never sits behind a guard
+        — a bit that outlived its callback would leave this source permanently
+        deaf to its owner, which is exactly the "never goes stale" property these
+        subscribers exist to hold.
+
+        That guarantee is why the bit is claimed only when Textual ACCEPTED the
+        callback: ``call_later`` returns False on a closing/closed pump
+        (``textual/message_pump.py``), and latching the bit on such a path would
+        strand the source forever — the callback that clears it is never going to
+        run. A refused schedule therefore leaves the bit unset, and the next delta
+        from the owner tries again rather than finding the source deaf. The
+        residual window is Textual's own: a Callback queued successfully but
+        dropped uninvoked by ``on_callback`` when the app is closing or has no
+        screen (shutdown, no screen stack), not a live lease.
+        """
+        if source.frontend_change_scheduled:
+            return
+        if self.call_later(self._apply_source_frontend_change, source):
+            source.frontend_change_scheduled = True
+
+    def _apply_source_frontend_change(self, source: SessionInteraction) -> None:
+        """Deliver one coalesced change for ``source``, or drop it as superseded.
+
+        Two ways a queued callback can be stale by the time Textual runs it, and
+        both are decided HERE rather than in the subscriber so the coalescer
+        cannot be skipped by the direct ``call_later(self._source_frontend_changed,
+        source)`` sites (subagent events, gate transitions, the close drain) that
+        keep their own cadence.
+
+        * The source was RETIRED — released, or swapped out with its session.
+          ``_source_frontend_changed``'s own first guard covers the release
+          decision, and ``bound is not source`` below covers the swap.
+        * The interaction was SUPERSEDED: ``_sidebar_sources`` is the live
+          binding for a session id (``_lease_sidebar_source`` returns the
+          registered non-retired source rather than minting a second one, and
+          every source records itself there before it subscribes), so a
+          different source standing in that row means this callback belongs to
+          an interaction nothing is looking at any more. A session with no id at
+          all is left alone deliberately: there is no row to compare against, and
+          dropping on an absent row would strand such a source's gate draft.
+        """
+        source.frontend_change_scheduled = False
+        bound = self._sidebar_sources.get(getattr(source.session, "session_id", ""))
+        if bound is not None and bound is not source:
+            return
+        self._source_frontend_changed(source)
 
     def _source_frontend_changed(self, source: SessionInteraction) -> None:
         if source.retired:
@@ -6496,8 +6684,11 @@ class OperatorApp(App[None]):
         the sidebar-close drain, which additionally drops sources retained
         ONLY by the owner's turn (:attr:`retained_for_auto_work`): that is a
         remote fact about a read-only projection, it is unbounded, and each
-        one costs a deep state copy per owner delta forever. Local retention
-        — our own workers, an unsent gate answer — still wins in both.
+        one costs a per-delta decision on every owner delta forever — the read
+        itself is copy-free since ``has_running_job`` landed (it used to be a
+        whole deep copy of canonical state per delta per source). Local
+        retention — our own workers, an unsent gate answer — still wins in
+        both.
         ``reason="expired"`` is the idle sweep, for which see
         :meth:`_sweep_idle_sidebar_sources`; it is `"idle"` plus permission to
         release a source the presentation LRU is still holding.
@@ -7858,6 +8049,10 @@ class OperatorApp(App[None]):
 
     def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
         message.stop()
+        # The click saw this catalogue token, not whatever finishes during the
+        # asynchronous switch. Carry that exact intent through the later bind.
+        candidate = getattr(self, "_attention_input_catalogue", {}).get(message.session_id)
+        self._attention_navigation_receipt = (message.session_id, *candidate) if candidate else None
         if self._session is not None and self._session.session_id == message.session_id:
             if self._interaction.display_only:
                 self._start_sidebar_connection(self._interaction)
@@ -8112,8 +8307,12 @@ class OperatorApp(App[None]):
                 # without bound (25 open/close cycles leaked 50 sources, 0
                 # dispose calls). Each leaked viewer keeps a socket and a
                 # frontend subscription alive, and every owner delta then
-                # costs a deep state copy per leak: ~1.2 ms each, which is the
-                # background lag that ends in a frozen TUI.
+                # costs a per-source predicate plus a coalesced change callback
+                # per leak, on the loop that paints the frame — which is the
+                # background lag that ends in a frozen TUI. (The predicate was a
+                # ~1.2 ms deep state copy when that number was measured; the
+                # clause is kept because the SOCKET is the cost that cannot be
+                # amortised, not the read.)
                 #
                 # `reason="closed"` drops owner-turn retention but never local
                 # work, so a source running our worker or holding an unsent
@@ -8752,6 +8951,13 @@ class OperatorApp(App[None]):
             set_refresh = getattr(session, "set_refresh_callback", None)
             if callable(set_refresh):
                 set_refresh(self._on_runtime_refreshed)
+            # The SAME frame, one event earlier, and the one the operator
+            # actually needs: the runtime announces a DRAINING departure before
+            # it latches, and this is the only moment at which a row can land
+            # ahead of the refusals (UX round 3, U1; QA round 3, Q-1).
+            set_drain = getattr(session, "set_drain_callback", None)
+            if callable(set_drain):
+                set_drain(self._on_runtime_draining)
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
@@ -8994,6 +9200,16 @@ class OperatorApp(App[None]):
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        attention = getattr(state, "attention", None)
+        if isinstance(attention, dict) and attention.get("completion_token"):
+            # A new canonical result may paint before the one-second receipt
+            # poll. Let its first real input witness B rather than stale A;
+            # on_event still checks committed geometry before granting evidence.
+            self._attention_rendered_receipt = (
+                self._session,
+                str(attention["completion_token"]),
+                str(attention.get("anchor_id") or ""),
+            )
         cost = getattr(state, "cumulative_cost", None)
         knowledge = getattr(
             getattr(
@@ -9770,6 +9986,14 @@ class OperatorApp(App[None]):
         conversation, and ``id(session)`` cannot outlive a parked facade.
         """
         self._session = session
+        self._attention_input_receipt = None
+        self._attention_rendered_receipt = None
+        intent = getattr(self, "_attention_navigation_receipt", None)
+        if session is not None and intent and intent[0] == session.session_id:
+            self._attention_input_receipt = (session, intent[1], intent[2])
+            self._attention_input_at = intent[3]
+        self._attention_navigation_receipt = None
+        self._attention_input_catalogue = {}
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
@@ -11750,11 +11974,20 @@ class OperatorApp(App[None]):
             card.restore(state="interrupted", duration_s=duration_s)
             return
         if getattr(result, "is_error", False):
+            # Symmetric with `replay_tool_call`'s error arm, including the
+            # receipt substitution: this settles a card that was already on
+            # screen (a viewer that watched the call being dictated and then
+            # reconnected after the turn ended), and the SAME call must not read
+            # one way there and another in a cold resume — see the long note in
+            # `session_presentation.replay_tool_call` for why a row takes the
+            # harness's vocabulary rather than the model-facing text
+            # (review round 1, F2).
+            receipt = output_limit_call_receipt(details)
             card.restore(
                 state="error",
-                result_text=result_text,
+                result_text=receipt or result_text,
                 details=details,
-                error=_first_line(result_text),
+                error=receipt or _first_line(result_text),
                 duration_s=duration_s,
             )
         else:
@@ -17283,8 +17516,39 @@ class OperatorApp(App[None]):
             # name, and a half-stated change ("updated to X") reads as an
             # update that came from nowhere, so this one stays silent.
             self._refreshed_from = None
+        # A DRAIN IS ANNOUNCED, AN IDLE HANDOVER IS NOT — and the notice moved
+        # off THIS callback, because this is the wrong end of the handover and
+        # the probe below was the wrong instrument. Measured (QA round 3, Q-1):
+        # this fires when the socket CLOSES, 26.2 s into a 26.1 s drain, i.e.
+        # after the last refusal it was meant to warn about; and ``_go_cold``
+        # clears the client BEFORE invoking this callback, so ``runtime_idle``
+        # answers False for the structural reason that the viewer is already
+        # cold — true of the idle handover too, which put a row about refusals
+        # on a refresh that never refused anything. The notice is painted by
+        # :meth:`_on_runtime_draining` instead, from the runtime's own verdict
+        # in the ``retiring`` frame while it is still alive and still refusing.
+        # What stays here is the work this callback owns: re-engage eagerly so
+        # the band never shows the cold state for a refresh nobody asked for.
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
+
+    def _on_runtime_draining(self) -> None:
+        """A runtime has committed to leaving while it still has work: say so.
+
+        Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
+        which the runtime sends immediately before it latches — so this lands
+        before the first refusal rather than ~26 s after the last one, and only
+        for a handover that will actually refuse (the idle rung sends the same
+        frame with ``draining`` false and never reaches here). The fact is the
+        RUNTIME's, because the viewer cannot hold it: by the time the viewer's
+        own state could be consulted it is cold, and cold is true of both
+        hands (QA round 3, Q-1).
+
+        One row, while the composer still accepts text that will be refused.
+        """
+        if self._interaction is None:
+            return
+        self._notice_for(self._interaction, DRAIN_NOTICE, "note")
 
     def _announce_refresh_completed(self) -> None:
         """One line naming the version change a self-refresh just made.
@@ -22224,9 +22488,95 @@ class OperatorApp(App[None]):
 
         self.run_worker(run(), group="background-notify")
 
+    def _attention_focus_refresh_due(self) -> bool:
+        """Whether this tick may re-ask the host for focus evidence.
+
+        A cadence, not a throttle on the poll: the poller itself is a 1 s tick
+        and cheap, while `terminal_is_foreground` shells out (osascript on
+        macOS) so it must not run per tick for a session whose terminal never
+        reported focus. A refusal is not recorded as a failure — the terminal is
+        simply not frontmost yet — and the next due tick asks again, which is
+        what makes this self-healing rather than a gate that stays shut.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_attention_focus_probe_at", 0.0)
+        if last and now - last < ATTENTION_FOCUS_REFRESH_S:
+            return False
+        self._attention_focus_probe_at = now
+        return True
+
+    def _attention_focus_evidenced(self, session: Any, token: str, anchor: str) -> bool:
+        """A real focus report or unexpired input for this exact observed token.
+
+        Freshness alone says nothing about a later result. Navigation may carry
+        a catalogue token while its transcript loads; neither that intent nor a
+        key bypasses the current visibility and measurable-host gates.
+        """
+        if getattr(self, "_attention_focus_observed", False):
+            return True
+        from local_operator.tui.attention import input_evidence_is_fresh
+
+        return getattr(self, "_attention_input_receipt", None) == (
+            session,
+            token,
+            anchor,
+        ) and input_evidence_is_fresh(getattr(self, "_attention_input_at", 0.0))
+
+    @staticmethod
+    def _acknowledgement_raced_a_newer_completion(settled: Any, token: str) -> bool:
+        """Whether an acknowledgement's ANSWER proves a newer completion took over.
+
+        The one reading that is evidence rather than ambiguity on a followed
+        session (see the poll's verification comment): the state has to
+        positively name a DIFFERENT token. An answer that still names the token
+        we sent says nothing -- one tick of push lag looks exactly like an owner
+        that did nothing -- and a missing or unreadable answer says nothing at
+        all, so neither may produce a verdict.
+        """
+        if not isinstance(settled, dict):
+            return False
+        named = settled.get("completion_token")
+        return settled.get("unseen") is not False and isinstance(named, str) and named != token
+
+    async def on_event(self, event: events.Event) -> None:
+        """Witness result/catalogue identity before Textual dispatches real input.
+
+        Key/MouseDown arrive here from the driver; wheel, hover and forwarded
+        events are not evidence. A timestamp is only an expiry for the witnessed
+        token, never permission to receipt later work after the reader leaves.
+        """
+        if isinstance(event, events.InputEvent) and not event.is_forwarded:
+            if isinstance(event, (events.Key, events.MouseDown)):
+                self._attention_input_at = time.monotonic()
+                # Snapshot only evidence already observed BEFORE dispatch. A key
+                # cannot authorize a future token, even inside the expiry window.
+                # Only what is ALREADY observed: the poll's rendered receipt or
+                # the canonical state's painted token. Deliberately no store read
+                # here -- this runs before dispatch for every keystroke in the
+                # app, and a sqlite hop on that path is latency the reader feels
+                # on every character typed, for a token the 1 s poll and
+                # `_apply_frontend_state` have already supplied.
+                candidate = getattr(self, "_attention_rendered_receipt", None)
+                self._attention_input_receipt = (
+                    candidate
+                    if candidate
+                    and candidate[0] is self._session
+                    and self._completion_anchor_visible(candidate[2])
+                    else None
+                )
+                self._attention_input_catalogue = {
+                    entry.id: (entry.completion_token, entry.anchor_id, self._attention_input_at)
+                    for entry in self._session_sidebar.visible_entries
+                    if entry.unseen and entry.completion_token and entry.anchor_id
+                }
+        await super().on_event(event)
+
     async def _poll_completion_attention(self) -> None:
         from local_operator.harness.rows import completion_notice
-        from local_operator.tui.attention import terminal_is_foreground
+        from local_operator.tui.attention import (
+            focus_is_measurable,
+            terminal_is_foreground,
+        )
 
         # BEFORE the guards below, which are about the ATTACHED session's read
         # receipt: a session that has no attention API, or a poll already in
@@ -22293,19 +22643,56 @@ class OperatorApp(App[None]):
                 not state.get("unseen")
                 or not token
                 or not anchor
-                or not getattr(self, "_attention_focus_observed", False)
                 or getattr(session, "is_streaming", False)
                 or not self._completion_anchor_visible(anchor)
             ):
                 return
+            # Input may witness only this already-rendered result. Retain the
+            # exact identity before the focus gate so the next real input can
+            # acknowledge it without licensing a later completion.
+            self._attention_rendered_receipt = (session, token, anchor)
+            # FOCUS EVIDENCE. Three cases, stated rather than implied, because
+            # the receipt behaves differently in each:
+            #
+            #  * a host that MEASURES focus (macOS cmux: frontmost application,
+            #    this socket's kernel peer PID, key visible window, focused
+            #    surface) can simply re-learn the same fact, and
+            #    `_attention_focus_refresh_due` bounds how often it asks;
+            #  * a terminal whose focus cannot be measured, WITH input observed:
+            #    a key or mouse-down this app receives could only have been
+            #    delivered to a focused terminal, so the input edge proves the
+            #    current token portably (`on_event` binds identity plus expiry),
+            #    never a new result that arrives after that input;
+            #  * a terminal whose focus cannot be measured and which has shown
+            #    nothing at all: no evidence, so the receipt waits. Textual's
+            #    initial `app_focus=True` describes startup, not the present, and
+            #    the probe's `True` there means only "no `CMUX_*` is set".
+            #
+            # The reported defect lived in case two: a terminal already focused
+            # when Textual enabled focus reporting never sends an edge, so the
+            # receipt waited forever for a report that could not come, and the
+            # sidebar's check mark never cleared.
+            measurable = focus_is_measurable()
+            evidenced = self._attention_focus_evidenced(session, token, anchor) or (
+                measurable and self._attention_focus_refresh_due()
+            )
+            if not evidenced:
+                return
             # Twenty open sessions need no twenty-process focus poll: only a
             # positively focused surface with a still-unread rendered result
-            # reaches this bounded off-loop host probe.
-            focused = await asyncio.to_thread(terminal_is_foreground)
+            # reaches this bounded off-loop host probe. A terminal the probe
+            # cannot measure is never asked — there it answers from the
+            # environment (`terminal_is_foreground` returns True whenever no
+            # `CMUX_*` is set), and the input edge above is the real evidence.
+            focused = await asyncio.to_thread(terminal_is_foreground) if measurable else True
+            if measurable and focused:
+                # Measured, not assumed: this is the same fact the focus edge
+                # carries, learned by asking instead of by being told.
+                self._attention_focus_observed = True
             if (
                 focused
                 and self._session is session
-                and getattr(self, "_attention_focus_observed", False)
+                and self._attention_focus_evidenced(session, token, anchor)
                 and not getattr(session, "is_streaming", False)
                 and self._completion_anchor_visible(anchor)
             ):
@@ -22313,11 +22700,42 @@ class OperatorApp(App[None]):
                 if (
                     self._session is session
                     and current.get("completion_token") == token
-                    and getattr(self, "_attention_focus_observed", False)
+                    and self._attention_focus_evidenced(session, token, anchor)
                     and not getattr(session, "is_streaming", False)
                     and self._completion_anchor_visible(anchor)
                 ):
-                    await cast(Any, acknowledge)(token)
+                    settled = await cast(Any, acknowledge)(token)
+                    # VERIFY, never assume — and never invent a verdict the
+                    # transport cannot support. A resolved acknowledgement is not
+                    # proof the receipt moved: an owner older than this contract
+                    # answers a no-op with success, and `unseen` is computed
+                    # against the NEWEST sequence, so a completion published
+                    # under us leaves the conversation unread. Nothing here
+                    # latches, so the next tick re-reads the state and
+                    # re-attempts with whatever token it names.
+                    #
+                    # What the answer CAN prove depends on the transport, and
+                    # the difference is not cosmetic. For a session this app
+                    # OWNS, `acknowledge_attention` returns the state its store
+                    # computed in the same transaction, so `unseen: false` is
+                    # authoritative there. For a FOLLOWED session the owner hands
+                    # its own state back ON the ack (`AckDetail`), because the
+                    # follower's projection arrives on the event queue — a
+                    # different writer — and would read stale by construction. An
+                    # owner OLDER than that field sends none, and then all this app
+                    # has is its own last-applied state, where "still unseen, still
+                    # my token" is equally consistent with one tick of push lag
+                    # (the honest path) and with an owner that did nothing:
+                    # INCONCLUSIVE, and a line claiming the receipt "did not land"
+                    # would be a false accusation on an honest path. Only a state
+                    # that has moved PAST the token we sent is evidence of
+                    # anything, and what it evidences is narrow: the completion
+                    # receipted is no longer the one this conversation asks about,
+                    # so the projection re-arms.
+                    if self._acknowledgement_raced_a_newer_completion(settled, token):
+                        logger.debug(
+                            "completion receipt raced a newer completion; the state re-arms"
+                        )
         except Exception:
             logger.debug("completion receipt deferred", exc_info=True)
         finally:
@@ -22354,6 +22772,11 @@ class OperatorApp(App[None]):
     def on_app_blur(self, event: AppBlur) -> None:
         """The terminal lost OS focus \u2014 notify, and slow every animation."""
         self._attention_focus_observed = False
+        self._attention_input_receipt = None
+        self._attention_rendered_receipt = None
+        self._attention_navigation_receipt = None
+        self._attention_input_catalogue = {}
+        self._attention_input_at = 0.0
         self._set_animation_focused(False)
         if self._notifier is None:
             return
@@ -23690,7 +24113,43 @@ class OperatorApp(App[None]):
                     # D5). On the common branch it loads the composer directly
                     # and appends nothing, so this only reorders the case that
                     # has two rows to order.
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
+                elif _is_retiring_refusal(error):
+                    # THE DRAIN REFUSED A MESSAGE THAT WAS NEVER DELIVERED, and
+                    # that is the whole reason this branch exists rather than
+                    # falling through to the bare-error one below. The refusal
+                    # is real and the row for the message is not: the echo was
+                    # painted at submit, the prompt never reached the session,
+                    # and the text existed only in this worker's hands. Left as
+                    # it was, the user read a refusal that told them to send
+                    # their message again while their message was gone and its
+                    # row stood there looking sent — twice over for a second
+                    # attempt inside the same drain (design round 1, D1; UX
+                    # round 1, U1). With the text back in the composer, "send it
+                    # again" is one keystroke rather than a retype.
+                    #
+                    # THE TWO SIBLING BRANCHES ABOVE DO EXACTLY THIS for their
+                    # own refusals; this case is the one that fell past them
+                    # because the runtime is neither gone nor oversize — it is
+                    # mid-handover. The predicate and not a bare `isinstance`,
+                    # because the runtime on the other end can be the build that
+                    # was resident before this viewer: an older one raises the
+                    # same refusal uncategorised (see `_is_retiring_refusal`).
+                    self._withdraw_user_echo_for(source)
+                    # The reason is painted BEFORE the restore, because
+                    # `_restore_unsent_for` can append a `DraftRecoveryNotice`
+                    # and that offer must not read as the cause of the refusal
+                    # — the ordering the sibling branch above documents for its
+                    # own restore. The refusal sentence itself says nothing
+                    # about where the draft went — the owner builds it for the
+                    # peer-send path too — so the viewer adds the claim only
+                    # where it is true.
+                    self._notice_for(
+                        source,
+                        _retiring_notice_text(error),
+                        "warning",
+                    )
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -23714,7 +24173,7 @@ class OperatorApp(App[None]):
                     # press — three copies of one message and two warnings,
                     # measured (QA round 2, U6).
                     self._withdraw_user_echo_for(source)
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                     go_cold = getattr(session, "_go_cold", None)
                     if callable(go_cold):
                         go_cold()
@@ -40056,8 +40515,12 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 114
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 120
     public members, and a positive ``isinstance`` walks every one of them.
+    (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
+    the time of measurement rather than adjusted by the size of one's own
+    change: the protocol keeps growing, and a number carried forward by hand is
+    the one thing this docstring cannot afford to get wrong.)
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
 

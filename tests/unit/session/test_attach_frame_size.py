@@ -87,6 +87,30 @@ from tests.unit.session.runtime.test_server import FakeHandle
 #: count rather than the thing that overflows.
 _RESULT_CHARS = 400
 
+#: One payload object per shape, shared BY VALUE across fixture rows.
+#:
+#: These are immutable ``str``, so a shared leaf aliases no state: every event
+#: dict, result dict, content list and block dict is still built per row. That
+#: is what makes the sharing safe here — nothing in this file asserts on
+#: identity (``grep -c 'id('`` is 0, and the only ``is`` comparisons are
+#: ``is None`` on unrelated fields), so no test can distinguish two equal
+#: strings from one. The production boundary rebinds rather than mutates any
+#: payload leaf (``frontend_state._bound_live_result_in_place`` assigns and
+#: rebinds), which a ``str`` cannot be edited through in any case.
+#:
+#: Rebuilding them per row instead cost ~1.47 MB per event — 882 MB across the
+#: 600-event heavy seed, and ~1.5 GB across the 1,000-event all-fields guard —
+#: retained by whichever xdist worker draws these tests, for no assertion.
+#:
+#: Keep them ``str`` and keep them constant. A case that needs a different
+#: width must build its own string locally; ``_payload_event``/``_payload_jobs``
+#: stay parameterised precisely because their callers pass six different widths.
+_IMAGE_B64 = "A" * 1_400_000
+_DETAILS_BLOB = "D" * 50_000
+_SEED_TEXT = "R" * 20_000
+_ALL_FIELDS_TEXT = "e" * 60_000
+_RESULT_TEXT = "x" * _RESULT_CHARS
+
 
 def _catalogue_row(index: int) -> dict[str, Any]:
     """One catalogue row exactly as ``refresh_model_catalogue`` builds it.
@@ -119,7 +143,7 @@ def _event(index: int) -> dict[str, Any]:
         "tool_call_id": f"call_{index:06d}",
         "tool_name": "bash",
         "intent": "Checking something moderately descriptive here",
-        "result": {"content": [{"type": "text", "text": "x" * _RESULT_CHARS}]},
+        "result": {"content": [{"type": "text", "text": _RESULT_TEXT}]},
         "_traj_seq": index,
     }
 
@@ -724,14 +748,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                         "tool_call_id": f"call-{index}",
                         "tool_name": "read",
                         "content": [
-                            {"type": "text", "text": "e" * 60_000},
+                            {"type": "text", "text": _ALL_FIELDS_TEXT},
                             {
                                 "type": "image",
-                                "data": "A" * 1_400_000,
+                                "data": _IMAGE_B64,
                                 "mime_type": "image/png",
                             },
                         ],
-                        "details": {"server_result": {"blob": "D" * 50_000}},
+                        "details": {"server_result": {"blob": _DETAILS_BLOB}},
                         "is_error": False,
                     },
                 },
@@ -3221,11 +3245,11 @@ async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
         # Every payload shape a real turn produces, not just text: an image
         # block alone is over the line limit, and `details` is what the MCP
         # bridge fills. A seed of pure text cannot prove the socket survives.
-        end = _live_end(f"call-{index}", text="R" * 20_000)
+        end = _live_end(f"call-{index}", text=_SEED_TEXT)
         end["result"]["content"].append(
-            {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+            {"type": "image", "data": _IMAGE_B64, "mime_type": "image/png"}
         )
-        end["result"]["details"] = {"server_result": {"blob": "D" * 50_000}}
+        end["result"]["details"] = {"server_result": {"blob": _DETAILS_BLOB}}
         seed.append(end)
     handle._frontend.mutate(jobs=_jobs(200, 500), live_events=seed)
 

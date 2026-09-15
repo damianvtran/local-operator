@@ -380,7 +380,17 @@ async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_sign
         with mock.patch.object(control, "_confirmed_session_id", _never):
             refused = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
             assert refused.method == "refused"
-            assert "must lapse" in refused.line  # the named wait (U2-3)
+            # The remedy is named as the WHOLE command (the TUI's /stop paints
+            # this string and has no spelling for a flag — U2-3/U3-2), and it is
+            # the FORCED rung, which is the one that reaches a heartbeating
+            # owner. The sentence used to promise that the heartbeat "must
+            # lapse (~45s)" and to advise retrying afterwards: that is true only
+            # while the owner keeps failing to report — a single turn in the
+            # window resets it — and the ladder meanwhile has a rung that works
+            # NOW, so the promise was both unfalsifiable and unnecessary. See
+            # ``_identity_by_start_time``.
+            assert f"lop stop --pid {target.pid} --force" in refused.line
+            assert "must lapse" not in refused.line
             assert no_signals[0] == []
             stopped = await control.stop_session(
                 target, timeout_s=0.5, force=True, _root=config_dir()

@@ -92,6 +92,7 @@ async def capabilities():
                 # rather than a boolean with a default.
                 "notification_contract": 1,
                 "mcp": 1,
+                "mcp_auth": 1,
                 "radient": 1,
                 # Session code memory: GET/POST/PATCH/DELETE on
                 # `/v1/desktop/sessions/{id}/variables`, reading and writing a
@@ -114,6 +115,38 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # Moving a live session's working directory
+                # (POST /v1/desktop/sessions/{id}/working-directory).
+                #
+                # ITS OWN KEY rather than a bump, and the rule is the one
+                # `session_search` and `draft_preview` state above: an EXISTING
+                # surface must keep working against a backend that lacks the new
+                # route. Here the existing surface is the read-only
+                # working-directory chip, which is exactly what a renderer that
+                # sees no `session_move` keeps rendering. Bumping `commands`
+                # would be the wrong lever twice over -- a client renders the
+                # command palette perfectly well without this route, and
+                # `/move`'s presentation already exists on older backends (it
+                # answers its native_action today).
+                #
+                # BUMPED TO 2 for the exclusivity fence: a move now refuses
+                # while another actual attach is registered (review R3), so a
+                # renderer must not promise the old unconditional behaviour. The
+                # bump is of THIS FEATURE CONTRACT, never the package version,
+                # and `1` remains readable by a renderer that gates on presence.
+                "session_move": 2,
+                # An explicit desktop-only `frontend.replace` frame on the event
+                # stream, plus the additive `frontend_replace=1` subscription
+                # flag that negotiates it (review R4).
+                #
+                # Its own key because the two are independently useful and must
+                # gate independently: a renderer that cannot consume the
+                # replacement must keep its move controls DISABLED even against
+                # this backend (`session_move >= 2` AND `frontend_replace >= 1`),
+                # because a move whose accepted directory no mounted viewer can
+                # render is exactly the stale-paint defect the frame exists to
+                # fix.
+                "frontend_replace": 1,
                 # ``/info``'s host read and ``/session``'s one-snapshot ledger
                 # report. A NEW key rather than a bump of `catalogues`, and the
                 # rule is the one `session_search` states above: a renderer

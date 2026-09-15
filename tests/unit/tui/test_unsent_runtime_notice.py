@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.tui.app import UNSENT_RUNTIME_NOTICE, OperatorApp
+from local_operator.tui.app import RESTORE_SEAM, UNSENT_RUNTIME_NOTICE, OperatorApp
 from local_operator.tui.events import UserMessageStart
 from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
 from local_operator.tui.widgets.editor import Editor
@@ -108,7 +108,11 @@ async def test_a_prompt_on_a_dead_runtime_comes_back_with_one_named_reason() -> 
         editor = await _boot(pilot, app)
         await _send(pilot, editor, "are you there?")
 
-        assert editor.text == "are you there?", "the user's text was not handed back"
+        # The handback carries the SEAM: the restore lands inside the submit,
+        # so the operator's next thought would otherwise continue this sentence
+        # (UX round 3, U2 — the same boundary the drain refusal shows, since
+        # round 4 filed the two routes as one behaviour).
+        assert editor.text == "are you there?" + RESTORE_SEAM, "the user's text was not handed back"
         assert _user_texts(app) == [], "a row stood for a message nobody received"
         assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE]
 
@@ -129,7 +133,11 @@ async def test_pressing_again_does_not_pile_up_rows_or_warnings() -> None:
         await _send(pilot, editor, "are you there?")
         await _send(pilot, editor, "are you there?")
 
-        assert editor.text == "are you there?"
+        # ONE seam, not two: this helper ASSIGNS the composer before each press,
+        # so the second submit sends the seamed text and the restore lands the
+        # same draft again. The real flow differs and grows a seam per press —
+        # pinned in `test_retiring_refusal.py`, which presses for real.
+        assert editor.text == "are you there?" + RESTORE_SEAM
         assert _user_texts(app) == [], _user_texts(app)
         assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE], _notice_texts(app)
 
@@ -242,7 +250,10 @@ async def test_a_draft_with_no_caret_of_its_own_lands_at_the_end() -> None:
 
     Serialised from the seat that measured it. Step A/B: the user's next words
     used to be glued IN FRONT of the returned message (measured as one message
-    reading `second message [bash:2]are you there?`). Step C: the row's own
+    reading `second message [bash:2]are you there?`) — and since round 4 THIS
+    route's handback lands behind a SEAM (a blank line; the drain route has shown
+    one since round 3), so the next words are their own paragraph rather than a
+    continuation of the sentence above. Step C: the row's own
     `/resume` advice typed there was consumed as a command and took the message
     with it, leaving the screen with no composer text at all. With the caret at
     the end, the words append (the message is intact and first) and a `/resume`
@@ -255,13 +266,15 @@ async def test_a_draft_with_no_caret_of_its_own_lands_at_the_end() -> None:
         editor = await _boot(pilot, app)
         await _send(pilot, editor, "are you there?")
 
-        assert editor.text == "are you there?"
-        assert editor.selection.end == (0, len("are you there?")), editor.selection
+        assert editor.text == "are you there?" + RESTORE_SEAM
+        # The caret is on the line BELOW the seam, not at the end of the drafted
+        # sentence, which is what makes the two separable.
+        assert editor.selection.end == (2, 0), editor.selection
 
-        # Step A/B — the glued-input case.
+        # Step A/B — the next-thought case: it lands as its own paragraph.
         editor.insert("second message ")
         await pilot.pause()
-        assert editor.text == "are you there?second message ", editor.text
+        assert editor.text == "are you there?" + RESTORE_SEAM + "second message ", editor.text
 
         # Step C — the advice case, on a clean hand-back so the state is exactly
         # the one the row describes: the seam the refusal uses does the restore.

@@ -21,7 +21,7 @@ from textual import events
 
 from local_operator.harness.types import CompactionEndEvent, CompactionStartEvent
 from local_operator.session.protocol import CompactionOutcome
-from local_operator.tui.app import OperatorApp, compaction_receipt
+from local_operator.tui.app import RESTORE_SEAM, OperatorApp, compaction_receipt
 from local_operator.tui.events import (
     CompactionEnded,
     TurnBoundaryEnd,
@@ -794,6 +794,19 @@ async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -
             "the queued notice outlived the refusal it was narrating; the "
             "transcript still promises a send that will not happen"
         )
+        # AND THE DRAFT CAME BACK BEHIND A SEAM. This cell asserted the
+        # withdrawal and never looked at the composer, so the sibling routes'
+        # `seam=True` could be deleted with the suite still green — the same
+        # "the cell cannot see its subject" shape review round 4 filed against
+        # the notice's own gate (review round 5, MINOR 1). The seam is the
+        # boundary between the returned draft and whatever the operator types
+        # next, and it is the same funnel the drain refusal uses. The text is
+        # matched by its own words rather than by equality: the restore carries
+        # the image's marker, and the marker's rendered form is the editor's.
+        assert editor.text.endswith(RESTORE_SEAM), "the returned draft lost the seam: " + repr(
+            editor.text
+        )
+        assert "what does this show" in editor.text, repr(editor.text)
 
 
 @pytest.mark.asyncio

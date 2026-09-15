@@ -42,8 +42,20 @@ disposed, and the dispose rung sets that flag before the turn's `finally`
 publishes.
 Copied fork journals cannot reuse another conversation's token.
 
-A receipt advances through the supplied token's sequence using a monotonic
-watermark. Delayed or duplicate acknowledgement of A cannot acknowledge newer B.
+A receipt names the completion the caller actually OBSERVED, and is accepted
+only while it can be observed as that conversation's read state: the supplied
+token must be the conversation's CURRENT completion, or the conversation must
+already be read. A superseded token — a real completion of this conversation
+that a newer one has replaced — is refused with 409 (`superseded_completion_token`,
+carried as `detail.code` on the desktop plane and as `code` in the mobile
+body) instead of being answered with a success that moves a watermark no
+surface can see. The caller's remedy is in its own hands: re-read the attention
+state and acknowledge the token it now names. Delayed or duplicate
+acknowledgement of A therefore cannot acknowledge newer B — while B is unread it
+is refused rather than recorded, and once B has been read it converges to the
+same read state. **A 2xx from `/seen` means the conversation is read** (`unseen`
+false); no client may treat a resolved call as proof of a read, which is how a
+no-op acknowledgement used to strand a completion checkmark forever.
 Runtime epoch, transcript mtime, heartbeat time and stream sequence are not
 completion clocks. The SQLite engine serializes writers across processes. All
 schema objects initialize in one transaction; readers of a positively identified
@@ -67,10 +79,14 @@ contains:
 
 The canonical frontend and mobile projection carry additive `attention` state.
 Runtime capability `completion-ack-v1` enables `acknowledge_attention` with
-`completion_token`. Mobile `POST /api/sessions/{id}/seen` takes the same token in
+`completion_token`. Its successful operation ack frame retains the legacy string
+`detail` and adds the owner's resulting `attention` state; followers must apply
+that answer before returning rather than waiting for a later projection push.
+A refused operation carries no replacement attention state. Mobile `POST /api/sessions/{id}/seen` takes the same token in
 a JSON object: missing legacy bodies return422, unknown/foreign tokens409,
-unknown sessions404, and unauthenticated callers401. Reads and subscriptions do
-not mutate the receipt store.
+superseded tokens409 carrying `code: superseded_completion_token`, unknown
+sessions404, and unauthenticated callers401. Reads and subscriptions do not
+mutate the receipt store.
 
 The relay maintains its existing projection ordering while alive. A new,
 authenticated and source-fenced SSE connection starts with an authoritative
@@ -106,6 +122,16 @@ child-agent page does not qualify. Terminal startup's default Textual focus
 value is not positive evidence. On macOS cmux, the bounded off-loop probe also
 checks the frontmost application, the same socket's kernel peer PID, and the
 key visible window's selected workspace and terminal surface.
+
+Focus evidence is obtained, not assumed — and where it can be MEASURED, it may
+be re-taken on a bounded cadence rather than only on the terminal's focus
+report. A terminal that was already focused when Textual enabled focus reports
+sends none, so an app that starts focused would otherwise never acknowledge what
+it displays; on macOS cmux the probe's verdict is that same evidence, so a
+poller with no report may ask again at most once every 30 s. Terminals where the
+probe answers from the environment rather than from a measurement (a plain
+terminal, where its True means only that no `CMUX_*` variable is set) keep the
+stricter rule: they wait for a real focus report.
 
 Mobile transcript rows carry `text_complete`. `final` means streaming settled;
 it does not prove transport retained the final row's ending. Both runtime and

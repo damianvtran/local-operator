@@ -405,9 +405,14 @@ def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
        against the same file, so it adds no evidence about the PROCESS. It
        is an authorization and freshness check, not an identity proof.
     2. A heartbeat fresher than the timeout, and the pid still HOLDING the
-       recorded control port. A starved runtime keeps heartbeating (that
-       thread is independent of the socket loop), which is what separates
-       "alive but not answering" from "record outlived its process".
+       recorded control port. Both are WINDOW checks: a lapsed beat says the
+       recorded owner stopped reporting, and a port that has moved on says the
+       name belongs to a different process now. Neither asks the process
+       anything, which is why this clause narrows the accident rather than
+       closing it — the beat is written by the runtime's OWN event loop (see
+       ``registry.classify``), so it is not evidence about the socket loop and
+       cannot separate "alive but not answering" from "record outlived its
+       process" on its own.
     3. The process did not start AFTER the record's last heartbeat. This is
        the clause that carries the weight: (1) and (2) together are still
        satisfiable by a stranger that inherited a dead lop's pid AND its
@@ -487,12 +492,12 @@ def _pid_holds_port(record: SessionRecord) -> bool:
 async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     """Identity for a process that will not answer its socket.
 
-    A wedged runtime — alive, heartbeat stale, socket silent — is the one
-    the kill switch exists for, and the socket check cannot confirm it. So
-    a second source that needs NO cooperation from the process, admitted
-    ONLY when the heartbeat is stale (see the inline comment for why a fresh
-    heartbeat forbids it): the process at this pid must have STARTED before
-    the record's last heartbeat. A
+    A runtime whose owner has stopped reporting — alive, beat stale, socket
+    silent — is the one the kill switch exists for, and the socket check cannot
+    confirm it. So a second source that needs NO cooperation from the process is
+    admitted, ONLY when the heartbeat is stale (see the inline comment for why a
+    fresh heartbeat forbids it): the process at this pid must have STARTED
+    before the record's last heartbeat. A
     recycled pid cannot pass that — the stranger now holding the pid began
     after the recorded process died, and it died after its last heartbeat
     (the heartbeat is the process proving it was alive). Same-host clock on
@@ -505,29 +510,31 @@ async def _identity_by_start_time(record: SessionRecord) -> tuple[bool, str]:
     """
     if not _same_uid(record):
         return False, "the record on disk no longer names this pid and session"
-    # Only a WEDGED record earns this proof. A heartbeat inside the timeout
-    # says the recorded process was alive and serving moments ago, so a
-    # silent socket means the socket is not that process's — the record is
-    # a stale file whose pid a stranger now holds (seen live: a fresh fake
-    # record over a ``sleep`` passed the start-time check and was
-    # signalled). Stale heartbeat + old start time is the one shape that
-    # is both wedged and provably the original process.
+    # Only a record whose beat has LAPSED earns this proof. A heartbeat inside
+    # the timeout says the recorded process reported moments ago, so a silent
+    # socket may be a loop that is simply behind (the beat is authored by the
+    # runtime's own event loop — ``registry.classify``) or a stale file whose
+    # pid a stranger now holds (seen live: a fresh fake record over a ``sleep``
+    # passed the start-time check and was signalled). Neither can be proved
+    # from the record's timing, so this rung refuses and names the opt-in.
     age = time.time() - record.heartbeat_at
     if age <= HEARTBEAT_TIMEOUT_S:
-        # Name the remedy: the refusal is only true while the heartbeat is
-        # fresh, and the wait is bounded (one heartbeat window). The forced
-        # stop is the opt-in past it for a starved process the socket cannot
-        # reach. Names the whole COMMAND, not a bare `--force`: this string is
-        # painted by the TUI's /stop as well as by the CLI, and the TUI has no
-        # spelling for a flag — a user told to "pass --force" there has
-        # nowhere to type it (round-3 U3-2).
-        wait_s = int(HEARTBEAT_TIMEOUT_S - age) + 1
+        # Name the remedy as the WHOLE COMMAND, not a bare `--force`: this
+        # string is painted by the TUI's /stop as well as by the CLI, and the
+        # TUI has no spelling for a flag (round-3 U3-2).
+        #
+        # The sentence promises NOTHING about waiting. An earlier version told
+        # the user the heartbeat "must lapse (~45s) ... retry then", which is
+        # advice the operator cannot act on with confidence: it is true only
+        # while the owner keeps failing to report, and a loop that turns once
+        # in that window resets it. The forced rung is reachable NOW for the
+        # case this refusal exists for, and it says what it does.
         return (
             False,
             f"it is heartbeating but not answering its socket "
-            f"(its last heartbeat was {int(age)}s ago; it must lapse "
-            f"(~{wait_s}s) before a forced stop is safe — retry then, or run "
-            f"`lop stop --pid {record.pid} --force` from a shell)",
+            f"(its last heartbeat was {int(age)}s ago), so a signal cannot be "
+            f"proven to be aimed at it. Run `lop stop --pid {record.pid} --force` "
+            f"from a shell to force-stop the process deliberately",
         )
     # Off the loop: this is a fork/exec of ``ps`` with a 5 s ceiling, and the
     # TUI runs the ladder on its event loop (``run_worker(thread=False)``).

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, StrictBool, model_validator
 
 from local_operator.harness.types import Message
+from local_operator.mcp.credentials import MCPCredentials
 from local_operator.mcp.desktop import MCPControl, public_server_config
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -252,6 +253,25 @@ async def mcp_control(session_id: str, body: MCPControl, request: Request):
                 ),
             )
         return reply({"data": result["data"]})
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/mcp/credentials", response_model=CRUDResponse[Result]
+)
+async def mcp_credentials(session_id: str, body: MCPCredentials, request: Request):
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        await bridge.remote.bind_runtime()
+        # Dedicated owner RPC; no command journal, request receipts, or session
+        # credential promotion (which injects into every child environment).
+        result = await bridge.remote.mcp_credentials_op(
+            {
+                "name": body.name,
+                "values": {key: value.get_secret_value() for key, value in body.values.items()},
+                "confirmed_replace": body.confirmed_replace,
+            }
+        )
+        return reply({"data": result})
 
 
 @router.post("/v1/desktop/sessions/{session_id}/credentials", response_model=CRUDResponse[Result])

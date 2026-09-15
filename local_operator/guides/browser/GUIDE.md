@@ -1,9 +1,9 @@
 ---
 name: browser
-description: Drive the user's real browser via the Local Operator extension — setup, pairing, launching a closed browser, async site approvals, multi-tab surfaces, focus safety.
+description: Drive the user's real browser via the desktop app's browser tab or the Local Operator extension — setup, pairing, launching a closed browser, async approvals, focus safety.
 ---
 
-# Browser: drive the user's real browser with the Local Operator extension
+# Browser: drive the user's real browser
 
 Read this guide before doing browser work when the `browser` tool is missing,
 when the user asks to set up browser access, or when a browser action returns a
@@ -12,17 +12,23 @@ playbook; the design contract lives in `docs/design/browser-extension.md`.
 
 ## The one thing to know
 
-The `browser` tool has three possible backends, in preference order:
+The `browser` tool has three possible hosts, in preference order, plus a last
+resort when none of them is available:
 
-1. **The Local Operator browser extension** (preferred) — a real Chromium
-   profile (Chrome, Edge, Arc, Brave, any Chromium) paired to lop over a
-   loopback bridge daemon. It carries the user's real cookies and logins, so it
-   reaches authenticated pages, and the user can sign in by hand and you carry
-   on. This is what you should set up and use.
-2. **A cmux browser panel** (fallback) — used automatically when lop runs
-   inside cmux and no extension is connected.
-3. **`bash` + curl for static pages** (last resort) — only when the user
-   declines the extension and there is no cmux panel. Never a downloaded
+1. **The Local Operator desktop app's browser tab** (preferred) — the app runs
+   the browser host itself, on a persistent shared profile, so "log in once,
+   stay logged in" holds. A fresh `open` uses it whenever it is reachable.
+2. **The Local Operator browser extension** — a real Chromium profile (Chrome,
+   Edge, Arc, Brave, any Chromium) paired to lop over a loopback bridge daemon.
+   It carries the user's real cookies and logins, so it reaches authenticated
+   pages, and the user can sign in by hand and you carry on. It is the host for
+   a session that exists only in a real profile — device trust, hardware keys,
+   enterprise conditional access — and a surface's `handle`, or an explicit
+   `backend` hint, reaches it when that is what the user wants.
+3. **A cmux browser panel** (fallback) — used automatically when lop runs
+   inside cmux and no other host is connected.
+4. **`bash` + curl for static pages** (last resort) — only when the user
+   declines both non-cmux hosts and there is no cmux panel. Never a downloaded
    browser engine.
 
 **Never** run `playwright install`, puppeteer, or download Chromium to load a

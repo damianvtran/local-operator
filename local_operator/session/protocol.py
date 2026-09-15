@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 114 public members and a POSITIVE
+    than stylistic. This protocol carries 120 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -597,8 +597,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
     112 once the lease-warm retry needed ``recovering``, 113 once
     ``restored_spend`` joined the shared surface a viewer inherits, 114 once
-    session code memory joined the session contract with ``variables_op``), so
-    recompute it rather than adjusting it by the size of your own change.
+    session code memory joined the session contract with ``variables_op``, 115
+    once the retention predicate's clone-free ``has_running_job`` joined the
+    per-frame reads, 116 once ``mcp_credentials_op`` joined
+    ``ViewerSessionProtocol``, 117 once a move needed the viewer's own ``cwd``,
+    118 once the same move needed ``supports_exclusive_move`` so a desktop host
+    can fail CLOSED against an owner that would ignore the exclusivity flag, 119
+    once it needed the ``set_local_cwd_callback`` seam the move's local
+    replacement is published through, 120 once the drain notice's
+    ``set_drain_callback`` joined the viewer contract), so recompute it rather
+    than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -828,6 +836,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         paint path that cannot tolerate a raise probes defensively instead —
         several in ``app.py`` deliberately do, and ``_session_subject`` records
         what a raise there costs.
+        """
+        ...
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether the bound owner can retire under the move exclusivity fence.
+
+        Asked by the desktop move path BEFORE it mutates anything, because an
+        owner without ``exclusive-move-v1`` ignores the ``exclusive`` field and
+        retires unguarded — leaving a sibling facade to engage a successor from
+        its own stale cwd. False means refuse with update guidance; it never
+        means "fall back to a plain retire".
         """
         ...
 
@@ -1094,8 +1114,39 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Run a slash command on the runtime and return its result."""
         ...
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Write declared MCP credential values to the RUNTIME's encrypted store.
+
+        Declared for the same reason as :meth:`warm_runtime` below: the desktop
+        bridge reaches it through ``bridge.remote`` on
+        ``POST /v1/desktop/sessions/{id}/mcp/credentials``, so a rename here has
+        to be a type error rather than a silently missing capability — this is the
+        route that stores the key a UI-added MCP server authenticates with.
+
+        A VIEWER forwards it to the owner rather than writing locally: the store
+        it resolves against is the one the runtime's connects read, and a value
+        written anywhere else would be a copy no server ever sees. ``body`` is the
+        validated ``MCPCredentials`` payload (``name``/``values``/
+        ``confirmed_replace``), and the answer is the frozen envelope
+        (``{code, saved_ids, failed_ids, name}``) — never the value, which is why
+        the shape carries ids only. Raises when there is no owner to write
+        through, unlike the read-side probes that report a disconnected state.
+        """
+        ...
+
     def move_will_wait(self) -> bool:
         """Whether a move would block on an in-flight turn."""
+        ...
+
+    @property
+    def cwd(self) -> str:
+        """Where this session works, i.e. what :meth:`set_working_directory` moves.
+
+        Declared for the same reason as :attr:`engage_in_flight` below: the move
+        route resolves a relative target against this value and compares against
+        it to decide a no-op, so a rename on the facade must be a type error
+        rather than a silently stale base for every path a user types.
+        """
         ...
 
     async def warm_runtime(self) -> None:
@@ -1200,6 +1251,27 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Called when the runtime retired itself for a newer build."""
+        ...
+
+    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+        """Called the moment the runtime announces a departure that REFUSES work.
+
+        The sibling of :meth:`set_refresh_callback` one event earlier: that one
+        fires when the socket closes and re-engages, this one fires on the
+        ``retiring`` frame while the runtime is still working, and only when
+        the frame says the departure is draining. Viewer-only by construction —
+        an owner ``Session`` has no wire to hear the frame on.
+        """
+        ...
+
+    def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Called when a move installs an accepted directory locally.
+
+        Viewer-only by construction: the callback exists so a DESKTOP bridge can
+        publish its own ``frontend.replace`` frame instead of the facade
+        emitting a same-sequence delta the renderer discards. An owner
+        ``Session`` has no host above it to repaint, so it must not grow one.
+        """
         ...
 
     def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
@@ -1328,6 +1400,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def epoch(self) -> str:
         """The runtime epoch, read without the whole-state clone."""
+        ...
+
+    @property
+    def has_running_job(self) -> bool:
+        """Whether any child is still running, read without the whole-state clone.
+
+        The retention predicate (``SessionInteraction.retained_for_auto_work``)
+        asks this as a boolean on every canonical delta of every leased source,
+        and it used to answer through ``frontend_state`` — a full deep copy of
+        canonical state for one boolean — which is why it belongs beside
+        ``pending_gate`` and ``epoch`` in this section rather than with the
+        roster-returning members.
+        """
         ...
 
     def subscribe_frontend(self, handler: Callable[[Any], Any]) -> Any:

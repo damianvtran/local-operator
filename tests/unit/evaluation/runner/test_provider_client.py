@@ -2708,6 +2708,40 @@ def _defective_reply(case: str, current: Observation) -> str:
         return json.dumps(
             {"actions": [{"kind": "type", "observation_id": observation_id, "text": ""}]}
         )
+    if case == "marker-in-a-field":
+        # The ONLY difference from ``field-invalid`` is the bytes the model wrote
+        # in the field that failed: this reply is a type error on an integer,
+        # and before round 2's fix the rendering (``input_value='second action
+        # batch'``) named it a competing batch -- a PRESERVED class, so the raw
+        # rendering was the correction handed back (review round 2, B1).
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "wait",
+                        "observation_id": observation_id,
+                        "duration_ms": "second action batch",
+                    }
+                ]
+            }
+        )
+    if case == "frame-id-names-another-class":
+        # A frame id spelling another class's marker, in an otherwise valid click.
+        # It used to be bucketed as an out-of-frame COORDINATE -- and then taught
+        # the coordinate bounds, the rule this model did not break.
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "click",
+                        "observation_id": observation_id,
+                        "frame_id": "outside model-visible frame",
+                        "x": 1,
+                        "y": 1,
+                    }
+                ]
+            }
+        )
     if case == "second-batch":
         return _click_payload(current, "screen") + _click_payload(current, "screen")
     if case == "observation-binding":
@@ -2751,6 +2785,17 @@ _REJECTION_HINT_CASES = [
     ("coordinate", "out-of-frame-coordinate", ['"x" 0..1279', '"y" 0..719']),
     ("unknown-frame-id", "unknown-frame-id", ["unknown frame_id '1'", "only accepted frame ids"]),
     ("field-invalid", "field-invalid", ['"text" in a "type" action', "non-empty string"]),
+    # The envelope path's own attack: a marker phrase in the field that failed.
+    # Both rows are the round-2 review's reproductions, and both are hygiene rows
+    # as well -- the first used to bucket as ``second-batch``, a PRESERVED class,
+    # so its correction was the raw Pydantic rendering; the second used to bucket
+    # as an out-of-frame coordinate and teach the coordinate bounds.
+    ("marker-in-a-field", "field-invalid", ['"duration_ms" in a "wait" action', "integer"]),
+    (
+        "frame-id-names-another-class",
+        "unknown-frame-id",
+        ["unknown frame_id 'outside model-visible frame'", "only accepted frame ids"],
+    ),
     ("second-batch", "second-batch", ["second action batch"]),
     (
         "observation-binding",

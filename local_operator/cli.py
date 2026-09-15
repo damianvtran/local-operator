@@ -2894,6 +2894,15 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except TimeoutError as exc:
+        # NOT "could not deliver": a read deadline expiring means no
+        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
+        # already in the owner's socket buffer, and the receiver commits before
+        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
+        # invites a duplicate steer or wake. Same split, and the same words, as
+        # the send TOOL's arm below it.
+        _peer_red(f"no delivery confirmation: {exc}")
+        return 1
     except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
         # ValueError covers a read fault the frame reader could still surface
         # (e.g. an oversized non-welcome line): it must become the same soft,
@@ -3205,8 +3214,10 @@ def sessions_command(args: argparse.Namespace) -> int:
     }
     show_why = any(why.values())
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
-        f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
+        f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
+        f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
+        f"{'MODEL':<{MODEL_COLUMN_WIDTH}} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} "
+        f"{'HB_AGE':>7}"
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
@@ -3215,15 +3226,27 @@ def sessions_command(args: argparse.Namespace) -> int:
     print(header)
     now = time.time()
     for row in rows:
-        name = (row["conversation_name"] or row["session_id"] or "")[:24]
-        model = (row["model_label"] or "")[:24]
-        needs = (row.get("pending") or "")[:8]
+        # CELLS, not characters, for the three columns that carry text this
+        # process did not author (design round 1, D2). A conversation title can
+        # be CJK and a model label carries the provider's own display name, and a
+        # 14-glyph title is 28 cells: a `[:24]` slice returned all of it and the
+        # row ran into its neighbour, leaving the table wider than its header.
+        # Measured here only for DISPLAY — `--json` above still carries the full
+        # values, which is what a script should read.
+        name = _fit_cell(
+            row["conversation_name"] or row["session_id"] or "",
+            CONVERSATION_COLUMN_WIDTH,
+        )
+        model = _fit_cell(row["model_label"] or "", MODEL_COLUMN_WIDTH)
+        needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
+        state = _state_cell(row["state"])
         line = (
-            f"{row['state']:<7} "
+            f"{state:<{STATE_COLUMN_WIDTH}} "
             f"{('—' if stored else str(row['pid'])):>7} "
-            f"{(row['kind'] or '—'):<7} {needs:<8} {name:<24} "
-            f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
+            f"{(row['kind'] or '—'):<7} {_pad_cell(needs, NEEDS_COLUMN_WIDTH)} "
+            f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
+            f"{_pad_cell(model, MODEL_COLUMN_WIDTH)} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
             f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
             f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
@@ -3234,33 +3257,173 @@ def sessions_command(args: argparse.Namespace) -> int:
             line += f" {age:>11}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
-            line += f" {cell:<{WHY_COLUMN_WIDTH}}"
+            # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
+            # fitted wide cell the blanks it never needed; `_pad_cell` is the
+            # same CELLS-not-characters rule the three text columns use above.
+            line += f" {_pad_cell(cell, WHY_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
 def _clamp_reason_cell(summary: str) -> str:
-    """A WHY cell inside :data:`WHY_COLUMN_WIDTH`, marked when it had to cut.
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
-    column's whole purpose is to answer "why did this session die". A slice at
-    exactly the width used to drop the last word (``CUT_OFF_UNKNOWN`` is 58
-    cells, so the row ended ``...the cause could not be `` with ``determined``
-    gone) and read as a finished sentence that happens to stop mid-clause. The
-    previous worst case, the involuntary ``runtime-killed`` reason at 47 cells,
-    filled the column exactly — which is why nothing clipped until this branch
-    added a longer reason, so the marker is what keeps the next longer sentence
-    honest rather than what fixes one string.
+    column's whole purpose is to answer "why did this session die". The column
+    was ALREADY clipping silently before the marker existed: the involuntary
+    ``runtime-killed`` summary is 104 cells, and the old slice cut it at 47
+    CHARACTERS — 47 cells as well, this sentence being ASCII — landing on a word
+    boundary, so the row ended ``...exiting cleanly `` and read as a finished
+    sentence that happened to stop mid-clause — that is what design round 2 saw as
+    the one case that "fitted exactly", and it is why the marker is what keeps
+    the next longer sentence honest rather than what fixes one string.
+
+    CELLS, NOT CHARACTERS (design round 3, D9). The budget is a COLUMN width,
+    and the strings reaching here are not all harness-authored: a FAILED turn's
+    reason is the provider's own error text (``session.py``'s turn-end writer
+    publishes ``outcome.error`` verbatim, ``attention`` replays it into the
+    store, and ``completion_reason`` arrives in this cell). A localised provider
+    error of 29 characters is 58 cells, so a ``len()`` comparison returned it
+    UNCUT and the row rendered 208 cells against a 179-cell header — the reflow
+    this clamp exists to prevent, in its own blind spot.
 
     The ellipsis is INSIDE the budget, so the table's fixed width and every
     other row's columns are unchanged; a summary that already fits is returned
     byte-for-byte, because a fitting cell must not pay for a cut that did not
     happen. The full sentence stays one flag away in ``--json``'s
     ``completion_reason``, which is what this column is a summary OF.
+
+    ONE CELL MAY GO UNUSED, and that is the honest reading of "inside the
+    budget" (review round 1, Q4 / design round 1, D3). The marker's own measured
+    width is subtracted, so the text gets cells 1-47 — and with all-wide glyphs
+    the longest prefix that fits 47 cells is 46, because a two-cell glyph cannot
+    occupy an odd cell. The cell then measures 47 rather than 48. Nobody pads it:
+    the last cell is unused, not missing, and inventing a space to fill it would
+    report width the text does not have. A reason whose glyph mix reaches an odd
+    boundary does land on 48.
+
+    The unit being fitted is the GRAPHEME — not the code point, and not the
+    character count the old rule used. A ZWJ family cluster is one 2-cell glyph,
+    so a reason built from them fills the column instead of a third of it, and a
+    VS16 sequence is 2 cells rather than the 1 its characters add up to (review
+    round 2, M1/M2; see :func:`_cut_to_cells`).
+
+    A summary that FITS is returned untouched, and that includes a joiner of its
+    own at the end: the back-off in :func:`_cut_to_cells` is a property of a CUT,
+    and a value nothing had to cut is not edited at all (review round 2, N2 —
+    recorded as the rule, not changed, because trimming it would be a second,
+    invisible edit on a cell that is already correct).
     """
-    if len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
         return summary
-    return summary[: WHY_COLUMN_WIDTH - 1] + "…"
+    # The marker's OWN measured width, not a hard-coded 1: the budget is
+    # arithmetic, so a future marker must not be able to push the cell over.
+    marker = "…"
+    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+
+
+def _cut_to_cells(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` that fits ``budget`` display cells.
+
+    A cell bound cannot be a slice: one East-Asian character is two cells, so
+    ``text[:n]`` overshoots by however many wide glyphs it happens to contain.
+    Neither can it be a walk over CHARACTERS, which is the defect this function
+    was written with: rich measures a STRING, and two of its rules only fire on a
+    whole sequence — a VS16 (``U+FE0F``) upgrades the glyph before it to two
+    cells, and a ZWJ (``U+200D``) collapses the emoji it joins into one two-cell
+    glyph. Summing ``cell_len(char)`` per character therefore MIS-measures both
+    classes in opposite directions: ``❤️`` is 1 cell per character but 2 as a
+    unit, so twenty of them (40 cells) came back UNCUT against a 24-cell budget
+    — worse than the character rule this replaced, which clipped them at 24 —
+    while a family cluster was charged about three times its width and left most
+    of the column empty (review round 2, M1 and M2).
+
+    So the unit measured is the GRAPHEME, via rich's own
+    :func:`rich.cells.split_graphemes` — the splitter the measurement rules come
+    from, so the unit measured is the unit emitted, and a combining mark or a
+    joined emoji cannot be separated from what it belongs to.
+
+    The returned prefix never ends on a ZERO-WIDTH JOINER. ``U+200D`` means "join
+    with the glyph AFTER me", so a prefix ending on one emits a joiner with
+    nothing to join — a stray control character immediately before the marker,
+    which a terminal renders as a replacement box (review round 1, Q1). The
+    back-off costs no cells, so the budget is unaffected and no other column
+    moves; it is a no-op for well-formed text, because a grapheme absorbs an
+    interior joiner together with the glyph it joins, and it fires only when the
+    input's OWN trailing grapheme ends on one. A value that fits is not touched
+    at all, trailing joiner included — see :func:`_clamp_reason_cell`.
+
+    The prefix is the longest that FITS, not one that FILLS. With all-wide text
+    the final cell can go unused (a two-cell glyph cannot occupy cell 47 of a
+    47-cell budget). The invariant is that the result is bounded by ``budget``;
+    occupying every cell is not a goal, and padding to reach it would report width
+    the text does not have.
+
+    ``split_graphemes`` is imported at the point of use, like every other
+    third-party name here: this module's contract is that ``import
+    local_operator.cli`` stays cheap (see the module docstring).
+    """
+    from rich.cells import split_graphemes
+
+    spans, _total_cells = split_graphemes(text)
+    used = 0
+    for start, _end, width in spans:
+        if used + width > budget:
+            cut = text[:start]
+            while cut.endswith("\u200d"):
+                cut = cut[:-1]
+            return cut
+        used += width
+    return text
+
+
+# The two primitives the table's text columns are built from, kept beside the
+# WHY column's own clamp so there is ONE cell-vs-character rule in this module
+# rather than one per column.
+
+
+def _fit_cell(text: str, width: int) -> str:
+    """``text`` cut to ``width`` display CELLS, silently.
+
+    Silent on purpose: these columns have always cut without a marker
+    (``value[:24]``), a marker would change every ASCII listing that overflows,
+    and none of them is the column whose PURPOSE is to answer a question. What
+    changes here is only the bound — characters to cells.
+
+    A value that already fits is returned byte-for-byte, and ``cell_len`` equals
+    ``len`` for ASCII, so an all-ASCII table renders exactly as it did before.
+    """
+    return _cut_to_cells(text, width) if _cell_len(text) > width else text
+
+
+def _pad_cell(text: str, width: int) -> str:
+    """``text`` left-aligned in ``width`` display CELLS.
+
+    ``f"{text:<{width}}"`` pads by CHARACTERS, so a fitted wide cell — 12 CJK
+    glyphs are 24 cells — is handed ``width`` characters PLUS the blanks it never
+    needed, leaving the row wider than its header in trailing space. Padding by
+    cells is what keeps "every row is header-width" true rather than merely true
+    for narrow text; for ASCII the two are identical.
+    """
+    return text + " " * max(0, width - _cell_len(text))
+
+
+def _cell_len(text: str) -> int:
+    """``len`` in terminal CELLS — what a fixed-width column is measured in.
+
+    Imported at the point of use because this module's contract is that
+    everything third-party stays out of its module-level imports so ``import
+    local_operator.cli`` stays cheap (see the module docstring); ``rich`` is
+    already a hard dependency and ``rich.cells`` is its width primitive.
+
+    This measures a WHOLE string, which is the only way rich applies its
+    sequence rules (VS16 upgrade, ZWJ collapse) — measuring per character is what
+    :func:`_cut_to_cells` did and why it mis-counted both classes. The cut fits
+    the same units this does, one grapheme at a time.
+    """
+    from rich.cells import cell_len
+
+    return cell_len(text)
 
 
 def _wake_create(args: argparse.Namespace) -> int:
@@ -3456,6 +3619,24 @@ def _wake_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
+    """How long a fire has been owed, in seconds, or ``None`` when not owed.
+
+    The ledger's ``first_attempt_ms`` is when the supervisor first failed to
+    hand this occurrence to a runtime, so the difference is the age of the
+    OWED fire rather than the age of the schedule. Rendered in the row tail
+    (design round 1, D2): the state words alone cannot separate a wake four
+    minutes late from one stuck since last week, and below 69 columns the WHEN
+    column is gone, so the row had no age of any kind.
+    """
+    if not record:
+        return None
+    first = record.get("first_attempt_ms")
+    if not isinstance(first, int) or isinstance(first, bool):
+        return None
+    return max((now_ms - first) / 1000.0, 0.0)
+
+
 def _wake_rows() -> "list[dict[str, Any]]":
     """Every scheduled wake on this machine, soonest first.
 
@@ -3467,11 +3648,18 @@ def _wake_rows() -> "list[dict[str, Any]]":
     import time as _time
 
     from local_operator.paths import config_dir
+    from local_operator.wakes.deliveries import read_deliveries
     from local_operator.wakes.store import read_index
     from local_operator.wakes.supervisor import STALE_AFTER_S, _session_exists
 
     root = config_dir()
     now_ms = int(_time.time() * 1000)
+    # The supervisor's ledger of fires it attempted and has not yet handed to a
+    # runtime. Read once, here, so the row's state and the `status` summary are
+    # derived from the same copy — the defect this whole PR is about was a wake
+    # that had failed to fire being visible on NO surface, and two surfaces
+    # disagreeing would be a smaller version of the same thing.
+    deliveries = read_deliveries(root)
     rows: list[dict[str, Any]] = []
     for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
@@ -3486,12 +3674,23 @@ def _wake_rows() -> "list[dict[str, Any]]":
         # remove, so the two surfaces share the predicate rather than deriving
         # it twice.
         ghost = not dormant and not _session_exists(root, session_id)
+        record = deliveries.get(session_id)
         for raw in entry.get("schedules") or ():
             if not isinstance(raw, dict):
                 continue
             due = raw.get("next_due_at")
             if isinstance(due, bool) or not isinstance(due, int):
                 continue
+            # A GHOST'S RECORD IS FROZEN, NOT WORK IN PROGRESS — the same
+            # decision `_delivery_rows` makes for `status` (QA round 1, Q1).
+            # Nothing can engage a session with no transcript, so this row must
+            # not carry an owed age in its tail or its legend, or the listing
+            # contradicts the process that has already gone home over it.
+            delivery = (
+                record
+                if record is not None and not ghost and record.get("occurrence_ms") == due
+                else None
+            )
             rows.append(
                 {
                     "session_id": session_id,
@@ -3537,6 +3736,15 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     # fields were added rather than defaulted to a lie.
                     "last_fired_at": entry.get("last_fired_at"),
                     "last_attempt_at": entry.get("last_attempt_at"),
+                    # THE OWED FIRE, if the supervisor has one for this very
+                    # occurrence. Matched on `occurrence_ms` rather than on the
+                    # session alone: a record is about one attempt at one due
+                    # time, and a recurring schedule whose next occurrence is
+                    # already different must not inherit it.
+                    "delivery": delivery,
+                    # Its age, against the SAME clock read as `due_in_s`, for the
+                    # `owed 9d` tail the listing renders (design round 1, D2).
+                    "owed_age_s": _owed_age_s(delivery, now_ms),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -3552,6 +3760,15 @@ def wake_command(args: argparse.Namespace) -> int:
     it reports whether the thing that fires wakes for closed sessions exists.
     """
     from local_operator.paths import config_dir
+
+    # BOTH branches render a wake's delivery state — `list` as the DUE-column
+    # word, `status` as prose — so the two words are named once, here, rather
+    # than imported into one branch and silently unbound in the other.
+    from local_operator.wakes.deliveries import (
+        STATE_RETRYING,
+        STATE_UNDELIVERED,
+        UNDELIVERED_AFTER_ATTEMPTS,
+    )
 
     command = getattr(args, "wake_command", None) or "status"
 
@@ -3666,6 +3883,18 @@ def wake_command(args: argparse.Namespace) -> int:
                 # this at all, which is a stronger statement than "the
                 # supervisor stopped retrying" (round 2, Q4).
                 state = "ghost"
+            elif row.get("delivery"):
+                # AN OWED FIRE IS WORK IN PROGRESS. The supervisor has attempted
+                # this occurrence, failed, and is retrying it from that record —
+                # which is also the reason a row PAST the staleness bound is
+                # still being fired at all. Reading it as `stale` would state
+                # the opposite of what the process is doing, and the legend
+                # under the table promises `stale` wakes are not fired.
+                state = (
+                    "undelivered"
+                    if row["delivery"].get("state") == STATE_UNDELIVERED
+                    else "retrying"
+                )
             elif row["stale"]:
                 state = "stale"
             else:
@@ -3695,6 +3924,16 @@ def wake_command(args: argparse.Namespace) -> int:
                 # and this listing said nothing, so the same wake read
                 # differently in two places (round 1, D9).
                 repeat = " · once"
+            owed_age = row.get("owed_age_s")
+            if owed_age is not None:
+                # THE AGE GOES IN THE TAIL, where the other bounds already live
+                # and where the round-5 R6/U16 rule says it is never clamped:
+                # `retrying owedstale001` (9 days) and `retrying owedretry001`
+                # (4 minutes) were otherwise identical rows at any width that
+                # drops WHEN (below 69 columns). The message is what gives —
+                # the part of the row the reader already knows — so the row's
+                # total width is unchanged and only the prose shortens.
+                repeat += f", owed {_format_duration(owed_age)}"
             if row.get("last_fired_at"):
                 repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
             # THE MESSAGE IS WHAT GETS CLAMPED, never the state tail. Clamping
@@ -3721,41 +3960,112 @@ def wake_command(args: argparse.Namespace) -> int:
                 f"{_elide_id(row['session_id'], id_w):<{id_w}} {detail}".rstrip()
             )
 
-        # ONE legend under the table rather than the same sentence on every
-        # row, and only for the states actually present: what "stale" and
-        # "dormant" COST is the thing a reader needs told, but telling it per
-        # row is what made a single wake occupy 155 columns.
-        # The legend folds to the terminal like the rows do (round 2, D12):
-        # a legend that wraps is the same ragged frame the table just stopped
-        # producing. 9 = the width of the state word plus its gap.
-        def _legend(word: str, text: str) -> None:
-            import textwrap
-
-            print()
-            for line in textwrap.wrap(
-                f"{word:<9}{text}", width=term_width, subsequent_indent=" " * 9
-            ):
-                print(line)
-
-        if any(row["stale"] and not row["dormant"] and not row["ghost"] for row in rows):
-            _legend(
-                "stale",
-                "the supervisor no longer fires these; they are delivered when "
-                "their session is next opened",
-            )
-        if any(row["dormant"] for row in rows):
-            _legend("dormant", "the session was stopped; reopening it re-arms its wakes")
-        if any(row["ghost"] for row in rows):
-            _legend(
-                "ghost",
-                "no session with this id exists on disk; nothing can fire these, and "
-                "nothing clears them automatically",
-            )
         if not show_when:
             # The omission is STATED, not silent: the absolute time was dropped
             # to keep the table aligned on a narrow terminal (round 2, D12), and
             # the reader is told where it went rather than left to notice.
+            #
+            # AND IT IS SAID IMMEDIATELY (design round 1, D6): it used to print
+            # after the legend block, 14 rows below the table at 60 columns, so
+            # the reader who noticed the missing column had to scroll past three
+            # legends to learn why.
             print("\n(WHEN hidden — terminal too narrow)")
+
+        # ONE legend under the table rather than the same sentence on every
+        # row, and only for the states actually present: what "stale" and
+        # "dormant" COST is the thing a reader needs told, but telling it per
+        # row is what made a single wake occupy 155 columns.
+        #
+        # AN OWED FIRE IS EXCLUDED FROM `stale`, exactly as it is from that
+        # count on `status`: the stale sentence promises the session's next open
+        # will deliver the wake, and for a fire the supervisor is still retrying
+        # that is not the plan. It gets its own words instead — `retrying` after
+        # a failed attempt, `undelivered` past `UNDELIVERED_AFTER_ATTEMPTS`,
+        # where the attempt count is what tells the reader whether this is a busy
+        # host or a session that will never construct (`lop wake status` carries
+        # both figures).
+        legend_rows: list[tuple[str, str]] = []
+
+        def _owed_state(state: str) -> bool:
+            return any(
+                row.get("delivery") and row["delivery"].get("state") == state for row in rows
+            )
+
+        if _owed_state(STATE_RETRYING) or _owed_state(STATE_UNDELIVERED):
+            # THE OWED PAIR COMES FIRST (design round 1, D8). They are the two
+            # states an operator has to act on; the three below them all mean
+            # "the supervisor is not firing this at all", so a reader scanning
+            # for what `retrying` means used to pass every one of those first.
+            #
+            # EACH WORD GETS ONE SHORT CLAUSE AND THE REST IS SAID ONCE (D5).
+            # The two legends used to repeat ~100 characters of the same
+            # sentence three lines apart, and the clause that actually separates
+            # them — below vs at the stalled-fire threshold — was buried
+            # mid-sentence in each; at 60 columns that was 21 rows of legend
+            # under a 6-row table, past a standard screen.
+            # Classification owns this boundary: retries 2–4 are not "one
+            # failed attempt", and copy must follow future threshold changes.
+            if _owed_state(STATE_RETRYING):
+                legend_rows.append(
+                    ("retrying", f"fewer than {UNDELIVERED_AFTER_ATTEMPTS} failed attempts.")
+                )
+            if _owed_state(STATE_UNDELIVERED):
+                legend_rows.append(
+                    ("undelivered", f"{UNDELIVERED_AFTER_ATTEMPTS}+ failed attempts.")
+                )
+            legend_rows.append(
+                (
+                    "",
+                    "these are still owed and retried with a backoff; 'lop wake status' has "
+                    "the attempts and the error",
+                )
+            )
+        if any(
+            row["stale"] and not row["dormant"] and not row["ghost"] and not row.get("delivery")
+            for row in rows
+        ):
+            legend_rows.append(
+                (
+                    "stale",
+                    "the supervisor no longer fires these; they are delivered when "
+                    "their session is next opened",
+                )
+            )
+        if any(row["ghost"] for row in rows):
+            legend_rows.append(
+                (
+                    "ghost",
+                    "no session with this id exists on disk; nothing can fire these, and "
+                    "nothing clears them automatically",
+                )
+            )
+        if any(row["dormant"] for row in rows):
+            legend_rows.append(
+                ("dormant", "the session was stopped; reopening it re-arms its wakes")
+            )
+
+        if legend_rows:
+            # THE LEGEND COLUMN IS SIZED FROM THE WORDS ACTUALLY RENDERED, and
+            # the fold follows it (round 2, D12) so a legend wraps the way the
+            # rows do. Every earlier word was at most 8 characters, so a fixed
+            # 9-wide column was invisible; `undelivered` is 11 and a fixed column
+            # ran the label straight into its sentence ("undeliveredthe
+            # supervisor has…"), which is the one line that explains a state. A
+            # word-less row is the shared continuation (design round 1, D5): it
+            # aligns under the labels so the shared clause reads as belonging to
+            # both words above it.
+            import textwrap
+
+            legend_w = max(len(word) for word, _ in legend_rows) + 1
+            for word, text in legend_rows:
+                print()
+                for line in textwrap.wrap(
+                    f"{word:<{legend_w}}{text}",
+                    width=term_width,
+                    subsequent_indent=" " * legend_w,
+                ):
+                    print(line)
+
         return 0
 
     # status
@@ -3817,8 +4127,16 @@ def wake_command(args: argparse.Namespace) -> int:
     # be engaged, and the supervisor retires on a ghost-only store. Excluded
     # from `fireable` for exactly the same reason stale is.
     ghost = [row for row in armed if row["ghost"]]
-    stale = [row for row in armed if row["stale"] and not row["ghost"]]
-    fireable = [row for row in armed if not row["stale"] and not row["ghost"]]
+    # AN OWED FIRE STAYS FIREABLE PAST THE STALENESS BOUND. The supervisor
+    # retries it from its own record — that is the whole exception the ledger
+    # introduces — so counting such a row as `stale` would put this frame back
+    # in contradiction with the process: `stale` promises the wake is left to
+    # the session's next open, which is not the plan for a fire something is
+    # still working on.
+    stale = [row for row in armed if row["stale"] and not row["ghost"] and not row.get("delivery")]
+    fireable = [
+        row for row in armed if (not row["stale"] or row.get("delivery")) and not row["ghost"]
+    ]
     overdue = [row for row in fireable if row["overdue"]]
     upcoming = fireable  # already sorted soonest-first by `_wake_rows`
 
@@ -3836,6 +4154,75 @@ def wake_command(args: argparse.Namespace) -> int:
         found = wedged_runtime(config_dir(), session_id)
         if found is not None:
             wedged.append((session_id, found[0], found[1]))
+
+    # THE OWED FIRES, which nothing on this surface could report before: the
+    # supervisor engaged a due wake, could not hand it to a runtime, and the
+    # only trace was a WARNING in wake-supervisor.log (510 lifetime on this
+    # machine, 128 in one day) while every other screen showed the wake as an
+    # ordinary overdue row. The record behind this line is the one the
+    # supervisor retries from, so the count is what the supervisor owes rather
+    # than a re-derivation of it — the two cannot disagree.
+    def _delivery_rows(state: str | None) -> "list[dict[str, Any]]":
+        # GHOSTS ARE EXCLUDED (QA round 1, Q1). An owed record whose session has
+        # no transcript on disk is frozen: `_engage_one` refuses a ghost before
+        # any attempt, so nothing retries it and nothing will. Reporting it as
+        # "still owed and retried with backoff" beside the `ghost:` line (which
+        # says nothing can fire it) made this surface argue with itself, and
+        # `--json` said `retrying: 1` with `overdue: 0`. The record is still on
+        # disk and still the operator's to delete; it is simply not work in
+        # progress, which is the only thing this bucket claims.
+        return [
+            row
+            for row in armed
+            if row.get("delivery")
+            and not row["ghost"]
+            and (state is None or row["delivery"].get("state") == state)
+        ]
+
+    owed = _delivery_rows(None)
+    stalled = _delivery_rows(STATE_UNDELIVERED)
+    retrying = _delivery_rows(STATE_RETRYING)
+
+    def _attempts_label(row: dict[str, Any]) -> str:
+        """``"4 attempt(s) since <time>"`` for one owed fire.
+
+        The age is the part that matters: whether a fire has been retrying for
+        a minute or for an hour is what tells the operator whether this is the
+        loaded-host case or a session that will never construct. The timestamp
+        renderer is imported HERE rather than hoisted: this status surface
+        otherwise renders every time relatively (its own ``_format_due``
+        ladder), and importing the absolute one at the top would put a name in
+        scope that only this helper uses.
+        """
+        from local_operator.wakes.display import format_wake_time
+
+        record = row["delivery"]
+        attempts = record.get("attempts")
+        count = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
+        first = record.get("first_attempt_ms")
+        if isinstance(first, int) and not isinstance(first, bool):
+            return f"{count} attempt(s) since {format_wake_time(first)}"
+        return f"{count} attempt(s)"
+
+    def _next_attempt_s(row: dict[str, Any]) -> float | None:
+        nxt = row["delivery"].get("next_attempt_ms")
+        if not isinstance(nxt, int) or isinstance(nxt, bool):
+            return None
+        return (nxt - int(time.time() * 1000)) / 1000.0
+
+    def _retry_clause(nxt: float | None) -> str:
+        """``, next attempt in 3m`` / ``, retry due now`` / ``""``.
+
+        ``next_attempt_in_s`` is the recorded attempt minus the clock this run
+        read, so it is SIGNED and design round 1 (D3) caught the old rendering:
+        the clause was dropped whenever the value was not positive, which is
+        exactly the state where the retry is already due — so the line that must
+        answer "is this being retried?" ended at `retried with backoff` with no
+        when at all, while the neighbouring `undelivered:` line printed one.
+        """
+        if nxt is None:
+            return ""
+        return f", next attempt in {_format_duration(nxt)}" if nxt > 0 else ", retry due now"
 
     # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
     # monitoring consumer branching on `state` had to string-match prose, and
@@ -3906,6 +4293,37 @@ def wake_command(args: argparse.Namespace) -> int:
         "wedged": [
             {"session_id": session_id, "pid": pid, "heartbeat_age_s": age}
             for session_id, pid, age in wedged
+        ],
+        # The owed fires, one entry per wake whose delivery is outstanding.
+        # Additive: a monitoring consumer that predates this block keeps
+        # parsing the counts above.
+        "undelivered": len(stalled),
+        "retrying": len(retrying),
+        # AND THEY ARE A SUBSET OF `overdue`, stated as such (design round 1,
+        # D4): every owed fire is overdue by construction, so `overdue` +
+        # `retrying` + `undelivered` counted the same wakes twice and a consumer
+        # adding the keys got 6 of 5. The flat keys above stay for the readers
+        # that already parse them; this block is the one that says what they are.
+        "owed": {
+            "subset_of": "overdue",
+            "total": len(owed),
+            "retrying": len(retrying),
+            "undelivered": len(stalled),
+        },
+        "deliveries": [
+            {
+                "session_id": row["session_id"],
+                "message": row["message"],
+                "wake_id": row["wake_id"],
+                "occurrence_ms": row["delivery"].get("occurrence_ms"),
+                "state": row["delivery"].get("state"),
+                "attempts": row["delivery"].get("attempts"),
+                "first_attempt_ms": row["delivery"].get("first_attempt_ms"),
+                "last_attempt_ms": row["delivery"].get("last_attempt_ms"),
+                "next_attempt_in_s": _next_attempt_s(row),
+                "last_error": row["delivery"].get("last_error"),
+            }
+            for row in owed
         ],
     }
     if args.json:
@@ -3996,7 +4414,43 @@ def wake_command(args: argparse.Namespace) -> int:
         # is the line that answers "what is the supervisor working on".
         worst = max(row["overdue_s"] for row in overdue)
         summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        if owed:
+            # THE SUBSET IS STATED WHERE THE COUNTS ARE (design round 1, D4).
+            # Every owed fire is overdue by construction, so `overdue` already
+            # contains the `retrying:`/`undelivered:` lines below and an operator
+            # adding the three counted the same wakes twice (6 of 5 on the
+            # designer's store). One clause, on the line a reader is already
+            # doing the arithmetic against.
+            summary += f" — {len(retrying)} retrying, {len(stalled)} undelivered"
         print(_wrap_status(summary, "overdue:"))
+    if stalled:
+        # THE DEEPEST-FAILING ONE, because a count alone cannot distinguish "a
+        # wake is 20 seconds late on a busy host" from "a session has not
+        # constructible for an hour", and only the second is worth attention.
+        deepest = max(stalled, key=lambda row: row["delivery"].get("attempts") or 0)
+        print(
+            _wrap_status(
+                f"{len(stalled)} — {deepest['session_id']} {deepest['message']!r} could not be "
+                f"handed to a runtime: {_attempts_label(deepest)}"
+                f"{_retry_clause(_next_attempt_s(deepest))} (last error: "
+                f"{deepest['delivery'].get('last_error') or 'unknown'}). It is STILL OWED "
+                "and retried with backoff.",
+                "undelivered:",
+            )
+        )
+    if retrying:
+        soonest = min(
+            retrying,
+            key=lambda row: row["delivery"].get("next_attempt_ms") or 0,
+        )
+        print(
+            _wrap_status(
+                f"{len(retrying)} — {soonest['session_id']} {soonest['message']!r}: "
+                f"{_attempts_label(soonest)}, retried with backoff"
+                f"{_retry_clause(_next_attempt_s(soonest))}",
+                "retrying:",
+            )
+        )
     if stale:
         print(
             _wrap_status(
@@ -4035,12 +4489,28 @@ def wake_command(args: argparse.Namespace) -> int:
         # every other non-running state (round 2, D14): the surface points at
         # `lop wake install` elsewhere, and here no wake-subsystem action can
         # help at all, so it names the two commands that can.
+        #
+        # The remedy names the ladder's FIRST rung, with the forced rung's cost
+        # beside it (design round 2, D3). A lapsed beat — which is what this
+        # line describes — is exactly what `_identity_by_start_time` admits, so
+        # `lop stop --pid N` is the rung that acts on this state; `--force`
+        # re-reads the record only while the beat is still inside
+        # `HEARTBEAT_TIMEOUT_S` (`control._identity_by_record`), so here it cannot
+        # convert a refusal into a stop. It stays named for the shape it IS for —
+        # an owner that is still beating but silent — with what running it
+        # does. "It will not recover on its own" stays gone with it: a stale
+        # beat is evidence the owner stopped reporting, not a forecast about a
+        # long turn that may simply finish (``registry.classify``).
         print(
             _wrap_status(
                 f"{session_id} (pid {pid}) has not sent a heartbeat in "
-                f"{_format_duration(age)}; it holds the session lease, so its wake "
-                f"cannot fire. It will not recover on its own — 'lop sessions' shows "
-                f"it, 'lop stop --pid {pid}' ends it",
+                f"{_format_duration(age)} and is not answering its socket; it holds "
+                f"the session lease, so its wake cannot fire while it does not "
+                f"answer. Nothing here can recover it — 'lop sessions' shows it; "
+                f"'lop stop --pid {pid}' asks it to stop and signals it if it will "
+                f"not answer, while 'lop stop --pid {pid} --force' signal-stops the "
+                f"process, discarding its in-flight turn, for an owner that is "
+                f"still beating but silent",
                 "wedged:",
             )
         )
@@ -4063,14 +4533,63 @@ def _elide_id(session_id: str, width: int) -> str:
     return session_id[: max(width - 1, 1)] + "…"
 
 
-#: Width of `lop sessions`' trailing WHY column, in characters.
+#: Width of `lop sessions`' leading STATE column, in display CELLS.
+#:
+#: Sized for the one human PHRASE it can carry rather than for the tokens
+#: around it (``wedged`` is 6 cells, ``not answering`` 13). The column used to
+#: be 7 and printed the raw token, which is fine for a script and not for the
+#: one person-facing place the wake surfaces send a reader to (design round 2,
+#: D5; QA Q1). ``--json``'s ``state`` key is untouched: it is the wire value.
+STATE_COLUMN_WIDTH = 13
+
+
+def _state_cell(state: str) -> str:
+    """The STATE cell for a person, from the state token a machine reads.
+
+    ``wedged`` is the one value in this column that is a verdict rather than a
+    word: ``lop wake status`` ends its wedge line with "'lop sessions' shows
+    it", so this table is where an operator arrives, and it was the only
+    person-facing surface where the token stood with no sentence to qualify it.
+    It reads as ``not answering`` — the phrase every other surface uses, and the
+    one the adjacent ``HB_AGE`` column measures — while ``--json`` keeps
+    ``wedged`` for the ~15 call sites and the desktop catalogue's
+    ``status.code`` that branch on it.
+
+    ``stale`` deliberately keeps its token: it means the record's pid is GONE,
+    which is a different fact from this one rather than a longer way of saying
+    the same thing, and the state whose wording this change is about is the one
+    where the process is still there.
+    """
+    return "not answering" if state == "wedged" else state
+
+
+#: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
 #: exiting cleanly while this turn was running, and nothing recorded a stop``
-#: is 96 cells — and an unbounded column re-flows the whole table on a normal
+#: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
+
+
+#: Widths of `lop sessions`' three TEXT columns, in display CELLS.
+#:
+#: Named rather than left as literals inside the format specs because the row
+#: builder now has to MEASURE them: the header and the row have to agree on a
+#: number that is used twice, and a second literal is how the two drift. These
+#: three are the columns whose content this process does not author — a
+#: conversation title is whatever named the conversation, and a model label is
+#: the provider catalogue's own display name (``openai/gpt-5.2``, or a CJK
+#: display name) — so they are the ones a wide glyph can overrun. The remaining
+#: columns hold enums, pids and formatted byte counts, all ASCII and bounded.
+#:
+#: The values are unchanged from the literals they replace, and for ASCII text
+#: ``cell_len`` equals ``len``, so every existing listing renders byte-for-byte
+#: (design round 1, D2 on the WHY column's PR).
+NEEDS_COLUMN_WIDTH = 8
+CONVERSATION_COLUMN_WIDTH = 24
+MODEL_COLUMN_WIDTH = 24
 
 
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
@@ -4353,17 +4872,10 @@ def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) 
 
 
 def _format_duration(seconds: float) -> str:
-    """Compact duration for the sessions table: 45s, 12m, 3h, 2d."""
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h"
-    return f"{hours // 24}d"
+    """Compact duration shared with the wake panel: 45s, 12m, 3h, 2d."""
+    from local_operator.wakes.display import format_age
+
+    return format_age(seconds)
 
 
 def mobile_command(args: argparse.Namespace) -> int:

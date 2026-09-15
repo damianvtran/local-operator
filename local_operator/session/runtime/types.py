@@ -71,6 +71,27 @@ PROTOCOL_VERSION = 5
 DESKTOP_WATCH_CAPABILITY = "desktop-watch-v1"
 DESKTOP_WATCH_LEASE_S = 45.0
 
+#: Additive attach capability: this owner can retire its runtime for a
+#: desktop MOVE under an exclusivity fence (``retire_now`` with
+#: ``exclusive: true``).
+#:
+#: WHY A CAPABILITY AND NOT JUST A NEW FIELD. A move changes the directory a
+#: successor runtime spawns in, and a successor is engaged by EVERY facade that
+#: was attached when the retire landed — each from its OWN ``_cwd``. Two facades
+#: with different directories therefore request contradictory successors, and a
+#: sibling that does not read the rewritten desktop marker can win that race with
+#: the OLD path. Propagating the new target to arbitrary siblings is a broad
+#: cross-viewer protocol this release deliberately does not ship, so the bounded
+#: answer is to refuse a move while another ACTUAL attach is registered.
+#:
+#: An old owner ignores the unknown ``exclusive`` field and would retire anyway,
+#: so the desktop must never send it without first seeing this string in the
+#: owner's record: the capability is what makes the refusal fail-CLOSED on old
+#: owners instead of silently unsynchronised. Advertised only by an owner whose
+#: handle carries the safe retirement latch (``begin_retire``), because the
+#: fence promises a re-check at that latch and a reduced handle cannot honour it.
+EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).
@@ -254,9 +275,19 @@ def session_dir(root: "Path", session_id: str) -> "Path":
 
 
 #: How often a runtime rewrites its record's ``heartbeat_at``. The daemon
-#: treats a record as wedged (not merely quiet) after ``HEARTBEAT_TIMEOUT_S``.
-#: A ``serve`` daemon beats at the same interval — one freshness budget for
-#: both record kinds, so a reader needs a single rule for "is this alive".
+#: treats a record as wedged after ``HEARTBEAT_TIMEOUT_S``. A ``serve`` daemon
+#: beats at the same interval — one freshness budget for both record kinds, so
+#: a reader needs a single rule for "is this alive".
+#:
+#: THE BEAT IS AUTHORED BY THE RUNTIME'S OWN EVENT LOOP, and that is a limit on
+#: what freshness can prove rather than a detail. For ``kind=daemon``/``exec``
+#: the runtime shares the workload's loop, so a long turn or a starved
+#: scheduler stalls this write while the process is demonstrably working —
+#: measured at 105.8 s and 205.8 s gaps against the 45 s timeout below on
+#: sessions whose CPU time was advancing. Treat a stale beat as "the owner has
+#: not reported and is not answering", never as death and never as proof the
+#: workload stopped: see ``registry.classify``, which owns that rule, and the
+#: per-surface wording that follows it.
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 

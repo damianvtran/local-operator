@@ -49,11 +49,23 @@ def test_mobile_requires_exact_observed_token_and_never_reads_on_subscription() 
         == 404
     )
     store.publish(f"session/{sid}", b, "answer-b", "complete")
-    response = client.post(route, json={"completion_token": a})
+    # The token of the PREVIOUS completion is now superseded. It must not be
+    # answered with a 200 whose body says `unseen`: the phone's completion view
+    # stops retrying on any resolved call, so that answer left the mark on for
+    # good. The refusal names the code so the phone re-reads and re-arms.
+    superseded = client.post(route, json={"completion_token": a})
+    assert superseded.status_code == 409
+    assert superseded.json()["code"] == "superseded_completion_token"
+    assert "superseded" in superseded.json()["error"]
+    assert store.state(f"session/{sid}")["revision"] == [
+        2,
+        0,
+    ], "a refused receipt moved the watermark"
+    response = client.post(route, json={"completion_token": b})
     assert response.status_code == 200
-    assert response.json()["attention"]["unseen"]
+    assert response.json()["attention"]["unseen"] is False
     assert response.json()["attention"]["completion_token"] == b
-    assert client.post(route, json={"completion_token": b}).json()["attention"]["unseen"] is False
+    # Reordered duplicate delivery of the old receipt still converges.
     assert client.post(route, json={"completion_token": a}).json()["attention"]["unseen"] is False
     assert not AttentionStore(config_dir() / "attention.db").state(f"session/{sid}")["unseen"]
 

@@ -15,10 +15,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.info.model import format_duration
 from local_operator.resume import SessionRow
 from local_operator.session.creation import session_category, session_created_at
 
 logger = logging.getLogger(__name__)
+
+#: The words for a row whose owner has stopped reporting (``live_state ==
+#: "wedged"``), optionally followed by the measured age.
+#:
+#: A constant rather than a literal in :meth:`CatalogEntry.status` because a
+#: SECOND home for it already exists: the sidebar's glyph/description pairing
+#: tests name every phrase the glyphs may carry, and a copy of this string there
+#: is a copy that drifts. ``/info`` and the wake surfaces paraphrase the same
+#: fact in their own sentences — those are sentences, not labels, and they are
+#: asserted where they are built.
+WEDGED_STATUS = "Not answering · process alive"
 
 
 @dataclass(frozen=True)
@@ -198,8 +210,11 @@ class CatalogEntry:
 
         * ``pending`` — a parked gate. Already outranked unseen, and still
           does: a person is blocked on this row right now.
-        * ``wedged`` — broken NOW. A stale mark from a turn that did finish
-          must not hide a runtime that has since stopped answering.
+        * ``wedged`` — not answering NOW. A stale mark from a turn that did
+          finish must not hide a runtime that has since stopped reporting, and
+          a stale beat must not be read as death either: the words below say
+          what was measured (``heartbeat_age_s``) rather than what it might
+          mean.
         * ``busy`` — the reported bug. The session is working; painting the
           previous turn's outcome over its own spinner made seven resumed,
           healthy sessions read as seven failures.
@@ -255,8 +270,20 @@ class CatalogEntry:
         # BEFORE the unseen branch, and mirrored by `shows_completion_mark`,
         # which is what the sidebar suppresses the mark on. A row that is
         # wedged or busy describes itself by what it is doing now.
+        #
+        # "Not answering", NOT "Not responding": the first is what the evidence
+        # supports (a beat the owner's own loop stopped writing for longer than
+        # ``HEARTBEAT_TIMEOUT_S``) and the second reads as a verdict on the
+        # process. The qualifier carries the two facts that stop a reader
+        # inferring death — the pid is still there, and here is the measured
+        # age — because ``registry.classify`` is explicit that a stale beat
+        # does not establish that the process stopped executing. This is also
+        # the desktop catalogue's ``status.label``, so the same sentence
+        # travels to the app unchanged.
         if self.row.live_state == "wedged":
-            return "Not responding"
+            age = self.row.heartbeat_age_s
+            measured = f" (last heartbeat {format_duration(age)} ago)" if age is not None else ""
+            return f"{WEDGED_STATUS}{measured}"
         if self.row.live_state == "busy":
             return "Working"
         if self.shows_completion_mark:
@@ -391,10 +418,19 @@ def decorate_rows(
     """Fill in each row's runtime state, and float the ones needing a person.
 
     Two reads for the whole list: the discovery records say which sessions
-    are running, working, attached or wedged, and the wake index says which
-    have reminders armed. Best-effort — a picker that cannot read either
+    are running, working, attached or not answering, and the wake index says
+    which have reminders armed. Best-effort — a picker that cannot read either
     one still lists every session exactly as it did before, because the
     fields are defaulted and the markers simply do not appear.
+
+    THE STATE IS TAKEN, NOT DERIVED. ``registry.scan`` owns the vocabulary
+    (its ``classify`` is the one place ``live``/``wedged``/``stale`` is
+    decided) and the mapping below is total over those three words and nothing
+    else. The heartbeat AGE comes from that same owner rather than from a
+    second subtraction here, so the tooltip cannot disagree with the verdict
+    about what a future-dated stamp means; the zombie probe is skipped because
+    the verdict has already been reached and a second ``ps`` fork per row per
+    poll would buy nothing.
     """
     from local_operator.session.runtime import registry
 
@@ -443,6 +479,10 @@ def decorate_rows(
         kind = ""
         if record_state is not None:
             record, state = record_state
+            # ``wedged`` here means the owner has stopped reporting, which is a
+            # fact about its RECORD and not a diagnosis of its process: a long
+            # turn on an in-process runtime produces it while the session is
+            # working. The tooltip says exactly that, with the age beside it.
             if state == "wedged":
                 live_state = "wedged"
             elif getattr(record, "busy", False):
@@ -458,6 +498,9 @@ def decorate_rows(
             kind = str(getattr(record, "kind", "") or "")
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+        age: float | None = None
+        if record_state is not None:
+            age = registry.classify(record_state[0], check_zombie=False).heartbeat_age_s
         updated.append(
             row._replace(
                 live_state=live_state,
@@ -465,6 +508,7 @@ def decorate_rows(
                 wakes=len(schedules),
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
                 kind=kind,
+                heartbeat_age_s=age,
             )
         )
     return sorted(updated, key=lambda row: 0 if row.pending else 1)
@@ -635,13 +679,17 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
                 # A directory the scan established is a subagent/hidden session
                 # cannot carry a desktop marker, so the stat below asks a
                 # question whose answer is already known. ``desktop.json`` has
-                # exactly ONE writer — ``DesktopSessions.create`` in
-                # ``server/utils/desktop_sessions.py`` — which mints a fresh
-                # ``uuid4`` directory and never writes an origin marker into it;
-                # nothing anywhere adds a desktop marker to a directory that
-                # already exists. Skipping these is HALF the saving of the
-                # inode-qualified scan, because the hidden population is ~91% of
-                # the store and every one of them landed here.
+                # exactly ONE WRITER FUNCTION — ``write_desktop_marker`` in
+                # ``server/utils/desktop_sessions.py`` — reached by two CALLERS:
+                # ``DesktopSessions.create``, which mints a fresh ``uuid4``
+                # directory, and the move route, which rewrites the marker of an
+                # EXISTING user session. Neither ever adds a marker to a
+                # directory that is hidden or a child of one, which is the
+                # property this skip relies on: a move can only touch a
+                # directory the catalogue already shows as a session.
+                # Skipping these is HALF the saving of the inode-qualified scan,
+                # because the hidden population is ~91% of the store and every
+                # one of them landed here.
                 if entry.name in hidden:
                     continue
                 try:

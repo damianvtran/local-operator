@@ -52,6 +52,12 @@ def cases() -> list[dict[str, Any]]:
                 # band's connection state, and its whole point is the docked
                 # composer at the size the clipped row was reported at.
                 args += ["100x30", variant]
+            elif script == "liveness_shot.py":
+                # The two surfaces that word a quiet owner differently, at the
+                # script's own default size: `/info` (the row and the shared
+                # caveat) and the sidebar (whose words are the hover tooltip
+                # only, so the frame needs the hover to show them at all).
+                args += ["110x30", variant]
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
             elif script == "sidebar_shot.py":

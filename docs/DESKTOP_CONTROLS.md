@@ -91,11 +91,77 @@ and rendered verification.
 
 All paths start `/v1/desktop/sessions/{id}` unless noted.
 
+- `POST /working-directory`: request_id and cwd, the live-session half of the
+  terminal's `/move` and the same implementation. `cwd` resolves against the
+  SESSION's current directory (`~` and `../sibling` accepted); the answer is
+  `{cwd,label,outcome,will_wait}` with outcome `cold|rebound|unchanged`. The
+  new directory is durable in BOTH `desktop.json` and the bridge's own `cwd`
+  before anything is retired, and a refused move restores both. THE SUCCESSOR IS
+  ENGAGED BY THE RETIRE FRAME, NOT BY THIS REQUEST: the runtime leaves by the
+  `retiring` route, the viewer goes cold and the bridge re-engages eagerly, and
+  the successor's bind is what republishes `frontend.cwd`.
+
+  Two failure shapes, and the difference matters to the client. An ordinary
+  refusal is a `409` carrying the session's own sentence (mid-turn, runtime too
+  old to be moved, work that arrived during the retire, absent/unenterable path,
+  unreadable/unwritable marker, another client attached, an older desktop
+  window). An UNKNOWN owner outcome — the retire request left the process and no
+  definitive answer came back, or a rollback could not run — is a `503
+  {"detail":{"code":"move_outcome_unknown","message":...}}` (`code` and `message`
+  ride under `detail`, the envelope every other error body on this API uses and
+the one the desktop client reads): nothing is rolled back, the
+  receipt stays pending, and the client reconciles against actual owner state
+  before claiming either directory. The request is also at-most-once
+  (`retry_safe=False`): a pending row is answered 409 indeterminate rather than
+  re-executed, and a client that still wants the move mints a NEW id.
+
+  EXCLUSIVITY IS BOUNDED, ON PURPOSE. A move retires the runtime and every
+  attached facade then engages a successor from its OWN cwd, so the route refuses
+  while another actual attach is registered (`409 … open in another terminal or
+  attached client. Disconnect that client, then move again.`) and while a mounted
+  desktop viewer has not negotiated the replacement frame (`409 … Update the
+  desktop app, then move again.`). Several desktop windows behind ONE bridge are
+  one attach and are unaffected. A TUI-initiated `/move` keeps the legacy,
+  non-exclusive shape — mixed-viewer propagation is a non-goal of this release.
+
+  Gated by `features.session_move >= 2` AND `features.frontend_replace >= 1`
+  (the accepted directory reaches an already-mounted viewer through the
+  `frontend.replace` frame, not through a same-sequence delta); `move` stays out
+  of `OWNER_COMMANDS`, so a bare `/move` remains a native_action that asks the
+  renderer to open its picker. Subagent children are separate sessions on their
+  own leases and are NOT moved with their parent — a move mid-subagent leaves the
+  child in the old tree.
 - `POST /credentials`: action `list|store|forget`, optional key, secret value only
   for store, confirmed=true for forget. It calls the runtime's `credential_op`. Values
   never enter the command receipt database or transcript; only key names are
   journalled by the existing runtime. `/credential <anything>` is rejected rather
   than accidentally recording a secret. Names-only listing does not expose values.
+- `POST /mcp/credentials`: the MCP-only encrypted write, `{name, values:
+  Record<secretId, SecretStr>, confirmed_replace: string[]}`. It is deliberately a
+  SEPARATE route from `POST /credentials` above, which is the provider/session
+  credential surface: this one stores into the encrypted secret store and never
+  touches `credentials.env`, never enters the `/credential` variable store, and
+  therefore never joins the environment of every unrelated `bash` child. Every
+  submitted ID is validated against the named server's own declared `${NAME}`
+  references BEFORE any write, so an unknown server, a config FIELD name
+  (`Authorization`), an undeclared ID, an extra field, an empty value or a
+  missing replacement confirmation returns a coded refusal
+  (`{name, saved_ids, failed_ids, code}`) with the stores unchanged — the
+  `confirmed_replace` gate, the declared-ID check and the per-key validation all
+  run before the first `store.set`. Replacement is confirmation-gated because the
+  same secret can be shared by several bindings and sessions, so overwriting one
+  is a decision the caller has to state. An oversized body never reaches the
+  handler:
+  the request model rejects it and the app answers **422** with
+  `{"detail": "The request has invalid fields."}` (never the rejected input,
+  which is why the app owns that response). One write CAN still land alone: a
+  store failure part-way through a multi-key body returns `code:
+  store_unavailable` with the ids written so far in `saved_ids`, so the caller
+  sees exactly which keys landed rather than a whole-body rollback. The response
+  carries `{name, saved_ids, failed_ids, code}` and never echoes a value. The
+  owner's RPC is a dedicated `mcp_credentials` op, never a `mcp.control` argument
+  — values must not reach the slash argument, the command journal, or a request
+  receipt.
 - `POST /fork`: stable request_id, optional message, boundary=`next_safe`.
   The runtime refuses compaction and uses `Session.request_fork` during a turn;
   otherwise it uses `fork_session`. This is the canonical complete-history fork
@@ -194,9 +260,25 @@ transport does **not** prove Google Workspace account authorization.
 POST the same path accepts the closed `MCPControl` schema:
 
 - `add`: name, scope global/project, either command+args[] or url; optional env,
-  headers and oauth boolean. Env/header values must be `${NAME}` references.
-  URLs reject inline credentials, query and fragment. Command arguments remain an
-  array; no shell evaluation or whitespace splitting. Store secrets separately.
+  headers and oauth boolean. Env/header values must be `${NAME}` references,
+  resolved at connect time from the encrypted secret store; a legacy
+  `credentials.env` value is used ONLY when the reference is definitively absent
+  from that store (never on a denied, locked, corrupt or empty entry). A reference
+  that cannot be resolved fails the connect naming the key; it never
+  reaches the server as text. A doubled `$` (`$${HOME}`) escapes one to literal
+  text. URLs reject inline credentials, query and fragment.
+  Command arguments remain an array; no shell evaluation or whitespace splitting.
+  Store secrets separately, through `POST /mcp/credentials`.
+
+  Each server row also publishes `secret_refs: [{id, bindings: [{field, key}]}]`
+  — the reference IDs its PRISTINE config declares and the destinations they are
+  bound into, deduped by ID. This is metadata only: no template text, no literal
+  fragment and no value. `environment_keys`/`header_keys` remain as INFORMATIONAL
+  map keys and are never secret IDs — writing their values as credentials is the
+  bug this metadata exists to prevent. `probe` additionally answers
+  `secret_refs`, `credential_state: [{id, source: encrypted|legacy|missing|
+  unavailable}]` and `key_submission_supported`; a server declaring no reference
+  gets an honest setup sentence rather than a guessed field binding.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver
   refuses removal of foreign imported definitions and does not shadow them.
 - `reload`, `connect`, `disconnect` use the session's existing manager. Disconnect
