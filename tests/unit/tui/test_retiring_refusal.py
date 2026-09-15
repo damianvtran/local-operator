@@ -201,16 +201,17 @@ async def test_following_the_refusal_inside_the_window_does_not_stack_rows() -> 
     echo before returning the draft, so the transcript never accumulates rows
     for messages nobody received.
 
-    AND WHAT THE COMPOSER REALLY DOES, corrected in round 4 (UX U1): this path
-    does NOT park on the second press. It cannot — the submit clears the editor,
-    so the restore always finds it empty and always takes the refill branch, and
-    the seam is appended again on every press. The operator's draft comes back
-    one blank line longer each time; nothing is lost and the resend still lands
-    as one row. The cell that used to assert the parking behaviour ASSIGNED
-    ``editor.text`` before each press, so it never reached the state its comment
-    named — the presses below are real, which is the whole correction (no
-    behaviour change: at most one blank line is cosmetic, and the seam is what
-    keeps the two thoughts separable).
+    AND WHAT THE COMPOSER DOES, in two corrections. Round 4 (UX U1): this path
+    does NOT park on the second press — it cannot, because the submit clears the
+    editor and the restore always finds it empty and refills. The cell that
+    claimed otherwise ASSIGNED ``editor.text`` before each press, so it never
+    reached the state its comment named; the presses below are real. Round 5
+    (design D1): refilling must not append a seam that is already there, or
+    following the notice's own "send it again" grows the draft by a blank line
+    per press — the composer went from 1 row to 3 and the transcript paid a row
+    for each attempt. So the assertion below is that the composer is EXACTLY the
+    same after every press, which is the cell that fails if the guard is
+    removed.
     """
     session = _retiring_session()
     app = OperatorApp(lambda: _factory(session))
@@ -220,17 +221,20 @@ async def test_following_the_refusal_inside_the_window_does_not_stack_rows() -> 
         assert editor.text == "the build is moving" + RESTORE_SEAM, editor.text
 
         # Pressed for real: the composer already holds the returned draft, so
-        # this IS the operator following "send it again". The submit's own strip
-        # takes the trailing seam out of the message; the ACCEPTED snapshot
-        # keeps it, and the restore appends another — hence the growth.
-        for expected in (RESTORE_SEAM * 2, RESTORE_SEAM * 3):
+        # this IS the operator following "send it again" — and the seam must not
+        # accumulate (design round 5, D1). The submit's own strip takes the
+        # trailing seam out of the MESSAGE; the accepted snapshot keeps it, and
+        # the restore is what must not add a second.
+        for _ in range(2):
             await pilot.press("enter")
             for _ in range(100):
                 await pilot.pause()
                 await asyncio.sleep(0.01)
-                if editor.text.endswith(expected):
+                if editor.text == "the build is moving" + RESTORE_SEAM:
                     break
-            assert editor.text == "the build is moving" + expected, editor.text
+            assert (
+                editor.text == "the build is moving" + RESTORE_SEAM
+            ), "the seam accumulated: " + repr(editor.text)
             assert not [
                 b for b in _blocks(app) if isinstance(b, DraftRecoveryNotice)
             ], "this path cannot park: the refill always wins"

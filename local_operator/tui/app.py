@@ -5117,15 +5117,17 @@ class OperatorApp(App[None]):
         restored = accepted or SessionDraft(text=text)
         # ``seam`` is opt-in per CALLER rather than a property of the restore,
         # because it shows a new line in the composer and that is a visual
-        # change to a surface. Every branch that hands a refused message back
-        # while the operator is not looking passes it — oversize, the drain, and
-        # the runtime's death — because the weld they share is ONE behaviour:
-        # leaving one route protected while its sibling welded the operator's
-        # next sentence onto their returned draft is the inconsistency UX round
-        # 4 filed, and it is not fixable by argument once the drain route shows
-        # the boundary. The undeliverable-steer restore further down this file
-        # still passes nothing, and that residual is recorded in the PR body
-        # rather than guessed at here.
+        # change to a surface. The three SOCKET-refusal routes pass it —
+        # oversize, the drain, and the runtime's death — because the weld they
+        # share is ONE behaviour: leaving one protected while its sibling welded
+        # the operator's next sentence onto their returned draft is the
+        # inconsistency UX round 4 filed, and it is not fixable by argument once
+        # the drain route shows the boundary. The undeliverable-STEER handback
+        # further down this file is a fourth route and passes nothing: a steer
+        # was never admitted and its return is a different story, which is
+        # recorded in the PR body's "Not addressed here" rather than guessed at
+        # here (review round 5, MINOR 3 — the sentence that used to be here
+        # claimed a body entry that did not exist).
         # No caret is set on `restored`: every draft this funnel builds is a
         # RESTORE, and `_load_editor_draft` lands a caretless draft at the END of
         # the text — the resend gesture's own landing (UX round 3, U2). The
@@ -5161,11 +5163,21 @@ class OperatorApp(App[None]):
                     # the two thoughts stay separable with one backspace. It
                     # costs the operator nothing but a paragraph break, which is
                     # what two separate thoughts are.
-                    # ``replace``, not a rebuilt draft: `SessionDraft` has 18
+                    # ``replace``, not a rebuilt draft: `SessionDraft` has 19
                     # fields and this branch knows about 3 of them, so the next
                     # field a restore must preserve would have been dropped here
                     # silently (review round 4, NIT 2).
-                    restored = replace(restored, text=restored.text + RESTORE_SEAM)
+                    #
+                    # AND ONLY ONCE. A press that follows the notice's own "send
+                    # it again" re-restores through this same funnel, and the
+                    # draft it is handed already ends in the seam it put there,
+                    # so appending unconditionally grew the composer by a blank
+                    # line per press — one row became three, and the transcript
+                    # paid a row for each attempt (design round 5, D1). The
+                    # guard is what keeps a boundary a boundary instead of a
+                    # tally of attempts.
+                    if not restored.text.endswith(RESTORE_SEAM):
+                        restored = replace(restored, text=restored.text + RESTORE_SEAM)
                 self._load_editor_draft(restored)
                 return
         elif not source.aside_open and not source.draft.text and not source.draft.attachments:
