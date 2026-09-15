@@ -21,6 +21,71 @@ from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
+@pytest.fixture(autouse=True)
+def _hold_the_attention_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the app's own 1 s attention tick, so a driven poll is the only one.
+
+    ``OperatorApp`` polls completion attention from a Textual interval on the
+    SAME event loop these tests drive (``set_interval(1.0,
+    self._poll_completion_attention)``, armed in ``on_mount`` at
+    ``app.py:8543`` and ``app.py:4559``), so every ``await
+    app._poll_completion_attention()`` in this file is racing a tick it did not
+    ask for. The window is fixed and small: the tick is due 1 s after mount and
+    these cases reach their assertion about half a second in, so on an idle
+    host the race is invisible and on a loaded one it is not. It has now been
+    observed on both: locally under worker starvation (1 run in 3, then 2 in 3,
+    with the CI assertion text reproduced byte for byte), and on CI run
+    34910432097 -- where it went red at head 3ced838fc on a commit that changed
+    no production code. By the time
+    ``test_a_rendered_result_is_receipted_without_a_focus_report`` reached its
+    precondition the tick had already set ``_attention_focus_observed``
+    through the measured-focus arm, and
+    ``test_a_receipt_that_raced_a_newer_completion_says_so`` had already
+    receipted the stale token, so its own poll produced the SECOND
+    acknowledgement the assertion saw (``['<stale>', '<stale>']``).
+
+    Both assertions are about what ONE poll decides, and every test here asks
+    for that poll by name, so the interval is registered PAUSED rather than
+    dropped: the app's timer census stays what production made it, and what
+    the tick would have decided is still decided -- just once, by the caller
+    that the assertions below are about. Nothing is loosened by this: taking
+    the measured-focus arm or the stale-token acknowledgement out of the
+    production path still fails these tests, it only stops an unscheduled
+    second caller from deciding first.
+    """
+    original = OperatorApp.set_interval
+
+    def set_interval(self: OperatorApp, *args: Any, **kwargs: Any) -> Any:
+        callback = args[1] if len(args) > 1 else kwargs.get("callback")
+        if _is_the_attention_tick(self, callback):
+            # `set_interval` takes `pause` as keyword-only, so this cannot
+            # collide with a positional argument the caller passed.
+            kwargs["pause"] = True
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(OperatorApp, "set_interval", set_interval)
+
+
+def _is_the_attention_tick(app: OperatorApp, callback: Any) -> bool:
+    """Whether ``callback`` is whatever this app now calls its attention poll.
+
+    Identity against the attribute the app is about to HAND OVER, not against
+    its ``__name__``. The two arming sites are both ``self.set_interval(1.0,
+    self._poll_completion_attention)``, so the live attribute is exactly the
+    callback that arrives -- and it stays exactly the callback that arrives
+    when something has wrapped the method, which is not hypothetical: a probe
+    that wrapped ``_poll_completion_attention`` for its own logging renamed the
+    callback to ``wrapped_poll``, a name check then left this tick unpaused, and
+    the fixture silently did nothing. There is no name to depend on here, and
+    none is used: whichever callable the app arms its interval with IS the one
+    this module must hold.
+    """
+    if callback is None:
+        return False
+    attention = getattr(app, "_poll_completion_attention", None)
+    return attention is not None and callback == attention
+
+
 class ReceiptSession(FakeSession):
     def __init__(self, path: Path, *, long: bool = False) -> None:
         super().__init__()
