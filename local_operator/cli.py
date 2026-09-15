@@ -4638,14 +4638,20 @@ WHY_COLUMN_WIDTH = 48
 #: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
 #: — a listing with no draining runtime is byte-for-byte what it was before.
 #:
-#: WIDENED FROM 40 when the phrase grew the drain’s bound (UX round 2, U9): the
+#: A TRAILING COLUMN RATHER THAN A TOKEN IN ``STATE``, which is the decision the
+#: drain's first round recorded (design round 2, D3, kept rather than changed):
+#: ``STATE`` holds seven cells that consumers branch on (``state == "stored"``),
+#: so teaching it a new word to carry a display fact would spend a value the
+#: machine reads to say something only a person needs.
+#:
+#: WIDENED FROM 40 when the phrase grew the drain's bound (UX round 2, U9): the
 #: row that carries this is the one the operator reads most, and
 #: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
-#: can take away. The number is the phrase’s own cell width and is pinned
-#: against it by ``tests/unit/test_cli_sessions.py`` rather than imported — this
+#: can take away. The number is the phrase's own cell width, pinned against it by
+#: ``tests/unit/info/test_sessions_extraction.py`` rather than imported — this
 #: module keeps session internals out of its module scope on purpose (see the
-#: header) — so a reword there fails loudly here instead of silently cutting
-#: the new clause off the row.
+#: header) — so a reword of the phrase fails loudly there instead of silently
+#: cutting the new clause off the row.
 LEAVING_COLUMN_WIDTH = 51
 
 
