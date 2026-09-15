@@ -2130,6 +2130,39 @@ class TestWarmSessionImports:
         )
         factory.warm_session_imports()  # must not raise
 
+    def test_it_also_warms_what_is_not_an_import(self, monkeypatch) -> None:
+        """Two costs ride the boot warm beside the module list, and both are
+        easy to drop because neither is a module.
+
+        * The tokenizer. tiktoken's ``cl100k_base`` table is built on first
+          use, inside the first turn's critical path (122 ms to build, 0.004 ms
+          once built), and nothing on the import path touches it — so a warm
+          that only imported modules would leave it exactly where it was.
+        * The bytecode cache. It repairs the NEXT process, not this one, which
+          is why it is asked for here rather than awaited.
+
+        Pinned as a call-order-free assertion on the two seams, because the
+        failure mode is silent: ``warm_session_imports`` still returns happily
+        with both gone, and the only symptom is a first turn that is 100 ms
+        slower than the benchmark said.
+        """
+        import local_operator.bytecode as bytecode
+        import local_operator.session_factory as factory
+        from local_operator.compaction import tokens as tokens_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(factory, "_WARM_IMPORTS", ())
+        monkeypatch.setattr(tokens_mod, "warm_tokenizer", lambda: calls.append("tokenizer"))
+        monkeypatch.setattr(
+            bytecode,
+            "warm_bytecode_cache_in_background",
+            lambda: calls.append("bytecode"),
+        )
+
+        factory.warm_session_imports()
+
+        assert sorted(calls) == ["bytecode", "tokenizer"]
+
 
 @pytest.mark.asyncio
 async def test_configured_variables_reach_a_real_tool_call(

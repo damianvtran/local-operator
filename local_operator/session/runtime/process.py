@@ -1729,6 +1729,17 @@ async def amain() -> int:
 
 
 def main() -> int:
+    # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
+    # lease: it is the only piece of boot work that nothing else on this path
+    # touches until the user's first message has already been sent, so
+    # overlapping it costs nothing and removes ~120 ms from this process's
+    # time-to-first-token (see ``compaction.tokens.warm_tokenizer``). It is a
+    # daemon thread whose failure mode is "the cost moves back to where it was"
+    # — never a boot failure.
+    from local_operator.compaction.tokens import warm_tokenizer_in_background
+
+    warm_tokenizer_in_background()
+
     # A child has no terminal and no inherited log stream — without this its
     # warnings (a failed prompt, a dead provider) vanish, which is how a
     # silently-dropped turn went undiagnosed. It writes a file of its own; why
