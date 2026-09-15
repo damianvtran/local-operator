@@ -5601,11 +5601,15 @@ class Session:
             return
         for line in lines:
             try:
-                # The quiet mailbox shape, never a wake: these were spooled
-                # as quiet notes, and a drain that opened a turn per row
-                # would turn "read this when you run" into "start work now".
+                # The row's own ``wake``, never a guess: a row spooled by a
+                # runtime that was leaving a replaced build carries what its
+                # sender asked for, and ``send --wake`` asked for a turn. Rows
+                # written before the field existed read as notes, unchanged.
                 await self.receive_peer_message(
-                    line.text, mode="mailbox", wake=False, sender=line.sender
+                    line.text,
+                    mode="mailbox",
+                    wake=bool(getattr(line, "wake", False)),
+                    sender=line.sender,
                 )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
@@ -11595,6 +11599,173 @@ class Session:
         self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
+    def retire_wakes_to_inbox(self) -> None:
+        """From now on, a fired wake is SPOOLED for whoever opens next.
+
+        Called when this session's runtime has committed to leaving for a build
+        it can no longer be trusted to run (``ServingSessionHandle.begin_drain``,
+        driven by ``process._BuildWatch``'s bound or its files-gone probe). The
+        invariant it holds is the one the wake layer would otherwise break: a
+        wake that comes due while the runtime is draining must not open a turn
+        against a build whose files are being replaced, and must not be silently
+        DROPPED either — by the time the scheduler delivers an occurrence it has
+        already advanced and persisted the schedule, so a wake swallowed here is
+        a reminder the user never gets and never hears about.
+
+        The inbox is the vehicle because it is the one channel that survives the
+        handover: ``process._drain_inbox_into`` reads it at the successor's boot,
+        BEFORE the control socket listens, so the row lands ahead of anything a
+        client can send.
+
+        TWO SHAPES, chosen by whether the fire RETIRED its schedule
+        (``due.final``), and both end with the successor RUNNING the occurrence
+        rather than filing it as text — see :meth:`_spool_wake_to_inbox` for why
+        the distinction is not cosmetic.
+
+        Overwrites the resume catch-up shim if one is installed, deliberately: a
+        runtime that is leaving does not owe a catch-up of its own — the
+        successor loads the same index and folds the same overdue wakes.
+        """
+        #: One-shot schedules this drain swallowed, written to the index by
+        #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
+        #: ``__init__`` because a session that never drains never has any, and
+        #: the hook that fills it is installed on this same line.
+        self._wake_rearms: list[WakeSchedule] = []
+        self._wake_deliver_hook = self._spool_wake_to_inbox
+
+    async def _spool_wake_to_inbox(self, due: DueWake) -> None:
+        """The draining hook: hand one fired wake to the successor. Never raises.
+
+        A fire that RETIRED its schedule (``due.final``: a one-shot, or the last
+        occurrence of a ``limit``/``until_at`` series) leaves nothing that can
+        engage a runtime. The index row the wake supervisor raises its errand
+        from goes with the schedule, and no errand is raised for a schedule that
+        has already fired — so spooling the text alone would keep the reminder
+        and never run the work until a human opened the conversation. That is
+        the ''scheduled work silently not running'' shape this whole change is
+        about (review round 1, MINOR 3), so the occurrence is RE-ARMED as a
+        one-shot due now and :meth:`hand_wakes_to_successor` writes it at the
+        exit: the supervisor then starts a runtime for the session, which folds
+        it as an overdue occurrence and runs it on the new build.
+
+        A fire that left a NEXT occurrence needs none of that — the schedule is
+        still in the index, so the supervisor engages the session on its own
+        when the next occurrence comes due. The fired text is spooled with
+        ``wake=True``, so the successor RUNS the occurrence that was missed when
+        it boots rather than filing it as a note it might never act on.
+
+        Loud on failure rather than silent, and the re-arm has the spool as its
+        fallback: a wake that ended up in neither place is lost work the user is
+        waiting on, and a log line is the only trace it existed
+        (``design-runtime-autorefresh`` §5.3).
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        if due.final and self._queue_wake_rearm(due):
+            return
+        text = format_wake_delivery_text(due)
+        missed_note = self._missed_delivery_note(due)
+        if missed_note:
+            text = f"{missed_note}\n\n{text}"
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            logger.warning(
+                "wake %s fired while draining and could not be spooled (no session dir)",
+                due.schedule.id,
+            )
+            return
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(text=text, sender={}, mode="mailbox", written_at=time.time(), wake=True),
+            )
+        except Exception:  # noqa: BLE001 — a drain must not die on a spool write
+            logger.warning(
+                "wake %s could not be spooled while draining", due.schedule.id, exc_info=True
+            )
+            return
+        if not written:
+            logger.warning("wake %s could not be spooled while draining", due.schedule.id)
+
+    def _queue_wake_rearm(self, due: DueWake) -> bool:
+        """Queue the one-shot that replaces a schedule this fire retired.
+
+        Same id, same message, due NOW and no longer repeating: what the
+        successor owes is this occurrence, not a new automation, and keeping the
+        id is what lets the user cancel the thing they scheduled by the handle
+        they know. ``fired_count`` is left alone — the delivery the successor
+        makes IS this occurrence, and the count moves when it lands.
+
+        False when there is nowhere to queue it, so the caller spools the text
+        instead: the one outcome this path must not produce is an occurrence
+        that exists neither as a schedule nor as a spooled reminder.
+        """
+        queued = getattr(self, "_wake_rearms", None)
+        if queued is None:
+            return False
+        try:
+            queued.append(
+                due.schedule.model_copy(
+                    update={
+                        "next_due_at": int(time.time() * 1000),
+                        "every_ms": None,
+                        "until_at": None,
+                        "limit": None,
+                    }
+                )
+            )
+        except Exception:  # noqa: BLE001 — the caller falls back to the spool
+            logger.warning(
+                "wake %s could not be re-armed for the successor", due.schedule.id, exc_info=True
+            )
+            return False
+        logger.info(
+            "session runtime: wake %s re-armed for the successor (its fire retired the schedule)",
+            due.schedule.id,
+        )
+        return True
+
+    async def hand_wakes_to_successor(self) -> int:
+        """Write the wakes this drain swallowed. Returns how many.
+
+        Called by ``process._drain_for`` at the EXIT, not by the deliver hook,
+        for two reasons that are both about the scheduler owning schedule state:
+        the hook runs inside ``WakeScheduler.pump``'s write lock, where this
+        write would deadlock against its own lock, and the pump persists its
+        post-retire list moments later, which would overwrite a write made from
+        the hook. At the exit that persist has landed, so what lands here is what
+        the index keeps.
+
+        The write goes through ``_persist_wake_schedules`` — transcript first,
+        then the derived index — for the same reason every other schedule change
+        does: the transcript is the source of truth, and a re-arm that existed
+        only in the index would be erased by the successor's own open-time
+        ``_rebuild_wake_index_entry`` before it could fire. The list written is
+        this session's LIVE schedules plus the re-armed ones, with any live copy
+        of a re-armed id dropped: the one-shot supersedes it, and the index must
+        not carry the same id twice.
+
+        Never raises: a runtime that has already stopped admitting work must not
+        be held by a failed handover, and the failure is loud because it means a
+        wake the user is waiting on is now only in the log.
+        """
+        pending = list(getattr(self, "_wake_rearms", []) or [])
+        if not pending:
+            return 0
+        self._wake_rearms = []
+        superseded = {schedule.id for schedule in pending}
+        live = [schedule for schedule in self._wake.schedules if schedule.id not in superseded]
+        try:
+            await self._persist_wake_schedules([*live, *pending])
+        except Exception:  # noqa: BLE001 — the exit must not wait on a handover
+            logger.warning(
+                "could not hand %d draining wake(s) to a successor", len(pending), exc_info=True
+            )
+            return 0
+        logger.info("session runtime: handed %d draining wake(s) to the successor", len(pending))
+        return len(pending)
+
     def _prepare_missed_wake_catchup(self) -> None:
         """Snapshot the overdue schedules load() just adopted and compose the
         single aggregated catch-up prompt for them. Runs in ``__init__`` so the
@@ -11790,7 +11961,26 @@ class Session:
         the index is rebuilt on the next open regardless, and a supervisor
         that failed to install costs nothing that was not already lost (the
         live session still fires its own wakes).
+
+        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` queues the
+        one-shot that replaces a schedule its fire retired, and the caller that
+        queues it IS the scheduler's deliver hook — so the persist the pump
+        runs immediately after that delivery is this method, and merging the
+        queue here is what makes the occurrence durable in the same breath as
+        the fire (review round 2, MINOR 1). Queuing it for the exit left it in
+        memory for as long as the drain's wait, which is deliberately unbounded
+        — the work it is waiting for is this change's own premise — so a socket
+        ``stop``, a SIGTERM, a dispose or a crash in that window lost the
+        occurrence with no schedule left to retry it (the pump had already
+        persisted the retire). The exit write stays as the retry: an id already
+        in the queue is dropped from the list being written, so merging is
+        idempotent, and until the queue is cleared nothing that comes through
+        here can drop it.
         """
+        pending = list(getattr(self, "_wake_rearms", []) or [])
+        if pending:
+            superseded = {schedule.id for schedule in pending}
+            schedules = [*[s for s in schedules if s.id not in superseded], *pending]
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},

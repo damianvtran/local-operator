@@ -1384,7 +1384,7 @@ class RuntimeServer:
         if not written.wait(timeout=_ANNOUNCE_WRITE_TIMEOUT_S):
             logger.debug("stop announcement did not reach viewers before the teardown")
 
-    async def announce_retiring(self, reason: str, *, to: str = "") -> None:
+    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
 
@@ -1397,6 +1397,18 @@ class RuntimeServer:
         True)``). Additive on the wire: an old viewer ignores the unknown op,
         sees the EOF, and runs its ordinary recovery (cold after 8 s) — the
         pre-refresh behaviour, so no ``PROTOCOL_VERSION`` bump.
+
+        ``draining`` is the runtime's OWN verdict, and it is the only place
+        that verdict can come from: it is True when the departure was
+        committed while work was still in flight (:func:`process._begin_drain`
+        announces and latches in one step, so everything after this frame is
+        refused until the drain empties), False for the idle handover
+        (:func:`process._refresh_for` and :meth:`_retire_if_pristine`), which
+        leaves in about a second and refuses nothing. A viewer that must say
+        something to the operator reads THIS field: asking itself instead asks
+        a state that is already cold by the time it can look, which is how a
+        notice meant for the drain ended up painted on every idle handover as
+        well (QA round 3, Q-1).
 
         Sent to ATTACH clients only. The phone daemon's projection path stays
         byte-identical, and the daemon already handles owner exit by adopting
@@ -1415,6 +1427,7 @@ class RuntimeServer:
             "reason": reason,
             "from": self._boot_build.label(),
             "to": to,
+            "draining": bool(draining),
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
@@ -2840,10 +2853,13 @@ class RuntimeServer:
             from local_operator.session.errors import (
                 AttachmentUnavailable,
                 ProfileRegistryUnavailable,
+                RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
-            if isinstance(exc, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            if isinstance(
+                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+            ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code

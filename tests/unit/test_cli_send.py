@@ -583,7 +583,11 @@ def test_send_to_a_stored_session_by_name_spools(monkeypatch, tmp_path, capsys) 
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "spooled" in out
+    # The receipt leads with the effect; the shared constant is the pin, so the
+    # CLI, the draining runtime and the cold spool cannot drift apart.
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert SPOOL_RECEIPT_NOTE in out
     assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
 
 

@@ -384,7 +384,9 @@ def test_stored_resolution_flows_into_spool_delivery(monkeypatch, tmp_path) -> N
             sender={},
         )
     )
-    assert receipt == "spooled (will be read when the session next opens)"
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert receipt == SPOOL_RECEIPT_NOTE
     assert (directory / "inbox.jsonl").is_file()
 
 
