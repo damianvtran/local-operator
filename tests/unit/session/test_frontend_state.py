@@ -1638,3 +1638,43 @@ def test_a_restored_usage_prices_at_the_calls_window_not_at_the_viewers(
     assert restored.last_usage is not None
     flash = deepseek_models["deepseek-flash"]
     assert cost_for_usage("deepseek", flash, restored.last_usage) == pytest.approx(0.30)
+
+
+def test_the_published_catalogue_carries_a_rows_schedule() -> None:
+    """MINOR 1: the follower's round trip must not drop the tariff.
+
+    `refresh_model_catalogue` serializes the owner's rows key by key for a
+    follower, and `tui/app.py` rebuilds `CatalogueEntry`s from those dicts. Without
+    `time_of_use` an attached session rendered a tariffed row at its stored PEAK
+    price with no window tag while the owner's own picker showed the rate in force
+    — the two-surface disagreement the shared renderer exists to prevent. The
+    reach is narrow (a row the follower already knows wins with its own entry), and
+    it bites exactly when the owner publishes a row the follower's list lacks,
+    which is the case this merge exists for.
+    """
+    store = FrontendStateStore(_state())
+    entry = SimpleNamespace(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        label="DeepSeek Flash",
+        context_window=1_000_000,
+        default_context_window=None,
+        max_context_window=None,
+        input_price=0.30,
+        output_price=1.20,
+        connected=True,
+        aggregated=False,
+        routed=False,
+        time_of_use="deepseek-tou",
+    )
+    store.refresh_model_catalogue([entry])
+
+    (row,) = store.state.model_catalogue
+    assert row["time_of_use"] == "deepseek-tou"
+    # An older owner (or a duck-typed entry from an embedding host) that does not
+    # publish the key reads back as None, which is the honest "no time-of-day
+    # structure known" rather than a crash or a wrong default.
+    plain = SimpleNamespace(**{k: v for k, v in vars(entry).items() if k != "time_of_use"})
+    store.refresh_model_catalogue([plain])
+    (row,) = store.state.model_catalogue
+    assert row["time_of_use"] is None

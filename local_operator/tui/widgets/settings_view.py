@@ -3890,7 +3890,20 @@ class SettingsView(Vertical):
         # `rank_rows` matches on the selector, so a user typing `openrouter/`
         # narrows by provider even though the accepted value is the bare id.
         ranked = rank_rows(self._model_catalogue, query)
-        return [_Suggestion(row.model_id, row.selector, _suggestion_detail(row)) for row in ranked]
+        # The room a suggestion's detail has on the painted row, measured
+        # against the SAME width the list painter clips to: the indent the
+        # suggest row spends, the label it prints, and the two-cell gap before
+        # the note. Deciding the fit here is what keeps the note from being cut
+        # mid-word by the painter's ellipsis (design round 1, D2).
+        room = max(0, self._list_width() - _CHOICE_INDENT - 2)
+        return [
+            _Suggestion(
+                row.model_id,
+                row.selector,
+                _suggestion_detail(row, label=row.selector, room=room - cell_len(row.selector)),
+            )
+            for row in ranked
+        ]
 
     def _suggest_rows(self) -> list["_Row"]:
         """The dropdown as painter rows, clamping `_suggest_index` to the list.
@@ -5774,29 +5787,73 @@ def _choices_for(setting: Setting) -> tuple[settings_io.Choice, ...]:
     return setting.resolved_choices
 
 
-def _suggestion_detail(row: ModelRow) -> str:
-    """The dim right-hand note for a model suggestion — provider then price.
+def _suggestion_detail(row: ModelRow, *, label: str, room: int) -> str:
+    """The dim right-hand note for a model suggestion — the price, and its window.
 
-    Kept terse and display-only (never parsed back): it answers "which of the
-    several rows named `claude-opus-5` is this" and "roughly what does it cost",
-    which is the same pair `/model`'s own rows carry. Reuses
-    `model_picker.format_price_pair` so a price reads identically on both
-    surfaces — INCLUDING the time-of-use window: a tariffed row's numbers here
-    are the rates in force, and its tag names the window, for the same reason the
+    Kept terse and display-only (never parsed back): it answers "roughly what does
+    it cost", which is the price `/model`'s own row carries. Reuses
+    `model_picker.format_price_pair` so a price reads identically on both surfaces
+    — INCLUDING the time-of-use window: a tariffed row's numbers here are the
+    rates in force, and its tag names the window, for the same reason the
     picker's are (one renderer, so the two cannot disagree about what a model
-    costs right now). The provider leads because two rows can share a model id
-    across a direct provider and an aggregator, and the provider is what tells
-    them apart.
+    costs right now).
+
+    ``label`` and ``room`` are what keep the note HONEST AT ITS WIDTH (design
+    round 1, D2/D3), because the row is composed whole and then clipped with an
+    ellipsis by the list painter:
+
+    * the provider is dropped when ``label`` already leads with it. Here the
+      label IS the `provider/id` selector, so `deepseek/deepseek-v4-flash  deepseek
+      · $0.15/0.6 off-peak` printed the provider twice and spent 11 cells on the
+      very line that had started to overrun. The docstring's old justification —
+      two rows can share a model id across a direct provider and an aggregator —
+      is satisfied by the label itself, which is the selector.
+    * the window word is chosen to FIT rather than left to be cut. Clipping
+      painted `$0.15/0.6 off-…` and `$0.66/1.98 off-p…` — and only in the
+      off-peak state, i.e. exactly where the price differs from the listing, so
+      the one number the user must not misread lost the word that qualifies it.
+      The ladder is full word, then the schedule's short form, then no word at
+      all; a partially painted word is never an option, and neither is inventing
+      room the caller does not have.
     """
     from local_operator.tui.widgets.model_picker import format_price_pair
 
-    price = format_price_pair(
-        row.input_price, row.output_price, routed=row.routed, tariff=row.time_of_use
+    def _note(price: str) -> str:
+        parts = [] if label.startswith(f"{row.provider}/") else [row.provider]
+        if price:
+            parts.append(price)
+        return " · ".join(parts)
+
+    # The price WITHOUT the window word is the floor below which this note has
+    # nothing left to choose: if it does not fit either, the painter's own
+    # ellipsis is the pre-existing answer for a row this wide.
+    ladder = [
+        format_price_pair(
+            row.input_price, row.output_price, routed=row.routed, tariff=row.time_of_use
+        ),
+        format_price_pair(
+            row.input_price,
+            row.output_price,
+            routed=row.routed,
+            tariff=row.time_of_use,
+            short_window=True,
+        ),
+    ]
+    for price in ladder:
+        note = _note(price)
+        if cell_len(note) <= room:
+            return note
+    # The floor: the price WITHOUT the word, still the rate in force — the word is
+    # what this note gives up when it cannot afford it, never the discount.
+    return _note(
+        format_price_pair(
+            row.input_price,
+            row.output_price,
+            routed=row.routed,
+            tariff=row.time_of_use,
+            window=False,
+        )
     )
-    parts = [row.provider]
-    if price:
-        parts.append(price)
-    return " · ".join(parts)
 
 
 def _value_tail(text: str, cells: int) -> str:

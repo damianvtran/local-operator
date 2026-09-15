@@ -159,6 +159,15 @@ _FIRST_VALUE_END = re.compile(r", | — ")
 #: part being chosen.
 _NUMBERS_MIN_WIDTH = 56
 
+#: Below this PICKER width the full window word is paid for out of the model id:
+#: measured at 56-65 cells (design round 1, D4), where ``off-peak``'s 8 cells turned
+#: ``deepseek-v4-flash-vision-exp`` into ``…-flash-vis…`` on a row that fitted in
+#: full before. The id is what the user is choosing and is recoverable from
+#: nothing else on the row; the word is recoverable from the number beside it, so
+#: the schedule's SHORT form is painted in that band instead. Above it there is
+#: room for the whole word, and the whole word is the honest one.
+_SHORT_WINDOW_MIN_WIDTH = 66
+
 #: Marker on the row that is the session's current model.
 _CURRENT_MARK = "●"
 
@@ -215,6 +224,8 @@ def format_price_pair(
     routed: bool = False,
     tariff: str | None = None,
     moment: datetime | None = None,
+    window: bool = True,
+    short_window: bool = False,
 ) -> str:
     """``$3/15`` per million, ``free``, ``usage-based`` for a router, else ``""``.
 
@@ -252,11 +263,28 @@ def format_price_pair(
     during an off-peak hour shows the half it actually costs, where printing the
     stored peak figure would overstate it by 2x for ~79% of the week. The
     window's name travels with them because a price that halves every few hours
-    without saying why is worse than no label at all. The tag is part of the
-    NUMBERS RUN, which the row drops as one unit when the width cannot hold it
-    (``_NUMBERS_MIN_WIDTH``) — so a narrow frame loses the numbers and their
-    label together rather than the label being silently stripped from a number
-    the user would then misread as the current rate.
+    without saying why is worse than no label at all.
+
+    The name goes BEFORE the price, not after it (design round 1, D1). The run is
+    right-aligned as one unit, so a trailing word — not the price — becomes what
+    sits on the column's right edge, and the price's own right edge goes ragged:
+    measured, tariffed rows ended 7-9 cells left of untariffed ones, and the same
+    row shifted 2 cells when the window flipped. Leading, the tag hangs left of
+    the column exactly as the ``1m``/``64k`` window column already does, and every
+    price keeps ending on the cell it always did.
+
+    ``short_window`` selects the schedule's abbreviated form for a caller that has
+    MEASURED its own width budget (``_SHORT_WINDOW_MIN_WIDTH``), and ``window=False``
+    drops the word entirely for a caller that has measured that even the short one
+    will not fit — the price is STILL scaled either way, because a row that cannot
+    afford the word must not silently go back to advertising the stored peak rate.
+    Both decisions belong to the caller because only it knows how many cells it
+    has.
+
+    The tag is part of the NUMBERS RUN, which the row drops as one unit when the
+    width cannot hold it (``_NUMBERS_MIN_WIDTH``) — so a narrow frame loses the
+    numbers and their label together rather than the label being silently
+    stripped from a number the user would then misread as the current rate.
 
     The scaling is applied to the NUMBERS, never to the formatted string. A
     stated zero (``free``) and an unknown price (the ``-1.0`` sentinel) are both
@@ -272,13 +300,16 @@ def format_price_pair(
         return ""
     if input_price == 0 and output_price == 0:
         return "free"
-    label = window_label(tariff, moment)
-    if label is not None:
-        scale = scale_at(tariff, moment)
+    label = window_label(tariff, moment, short=short_window)
+    # The scale is applied whether or not the word is painted: the window decides
+    # WHAT the number is, the word only says so. A caller that dropped the word
+    # and kept the peak figure would be showing the listing rather than the rate.
+    scale = scale_at(tariff, moment)
+    if scale != 1.0:
         input_price *= scale
         output_price *= scale
     pair = f"${_trim_price(input_price)}/{_trim_price(output_price)}"
-    return f"{pair} {label}" if label is not None else pair
+    return f"{label} {pair}" if window and label is not None else pair
 
 
 def _is_parenthesised_tail(name: str) -> bool:
@@ -660,7 +691,9 @@ class ModelPicker(Static):
         line.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
 
         numbers = (
-            self._numbers(row) if width >= _NUMBERS_MIN_WIDTH else self._window(row, compact=True)
+            self._numbers(row, width=width)
+            if width >= _NUMBERS_MIN_WIDTH
+            else self._window(row, compact=True)
         )
         mark = f" {_CURRENT_MARK}" if row.selector == self._current else ""
         reserved = _GUTTER_CELLS + _EDGE_MARGIN + cell_len(numbers) + cell_len(mark)
@@ -745,17 +778,28 @@ class ModelPicker(Static):
             line.append(numbers, style=number_style)
         return _pad_to(line, width, bg)
 
-    def _numbers(self, row: ModelRow) -> str:
+    def _numbers(self, row: ModelRow, *, width: int | None = None) -> str:
         """The right-hand metadata run: context window, then price.
 
         Assembled as one string rather than as padded columns because the window
         is filtered: per-window column alignment would make the numbers jump
         every time the user typed a character, and a stable right EDGE reads
         better than columns that only line up sometimes.
+
+        ``width`` is the picker width the run is painted at, and it is what
+        chooses the schedule's LONG or SHORT word (``_SHORT_WINDOW_MIN_WIDTH``).
+        Omitted — as the annotation-room reservation below does — the run is sized
+        for the LONG form, so the reservation stays the widest the run can ever
+        be and a shrinking window never hands the annotation the cells it freed.
         """
         if not row.connected:
             return "login required"
-        parts = [part for part in (self._window(row), self._price(row)) if part]
+        short_window = width is not None and width < _SHORT_WINDOW_MIN_WIDTH
+        parts = [
+            part
+            for part in (self._window(row), self._price(row, short_window=short_window))
+            if part
+        ]
         return "  ".join(parts)
 
     def _window(self, row: ModelRow, *, compact: bool = False) -> str:
@@ -780,7 +824,7 @@ class ModelPicker(Static):
         # Preserve the existing narrow-row layout for models without two limits.
         return "" if compact else format_window(row.context_window)
 
-    def _price(self, row: ModelRow) -> str:
+    def _price(self, row: ModelRow, *, short_window: bool = False) -> str:
         # ``tariff=row.time_of_use`` is what makes the column show the rate in
         # FORCE; ``moment`` is left to the schedule's own clock (the frame is
         # painted at open, so "now" is the honest instant — the picker does not
@@ -790,6 +834,7 @@ class ModelPicker(Static):
             row.output_price,
             routed=row.routed,
             tariff=row.time_of_use,
+            short_window=short_window,
         )
 
     def _footer_rows(self, width: int) -> list[Text]:
