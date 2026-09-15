@@ -20,19 +20,27 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
-from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
-from local_operator.evaluation.protocol import KeyAction
+from local_operator.evaluation.action_surface import (
+    LEGACY_ACTION_SURFACE,
+    ActionAdmissionError,
+)
+from local_operator.evaluation.protocol import ActionBatch, KeyAction
 from local_operator.evaluation.runner.provider_client import (
     _MISPLACED_REPLY_VERSION_MARKER,
     REJECTION_CLASS_UNKNOWN,
     DecisionParseError,
     _action_schema_lines,
     _decode_leading_json,
+    _first_field_path,
+    classify_admission_error,
     classify_rejection,
+    classify_validation_error,
     rejection_hint,
     strip_reasoning_boundary_markers,
+    validation_diagnostic,
 )
 from local_operator.evaluation.runner.public_reply import (
     decode_public_reply,
@@ -636,3 +644,162 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
         for label, count in sorted(transitions.items()):
             print(f"  {count:4d}  {label}")
         print(f"  {recovered:4d}  recovered to the accepted shape")
+
+
+# --- The structured half of the taxonomy -----------------------------------
+#
+# ``classify_rejection`` reads PROSE, and that is the right design for the
+# envelope path: a sealed bundle has only the message the validator wrote, and a
+# class that could only be derived by re-running the validator would measure a
+# different population than the run it is bucketing. It is the wrong design for a
+# payload the model authored, because ``str(ValidationError)`` renders
+# ``input_value=<head>…<tail>`` and ``validate_for`` interpolates
+# ``action.frame_id`` into its own sentence -- so the payload's own bytes become
+# an input to an ordered substring test, and the model chooses its class (and,
+# for a preserved class, receives that rendering as its correction).
+#
+# The two functions below are the other half of the SAME vocabulary, read from
+# structured data: Pydantic's ``type``/``loc`` entries, which carry no value, and
+# the exception's own type. The class keys they return are the ones above, so a
+# bundle's class table stays comparable whichever path produced it.
+
+
+def _validation_error(payload: dict[str, Any]) -> ValidationError:
+    """A real ``ValidationError``, from the protocol's own model, made by hand.
+
+    Built from ``ActionBatch`` rather than from a fixture so the error TYPES are
+    the ones the real path produces -- a hand-rolled error object would let this
+    test pin a table the protocol no longer emits.
+    """
+
+    with pytest.raises(ValidationError) as raised:
+        ActionBatch.model_validate(
+            {
+                "protocol_version": "1.0",
+                "kind": "action_batch",
+                "task_id": "task-1",
+                "episode_id": "episode-1",
+                "observation_id": "obs-1",
+                **payload,
+            }
+        )
+    return raised.value
+
+
+def test_the_value_free_diagnostic_keeps_what_its_readers_read() -> None:
+    """The rendering the tool passes instead of ``str(error)``.
+
+    Two readers in this module depend on its shape -- ``_first_field_path`` on
+    the location line, ``_VALUE_ERROR_RULE`` on the rule sentence -- and the
+    envelope path's own renderer is untouched, so this rendering exists only for
+    a payload the model wrote. What it drops is exactly the refused value.
+    """
+
+    # ``observation_id`` is stated so the failure is the KEY NAME's: the real
+    # tool injects it, and a raw protocol model still demands it.
+    error = _validation_error(
+        {"actions": [{"kind": "key", "observation_id": "obs-1", "keys": ["NOSUCH"]}]}
+    )
+    diagnostic = validation_diagnostic(error)
+
+    assert "actions.0.key.keys" in diagnostic
+    assert "unknown key: 'NOSUCH'" in diagnostic
+    assert "[type=value_error]" in diagnostic
+    for marker in ("input_value=", "input_type=", "errors.pydantic.dev"):
+        assert marker not in diagnostic
+        assert marker in str(error)
+
+    # The readers really do read it: the location line is found, and the class
+    # comes from the rule's own prefix rather than from the rendering.
+    assert _first_field_path(diagnostic) == ("actions", "0", "key", "keys")
+    assert classify_validation_error(error) == "unknown-key"
+
+
+def test_the_structured_classifier_reads_pydantic_types_and_never_values() -> None:
+    """One entry per structured rule, and the same failure with a marker VALUE.
+
+    Each pair differs only in the bytes the model wrote in one position, and each
+    marker value is a phrase that names a class above -- so this is the taxonomy's
+    own attack surface, at the level of the classifier rather than the tool: the
+    class must be a property of the failure, never of the value that failed.
+    """
+
+    cases = [
+        # (control payload, the same payload with a class marker as its value, class)
+        (
+            {"actions": [{"kind": "wait", "duration_ms": "123abc"}]},
+            {"actions": [{"kind": "wait", "duration_ms": "second action batch"}]},
+            "field-invalid",
+        ),
+        (
+            {"actions": [{"kind": "wait", "duration_ms": 5, "noun": "note"}]},
+            {"actions": [{"kind": "wait", "duration_ms": 5, "noun": "second action batch"}]},
+            "extra-action-key",
+        ),
+        (
+            {"actions": [{"kind": "drag", "x": 1}]},
+            {"actions": [{"kind": "drag", "x": "is limited to"}]},
+            "unknown-action-kind",
+        ),
+        (
+            {"actions": [{"kind": "key", "keys": {"item": ["CTRL"]}}]},
+            {"actions": [{"kind": "key", "keys": {"item": ["reserved envelope"]}}]},
+            "keys-not-array",
+        ),
+        (
+            {"actions": [{"kind": "key", "keys": ["zzzz"]}]},
+            {"actions": [{"kind": "key", "keys": ["outside model-visible frame"]}]},
+            "unknown-key",
+        ),
+        (
+            {"actions": []},
+            {"actions": []},
+            "field-invalid",
+        ),
+    ]
+
+    for control_payload, attacked_payload, expected in cases:
+        control = classify_validation_error(_validation_error(control_payload))
+        assert control == expected, control_payload
+        assert (
+            classify_validation_error(_validation_error(attacked_payload)) == control
+        ), attacked_payload
+
+
+def test_an_admission_refusal_is_classified_by_type_and_value_free_prefix() -> None:
+    """The surface's class IS its exception type; the protocol's is its prefix.
+
+    ``validate_for`` interpolates ``action.frame_id`` into its own sentence, so
+    the two cases at the end are the attack: a frame id that names another class
+    must not be believed.
+    """
+
+    assert (
+        classify_admission_error(ActionAdmissionError("second action batch"))
+        == "adapter-capability"
+    )
+    for reason, expected in (
+        (
+            "action coordinate 500,10 is outside model-visible frame 100x100",
+            "out-of-frame-coordinate",
+        ),
+        ("action references unknown frame_id 'screen-2'", "unknown-frame-id"),
+        (
+            "action batch does not bind to the current task, episode, and observation",
+            "observation-binding",
+        ),
+        # The value is in the message, after the anchor, and cannot name the class.
+        (
+            "action references unknown frame_id 'outside model-visible frame'",
+            "unknown-frame-id",
+        ),
+        (
+            "action batch does not bind to the current task, episode, and observation "
+            "-- unknown key: 'X'",
+            "observation-binding",
+        ),
+    ):
+        assert classify_admission_error(ValueError(reason)) == expected, reason
+    # A sentence from a later protocol is RECORDED as unrecognised rather than
+    # guessed at from its text: no raise site exists that this build cannot name.
+    assert classify_admission_error(ValueError("a rule added later")) == REJECTION_CLASS_UNKNOWN

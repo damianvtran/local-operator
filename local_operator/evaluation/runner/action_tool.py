@@ -56,8 +56,12 @@ from local_operator.evaluation.protocol import (
     Observation,
 )
 from local_operator.evaluation.runner.provider_client import (
-    classify_rejection,
+    REJECTION_CLASS_SECOND_BATCH,
+    HintShape,
+    classify_admission_error,
+    classify_validation_error,
     rejection_hint,
+    validation_diagnostic,
 )
 from local_operator.evaluation.runner.public_reply import _inlined_action_schema
 from local_operator.harness.types import (
@@ -92,21 +96,48 @@ ACTION_TOOL_DESCRIPTION = (
 #: is what makes a stale binding inexpressible rather than merely refused.
 _INJECTED_ACTION_FIELDS = ("observation_id",)
 
+#: The top-level key the reply ENVELOPE carries and this tool's parameters do
+#: not. Listed rather than derived: the hint machinery below cannot see this
+#: module's schema, and the two omissions together ARE the projection.
+_ENVELOPE_ONLY_TOP_LEVEL_KEYS = ("public_observations",)
+
+#: What this tool's contract removes from the shape a refusal states
+#: (``HintShape``). The hint table is written for the envelope, so without this
+#: a correction for a missing field would answer with the kind's "full shape"
+#: including the ``observation_id`` the projection exists to make inexpressible
+#: -- and the fallback example would re-advertise the envelope's own
+#: ``public_observations``. Contradictory guidance at the moment the model is
+#: being corrected is worse than no guidance, so the removals are stated once,
+#: here, where the projection is defined.
+_HINT_SHAPE = HintShape(
+    omitted_action_fields=frozenset(_INJECTED_ACTION_FIELDS),
+    omitted_top_level_keys=frozenset(_ENVELOPE_ONLY_TOP_LEVEL_KEYS),
+)
+
 #: The key ``ToolResult.details`` carries the refusal class under. The class
-#: vocabulary itself is ``classify_rejection``'s (kept, not re-derived: sealed
+#: vocabulary itself is the shared classifier's (kept, not re-derived: sealed
 #: bundles quote these keys verbatim and the canary notes read them off
 #: artifacts), and the driver folds this key into its ``error`` event.
 REJECTION_CLASS_KEY = "rejection_class"
 
-#: Refusing a second call in one turn. It carries the classifier's
-#: ``second action batch`` marker on purpose, so the class it lands in is the
-#: one the envelope path already used for the same defect -- whose hint IS its
-#: own sentence (see ``provider_client._PRESERVED_HINTS``), and says the rule.
-_SECOND_BATCH_REFUSAL = (
-    "this turn already ran one action batch, and a second action batch for the "
-    "same observation is refused -- the actions a model chooses belong to the "
-    "screen it was shown, and only the batch that ran saw it. Read the "
-    "observation that batch returned and reply with exactly one action batch for it."
+#: Refusing a call that finds no observation to bind to. TWO DIFFERENT CAUSES
+#: reach this branch and the sentence has to be true of BOTH: an earlier call in
+#: this turn already ran its one batch and consumed the token, or the episode has
+#: ended (``mark_terminal``, which the driver's terminal handling calls) and
+#: there will never be another observation to bind to.
+#:
+#: The class stays the vocabulary's ``second-batch`` ("the competing batch" is
+#: the defect this branch exists for, and a sealed bundle's class table has to
+#: stay comparable), but it is stated as the constant that names it rather than
+#: derived from this prose: a sentence wide enough to be true of both causes is
+#: not evidence about which one it was, and a class the wording decides is the
+#: defect the structured classifiers close.
+_NO_PENDING_OBSERVATION_REFUSAL = (
+    "no action batch was run: this call found no observation to bind to. Either "
+    "this turn already ran its one action batch, or the episode has ended -- a "
+    "batch is only ever bound to the screen you were shown, and only the batch "
+    "that ran saw it. If a batch already ran this turn, read the observation "
+    "that batch returned and reply with exactly one action batch for it."
 )
 
 
@@ -268,6 +299,14 @@ class PendingObservationToken:
         that went unanswered), which is the stage that wires this tool into a
         loop; nothing in this module calls it yet, and the gate above reads the
         flag it sets.
+
+        The contract, which ``test_mark_terminal_ends_the_episode`` pins because
+        the stage that calls this will assume all of it: the token is left with
+        nothing pending; a call that arrives anyway is refused with NO execution
+        (the same ``second-batch`` class -- its sentence is written to be true of
+        an ended episode as well as of a second call in one turn); and a later
+        ``fold`` cannot re-arm, so no executed batch's output can hand the
+        episode a screen to act on after it has ended.
         """
         self._terminal = True
         self._pending = None
@@ -319,7 +358,7 @@ def build_action_tool(
         del signal, on_update, context  # no approval flow, no streaming, no cwd
         pending = token.pending
         if pending is None:
-            return _second_batch_refusal(tool_call_id)
+            return _no_pending_refusal(tool_call_id)
 
         # VALIDATE BEFORE CONSUMING. A rejected call must not burn the token, or
         # the corrective re-ask the rejection asks for would find no screen to
@@ -329,9 +368,17 @@ def build_action_tool(
         try:
             batch = _build_batch(arguments, pending)
         except ValidationError as error:
+            # The CLASS comes from the error's structured entries and the TEXT
+            # from a rendering that keeps no value the model supplied. Deriving
+            # the class from ``str(error)`` -- which the envelope path does --
+            # would make the payload's own bytes an input to an ordered substring
+            # test, so a model could name its own refusal class by putting a
+            # marker phrase in a field, and, for a preserved class, be handed
+            # back the rendering this module promises never reaches it.
             return _refusal(
                 tool_call_id,
-                f"action batch is not valid: {error}",
+                validation_diagnostic(error),
+                class_key=classify_validation_error(error),
                 observation=pending,
                 surface=surface,
             )
@@ -347,9 +394,13 @@ def build_action_tool(
         except ValueError as error:
             # ``ActionAdmissionError`` is a ValueError, and so is ``validate_for``'s
             # refusal: both are this batch's failure against this observation.
+            # The class is read from the exception rather than from its message:
+            # ``validate_for`` interpolates ``action.frame_id`` into its own
+            # sentence, so a message-based class is one the model can choose.
             return _refusal(
                 tool_call_id,
                 f"action batch does not match this observation: {error}",
+                class_key=classify_admission_error(error),
                 observation=pending,
                 surface=surface,
             )
@@ -360,7 +411,7 @@ def build_action_tool(
             # tool is exclusive and nothing can interleave between them), but
             # the refusal is cheaper than trusting that, and the alternative is
             # executing against a screen nobody was shown.
-            return _second_batch_refusal(tool_call_id)
+            return _no_pending_refusal(tool_call_id)
 
         result = await execute(batch)
         token.record_in_flight(result.observation)
@@ -425,17 +476,30 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
 
 
 def _refusal(
-    tool_call_id: str, reason: str, *, observation: Observation, surface: ActionSurface
+    tool_call_id: str,
+    reason: str,
+    *,
+    class_key: str,
+    observation: Observation,
+    surface: ActionSurface,
 ) -> ToolResult:
     """One model-recoverable refusal, in the runner's existing two halves.
 
-    The CLASS is what sealed bundles quote and what the canary notes count, so
-    it is derived by ``classify_rejection`` from the same rendering the envelope
-    path hands it -- not by a second table kept in this module. The MESSAGE is
-    ``rejection_hint``'s, which states the accepted shape for the class instead
-    of the validator's rendering: a pydantic ``str()`` embeds
-    ``input_value=<head>…<tail>``, and the model needs the shape, not the
-    refused bytes echoed back at it.
+    The CLASS is what sealed bundles quote and what the canary notes count, and
+    it is passed IN rather than derived here from ``reason``: the callers derive
+    it from structured evidence (``classify_validation_error`` for a Pydantic
+    failure, ``classify_admission_error`` for the protocol's or the surface's
+    own refusal), because a reason string carries bytes the MODEL supplied. The
+    vocabulary is still the envelope path's -- ``classify_rejection``'s -- so a
+    sealed bundle's class table stays comparable across the two paths; what is
+    not shared is the habit of reading it out of prose.
+
+    The MESSAGE is ``rejection_hint``'s, which states the accepted shape for the
+    class instead of the validator's rendering: a pydantic ``str()`` embeds
+    ``input_value=<head>…<tail>`` and a docs URL, and the model needs the shape,
+    not the refused bytes echoed back at it. The hint is built with
+    ``_HINT_SHAPE`` so it states THIS tool's contract -- the projection, not the
+    envelope it was projected from.
 
     The fault marker is the model's own. ``is_error`` alone would classify as
     ``execution`` at ``AgentLoop._classify_fault`` -- the harness's and the
@@ -444,7 +508,6 @@ def _refusal(
     and the model could have known from the schema (or from the observation it
     was shown) that the arguments were wrong.
     """
-    class_key = classify_rejection(reason)
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=ACTION_TOOL_NAME,
@@ -452,7 +515,11 @@ def _refusal(
         content=[
             TextContent(
                 text=rejection_hint(
-                    class_key, reason=reason, observation=observation, surface=surface
+                    class_key,
+                    reason=reason,
+                    observation=observation,
+                    surface=surface,
+                    shape=_HINT_SHAPE,
                 )
             )
         ],
@@ -460,17 +527,22 @@ def _refusal(
     )
 
 
-def _second_batch_refusal(tool_call_id: str) -> ToolResult:
-    """The refusal of a second batch in one turn: same class, same fault bucket.
+def _no_pending_refusal(tool_call_id: str) -> ToolResult:
+    """The refusal of a call that finds no observation to bind to.
 
-    Its hint is its own sentence (``second-batch`` is a preserved hint), so the
-    text is stated once, above, in the words the model needs.
+    The class is ``second-batch`` -- the vocabulary's own key for this defect
+    family, kept so a sealed bundle's counts stay comparable -- and the sentence
+    is ``_NO_PENDING_OBSERVATION_REFUSAL``, which is true of both causes that
+    reach here. It is a PRESERVED hint (``provider_client._PRESERVED_HINTS``),
+    so the sentence IS the correction and is stated once, above.
     """
-    class_key = classify_rejection(_SECOND_BATCH_REFUSAL)
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=ACTION_TOOL_NAME,
         is_error=True,
-        content=[TextContent(text=_SECOND_BATCH_REFUSAL)],
-        details={FAULT_KEY: FAULT_INVALID_ARGUMENTS, REJECTION_CLASS_KEY: class_key},
+        content=[TextContent(text=_NO_PENDING_OBSERVATION_REFUSAL)],
+        details={
+            FAULT_KEY: FAULT_INVALID_ARGUMENTS,
+            REJECTION_CLASS_KEY: REJECTION_CLASS_SECOND_BATCH,
+        },
     )

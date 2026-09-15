@@ -33,8 +33,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
+from pydantic import ValidationError
+
 from local_operator.evaluation.action_surface import (
     LEGACY_ACTION_SURFACE,
+    ActionAdmissionError,
     ActionSurface,
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
@@ -270,6 +273,16 @@ def _type_name(annotation: Any) -> str:
 #: message changed shape must still be recordable and still produce a hint.
 REJECTION_CLASS_UNKNOWN = "unknown"
 
+#: The class of a call that finds nothing to bind to: an earlier call in the same
+#: turn already ran its batch, or the episode has ended. Stated as a constant
+#: because its callers reach for it BEFORE any diagnostic exists, and because the
+#: sentence that has to be true of both causes -- see
+#: ``action_tool._NO_PENDING_OBSERVATION_REFUSAL`` -- is not evidence about which
+#: one it was: a class named by the wording is exactly the defect the structured
+#: classifiers below close. It keeps the vocabulary's own key (``second-batch``)
+#: so a sealed bundle's class table stays comparable across this change.
+REJECTION_CLASS_SECOND_BATCH = "second-batch"
+
 
 @dataclass(frozen=True)
 class RejectionEvidence:
@@ -373,6 +386,125 @@ def classify_rejection(reason: str) -> str:
     return REJECTION_CLASS_UNKNOWN
 
 
+#: The structured half of the SAME vocabulary, for a refusal that arrived as an
+#: exception rather than as prose: Pydantic's error TYPE codes (a documented API,
+#: and the very codes the text table above keys on) in the order that table tests
+#: them. Ordered rather than a dict because the order IS the specificity rule.
+_VALIDATION_TYPE_CLASSES: tuple[tuple[str, str], ...] = (
+    ("extra_forbidden", "extra-action-key"),
+    ("tuple_type", "keys-not-array"),
+    ("union_tag_invalid", "unknown-action-kind"),
+)
+
+#: The protocol's own validator rules, keyed by the PREFIX that carries no value.
+#: ``unknown key: 'NOSUCH'`` interpolates the model's key after the harness's
+#: words, so a prefix test cannot be moved by it; the same rule is what makes the
+#: admission table below sound.
+_VALIDATION_RULE_PREFIX_CLASSES: tuple[tuple[str, str], ...] = (
+    ("unknown key: ", "unknown-key"),
+    ("actions at indexes ", "observation-binding"),
+)
+
+#: ``ActionBatch.validate_for``'s own sentences, same anchoring. Every one of them
+#: interpolates a value the model supplied -- ``action.frame_id`` through ``!r``,
+#: the coordinates as integers -- and every one puts it AFTER the anchor, which is
+#: why the anchors are prefixes and not the containment tests of the table above.
+_ADMISSION_RULE_PREFIX_CLASSES: tuple[tuple[str, str], ...] = (
+    ("action coordinate ", "out-of-frame-coordinate"),
+    ("action references unknown frame_id ", "unknown-frame-id"),
+    ("action batch does not bind to the current task", "observation-binding"),
+)
+
+
+def _value_error_rule(message: str) -> str:
+    """The protocol's own rule sentence, out of Pydantic's ``msg`` for it."""
+    return message.removeprefix("Value error, ")
+
+
+def classify_validation_error(error: ValidationError) -> str:
+    """Name a refused payload's class from Pydantic's STRUCTURED error entries.
+
+    WHY THIS IS NOT ``classify_rejection(str(error))``. ``str(error)`` renders
+    ``input_value=<head>…<tail>`` for every failure, so the payload's own bytes
+    become an INPUT to an ordered substring test: a model that put "second
+    action batch" in ``duration_ms`` was recorded as a competing batch rather
+    than as a type error, one that put "is limited to" in the same place was
+    recorded as an adapter limit, and one that named ``frame_id`` "outside
+    model-visible frame" was recorded as an out-of-frame coordinate. The class is
+    what a sealed bundle quotes and what a canary arm counts, so a class the
+    model can NAME is not evidence -- and for a preserved class the same
+    rendering is handed back as the correction, minus the model's own bytes only
+    where ``rejection_hint`` strips them.
+
+    ``errors()`` carries the same failure as DATA: a type code, a location, and
+    Pydantic's own message about the type. The refused value sits in ``input``
+    (and the URL in ``url``), and neither is read here. Where a class needs more
+    than the type code, it comes from the protocol's own rule sentence, which is
+    the harness's wording with any interpolated value after it.
+    """
+    entries = error.errors(include_url=False)
+    types = {str(entry["type"]) for entry in entries}
+    for error_type, class_key in _VALIDATION_TYPE_CLASSES:
+        if error_type in types:
+            return class_key
+    for entry in entries:
+        if str(entry["type"]) != "value_error":
+            continue
+        rule = _value_error_rule(str(entry["msg"]))
+        for prefix, class_key in _VALIDATION_RULE_PREFIX_CLASSES:
+            if rule.startswith(prefix):
+                return class_key
+    # A malformation with no marker of its own is exactly the class this is the
+    # default for -- a bound broken, a kind's field missing or mistyped.
+    return "field-invalid"
+
+
+def classify_admission_error(error: ValueError) -> str:
+    """Name the class of a pre-dispatch refusal raised against a WHOLE batch.
+
+    The two raise sites are the protocol's ``validate_for`` and the surface's
+    ``validate_batch``. The surface's own exception type IS the class -- it is
+    documented as the negotiated restriction and every one of its sentences is
+    the adapter's limit with the alternative it can carry -- so it is read as a
+    type rather than as text. The protocol's three sentences are matched by their
+    value-free prefix.
+
+    An unrecognised admission sentence returns ``unknown`` rather than falling
+    back to a substring test: the classes above are the only two sites that can
+    raise, and a fallback over a message that interpolates ``action.frame_id``
+    would hand the model's bytes the choice this function exists to take away.
+    """
+    if isinstance(error, ActionAdmissionError):
+        return "adapter-capability"
+    reason = str(error)
+    for prefix, class_key in _ADMISSION_RULE_PREFIX_CLASSES:
+        if reason.startswith(prefix):
+            return class_key
+    return REJECTION_CLASS_UNKNOWN
+
+
+def validation_diagnostic(error: ValidationError) -> str:
+    """``str(error)`` minus every byte the model supplied.
+
+    Two readers depend on the shape, and both live in this module: the LOCATION
+    line (``actions.0.wait.duration_ms``) is what ``_first_field_path`` reads,
+    and the rule sentence (``Value error, … [type=value_error]``) is what
+    ``_VALUE_ERROR_RULE`` reads. Each location therefore keeps its own line,
+    exactly as Pydantic renders it, so the same helpers read this and the
+    envelope path's rendering.
+
+    What is dropped is the rest of Pydantic's rendering: ``input_value=``,
+    ``input_type=`` and the ``errors.pydantic.dev`` URL. Those are the refused
+    payload echoed back -- the one thing a correction must never spend its length
+    on, and the thing a class must never be derived from.
+    """
+    lines: list[str] = []
+    for entry in error.errors(include_url=False):
+        location = ".".join(str(part) for part in entry["loc"])
+        lines.append(f"{location}\n{entry['msg']} [type={entry['type']}]".strip())
+    return "\n".join(lines)
+
+
 #: Markers whose message ALREADY states the defect and the accepted shape, and
 #: was measured doing it. The hint keeps them verbatim: the envelope diagnostic
 #: in ``decode_public_reply`` names the keys carried and omitted and recovered
@@ -447,6 +579,34 @@ _QUOTED_TAG = re.compile(r"Input tag '(.*?)' found using 'kind'")
 _MAX_RULE_CHARS = 200
 
 
+@dataclass(frozen=True)
+class HintShape:
+    """What the CALLER's contract removes from the shape a hint would state.
+
+    The hint table is written for the reply ENVELOPE: an action carries its own
+    ``observation_id``, and the object carries ``public_observations``. That is
+    the only shape the corpus these corrections were measured on ever had, and
+    for the envelope decoder it is still exactly right.
+
+    The action tool is a PROJECTION of the same models
+    (``action_tool.action_tool_parameters``), which removes the identity field
+    from every action and carries no envelope at all. A hint built from the
+    models alone would therefore re-advertise the very binding the projection
+    exists to make inexpressible -- at the moment the model is being corrected,
+    which is the worst possible moment to give it contradictory guidance. So the
+    caller states what it removed, and every hint is built from the models MINUS
+    that. The default removes nothing, so the envelope path is byte-identical to
+    what it was.
+
+    Stated as data rather than as a second set of hint branches because the two
+    callers must not drift: this module cannot import ``action_tool`` (the tool
+    imports this one), so the projection is handed down, not looked up.
+    """
+
+    omitted_action_fields: frozenset[str] = frozenset()
+    omitted_top_level_keys: frozenset[str] = frozenset()
+
+
 def rejection_evidence(
     reply_text: str,
     reason: str,
@@ -479,6 +639,7 @@ def rejection_hint(
     reason: str,
     observation: Observation,
     surface: ActionSurface = LEGACY_ACTION_SURFACE,
+    shape: HintShape = HintShape(),
 ) -> str:
     """The model-facing correction for one refusal class.
 
@@ -502,7 +663,9 @@ def rejection_hint(
         # would refuse. The version-less plain batch is deliberately not offered
         # here: a reply that already committed to the envelope would lose its
         # notes by taking that route, and this defect is one key's position.
-        return f"{reason}. Reply with exactly this shape: {_example_json(surface, observation)}"
+        return (
+            f"{reason}. Reply with exactly this shape: {_example_json(surface, observation, shape)}"
+        )
     if class_key == "leading-delimiter":
         # The half of the old ``malformed-json`` class whose reply could not be
         # READ AT ALL: the first byte is not the start of a JSON value, so the
@@ -521,7 +684,7 @@ def rejection_hint(
             "code fence or a native tool-call syntax wrapper before the object "
             "is not skipped. Reply with exactly one JSON object, beginning with "
             "'{', and nothing else: "
-            f"{_example_json(surface, observation)}"
+            f"{_example_json(surface, observation, shape)}"
         )
     if class_key == "incomplete-json":
         # The other half: the decode STARTED, so the first byte was fine and
@@ -536,7 +699,7 @@ def rejection_hint(
             "incomplete (cut off or double-escaped), or a leading provider "
             "reasoning delimiter was removed and what remained was still not a "
             "complete object. Reply with exactly one JSON object and nothing "
-            f"else: {_example_json(surface, observation)}"
+            f"else: {_example_json(surface, observation, shape)}"
         )
     if class_key == "unsupported-reply-version":
         # Not producible by this build any more: the reply version is ignored
@@ -547,10 +710,10 @@ def rejection_hint(
         return (
             'the reply declared a "reply_version" this harness does not ask for. '
             "A reply needs no version -- reply with the action batch itself: "
-            f"{_example_json(surface, observation)}"
+            f"{_example_json(surface, observation, shape)}"
         )
     if class_key == "extra-action-key":
-        return _extra_action_key_hint(reason, surface, observation)
+        return _extra_action_key_hint(reason, surface, observation, shape)
     if class_key == "unknown-action-kind":
         return _unknown_action_kind_hint(reason, surface)
     if class_key == "unknown-key":
@@ -570,52 +733,73 @@ def rejection_hint(
     if class_key == "unknown-frame-id":
         return f"{reason}. {_frame_id_hint(observation)}"
     if class_key == "observation-binding":
+        if "observation_id" in shape.omitted_action_fields:
+            # The caller removed the field, so there is no binding for the model
+            # to state and naming one would send it after a key its own schema
+            # does not offer. Unreachable from the action tool's body -- the
+            # identity it injects always matches -- but the class IS one the
+            # admission table can return, so it answers for the projection
+            # rather than leaking the field into a corrective prompt.
+            return (
+                "this batch does not bind to the observation in force, and it was "
+                "refused before anything was executed. Every action is bound to the "
+                "observation you were shown by the harness, so there is no binding "
+                "for you to state: send the actions themselves."
+            )
         return (
             "every action must carry the "
             f'"observation_id" of the observation being answered: "{observation.observation_id}"'
         )
     if class_key == "field-invalid":
-        return _field_invalid_hint(reason, observation, surface)
+        return _field_invalid_hint(reason, observation, surface, shape)
     # Anything unmatched: state the accepted envelope so the model has the shape
     # even when the class is one this build has never seen.
     return (
         "the reply was refused before anything was executed. Reply with exactly "
-        f"one JSON object and nothing else: {_example_json(surface, observation)}"
+        f"one JSON object and nothing else: {_example_json(surface, observation, shape)}"
     )
 
 
-def _example_json(surface: ActionSurface, observation: Observation) -> str:
+def _example_json(
+    surface: ActionSurface, observation: Observation, shape: HintShape = HintShape()
+) -> str:
     """One concrete accepted reply, built from the enforced reply schema.
 
     Read from ``public_reply_schema`` rather than hand-written, so the example
     cannot advertise a key the decoder would refuse, or a shape the envelope no
     longer has -- the same guarantee ``_action_schema_lines`` gives the system
-    prompt. The order is the prompt's own so the two read alike.
+    prompt. The order is the prompt's own so the two read alike. ``shape``
+    subtracts what the caller's own contract removed: a top-level key the caller
+    does not carry is dropped here exactly as the action fields are dropped in
+    ``_example_action``.
     """
 
     properties = public_reply_schema(surface)["properties"]
     example: dict[str, Any] = {}
     for key in ("actions", "public_observations"):
-        if key not in properties:
+        if key not in properties or key in shape.omitted_top_level_keys:
             continue
-        example[key] = [_example_action(surface, observation)] if key == "actions" else ""
+        example[key] = [_example_action(surface, observation, shape)] if key == "actions" else ""
     return json.dumps(example)
 
 
-def _example_action(surface: ActionSurface, observation: Observation) -> dict[str, Any]:
+def _example_action(
+    surface: ActionSurface, observation: Observation, shape: HintShape = HintShape()
+) -> dict[str, Any]:
     """One concrete action of the first kind this surface admits.
 
     Values are placeholders EXCEPT the two the model most often gets wrong and
     which are knowable here: the observation id and the frame id. Both are
     taken from the observation in hand, so the example is executable shape, not
-    prose about it.
+    prose about it. A field the caller's contract removed is left out entirely,
+    and the observation id is then simply not stated -- the harness binds it.
     """
 
     model = surface.models[0]
     fields = model.model_fields
     action: dict[str, Any] = {"kind": fields["kind"].default}
     for name, field in fields.items():
-        if name == "kind":
+        if name == "kind" or name in shape.omitted_action_fields:
             continue
         action[name] = _example_field_value(name, field, observation)
     return action
@@ -730,7 +914,12 @@ def _bound(field: Any, attribute: str) -> int | None:
     return None
 
 
-def _field_invalid_hint(reason: str, observation: Observation, surface: ActionSurface) -> str:
+def _field_invalid_hint(
+    reason: str,
+    observation: Observation,
+    surface: ActionSurface,
+    shape: HintShape = HintShape(),
+) -> str:
     """Name the field the validator refused and the shape it accepts.
 
     The one class of hint built from a Pydantic LOCATION: the rendered path is
@@ -744,6 +933,9 @@ def _field_invalid_hint(reason: str, observation: Observation, surface: ActionSu
     "something was wrong somewhere": the rule is the harness's own sentence
     about why, and it is the only part of Pydantic's rendering that survives
     here. ``input_value=`` and the docs URL around it do not.
+
+    The kind's full shape is rendered through ``shape``, so a caller whose own
+    contract removed a field is not told to send it back.
     """
 
     rule = _VALUE_ERROR_RULE.search(reason)
@@ -757,12 +949,12 @@ def _field_invalid_hint(reason: str, observation: Observation, surface: ActionSu
             return (
                 f'"{name}" in a "{kind}" action was refused: it takes '
                 f"{_field_shape(field, name=name)}. "
-                f"The kind's full shape is {_action_line(surface, kind)}."
+                f"The kind's full shape is {_action_line(surface, kind, shape)}."
             )
         rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
         return (
             f'a "{kind}" action was refused.{rule_text} '
-            f"Its accepted shape is {_action_line(surface, kind)}."
+            f"Its accepted shape is {_action_line(surface, kind, shape)}."
         )
     if quoted_rule:
         # A batch-level rule from one of the protocol's own model validators.
@@ -771,11 +963,16 @@ def _field_invalid_hint(reason: str, observation: Observation, surface: ActionSu
         return f"the batch was refused by a protocol rule: {quoted_rule}"
     return (
         "the reply was refused before anything was executed. Accepted shape: "
-        f"{_example_json(surface, observation)}"
+        f"{_example_json(surface, observation, shape)}"
     )
 
 
-def _extra_action_key_hint(reason: str, surface: ActionSurface, observation: Observation) -> str:
+def _extra_action_key_hint(
+    reason: str,
+    surface: ActionSurface,
+    observation: Observation,
+    shape: HintShape = HintShape(),
+) -> str:
     """Name the field that is not accepted, and where it IS accepted.
 
     The useful half is not "extra inputs are not permitted" -- the model knows
@@ -787,7 +984,7 @@ def _extra_action_key_hint(reason: str, surface: ActionSurface, observation: Obs
 
     path = _first_field_path(reason)
     if len(path) < 4 or path[0] != "actions":
-        return _example_json_hint(surface, observation, "an extra field in an action")
+        return _example_json_hint(surface, observation, "an extra field in an action", shape)
     kind, name = path[2], path[3]
     owners = sorted(
         _action_kind_of(model)
@@ -800,19 +997,24 @@ def _extra_action_key_hint(reason: str, surface: ActionSurface, observation: Obs
             f"it belongs to the {', '.join(json.dumps(owner) for owner in owners)} "
             f'action kind(s) -- check that "{kind}" is the kind you meant'
         )
-    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind)}')
+    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind, shape)}')
     return ". ".join(parts)
 
 
-def _action_line(surface: ActionSurface, kind: str) -> str:
-    """One action kind's accepted fields, from the models the prompt uses."""
+def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape()) -> str:
+    """One action kind's accepted fields, from the models the prompt uses.
+
+    A field the caller's contract removed is left out: this line is the model's
+    last look at the shape it should be sending, and stating a field the
+    signature does not offer is how a correction teaches the wrong contract.
+    """
 
     for model in surface.models:
         if _action_kind_of(model) == kind:
             fields = [
                 f'"{name}": {_field_shape(field, name=name)}'
                 for name, field in model.model_fields.items()
-                if name != "kind"
+                if name != "kind" and name not in shape.omitted_action_fields
             ]
             return "{" + ", ".join(fields) + "}"
     return 'a JSON object whose "kind" is one of the accepted action kinds'
@@ -892,8 +1094,14 @@ def _frame_id_hint(observation: Observation) -> str:
     return f"the only accepted frame ids on this observation are {ids}"
 
 
-def _example_json_hint(surface: ActionSurface, observation: Observation, refused: str) -> str:
-    return f"{refused} was refused. Accepted shape: {_example_json(surface, observation)}"
+def _example_json_hint(
+    surface: ActionSurface,
+    observation: Observation,
+    refused: str,
+    shape: HintShape = HintShape(),
+) -> str:
+    shape_example = _example_json(surface, observation, shape)
+    return f"{refused} was refused. Accepted shape: {shape_example}"
 
 
 def _first_field_path(reason: str) -> tuple[str, ...]:
