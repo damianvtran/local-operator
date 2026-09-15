@@ -1216,3 +1216,54 @@ def test_an_exempt_row_is_still_swept_from_the_ledger():
         )
 
     assert manager.list() == []  # the LEDGER releases them on schedule
+
+
+def test_a_folded_subtree_keeps_a_moment_only_while_every_call_agrees_on_it() -> None:
+    """A mixed-window subtree must not be priced as if it ran in one window.
+
+    The fold sums several calls onto one row, and it used to inherit the FIRST
+    member's ``at_ms`` — a claim that the whole subtree ran in that window, which
+    is false the moment a second call ran in another (review round 1, MINOR 3:
+    a peak call plus an off-peak call summed onto the peak stamp priced 0.60 where
+    the truth is 0.45). Agreement keeps the exactness a single-window subtree
+    genuinely has; disagreement drops the stamp, and the row is then priced at the
+    clock — the documented fallback for an aggregate, the same one a turn's folded
+    total already uses.
+    """
+    from typing import Any
+
+    from local_operator.harness.jobs import _merge_accounting_component
+
+    peak_ms, off_ms = 1_700_000_000_000, 1_700_003_600_000
+    grouped: dict[tuple[str | None, str | None, str], Any] = {}
+
+    def _component(at_ms: int | None) -> Any:
+        from local_operator.harness.types import Usage
+
+        return Usage(
+            input_tokens=10,
+            output_tokens=0,
+            provider="deepseek",
+            model_id="deepseek-flash",
+            at_ms=at_ms,
+        )
+
+    _merge_accounting_component(grouped, _component(peak_ms))
+    only = next(iter(grouped.values()))
+    assert only.at_ms == peak_ms, "a single member's own moment is exact and must survive"
+
+    _merge_accounting_component(grouped, _component(peak_ms))
+    still = next(iter(grouped.values()))
+    assert still.at_ms == peak_ms, "two calls in the SAME window may share it"
+
+    _merge_accounting_component(grouped, _component(off_ms))
+    mixed = next(iter(grouped.values()))
+    assert (
+        mixed.at_ms is None
+    ), "a row folding calls from two windows cannot claim either one's moment"
+    # And a member with no stamp at all also clears it: the row can no longer
+    # assert a window for every call it covers.
+    grouped.clear()
+    _merge_accounting_component(grouped, _component(peak_ms))
+    _merge_accounting_component(grouped, _component(None))
+    assert next(iter(grouped.values())).at_ms is None

@@ -163,3 +163,43 @@ def test_a_keyed_sonar_request_is_priced_and_never_free() -> None:
 
     unknown = estimate_search_cost("perplexity", None)
     assert unknown.usd is None, "no usage and no tier flag is unknown, not free"
+
+
+def test_the_search_routes_peak_constants_agree_with_the_registry_row() -> None:
+    """The one remaining duplication of DeepSeek's rates, pinned to its source.
+
+    This route keeps its own per-token constants because it is Anthropic-wire and
+    prices its own buckets (cache reads sit OUTSIDE ``input_tokens`` there, the
+    opposite of the chat route), so folding it onto the registry row would import
+    the other wire's arithmetic. The constants must still be the SAME published
+    peak rates as ``deepseek_models["deepseek-flash"]`` divided by 1e6 — this is
+    the test that makes that duplication safe, because the day they drift the
+    search ledger starts quoting a price the model picker does not.
+    """
+    from local_operator.model.registry import deepseek_models
+    from local_operator.web_search import cost as search_cost
+
+    row = deepseek_models["deepseek-flash"]
+    assert row.cache_reads_price is not None
+    assert search_cost.DEEPSEEK_PEAK_INPUT_USD_PER_TOKEN == pytest.approx(row.input_price / 1e6)
+    assert search_cost.DEEPSEEK_PEAK_OUTPUT_USD_PER_TOKEN == pytest.approx(row.output_price / 1e6)
+    assert search_cost.DEEPSEEK_PEAK_CACHE_HIT_USD_PER_TOKEN == pytest.approx(
+        row.cache_reads_price / 1e6
+    )
+
+
+def test_the_search_route_evaluates_the_shared_schedule_not_its_own_copy() -> None:
+    """Both routes must answer "is this peak" identically, hour by hour.
+
+    The search route's predicate now DELEGATES to ``model/tariff``; this walks a
+    week of hours and asserts the two agree, so the ownership is observable
+    rather than merely claimed in a docstring.
+    """
+    from local_operator.model import tariff
+
+    for day_offset in range(7):
+        for hour in range(24):
+            moment = _at(2026, 9, 14 + day_offset, hour)
+            assert deepseek_is_peak_hour(moment) is tariff.is_peak(
+                tariff.DEEPSEEK_TOU, moment
+            ), moment

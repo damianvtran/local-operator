@@ -82,6 +82,7 @@ def picker_rows(
             connected=entry.connected,
             aggregated=entry.aggregated,
             routed=entry.routed,
+            time_of_use=entry.time_of_use,
         )
         for entry in listed
         if usable is None or entry.provider in usable or entry.selector == current

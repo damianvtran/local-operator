@@ -45,7 +45,15 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -413,8 +421,34 @@ class Message(BaseModel):
         return message
 
 
+def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``at_ms`` from a serialized usage while it was never set.
+
+    Every ``Usage`` subclass's own ``@model_serializer`` must route its result
+    through here (see ``session/frontend_state``'s frozen wrappers), because a
+    subclass serializer REPLACES this one rather than composing with it.
+
+    Written as a serializer rather than as field metadata on purpose: a
+    field-level ``exclude_if`` reads better but only exists in pydantic 2.12+,
+    while ``pyproject.toml`` declares ``pydantic>=2.7`` — on 2.7-2.11 it degrades
+    to schema metadata and every usage goes back to carrying ``"at_ms": null``,
+    invisibly, until the attach frame crosses its 1 MiB socket line limit again
+    (review round 1, MINOR 2).
+    """
+    if data.get("at_ms") is None:
+        data.pop("at_ms", None)
+    return data
+
+
 class Usage(BaseModel):
     """Token accounting reported by a provider (or estimated locally)."""
+
+    @model_serializer(mode="wrap")
+    def _serialize_usage_without_unset_stamp(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Serialize normally, then drop a stamp that was never set."""
+        return _omit_unset_usage_stamp(handler(self))
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -451,6 +485,28 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # Epoch milliseconds in UTC when the PROVIDER reported this usage. The window
+    # a time-of-use tariff is evaluated in is a property of the CALL, not of when
+    # somebody later read the ledger: a restored session or an attached receipt
+    # priced at view time is wrong by up to 2x in either direction, and this
+    # stamp is the call's own answer. Stamped where a provider response is parsed
+    # (``providers/clients.py``); an aggregate leaves it unset — a turn's folded
+    # total and a child's lifetime total carry their provenance in
+    # ``cost_components`` instead, exactly as they already do for ``usd_cost``
+    # (see ``harness/jobs._merge_accounting_component`` for the one fold that
+    # keeps a stamp, and only while every call it merges shares it).
+    #
+    # SERIALIZATION is load-bearing here, not tidiness: the field is set on every
+    # wire usage and unset on every aggregate, and the attach frame serializes up
+    # to 80,000 usages in its worst-case roster — so a literal ``"at_ms": null``
+    # on each one cost 8 KB of a frame that had 3 KB of headroom and pushed it past
+    # the 1 MiB socket line limit (``tests/unit/session/test_attach_frame_size``).
+    # Unset stamps are dropped by :func:`_omit_unset_usage_stamp` instead. That is
+    # also the honest wire shape — "absent" and "None" mean the same thing to
+    # every reader (``tariff.moment_for`` reads the stamp duck-typed off an object
+    # OR a mapping) — it is still serialized wherever it IS set, so it travels the
+    # wire and the checkpoint, and a legacy transcript's bytes are unchanged.
+    at_ms: int | None = None
     # A record-time table estimate is durable money, but NOT a provider receipt.
     # Keeping the provenance separate lets offline viewers/resumes retain known
     # spend without pretending the provider reported a bill or repricing history.

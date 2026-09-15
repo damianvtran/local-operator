@@ -33,9 +33,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+from local_operator.model import tariff
 from local_operator.web_search.models import SearchCost, SearchUsage
 
 __all__ = [
@@ -53,6 +54,14 @@ __all__ = [
 #: deepseek-flash list price during PEAK hours, USD per token (i.e. per-1M rates
 #: divided by 1e6). Peak is 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday;
 #: every other hour is half price. Source: api-docs.deepseek.com/quick_start/pricing.
+#:
+#: Kept here rather than read off the registry because this route is
+#: Anthropic-wire and prices its OWN buckets (see ``_deepseek_cost``): its
+#: input/cache semantics are not the chat route's, so borrowing the row's four
+#: fields would silently import the other wire's arithmetic. They are the same
+#: numbers as ``deepseek_models["deepseek-flash"]`` divided by 1e6, and
+#: tests/unit/web_search/test_cost.py asserts exactly that, so the duplication
+#: cannot drift unnoticed.
 DEEPSEEK_PEAK_INPUT_USD_PER_TOKEN = 0.30 / 1_000_000
 DEEPSEEK_PEAK_OUTPUT_USD_PER_TOKEN = 1.20 / 1_000_000
 DEEPSEEK_PEAK_CACHE_HIT_USD_PER_TOKEN = 0.006 / 1_000_000
@@ -99,20 +108,19 @@ def deepseek_is_peak_hour(moment: datetime | None = None) -> bool:
     Peak is 01:00-04:00 and 06:00-10:00 UTC on weekdays; the rates halve outside
     it. The window is evaluated in UTC because that is how DeepSeek states it --
     pricing in local time would silently mis-price every off-hours session.
+
+    A thin re-export of the shared schedule, kept under its own name (and in its
+    own module) because tests and this module's own callers name it: the rule has
+    ONE owner now (``local_operator.model.tariff``), so the search route's copy
+    and the chat route's copy cannot drift into disagreeing about what peak
+    means.
     """
-    when = moment or datetime.now(timezone.utc)
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    when = when.astimezone(timezone.utc)
-    if when.weekday() >= 5:  # Saturday/Sunday are off-peak all day
-        return False
-    hour = when.hour
-    return 1 <= hour < 4 or 6 <= hour < 10
+    return tariff.is_peak(tariff.DEEPSEEK_TOU, moment)
 
 
 def _deepseek_cost(usage: SearchUsage, moment: datetime | None) -> SearchCost:
     peak = deepseek_is_peak_hour(moment)
-    scale = 1.0 if peak else 0.5
+    scale = tariff.scale_at(tariff.DEEPSEEK_TOU, moment)
     # The search route is the ANTHROPIC Messages wire, whose ``input_tokens``
     # EXCLUDES the cached reads -- the distinction ``model/configure.py`` spells
     # out in ``_cache_tokens_are_inside_input``. (That helper keys off the MODEL
