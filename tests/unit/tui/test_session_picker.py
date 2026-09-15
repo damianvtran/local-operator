@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -365,6 +366,88 @@ def test_the_repaint_signature_covers_every_field_the_rows_render() -> None:
     # The specific escape, pinned by name: `kind` drives EXEC_MARKER and the
     # reserved column, so it must be compared.
     assert "kind" in covered
+    # And the drain, for the same reason one step removed: a signal can land
+    # while the list is open, and the row's own words change when it does.
+    assert "leaving" in covered
+
+
+def test_a_draining_record_reaches_the_catalogue_row_and_its_words(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """UX round 2, U8: the drain must survive the trip from record to `/resume`.
+
+    The catalogue is what the picker, the sidebar and the mobile list read, and
+    it derived a row's state from ``wedged``/``busy``/``attached`` alone — so a
+    signed-off runtime was indistinguishable from an ordinary busy one on every
+    surface built on it, while `lop sessions` printed the phrase.
+
+    Two halves are pinned and they are deliberately different SHAPES of answer:
+
+    * ``SessionRow.leaving`` carries the runtime's phrase, because that is what
+      a reader needs;
+    * ``status_code`` keeps returning ``busy``, because it is the transport
+      spelling consumers branch on and it is still TRUE of a draining runtime.
+      Growing that vocabulary is the contract change the CLI's LEAVING column
+      refused to make in STATE (design round 2, D3).
+    """
+    from local_operator.session.catalog import CatalogEntry, decorate_rows
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL, SessionRecord
+
+    record = SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id="drain0000001",
+        conversation_name="uxtuidrain",
+        cwd=str(tmp_path),
+        model_label="test/mock",
+        control_port=1,
+        control_key="k",
+        busy=True,
+        leaving=LEAVING_ON_SIGNAL,
+    )
+    monkeypatch.setattr(registry, "scan", lambda _directory: [(record, "live")])
+    monkeypatch.setattr(
+        "local_operator.wakes.store.read_index", lambda _directory: {}, raising=False
+    )
+
+    rows = decorate_rows(tmp_path, [_row("drain0000001", "uxtuidrain")])
+    assert rows[0].leaving == LEAVING_ON_SIGNAL, rows[0]
+    entry = CatalogEntry(rows[0])
+    # The reader's answer: the drain, ahead of "Working", in the record's words.
+    assert entry.status == LEAVING_ON_SIGNAL, entry.status
+    # The machine's answer: unchanged, because a draining runtime IS busy.
+    assert entry.status_code == "busy", entry.status_code
+
+    # An ordinary busy record is untouched by any of this.
+    ordinary = replace(record, leaving="")
+    monkeypatch.setattr(registry, "scan", lambda _directory: [(ordinary, "live")])
+    plain = CatalogEntry(decorate_rows(tmp_path, [_row("drain0000001", "uxtuidrain")])[0])
+    assert plain.status == "Working", plain.status
+
+    # And a record from an OLDER runtime (no such field) lists cleanly: this runs
+    # on the poll loop behind `/resume` on a host mid-upgrade.
+    monkeypatch.setattr(registry, "scan", lambda _directory: [(_OldShapedRecord(), "live")])
+    old = CatalogEntry(decorate_rows(tmp_path, [_row("drain0000001", "uxtuidrain")])[0])
+    assert old.row.leaving == "", old.row.leaving
+
+
+class _OldShapedRecord:
+    """A record as an older runtime writes it: no ``leaving``, no ``busy``."""
+
+    pid = 4242
+    kind = "tui"
+    session_id = "drain0000001"
+    conversation_name = "uxtuidrain"
+    cwd = "/tmp"
+    model_label = "test/mock"
+    control_port = 1
+    control_key = "k"
+    busy = False
+    detached = False
+    started_at = 0.0
+    heartbeat_at = 0.0
+    pending = None
 
 
 def test_a_kind_only_change_is_visible_to_the_repaint_decision() -> None:

@@ -156,6 +156,13 @@ class SessionLine:
     last_activity_s: float | None = None
     pending: str | None = None
     busy: bool = False
+    #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
+    #: first: the phrase its record published (``SessionRecord.leaving``), or
+    #: ``""``. The one field that makes a drain visible outside the runtime's
+    #: own log — for up to ``SIGNAL_DRAIN_S`` a signalled runtime is alive,
+    #: working and otherwise indistinguishable from an ordinary busy one, which
+    #: is what made a plain ``lop stop`` on it destructive (U1/U2, PR #1141).
+    leaving: str = ""
     detached: bool = False
     version: str = ""
     source_ref: str = ""

@@ -37,6 +37,18 @@ automations. The ``LOP_MOBILE_CHILD_*`` environment names keep their spelling
 for the same reason ``RUN_DIRNAME`` does — they are a cross-process contract,
 and during an upgrade a daemon of one version spawns a child of another.
 ``local_operator.mobile.child`` still resolves and still runs this ``main``.
+
+**Work-aware termination.** A termination signal is no longer an exemption
+from the residency rule above. When SIGTERM or SIGINT arrives with work in
+flight, the runtime COMMITS to leaving through the same seam a replaced build
+uses (:func:`_commit_to_leaving`) — announced as it commits, so the operator is
+told before anything is refused, and latched so no new work is admitted — then
+leaves at the next boundary at which nothing would be lost, bounded by
+``types.SIGNAL_DRAIN_S`` (see :func:`_drain_for_signal` for the
+three properties and why each is load-bearing). A signal with nothing in
+flight is byte-for-byte the old behaviour, and SIGKILL remains unrefusable.
+The graceful paths were always idle-gated; the signal path was the gap, and it
+is the one an unnamed outside sweep can actually reach.
 """
 
 from __future__ import annotations
@@ -54,6 +66,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_CAUSE,
+    SIGNAL_DRAIN_S,
+)
 
 if TYPE_CHECKING:
     from local_operator.update import BuildStamp
@@ -514,12 +532,48 @@ def _viewer_attached(runtime: object) -> bool:
     return isinstance(live, int) and live > 0
 
 
+def _work_in_flight(handle: object) -> bool:
+    """Is there work in flight that disposing NOW would destroy?
+
+    THE one work predicate of this module, and the reason it is a function
+    rather than two inline ``handle.is_busy()`` calls: the reaper's residency
+    predicate (:func:`_should_exit`, term 1) and the signal drain
+    (:func:`_drain_for_signal`) must agree on what "would lose nothing" means.
+    They did not — the reaper sampled the handle, the signal handler never
+    asked and disposed on the spot — and that asymmetry is what cut 32 turns
+    off in the 2026-09-14 sweep: the same event the reaper would have deferred
+    to a safe boundary was fatal when it arrived as a signal instead of as an
+    idle tick.
+
+    ``is_busy`` is the authority (never the record's derived ``busy`` bit): it
+    covers a live turn, a parked approval, a running goal loop, live subagents,
+    background jobs and a queued prompt.
+
+    Absent probe -> ``False``, matching the long-standing treatment of reduced
+    test handles and older implementations that never grew the accessor. A
+    RAISING probe -> ``True``, and the direction is deliberate: ``is_busy``
+    documents itself as failing closed, and a predicate that cannot be
+    evaluated must never be the thing that ends a turn. (Letting it propagate,
+    which the inline form did, also took the reaper down with it.)
+    """
+    probe = getattr(handle, "is_busy", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 — uncertainty must keep the runtime working
+        logger.debug("busy probe failed; treating work as in flight", exc_info=True)
+        return True
+
+
 def _should_exit(handle: object, runtime: object) -> bool:
     """The residency predicate (design §6.1): exit when ALL three hold.
 
-    1. ``handle.is_busy()`` is False — no turn, compaction, subagents, jobs,
-       queued prompts, or gate parked on a user's answer. Work is
-       authoritative: nothing below can end a turn early.
+    1. :func:`_work_in_flight` is False (``handle.is_busy()``) — no turn,
+       compaction, subagents, jobs, queued prompts, or gate parked on a user's
+       answer. Work is authoritative: nothing below can end a turn early. That
+       predicate is shared with the signal drain, so "would lose nothing" has
+       exactly one definition on this process.
     2. No wake is due within :data:`WARM_WINDOW_S` — a runtime about to fire
        its own wake is cheaper kept than re-spawned (see the constant).
     3. No interactive viewer is attached — a user looking at the session is
@@ -538,8 +592,7 @@ def _should_exit(handle: object, runtime: object) -> bool:
     daemon's connection is not the user's attention, and the phone's
     interactive attach dials as ``"attach"`` when it wants warmth.
     """
-    is_busy = getattr(handle, "is_busy", None)
-    if is_busy is not None and is_busy():
+    if _work_in_flight(handle):
         return False
     if _wake_within_window(handle):
         return False
@@ -780,6 +833,15 @@ class _Drain:
     to: str
     reason: str
     stagger_until: float
+    #: The token this departure latches and names itself with at the exit. Two
+    #: values, because the two triggers make different claims: ``runtime-retired``
+    #: is the build vocabulary every viewer-driven retirement already carried
+    #: ("this process left so the next engage runs the new build"), while a
+    #: termination signal makes no claim about the build at all and says
+    #: ``runtime-shutdown`` — the same token the dispose rung would have written
+    #: had the signal been fatal on arrival, so a cut turn is classified
+    #: identically whether the drain expired or never ran.
+    cause: str = "runtime-retired"
 
 
 async def _begin_drain(
@@ -818,15 +880,6 @@ async def _begin_drain(
     and leaves when its own work is done, rather than waiting to be let go. See
     ``ServingSessionHandle.begin_drain`` for the runtime's half of the shape.
     """
-    begin_drain = getattr(handle, "begin_drain", None)
-    if not callable(begin_drain):
-        return None
-    if getattr(handle, "_disposing", False):
-        # The disposal owns the exit already. Announcing a departure here would
-        # repeat on every check (nothing latches, so ``drain`` stays unset) and
-        # would invite a viewer to re-engage a session that is on its way out
-        # for a reason the disposal has stated itself.
-        return None
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
     to = poll.newer.label() if poll.newer is not None else ""
     detail = _drain_detail(poll, boot)
@@ -836,7 +889,135 @@ async def _begin_drain(
         reason = "retiring for " + to
     else:
         reason = "retiring for a build replaced on disk"
-    delay = random.uniform(0, _build_stagger_seconds())  # noqa: S311 — jitter, not security
+    return await _commit_to_leaving(
+        handle,
+        runtime,
+        stop,
+        label="stale-build",
+        reason=reason,
+        detail=detail,
+        to=to,
+        loaded=boot.label() if boot is not None else "<unknown>",
+        cause="runtime-retired",
+        stagger_s=random.uniform(0, _build_stagger_seconds()),  # noqa: S311 — jitter, not security
+        leaving=LEAVING_FOR_BUILD,
+    )
+
+
+def _drain_loaded_label(runtime: object) -> str:
+    """What the runtime loaded, for a departure's log line.
+
+    One helper rather than the same inline ternary at every call site: the
+    "<unknown>" fallback is what makes the line readable for a runtime whose
+    boot stamp is unreadable (which is exactly the runtime an investigation
+    wants to see named).
+    """
+    boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
+    return boot.label() if boot is not None else "<unknown>"
+
+
+async def _commit_to_leaving(
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    label: str,
+    reason: str,
+    detail: str,
+    loaded: str,
+    to: str = "",
+    cause: str = "runtime-retired",
+    stagger_s: float = 0.0,
+    leaving: str = "",
+) -> "_Drain | None":
+    """Announce a departure, then stop admitting work. ``None``: not ours.
+
+    THE ONE PLACE A DEPARTURE IS COMMITTED TO, whichever trigger asked for it —
+    the build replaced on disk (:func:`_begin_drain`) or a termination signal
+    (:func:`_drain_for_signal`). Two triggers, ONE state, and that is the point
+    rather than tidiness: the ``retiring`` frame's ``draining`` flag and the
+    phrase the fleet surfaces read (``SessionRecord.leaving``) are two
+    renderings of this single commit, written by the one call below
+    (``RuntimeServer.announce_retiring``), so no surface can report a drain that
+    another surface does not, and the bound a caller imposes is the only thing
+    the two triggers do differently.
+
+    ANNOUNCE FIRST, LATCH SECOND, and the order is invariant (iii): a viewer
+    must learn the runtime is leaving BEFORE it starts refusing, or the first
+    refused message reads as an error rather than as a handover. The latch
+    (``ServingSessionHandle.begin_drain``) is the commit — from that instant no
+    new work is admitted while the live turn, its subagents and its jobs run to
+    completion, and the exit waits for exactly that. It deliberately does NOT
+    write the cut-off cause (that is ``begin_retire``, reached at the boundary
+    by :func:`_drain_for`), which is what makes it safe to commit while a turn
+    the drain exists to save is still running.
+
+    ``leaving`` IS THE RECORD'S HALF OF THE SAME COMMIT, and passing it here
+    rather than writing the record from the trigger is the reconciliation PR
+    #1108 forced: that PR landed its own drain state, whose ``draining`` flag on
+    the ``retiring`` frame is what the APP paints its notice from at frame
+    receipt, while this branch had added ``SessionRecord.leaving`` for the fleet
+    surfaces (``lop sessions``, ``/info``, the catalogue, the stop ladder's
+    refusal). Two renderings of one fact, so ONE writer: the frame is
+    authoritative for the app and the phrase is authoritative for the fleet,
+    and ``announce_retiring`` writes the phrase and sends the frame in the same
+    call — a trigger cannot publish one without the other, which is what makes
+    a disagreement impossible rather than merely unlikely. A trigger passes its
+    OWN words, because the two reasons are not interchangeable and either
+    phrase would be a lie about the other trigger; the frame's ``reason`` label
+    does the same job on the wire.
+
+    A handle without the latch (an older host, a reduced test double) does NOT
+    drain. The bound's whole guarantee is that admissions stop; a runtime that
+    kept accepting work it had already decided to walk away from would be
+    serving the replaced build for longer, not less. It keeps the old behaviour
+    — keep serving, ask again on the next check — which is the status quo rather
+    than a regression.
+
+    A LATCHED DRAIN IS NEVER TAKEN TWICE. The signal path and the reaper can
+    both reach here for one departure (a sweep arriving while a hard-stale
+    runtime is already draining, or the reverse), and ``_drain_for`` is not
+    written to be run twice for one exit: the first commit owns the exit, and
+    the second trigger waits for it or bounds it.
+
+    THE ANNOUNCEMENT PRECEDES THE LATCH. The daemon reaches the same order by a
+    different route, and the difference is worth reading off rather than
+    paraphrased: ``server/retire.py`` publishes ``retiring_from``/``retiring_to``
+    into the RECORD the moment a settled change is detected, keeps serving
+    while anything is attached, and latches its typed refusal only once the
+    drain has emptied — with a jittered ``BUILD_STAGGER_S`` slice between the
+    latch and the exit. Both serve the same goal, a reader must learn the
+    process is leaving before it is refused, and each mechanism decides how much
+    time that reader gets: a daemon's readers POLL its record, so announcing
+    early costs it nothing and it can keep working until they let go, while this
+    runtime's announcement is a FRAME on the very connection a prompt arrives
+    on — and waiting for that viewer is precisely the failure being fixed here,
+    because viewer presence is the term that kept five-hour-stale runtimes
+    resident. So the runtime announces and latches in the SAME synchronous step
+    and leaves when its own work is done, rather than waiting to be let go. See
+    ``ServingSessionHandle.begin_drain`` for the runtime's half of the shape.
+    """
+    begin_drain = getattr(handle, "begin_drain", None)
+    if not callable(begin_drain):
+        return None
+    if getattr(handle, "_disposing", False):
+        # The disposal owns the exit already. Announcing a departure here would
+        # invite a viewer to re-engage a session that is on its way out for a
+        # reason the disposal has stated itself.
+        return None
+    if getattr(handle, "_draining", False):
+        # A departure is already committed to and announced. Its own call site
+        # owns the exit; a second ``_Drain`` would race it into ``_clean_exit``.
+        return None
+    # THE SUCCESSOR-SPREAD DELAY IS THE CALLER'S, because the two triggers do
+    # not share the reason for it: a BUILD change retires a whole fleet within
+    # seconds of itself (every runtime sees the same stamp), so the build path
+    # draws a jittered ``BUILD_STAGGER_S`` slice here and the successors spawn
+    # spread out. A signal retires only what it hit, and those exits are spread
+    # by the work each one is finishing — so the signal path draws nothing, and
+    # a signalled runtime leaves the moment its own turn ends instead of holding
+    # its process (and its record) for up to ``BUILD_STAGGER_S`` afterwards.
+    delay = stagger_s
     if stop.is_set():
         # BEFORE the log and before the announce, and both orders are the point:
         # the log line below says no new work will be admitted and the frame
@@ -854,7 +1035,7 @@ async def _begin_drain(
         "session runtime: %s (loaded %s; %s); no new work will be admitted, in-flight work "
         "finishes first (pid %d)",
         reason,
-        boot.label() if boot is not None else "<unknown>",
+        loaded,
         detail,
         os.getpid(),
     )
@@ -867,14 +1048,14 @@ async def _begin_drain(
             # empties. A viewer that inferred that from its own state inferred
             # "cold", which is true of every handover (QA round 3, Q-1).
             await cast(Callable[..., Awaitable[None]], announce)(
-                "stale-build", to=to, draining=True
+                label, to=to, draining=True, leaving=leaving
             )
         except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
             logger.debug("retiring announcement failed", exc_info=True)
     if stop.is_set():
         return None  # a stop arrived during the announcement; its path owns the exit
     try:
-        latched = begin_drain("runtime-retired", detail)
+        latched = begin_drain(cause, detail)
     except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
         logger.warning("could not latch the drain; keeping runtime", exc_info=True)
         return None
@@ -885,6 +1066,7 @@ async def _begin_drain(
         to=to,
         reason=reason,
         stagger_until=time.monotonic() + delay,
+        cause=cause,
     )
 
 
@@ -916,7 +1098,7 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
     if not _idle_for_refresh(handle):
         return False
     begin_retire = getattr(handle, "begin_retire", None)
-    if callable(begin_retire) and not begin_retire("runtime-retired", drain.detail):
+    if callable(begin_retire) and not begin_retire(drain.cause, drain.detail):
         logger.info("session runtime: work arrived as the drain closed; keeping")
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
@@ -954,6 +1136,196 @@ async def _hand_wakes_to_successor(handle: object) -> int:
         logger.warning("could not hand the drain's wakes to a successor", exc_info=True)
         return 0
     return int(handed)
+
+
+#: The wire label a SIGNAL-driven retirement announces. Deliberately not one of
+#: the build labels (``stale-build``, ``moved``): both of those mean "a NEWER
+#: build is owed", and a viewer that read that off an ordinary SIGTERM would be
+#: told the install had moved when it had not. The frame itself is the ordinary
+#: ``retiring`` one — what a viewer does with it (engage a successor) is exactly
+#: right here, because a runtime that has been signalled IS leaving.
+_SIGNAL_DRAIN_REASON = "shutdown-drain"
+
+
+async def _drain_for_signal(
+    handle: object, runtime: object, stop: asyncio.Event, *, sig_name: str
+) -> None:
+    """Leave after a termination signal — at the next boundary, or at the bound.
+
+    Called by ``amain``'s signal handler INSTEAD of ``stop.set()`` when
+    :func:`_work_in_flight` is true. It is the fix for the asymmetry the
+    2026-09-14 incident measured: the reaper refused to exit while a turn was in
+    flight, and the signal handler disposed anyway, so a broadcast SIGTERM
+    destroyed work the very same process had just decided not to disturb.
+    SIGTERM is catchable and already handled on this loop, so the receiver can
+    afford to be the polite one — which is the whole point: the sender of a
+    sweep is unnamed and cannot be taught manners, while this process always
+    knows whether it is mid-turn.
+
+    IT COMMITS THROUGH :func:`_commit_to_leaving`, the same seam the
+    build-replaced drain commits through, so a signalled runtime is in ONE state
+    and every surface reports that state the same way: the ``retiring`` frame
+    carries ``draining=True`` for the app, and the same call publishes the
+    phrase the fleet surfaces read. What the two triggers do differently is the
+    bound this function imposes — the build drain waits on its work alone.
+
+    Three properties, each load-bearing:
+
+    * THE WAIT IS BOUNDED by ``types.SIGNAL_DRAIN_S``. A wedged or runaway
+      runtime must not become unkillable, and a signal must never turn into an
+      unbounded wait. The deadline is absolute and the boundary is re-checked
+      every ``REAP_CHECK_S``, so the wait ends at the FIRST tick after the work
+      finishes.
+
+    * THE COMMIT IS SAFE TO TAKE NOW, and PR #1108 is what made it so.
+      ``begin_drain`` refuses new admissions and spools peer messages without
+      touching the turn in flight, and it deliberately does NOT write the
+      cut-off cause — that is ``begin_retire``, which :func:`_drain_for` reaches
+      only at the boundary. A turn that finishes inside the window therefore
+      cannot be relabelled an error. Round 1 had to announce at the boundary
+      instead of committing at the signal, because the only latch that existed
+      then did both jobs at once.
+
+      WHICH latch that argument is about is worth spelling out, because only one
+      of the two conceivable spellings could do that harm. Calling
+      ``begin_retire`` BEFORE the wait would latch NOTHING: it returns ``False``
+      the moment ``may_refresh()`` is non-empty, and ``may_refresh()`` reports
+      ``"busy"`` whenever ``is_busy()`` is true (``serving.py``) — which is
+      precisely the case this function exists for, since a signal only reaches
+      here with work in flight. That spelling is harmless rather than correct,
+      and saying so is not pedantry: it looks like the fix, and a reader who
+      "simplified" the boundary latch into it would silently lose the cut-off
+      cause for a turn the bound really does destroy. The hazard belongs to a
+      latch that writes the cause directly (``note_cut_off`` plus
+      ``_retiring_cause``), which is the one this path still does not take.
+
+      What the early commit costs is stated rather than hidden: work that
+      arrives mid-drain is refused (``prompt``) or spooled for the successor
+      (``peer_message``) — the same behaviour the build drain has, from the same
+      latch — where round 1 admitted it and cut it if the bound expired. And a
+      refusal is only honest if the operator was told, which is why the commit
+      announces the moment it is taken.
+
+    * ON EXPIRY THE DISPOSAL IS THE ORDINARY ONE: no second announcement and no
+      clean-exit convergence, so the dispose rung notes ``runtime-shutdown`` for
+      the turn it aborts — the token this drain's own latch carries, so a turn
+      is classified identically whether the drain expired or never ran. Say so
+      HERE rather than at the exit line, because the fact that matters
+      afterwards is that the BOUND cut this turn and not the signal.
+
+    * THE PENDING EXIT IS PUBLISHED *BEFORE* THE WAIT, unlike the retirement
+      latch — and the two are deliberately not the same moment. The latch is a
+      statement about a turn's OUTCOME (it brands the next end), so it must wait
+      for the boundary; ``leaving`` is a statement about the PROCESS (a signal
+      arrived and is being honoured), which is already true the instant this
+      function starts. Publishing it here is what makes the drain visible at
+      all: without it a signalled-but-working runtime spends up to
+      ``SIGNAL_DRAIN_S`` looking like an ordinary busy one on every surface an
+      operator reads, and the natural remedy for "it is still working" — a
+      plain ``lop stop`` — cuts the very turn the drain is finishing (U1/U2, PR
+      #1141). See ``SessionRecord.leaving``; ``lop stop`` refuses on it too.
+
+    ONE GAP IS DELIBERATE and is stated rather than closed: the predicate is
+    read above and then ``announce_retiring`` is awaited, so a ``prompt``
+    landing inside that window is admitted before ``begin_drain`` — the latch
+    adjacent to the announce — starts refusing. What protects a turn taken
+    through that gap is the BOUNDARY latch, not a second read here: ``_drain_for``
+    re-reads the idle gate immediately before ``begin_retire`` (through
+    ``_idle_for_refresh``, the same ``may_refresh`` gate the reaper samples) and
+    skips the commit when work arrived, so such a turn is normally WAITED OUT and
+    ``stop.set()`` cuts it only if ``SIGNAL_DRAIN_S`` expires first (pinned by
+    ``test_process_refresh.py::test_work_arriving_after_the_announce_keeps_the_runtime``).
+    Re-reading the gate at the announce would not close the window — the signal
+    has already decided that this process leaves, so a re-read could only relabel
+    a cut, never save the turn — and the re-read that DOES matter is the one at
+    the boundary, where it can still refuse the exit. So the window stays,
+    bounded by one socket write, and the label stays honest
+    (``runtime-shutdown``).
+
+    The signal name is passed for the log only; the disposal itself stays where
+    it is and in the order it already had — ``amain`` owns deny -> dispose ->
+    aclose, and this function only decides WHEN ``stop`` is set.
+    """
+    # ``time.monotonic`` rather than ``loop.time``: the deadline is compared
+    # against a clock nobody can move, and the reaper's own waits use this one.
+    deadline = time.monotonic() + SIGNAL_DRAIN_S
+    logger.info(
+        "session runtime: %s arrived with work in flight; leaving at the next boundary "
+        "(bound %.0fs)",
+        sig_name,
+        SIGNAL_DRAIN_S,
+    )
+    if getattr(handle, "_draining", False) and not stop.is_set():
+        # A departure is ALREADY committed to — the build on disk was replaced
+        # first — so its own call site owns the exit and this signal adds only
+        # the one thing that path does not have: a bound. Waiting on ``stop``
+        # rather than on the work is what keeps the two from racing into
+        # ``_clean_exit``; the drain the reaper is running sets it.
+        while not stop.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(REAP_CHECK_S)
+        if not stop.is_set():
+            logger.warning(
+                "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
+                "disposing now",
+                sig_name,
+                SIGNAL_DRAIN_S,
+            )
+            stop.set()
+        return
+    # ``leaving=`` is how the pending exit reaches the fleet surfaces, and the
+    # seam is the ONLY writer of both halves of that fact: it publishes the
+    # phrase on the record and sends the ``draining=True`` frame in one call, so
+    # no surface can report a drain another surface does not (see
+    # ``RuntimeServer.announce_retiring``). Best-effort inside that call: a
+    # record that could not be rewritten must not stop a runtime from honouring
+    # the signal it was given.
+    drain = await _commit_to_leaving(
+        handle,
+        runtime,
+        stop,
+        label=_SIGNAL_DRAIN_REASON,
+        reason=f"leaving after {sig_name}",
+        detail=f"{sig_name}: drained to the end of the turn in flight",
+        loaded=_drain_loaded_label(runtime),
+        cause=SIGNAL_DRAIN_CAUSE,
+        leaving=LEAVING_ON_SIGNAL,
+    )
+    if drain is None:
+        if stop.is_set() or getattr(handle, "_disposing", False):
+            # An exit is already under way and owns the ordering; a second
+            # ``stop.set()`` here would only be noise.
+            return
+        # NO LATCH ON THIS HANDLE (a reduced host or a test double). The old
+        # fallback, kept because the guarantee it buys is the point of this
+        # function: wait the work out, bounded, announcing nothing — a runtime
+        # that never latched has nothing to refuse, so there is no handover to
+        # advertise — and let the disposal own the exit.
+        while _work_in_flight(handle) and time.monotonic() < deadline:
+            await asyncio.sleep(REAP_CHECK_S)
+        if _work_in_flight(handle):
+            logger.warning(
+                "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
+                "disposing now",
+                sig_name,
+                SIGNAL_DRAIN_S,
+            )
+        stop.set()
+        return
+    while True:
+        if await _drain_for(drain, handle, runtime, stop):
+            return
+        if stop.is_set():
+            return
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(REAP_CHECK_S)
+    logger.warning(
+        "session runtime: %s drain bound (%.0fs) expired with work still in flight; "
+        "disposing now",
+        sig_name,
+        SIGNAL_DRAIN_S,
+    )
+    stop.set()
 
 
 async def _drain_inbox_into(handle: object) -> int:
@@ -1199,10 +1571,45 @@ async def amain() -> int:
     # their own reason from ``_clean_exit``; this covers the two triggers that
     # dispose directly.
     trigger: dict[str, str] = {}
+    #: The in-flight drain, if a signal has asked for one. Held so that a
+    #: REPEAT signal cannot start a second drain, and so nothing else needs to
+    #: know whether one is running.
+    draining: asyncio.Task[None] | None = None
 
     def _on_signal(sig: signal.Signals) -> None:
+        """Leave — at the next boundary if a turn is in flight, right now if not.
+
+        The asymmetry this closes: the reaper has always refused to exit under
+        live work, while this handler disposed immediately, so a sweep that
+        arrived as a signal destroyed exactly the turns residency protects (the
+        2026-09-14 incident: 21 runtimes, 32 cut-off turns).
+
+        A signal with NOTHING in flight behaves exactly as it always did — the
+        event is set in this same synchronous step, no task, no added latency,
+        no change to anything that watches ``stop``.
+
+        A REPEAT signal does NOT shorten the bound. A second SIGTERM is either
+        the same fire-and-forget sweep arriving twice or a person pressing a
+        key twice, and neither may talk the runtime into discarding the turn it
+        is finishing; SIGKILL remains the unrefusable way to end a process that
+        truly must end now. The repeat IS logged, because "the signal arrived
+        twice and was absorbed" is the sort of thing an incident review has to
+        be able to see afterwards.
+        """
+        nonlocal draining
         trigger.setdefault("why", sig.name)
-        stop.set()
+        if not _work_in_flight(handle):
+            stop.set()
+            return
+        if draining is None:
+            draining = asyncio.ensure_future(
+                _drain_for_signal(handle, runtime, stop, sig_name=sig.name)
+            )
+            return
+        logger.info(
+            "session runtime: %s repeated while draining; the drain bound is unchanged",
+            sig.name,
+        )
 
     def _on_socket_stop() -> None:
         """The graceful ``stop`` op (``ServingSessionHandle.request_stop``)."""
@@ -1272,6 +1679,13 @@ async def amain() -> int:
     reaper = asyncio.ensure_future(_reaper(handle, runtime, stop))
     reaper_ran_clean_exit = False
     await stop.wait()
+    if draining is not None and not draining.done():
+        # The stop came from somewhere else first (the reaper's idle drain, the
+        # socket ``stop`` op, or the refresh branch) while a signal-driven drain
+        # was still waiting. That drain's remaining job was to set ``stop``,
+        # which has now happened, so it is cancelled rather than left to wake
+        # against a session that is already disposing.
+        draining.cancel()
     if not reaper.done():
         reaper.cancel()
     elif reaper.exception() is None:

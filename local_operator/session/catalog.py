@@ -284,6 +284,17 @@ class CatalogEntry:
             age = self.row.heartbeat_age_s
             measured = f" (last heartbeat {format_duration(age)} ago)" if age is not None else ""
             return f"{WEDGED_STATUS}{measured}"
+        # THE DRAIN OUTRANKS "Working", and says it in the record's own words.
+        # A draining runtime IS working, so "Working" was true and useless: the
+        # one thing a reader needs off this row is that the runtime has already
+        # committed to leaving and is finishing the turn first — the state that
+        # makes a plain stop destructive. The phrase is the same one `lop
+        # sessions` prints and `/info` shows, and the same commit that sends the
+        # ``draining`` flag to the app writes it (``announce_retiring``), so the
+        # catalogue and the app cannot disagree about whether this row is
+        # draining (UX round 2, U8; PR #1108 reconciliation).
+        if self.row.leaving:
+            return self.row.leaving
         if self.row.live_state == "busy":
             return "Working"
         if self.shows_completion_mark:
@@ -476,6 +487,7 @@ def decorate_rows(
         record_state = live.get(row.id)
         live_state = ""
         pending: str | None = None
+        leaving = ""
         kind = ""
         if record_state is not None:
             record, state = record_state
@@ -496,6 +508,18 @@ def decorate_rows(
             # says nothing rather than claiming a session is still an exec run
             # after the process that made it that has gone.
             kind = str(getattr(record, "kind", "") or "")
+            # THE DRAIN, carried as the record's own phrase rather than folded
+            # into ``live_state``. A signalled runtime IS busy, so the token is
+            # not wrong — it is just not the fact a reader needs, and the token
+            # is what consumers branch on (``status_code`` is a transport
+            # spelling, ``session_category`` ranks on it). A third value there
+            # would be a contract change to say something the row can say in a
+            # field of its own, which is the same call the CLI's LEAVING COLUMN
+            # made instead of adding a token to STATE (design round 2, D3).
+            # Defaulted through getattr like the neighbouring live fields: a
+            # record written by an OLDER runtime has no such field, and this
+            # runs on the poll loop behind ``/resume``.
+            leaving = str(getattr(record, "leaving", "") or "")
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         age: float | None = None
@@ -505,6 +529,7 @@ def decorate_rows(
             row._replace(
                 live_state=live_state,
                 pending=pending,
+                leaving=leaving,
                 wakes=len(schedules),
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
                 kind=kind,

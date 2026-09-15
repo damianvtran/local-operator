@@ -229,3 +229,79 @@ class TestTheWatch:
     def test_the_pair_names_both_builds(self) -> None:
         assert buildwatch.build_pair(OLD, NEW) == f" ({OLD.label()} → {NEW.label()})"
         assert buildwatch.build_pair(None, NEW) == ""
+
+
+class TestTheWireSentences:
+    """The rotation's answers are a CONTRACT between two processes.
+
+    The runtime picks the sentence and ``control.refresh_session`` routes on it,
+    so a reword at either end used to fail SILENTLY: the matcher missed and fell
+    through to its generic ``kept`` branch, reporting "was not moved: …" for a
+    state that has a precise, actionable diagnosis (review round 2, NIT-1).
+    """
+
+    def test_the_retired_hedge_still_routes(self) -> None:
+        """A runtime started before #1141 answers this until build skew retires it.
+
+        ``lop refresh``'s own docstring says its first run is ``lop-update``, so
+        the fleet that exists at update time is BY CONSTRUCTION made of runtimes
+        executing the previous build's code — the one build that cannot know the
+        two precise sentences. The matcher therefore keeps accepting the retired
+        hedge, and it does so by matching ``KEPT_MATCHES`` as a PREFIX of it,
+        which is a cross-version contract rather than a tidiness accident.
+        """
+        assert buildwatch.KEPT_MATCHES_OR_UNSETTLED.startswith(buildwatch.KEPT_MATCHES)
+        assert "has not settled" in buildwatch.KEPT_MATCHES_OR_UNSETTLED
+
+    def test_the_two_live_answers_are_distinct_and_neither_is_the_hedge(self) -> None:
+        assert buildwatch.KEPT_MATCHES != buildwatch.KEPT_UNSETTLED
+        for live in (buildwatch.KEPT_MATCHES, buildwatch.KEPT_UNSETTLED):
+            assert live.startswith("kept: "), live
+            assert live != buildwatch.KEPT_MATCHES_OR_UNSETTLED, live
+
+
+class TestMovedAndUnsettled:
+    """The settle question asked about a stamp somebody ELSE published.
+
+    ``pending_build`` asks it about the stamp this process booted from;
+    ``lop refresh`` holds a DISCOVERY RECORD instead, and that is the case this
+    reader exists for (design round 2 D1 / UX round 2 U6 / QA round 2 O1).
+    """
+
+    @pytest.fixture(autouse=True)
+    def disk(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.state: dict[str, object] = {"build": NEW, "age": 0.0}
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: self.state["build"])
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: self.state["age"])
+        monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
+
+    def test_a_record_with_no_stamp_asks_nothing(self) -> None:
+        """With nothing to compare, the marker cannot be said to have moved PAST it.
+
+        The runtime's own "matches" then stands rather than being second-guessed,
+        which is also what keeps an old record from being reported as an
+        unsettled install on the strength of a comparison it never took part in.
+        """
+        assert buildwatch.moved_and_unsettled("", "") is False
+
+    def test_a_moved_marker_inside_the_settle_is_unsettled(self) -> None:
+        assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is True
+
+    def test_a_settled_move_is_not_unsettled(self) -> None:
+        self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
+        assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is False
+
+    def test_a_matching_install_is_not_unsettled(self) -> None:
+        self.state["build"] = OLD
+        assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is False
+
+    def test_a_raising_probe_is_no_evidence_rather_than_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """This is read while composing a receipt for a person, mid-scan."""
+
+        def _boom(*_a: object, **_k: object) -> BuildStamp:
+            raise RuntimeError("no dist-info")
+
+        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is False

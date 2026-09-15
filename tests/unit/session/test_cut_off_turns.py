@@ -348,11 +348,11 @@ class _LatchHost:
     from local_operator.session.runtime.serving import ServingSessionHandle as _H
 
     begin_retire = _H.begin_retire
-    # ``staticmethod`` because the handle's own is one: assigning the plain
-    # function would rebind it as a METHOD of this stub, so the call below
-    # would pass ``self`` and raise `TypeError`. `test_serving_drain.py`'s
-    # ``DrainHost`` wraps it the same way.
-    _retiring_refusal = staticmethod(_H._retiring_refusal)
+    # Plain assignment, because the handle's own is an ordinary instance method:
+    # it reads the cause the handle latched to choose its sentence (design round
+    # 4, D10), so the binding here must pass ``self``. `test_serving_drain.py`'s
+    # ``DrainHost`` binds it the same way.
+    _retiring_refusal = _H._retiring_refusal
 
     #: Typed ``Any`` on purpose: the real attribute holds a ``Session``, and the
     #: tests below substitute a recorder that only implements ``note_cut_off``.

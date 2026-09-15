@@ -24,6 +24,7 @@ from local_operator.mobile.attach_client import (
 )
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.providers.clients import STREAM_READ_TIMEOUT_S
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 
@@ -277,6 +278,99 @@ async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config
         while asyncio.get_running_loop().time() < deadline and not disconnected:
             await asyncio.sleep(0.05)
         assert disconnected == [RETIRING_REASON], disconnected
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_key_drain_frame_places_the_refusal_the_raiser_could_not_name(
+    config: Path,
+) -> None:
+    """U14/M-1/D11: the refusal speaks for the departure the SAME wire announced.
+
+    THE CROSS-VERSION WINDOW, and the one place round 5 found the two faces of
+    one state disagreeing. ``error_trigger`` is new in this branch, so a runtime
+    older than it crosses with ``error_code`` alone — and at least one of those
+    runtimes, the rungs of this very branch that had the work-aware SIGTERM
+    drain but not the phrase key, then SIGNAL-drained while its viewer painted
+    "switching to a newer build". Reached with a build this old: the viewer held
+    the phrase off the frame it had just read and the refusal knew nothing.
+
+    So the client remembers the departure's own words and hands them to the
+    decoder, and these three arms are the three populations that can arrive that
+    way: a RELEASED build (its only draining announce is the stale-build
+    handover, so the build sentence stays true), a pre-key rung of this branch
+    (a signal drain, which must NOT be told about a build), and a phrase from a
+    build newer than this one, which establishes nothing and so earns the
+    sentence that names no departure.
+
+    The drain frames come from the real emitter (``RuntimeServer`` over a real
+    socket to a real ``AttachClient``); the refusal frame is the shape an older
+    raiser sends, which was captured on the wire in round 5 — ``op``/``req``,
+    ``error_code``, ``message``, and nothing naming the departure.
+    """
+    from local_operator.session.runtime.types import (
+        LEAVING_ON_SIGNAL,
+        drain_phrase_for_frame,
+    )
+
+    #: What a runtime too old to send ``error_trigger`` puts on the wire when its
+    #: drain refuses a message. The ``message`` it composed is never read here
+    #: (the category is), so an old build's own build-sentence wording is not a
+    #: variable in this cell.
+    older_raiser = {
+        "op": "error",
+        "req": 1,
+        "error_code": RuntimeRetiring.code,
+        "message": "the session runtime is retiring (runtime-retired)",
+    }
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        frames: list[dict[str, Any]] = []
+        client = AttachClient(lambda p: None, lambda reason: None, on_retiring=frames.append)
+        await client.connect(record, "sess-a")
+
+        async def announce(reason: str, **fields: Any) -> dict[str, Any]:
+            before = len(frames)
+            await r.announce_retiring(reason, **fields)
+            deadline = asyncio.get_running_loop().time() + 5
+            while asyncio.get_running_loop().time() < deadline and len(frames) == before:
+                await asyncio.sleep(0.05)
+            assert len(frames) == before + 1, frames
+            return frames[-1]
+
+        # A pre-key SIGNAL drain: no phrase key, the trigger only in the reason.
+        signal_frame = await announce("shutdown-drain", to="", draining=True)
+        assert signal_frame.get("leaving") == "", signal_frame
+        with pytest.raises(RuntimeRetiring) as refused:
+            client._raise_for_reply_error(older_raiser)
+        assert refused.value.HEAD == RuntimeRetiring.HEAD_SIGNALLED, refused.value.HEAD
+        assert "newer build" not in str(refused.value), str(refused.value)
+        # And the phrase the app is handed for that SAME frame is the one the
+        # notice paints from, so the two faces of one drain cannot disagree.
+        assert drain_phrase_for_frame(signal_frame) == LEAVING_ON_SIGNAL
+
+        # A RELEASED build's drain, which is the handover and nothing else.
+        build_frame = await announce("stale-build", to="0.55.6@f4a70b9", draining=True)
+        assert build_frame.get("leaving") == "", build_frame
+        with pytest.raises(RuntimeRetiring) as handover:
+            client._raise_for_reply_error(older_raiser)
+        assert handover.value.HEAD == RuntimeRetiring.HEAD, handover.value.HEAD
+
+        # A phrase this build has never heard of, off a NEWER runtime's frame:
+        # the phrase is carried through untouched — the app looks its notice up
+        # in a table keyed on exactly this string — and it places no departure at
+        # the decoder, which is why the refusal may not borrow another's words.
+        future_frame = await announce(
+            "a-reason-from-the-future", draining=True, leaving="leaving for parts unknown"
+        )
+        assert future_frame["leaving"] == "leaving for parts unknown", future_frame
+        with pytest.raises(RuntimeRetiring) as unplaced:
+            client._raise_for_reply_error(older_raiser)
+        assert unplaced.value.HEAD == RuntimeRetiring.HEAD_UNNAMED, unplaced.value.HEAD
     finally:
         r.close()
 

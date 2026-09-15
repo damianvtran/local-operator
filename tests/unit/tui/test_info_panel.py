@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -28,6 +29,12 @@ from local_operator.info.model import (
     SessionLine,
     SessionsInfo,
     SubagentLine,
+)
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_S,
+    bound_text,
 )
 from local_operator.tui.widgets.info_panel import (
     INFO_COPY_KEY,
@@ -126,6 +133,55 @@ def _lines(snapshot: InfoSnapshot | None, live: LiveState | None = None, width: 
 
 def _text(snapshot: InfoSnapshot | None, live: LiveState | None = None, width: int = 83) -> str:
     return "\n".join(_lines(snapshot, live, width))
+
+
+def test_a_draining_session_says_so_instead_of_busy() -> None:
+    """UX round 2, U8: the drain must reach the surface the operator is typing in.
+
+    ``SessionLine.leaving`` was populated by this PR and rendered nowhere, so
+    ``/info`` printed an ordinary ``busy`` beside a session that had already
+    been signalled — while ``lop sessions`` and the refresh receipt said
+    otherwise about the same runtime. That is the invisibility U1/U2 removed,
+    surviving on the one fleet surface a user reads WITHOUT leaving the app.
+
+    Asserted on the rendered strings, and asserted as a REPLACEMENT rather than
+    an addition: the phrase already says the runtime is working, so printing
+    ``busy`` beside it would be two facts where there is one.
+
+    The phrase is placed before the facts this section sheds, so it is the
+    SECOND-TO-LAST item to go on a narrow frame — pinned here at a width where
+    the memory figure and the uptime are already gone.
+    """
+    line = SessionLine(
+        pid=4244,
+        kind="daemon",
+        state="live",
+        session_id="b1f2c3d4e5f6",
+        conversation_name="uxtuidrain",
+        model_label="test/mock",
+        uptime_s=10.0,
+        rss_bytes=125_000_000,
+        # A draining runtime IS busy. Both fields set is the real shape, not a
+        # contrived one — the record publishes exactly this pair.
+        busy=True,
+        leaving=LEAVING_ON_SIGNAL,
+    )
+    snapshot = _snapshot(sessions=SessionsInfo(lines=(line,), total=1, live=1))
+
+    wide = _text(snapshot)
+    assert LEAVING_ON_SIGNAL in wide, wide
+    assert "busy" not in wide, wide
+
+    narrow = _text(snapshot, width=70)
+    assert LEAVING_ON_SIGNAL in narrow, narrow
+
+    # And an ordinary busy session is untouched: no phrase, and the word it has
+    # always carried.
+    ordinary = _text(
+        _snapshot(sessions=SessionsInfo(lines=(replace(line, leaving=""),), total=1, live=1))
+    )
+    assert "busy" in ordinary, ordinary
+    assert "signalled" not in ordinary, ordinary
 
 
 # -- the loading frame --------------------------------------------------------
@@ -1292,6 +1348,47 @@ def test_below_the_note_floor_the_words_survive_even_though_the_age_does_not(
     assert "not answering" in rows[0], rows[0]
     assert "last heartbeat" not in rows[0], rows[0]
     assert "181 MB" not in rows[0], rows[0]
+
+
+@pytest.mark.parametrize("width", [56, 40])
+def test_below_the_note_floor_a_draining_row_keeps_its_own_words(width: int) -> None:
+    """U10: the drain is legible at the width the ladder is shed at.
+
+    Below ``_NOTE_MIN`` every meta is shed and only ``short_meta`` survives, and
+    a leaving row had none — so on the narrow shelf the state that changes what
+    the operator may safely do next rendered as a bare ``● <name>``, while a
+    wedged row next to it kept "not answering". The compact form carries the
+    bound where the phrase has one, so the narrow reader is told both that it is
+    leaving and how long that can take, and it is derived from the same
+    ``SIGNAL_DRAIN_S`` the long phrase spells out.
+    """
+
+    def row(phrase: str) -> str:
+        line = SessionLine(
+            pid=4245,
+            kind="daemon",
+            state="live",
+            session_id="c1d2e3f4a5b6",
+            conversation_name="uxnarrow01",
+            model_label="test/mock",
+            uptime_s=2.0,
+            rss_bytes=125_000_000,
+            busy=True,
+            leaving=phrase,
+        )
+        snapshot = _snapshot(sessions=SessionsInfo(lines=(line,), total=1, live=1))
+        rows = [text for text in _lines(snapshot, width=width) if "uxnarrow" in text]
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    signalled = row(LEAVING_ON_SIGNAL)
+    assert f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})" in signalled, signalled
+
+    # The build trigger names no bound and gets none: the phrase promises none,
+    # so the compact form must not invent one.
+    build = row(LEAVING_FOR_BUILD)
+    assert "leaving for build" in build, build
+    assert "min" not in build, build
 
 
 def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:

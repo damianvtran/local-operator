@@ -32,8 +32,35 @@ import pytest
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import control, registry
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SessionRecord,
+)
 from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
+
+
+def _bare_record(**overrides: Any) -> SessionRecord:
+    """A resolvable record with no live runtime behind it.
+
+    For the cells that read a record rather than dial it: the ``/info``,
+    ``lop sessions`` and receipt builders take a record and nothing else, and a
+    plain one keeps a wording cell from needing a server to state itself.
+    """
+    fields: dict[str, Any] = {
+        "pid": 4242,
+        "kind": "tui",
+        "session_id": "stub01234567",
+        "conversation_name": "stub",
+        "cwd": "/tmp",
+        "model_label": "test/mock",
+        "control_port": 1,
+        "control_key": "k",
+        "version": "0.55.4",
+        "source_ref": "f4a70b9" + "0" * 33,
+    }
+    fields.update(overrides)
+    return SessionRecord(**fields)
 
 
 def _record_for(server_record: SessionRecord, **overrides: Any) -> SessionRecord:
@@ -353,7 +380,9 @@ async def test_old_runtime_unknown_op_is_a_miss_not_a_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_signals) -> None:
+async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A heartbeating runtime whose socket never answers (a TUI burning
     100% CPU, its socket loop queued behind the runaway) is refused without
     --force and signalled with it.
@@ -392,8 +421,21 @@ async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_sign
             assert f"lop stop --pid {target.pid} --force" in refused.line
             assert "must lapse" not in refused.line
             assert no_signals[0] == []
+            # A short rung-2 wait, INJECTED rather than shortened in the
+            # product: the process behind this record is the test runner
+            # itself, which never exits, so the production grace (minutes by
+            # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
+            # What this cell pins is WHICH rung fires. The CONSTANT is patched
+            # rather than a parameter passed (NIT, PR #1141): a knob on the one
+            # value whose purpose is that it cannot be shortened is one
+            # production caller away from landing SIGKILL inside the receiver's
+            # drain.
+            monkeypatch.setattr(control, "SIGTERM_GRACE_S", 0.5)
             stopped = await control.stop_session(
-                target, timeout_s=0.5, force=True, _root=config_dir()
+                target,
+                timeout_s=0.5,
+                force=True,
+                _root=config_dir(),
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -571,7 +613,9 @@ class _AckingHandle(FakeHandle):
 
 
 @pytest.mark.asyncio
-async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals) -> None:
+async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The rung that ACTS leaves exactly one marker, naming itself.
 
     The other half of the invariant below: a rung that escalates must attest,
@@ -598,8 +642,21 @@ async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals
             return False, control._SOCKET_SILENT
 
         with mock.patch.object(control, "_confirmed_session_id", _never):
+            # A short rung-2 wait, INJECTED rather than shortened in the
+            # product: the process behind this record is the test runner
+            # itself, which never exits, so the production grace (minutes by
+            # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
+            # What this cell pins is WHICH rung fires. The CONSTANT is patched
+            # rather than a parameter passed (NIT, PR #1141): a knob on the one
+            # value whose purpose is that it cannot be shortened is one
+            # production caller away from landing SIGKILL inside the receiver's
+            # drain.
+            monkeypatch.setattr(control, "SIGTERM_GRACE_S", 0.5)
             stopped = await control.stop_session(
-                target, timeout_s=0.5, force=True, _root=config_dir()
+                target,
+                timeout_s=0.5,
+                force=True,
+                _root=config_dir(),
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -685,3 +742,681 @@ async def test_a_refused_stop_leaves_no_marker_and_the_death_stays_unattributed(
         assert f"pid {dead_pid}" in result[2], result[2]
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# Rotation (`lop refresh`) and the ladder's duty not to cut work in flight
+# ---------------------------------------------------------------------------
+
+
+class _RefreshableHandle(_StoppingHandle):
+    """A handle that can judge itself idle and answer a retirement request."""
+
+    def __init__(self, *, reason: str = "") -> None:
+        super().__init__()
+        self.reason = reason
+        self.probes = 0
+
+    def may_refresh(self) -> str:
+        self.probes += 1
+        return self.reason
+
+
+def test_the_sigkill_rung_outlasts_the_receivers_drain_bound() -> None:
+    """THE INVARIANT between the two halves of the work-aware signal fix.
+
+    A runtime that receives SIGTERM with a turn in flight defers its own
+    disposal by up to ``SIGNAL_DRAIN_S`` (``process._drain_for_signal``). This
+    ladder escalates to SIGKILL after ``SIGTERM_GRACE_S``. If the second number
+    were ever the smaller, the escalation would kill a runtime that was
+    deliberately and correctly finishing a turn — with the one signal nothing
+    can catch — and the receiver-side fix would be worse than useless.
+    """
+
+    from local_operator.session.runtime.types import SIGNAL_DRAIN_S
+
+    assert (
+        control.SIGTERM_GRACE_S > SIGNAL_DRAIN_S
+    ), "the ladder's SIGTERM→SIGKILL grace must outlast the runtime's drain bound"
+    assert (
+        control.SIGTERM_GRACE_S - SIGNAL_DRAIN_S >= 5.0
+    ), "the margin must leave the receiver real time to dispose after its drain"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_target_is_skipped_and_nobody_signals_it(no_signals) -> None:
+    """Our own kill switch must not cut a turn in flight.
+
+    Rung 1 (the socket op) is tried first and would stop a cooperative runtime
+    promptly even mid-turn — a stop the user asked for is one they want. What
+    this pins is the case the sweep needs: the socket did NOT answer, and the
+    record says a turn is in flight, so the ladder declines to signal and says
+    so, naming both ways forward.
+    """
+    from local_operator.paths import config_dir as ambient_config_dir
+
+    server, record = await _serve()
+    server.close()  # nothing listening: rung 1 is a scheduled miss
+    target = _record_for(record, busy=True)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
+        assert outcome.method == "busy"
+        assert "turn is in flight" in outcome.line
+        assert "--force" in outcome.line
+        assert no_signals[0] == [], "a busy target is never signalled"
+    finally:
+        registry.unpublish(target.pid)
+    assert ambient_config_dir  # the ambient root is never used by these tests
+
+
+@pytest.mark.asyncio
+async def test_force_signals_the_busy_target_the_plain_stop_left_alone(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` is the escape hatch, and it escalates the whole ladder.
+
+    The flag already means "signal this runtime I cannot reach"; someone who
+    types it has accepted that the turn goes with it.
+    """
+    import signal as signal_mod
+
+    server, record = await _serve()
+    server.close()
+    target = _record_for(record, busy=True)
+    monkeypatch.setattr(control, "_identity_by_record", lambda _r: (True, ""))
+    # The target dies the moment it is signalled. This test is about WHICH rung
+    # runs with --force (the skip is bypassed), not about the escalation order
+    # or the grace budgets, which the constant tests own; without this the
+    # ladder would spend its real SIGTERM grace waiting for a process that the
+    # fixture keeps alive on purpose.
+    monkeypatch.setattr(control.registry, "pid_alive", lambda _pid, **_: not no_signals[0])
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.5, force=True, _root=config_dir())
+        assert [sig for _pid, sig in no_signals[0]] == [signal_mod.SIGTERM]
+        assert outcome.method == "sigterm"
+    finally:
+        registry.unpublish(target.pid)
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_busy_session_is_still_stopped_promptly_by_the_socket_rung(
+    no_signals,
+) -> None:
+    """The skip never applies to a target that ANSWERS: a deliberate stop wins.
+
+    This is the behaviour the whole ladder exists for — ``lop stop <busy
+    session>`` must end it, mid-turn, without waiting for the receiver's drain
+    bound. The skip is scoped to targets whose own socket is silent, which is
+    why it sits after rung 1.
+    """
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        outcome = await control.stop_session(
+            _record_for(record, busy=True), timeout_s=3.0, _root=config_dir()
+        )
+        assert outcome.method == "socket"
+        assert handle.stops == [True]
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_is_already_leaving_is_asked_before_it_is_stopped(
+    no_signals,
+) -> None:
+    """U1: the drain is real work, so the ladder must not quietly cut it.
+
+    A signalled runtime keeps working for up to ``SIGNAL_DRAIN_S`` and publishes
+    ``leaving`` while it does (``SessionRecord.leaving``). Every OTHER rung
+    reaches it — it is cooperative, its socket answers, and rung 1 ends it in
+    milliseconds — which is the harm rather than the safeguard: the operator's
+    own stop cuts the very turn the signal asked the runtime to finish, and
+    nothing they could read said so (`lop sessions` reported ``live``, and no
+    surface mentioned the signal at all). So this refusal runs BEFORE rung 1.
+
+    Two properties are pinned together, because the fix is only correct with
+    both: the plain stop declines and says what insisting would cost, and
+    ``--force`` still ends it PROMPTLY through the socket — a confirmation, never
+    a postponement. A deliberate stop that got slower or was deferred would be a
+    regression on the property this ladder was built to protect.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert LEAVING_ON_SIGNAL in outcome.line, outcome.line
+        assert "cuts the turn" in outcome.line, outcome.line
+        assert "--force" in outcome.line, outcome.line
+        # The refusal is a PARTIAL result (the target is still running) and is
+        # in the shared set the front ends read, not a method nobody classified.
+        assert outcome.method not in control.ENDED_METHODS
+        assert outcome.method in control.LEFT_ALONE_METHODS
+        # Rung 1 never ran, and nothing was signalled.
+        assert handle.stops == [], "the socket rung must not run for a draining target"
+        assert no_signals[0] == []
+
+        forced = await control.stop_session(target, timeout_s=3.0, force=True, _root=config_dir())
+        assert forced.method == "socket", forced.line
+        assert handle.stops == [True], "--force stops it now, by the socket rung"
+        assert no_signals[0] == [], "and still without a signal"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_quotes_the_drains_own_reason(no_signals) -> None:
+    """The refusal is trigger-agnostic, because the drain now is (PR #1108).
+
+    Two things commit a runtime to leaving — a termination signal and a build
+    replaced on disk while a turn was in flight — and ``process._commit_to_leaving``
+    publishes both to the same record field through the same call. The ladder
+    therefore refuses to cut either one, and the sentence it paints has to come
+    from the record: a hard-coded "it was signalled" would state the wrong
+    reason for every build-driven drain, on the one line the operator reads to
+    decide whether to insist.
+    """
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_FOR_BUILD)
+    try:
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert LEAVING_FOR_BUILD in outcome.line, outcome.line
+        assert "was signalled" not in outcome.line, outcome.line
+        assert handle.stops == [], "the socket rung must not run for a draining target"
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_offers_only_a_remedy_its_reader_can_act_on(
+    no_signals,
+) -> None:
+    """UX round 2, U7: the TUI paints this line and parses no flags at all.
+
+    The refusal is composed in the shared module and painted verbatim by both
+    front ends, so it used to name ``--force`` — a flag of ``lop stop`` — on a
+    surface whose ``/stop`` takes only a target: ``/stop --force <id>`` answers
+    "no live session matches '--force <id>'" about a session that is live and
+    listed. A surface must never offer an action it cannot accept, so the remedy
+    is named in the reader's own vocabulary: the flag for the CLI, the shell for
+    the TUI.
+
+    Both directions are asserted. A fix that dropped the flag everywhere would
+    remove the escape from the one front end that HAS it, which is the half this
+    test exists to keep.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        cli = await control.stop_session(
+            target, timeout_s=3.0, _root=config_dir(), _command="lop stop"
+        )
+        assert cli.method == "draining", cli.line
+        assert "--force to stop it anyway" in cli.line, cli.line
+
+        tui = await control.stop_session(
+            target, timeout_s=3.0, _root=config_dir(), _command="/stop"
+        )
+        assert tui.method == "draining", tui.line
+        assert "--force to stop it anyway" not in tui.line, tui.line
+        assert f"lop stop --force {target.pid}" in tui.line, tui.line
+
+        # AND THE FIRST REMEDY IS NOTHING. Exit 2 plus a lone "--force to stop
+        # it anyway" reads as "this did not work, retry if you meant it", when
+        # the exit is already scheduled and the answer for almost everyone is to
+        # let the turn finish (UX round 2, NIT-2).
+        for outcome in (cli, tui):
+            assert "it leaves by itself, nothing to do" in outcome.line, outcome.line
+
+        # Neither line stopped or signalled anything, on either surface.
+        assert handle.stops == []
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+def test_the_wait_line_names_its_bound_once_and_in_one_unit() -> None:
+    """D4/U5: two bounds, one unit — and neither vocabulary in the wrong mouth.
+
+    The drain bound and the ladder's grace are 120 s and 150 s. Printed as ``(up
+    to 2 min)`` and ``waiting up to 150s`` they read as different KINDS of
+    number, inviting the reader to wonder whether they are the same wait (design
+    round 2, D4). ``bound_text`` is the one formatter both go through; this
+    pins its output and the two sentences that carry it.
+
+    The TUI's form is asserted to stay out of the kill vocabulary for the reason
+    its reader is different: ``SIGKILL`` and "drain" are the CLI's words, and the
+    app paints this line verbatim into a notice that had always promised
+    "waiting for it to answer" (design round 2, D2).
+    """
+    assert control.bound_text(120.0) == "2 min"
+    assert control.bound_text(150.0) == "2.5 min"
+    assert control.bound_text(3.0) == "3s"
+    assert control.bound_text(1800.0) == "30 min"
+
+    cli = control._wait_line("beta", 1676, from_a_shell=True)
+    assert cli == 'waiting up to 2.5 min for "beta" (pid 1676) to drain before SIGKILL'
+    tui = control._wait_line("beta", 1676, from_a_shell=False)
+    assert "SIGKILL" not in tui and "drain" not in tui, tui
+    # The BOUND survives into the TUI's own words — the whole point of (U5): the
+    # pause is minutes long and an unannounced one reads as a hang.
+    assert "2.5 min" in tui, tui
+
+    # Both bound-bearing sentences now state their bound through the ONE
+    # formatter, so neither can drift into a second unit on its own.
+    assert control.bound_text(control.SIGTERM_GRACE_S) in cli
+    stub = SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id="stub01234567",
+        conversation_name="stub",
+        cwd="/tmp",
+        model_label="test/mock",
+        control_port=1,
+        control_key="k",
+    )
+    receipt = control._refresh_line(stub, "0.55.0@46a4e9b", "draining", "")
+    assert f"(up to {control.bound_text(control.SIGNAL_DRAIN_S)})" in receipt, receipt
+    # ...and it is the receiver's bound in that sentence, not the sender's: the
+    # receipt describes how long the RUNTIME will finish its turn for.
+    assert control.SIGNAL_DRAIN_S != control.SIGTERM_GRACE_S
+
+
+@pytest.mark.asyncio
+async def test_the_settle_question_keeps_no_phrase_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D8 is RECORDED, not closed — this cell is the record.
+
+    The design round's D8 measured a draining runtime from the round-1 lineage
+    being answered "ask again", and the temptation is to make ``_settle_question``
+    answer "draining" whenever the record carries a phrase. That branch would be
+    DEAD: ``Server._refresh_if_idle`` returns ``kept: already leaving`` whenever
+    ``_leaving`` is set, and ``announce_retiring`` sets it in the same call that
+    writes the phrase — so a phrase-carrying runtime never routes here at all,
+    while the buildings that DO route here (drain on a signal, publish no
+    phrase) carry nothing the CLI can distinguish "leaving" from "not settled"
+    with. Pinned as a negative so the shortcut is not re-added as a fix: the
+    CLI's answer for that population is the marker's, and the population is
+    named in the function's docstring.
+    """
+    record = _bare_record()
+    monkeypatch.setattr(control, "moved_and_unsettled", lambda *_a, **_k: True)
+
+    assert control._settle_question(record) == ("unsettled", "")
+    assert control._settle_question(_record_for(record, leaving=LEAVING_ON_SIGNAL)) == (
+        "unsettled",
+        "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_drain_reads_as_prose_in_every_receipt() -> None:
+    """D7: one vocabulary, and it carries a verb where a person reads it.
+
+    The record's phrase is a CELL VALUE (lowercase, subject-less) because
+    ``lop sessions`` and ``/info`` print it in a column, so concatenating it
+    into a sentence produced '"name" (pid 12, running …) signalled; leaving when
+    its turn ends' — a fragment with no verb. Both prose slots hang their own
+    subject on one copula supplied by ``_drain_phrase``, so the same words are a
+    cell in one place and a clause in the other.
+    """
+    record = _bare_record()
+    for phrase in (LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD):
+        receipt = control._refresh_line(
+            _record_for(record, leaving=phrase), "0.55.4@f4a70b9", "draining", ""
+        )
+        assert receipt.endswith(f"is {phrase}"), receipt
+
+    handle = _StoppingHandle()
+    server, served = await _serve(handle)
+    target = _record_for(served, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.2, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert f"— it is {LEAVING_ON_SIGNAL};" in outcome.line, outcome.line
+    finally:
+        server.close()
+        registry.unpublish(target.pid)
+
+
+@pytest.mark.asyncio
+async def test_a_dead_pid_behind_a_leaving_record_is_reported_as_gone(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is liveness-gated: a stale record cannot refuse a stop.
+
+    A drain always ends in an exit, and a record outlives its process by a
+    moment. The honest report for a target that has already gone is the ladder's
+    own "already exited" — a CLEAN resolution, exit 0 — rather than a refusal
+    about a drain that is over. So the check needs an alive pid, and this cell is
+    the other half of that condition.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    server, record = await _serve()
+    server.close()
+    target = _record_for(record, leaving=LEAVING_ON_SIGNAL)
+    monkeypatch.setattr(control.registry, "pid_alive", lambda *_a, **_k: False)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.2, _root=config_dir())
+        assert outcome.method == "gone", outcome.line
+        assert outcome.method in control.ENDED_METHODS
+    finally:
+        registry.unpublish(target.pid)
+
+
+@pytest.mark.asyncio
+async def test_refresh_moves_a_stale_idle_runtime_over_the_real_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lop refresh`` against a REAL runtime: the op moves it, and it says so.
+
+    The whole acceptance argument for the rotation path is that it ends no
+    session and cuts no work, so this drives the real dial and the real op
+    rather than a stubbed reply: the runtime answers ``retiring`` and its own
+    ``request_stop`` runs, which is exactly what "moved" means.
+    """
+    handle = _RefreshableHandle(reason="")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "moved", outcome
+        assert "retiring now" in outcome.line
+        # And it NAMES the build it is leaving for (NIT, PR #1141): "which of
+        # these is still on the old build" is the question this command exists
+        # to answer, and a version-only label cannot answer it on a host whose
+        # common handover is a same-version rebuild. The label comes from the
+        # runtime's own committed decision, not a second disk read.
+        assert "for the build on disk (0.49.9)" in outcome.line, outcome.line
+        assert handle.stops == [True], "the runtime really was asked to leave"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unsettled_install_is_reported_as_unsettled_not_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/M2 at the front end: the runtime's hedge survives into the METHOD.
+
+    The runtime answers two different sentences now — "build on disk matches"
+    and "the install on disk has not settled yet" — and this is the half that
+    matters to a script: only the first is a settled outcome (exit 0). Collapsing
+    the second into ``current`` is exactly the defect, because `lop refresh`'s
+    own documentation says its first run is `lop-update`, so it lands inside
+    ``BUILD_SETTLE_S`` for a whole fleet.
+    """
+    server, record = await _serve()
+    try:
+
+        async def _answer(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"op": "ack", "detail": "kept: the install on disk has not settled yet"}
+
+        monkeypatch.setattr(control, "_exchange", _answer)
+        outcome = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        assert outcome.method == "unsettled", outcome
+        assert (
+            outcome.method not in control.REFRESH_SETTLED_METHODS
+        ), "an unsettled install is NOT a completed rotation"
+        assert "ask again" in outcome.line, outcome.line
+
+        # The sibling answer keeps its own, settled meaning: the two are one
+        # line of code apart and must not be merged by a later reader. The stamp
+        # and the marker are set so that "current" is PROVEN here rather than
+        # assumed — the record says it runs the build on disk, the disk says the
+        # same thing, and the marker has aged past the settle, which is the only
+        # combination that earns a zero exit.
+        from local_operator import update as update_mod
+        from local_operator.update import BuildStamp
+
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+
+        async def _matches(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"op": "ack", "detail": "kept: build on disk matches"}
+
+        monkeypatch.setattr(control, "_exchange", _matches)
+        matching = _record_for(record, version="0.49.9", source_ref="f4a70b9cdef")
+        matched = await control.refresh_session(matching, timeout_s=1.0)
+        assert matched.method == "current", matched
+        assert matched.method in control.REFRESH_SETTLED_METHODS
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_retired_hedge_is_settled_here_instead_of_read_as_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/U6/O1: the fleet alive when the install moves answers the OLD sentence.
+
+    ``lop refresh``'s own docstring says its first run is ``lop-update``, so the
+    command is invoked INSIDE the settle window — and inside that window every
+    live runtime is still executing the PREVIOUS build's code, which knows ONE
+    sentence for both "matches" and "has not settled". Folding that sentence
+    into ``current`` (exit 0) tells a rotating script the fleet is done while
+    every member of it is about to retire: the harm the runtime-side fix exists
+    to remove, on a runtime that cannot carry the fix. The design, UX and QA
+    rounds reproduced it independently on this head (design D1, UX U6, QA O1,
+    all three quoting the machine having the real tool install as the witness).
+
+    So the CLI settles the question itself, from the stamp the record PUBLISHED
+    and the marker on disk now. Both directions are asserted, because a check
+    that answered ``unsettled`` for everything would be as wrong as the one it
+    replaces: the same record, past the settle, is honestly ``current``.
+    """
+    from local_operator import buildwatch
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    server, record = await _serve()
+    try:
+
+        async def _hedge(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            # Verbatim the pre-#1141 runtime's answer, quoted from the constant
+            # rather than retyped: if that sentence ever moves, this cell fails
+            # loudly instead of quietly testing a string nobody sends.
+            return {"op": "ack", "detail": buildwatch.KEPT_MATCHES_OR_UNSETTLED}
+
+        monkeypatch.setattr(control, "_exchange", _hedge)
+        target = _record_for(record, version="0.49.8", source_ref="46a4e9b1234567")
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
+        # The install moved, and NOBODY has judged it yet — which is what the
+        # hedge admits with its second clause and what the old caller threw away.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 0.5)
+        outcome = await control.refresh_session(target, timeout_s=1.0)
+        assert outcome.method == "unsettled", outcome
+        assert outcome.method not in control.REFRESH_SETTLED_METHODS
+        assert "ask again" in outcome.line, outcome.line
+
+        # Past the settle the same hedge is the true answer: the disk has not
+        # moved beyond what the record says, so there is nothing to ask again
+        # for. The ladder still does not call it ``moved`` — the runtime never
+        # committed to retiring — but it is settled.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+        settled = await control.refresh_session(target, timeout_s=1.0)
+        assert settled.method == "current", settled
+        assert settled.method in control.REFRESH_SETTLED_METHODS
+
+        # A record that published NO stamp cannot be second-guessed: with
+        # nothing to compare, the runtime's own answer stands.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 0.5)
+        anonymous = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        assert anonymous.method == "current", anonymous
+    finally:
+        server.close()
+
+
+def test_the_retired_hedge_is_a_prefix_of_the_live_answer() -> None:
+    """The cross-version contract itself, pinned in one assertion.
+
+    A runtime started before this change answers ``kept: build on disk matches
+    (or has not settled)`` and will keep answering it until build skew retires
+    it, so the matcher has to keep accepting that sentence for ever. It does so
+    by matching the shorter, live answer as a PREFIX — the two constants are one
+    edit apart and the day somebody "tidies" the retired string out of the
+    module is the day the fleet that exists at update time stops being routed at
+    all: the answer falls to the generic ``kept`` branch and a diagnosis becomes
+    "was not moved: …".
+    """
+    from local_operator import buildwatch
+
+    assert buildwatch.KEPT_MATCHES_OR_UNSETTLED.startswith(buildwatch.KEPT_MATCHES)
+    assert buildwatch.KEPT_MATCHES != buildwatch.KEPT_MATCHES_OR_UNSETTLED
+
+
+def _make_stale(monkeypatch: pytest.MonkeyPatch, server: Any) -> None:
+    """The disk now carries a NEWER build than the one ``server`` booted on.
+
+    The same three inputs ``test_server_refresh`` uses, and they are the whole
+    gate: the op compares the boot stamp with the install on disk before it ever
+    asks whether the runtime is idle, so a runtime on the CURRENT build answers
+    "already current" whatever it is busy with. That ordering is what makes the
+    queued move below meaningful — the build really has moved, and the only
+    thing left is whether this runtime may leave yet.
+    """
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    server._boot_build = BuildStamp(version="0.49.8", source_ref="46a4e9b1234567")
+    monkeypatch.setattr(
+        update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.9")
+    )
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+    monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_a_busy_runtime_as_a_queued_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy runtime is NOT a failure: it retires by itself when its turn ends.
+
+    The move is queued rather than refused, and that is the difference from the
+    kill switch: nothing is ending this session, so its own reaper gets to
+    decide when it can leave. It also needs no bound of its own — a turn that
+    runs for an hour is simply waited out by the process that owns it.
+    """
+    handle = _RefreshableHandle(reason="busy")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "busy", outcome
+        assert "a turn in flight" in outcome.line
+        assert handle.stops == [], "a busy runtime is never retired by the ask"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_a_current_runtime_as_nothing_to_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative arm of the rotation: a matching build is left alone.
+
+    The disk still carries the build this runtime booted from, which is the
+    ordinary state of a host that has not run ``lop-update`` since — and the
+    state in which ``lop refresh`` must say "nothing to do" rather than retire
+    a working runtime for a build it is already running.
+    """
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    handle = _RefreshableHandle(reason="")
+    server, record = await _serve(handle)
+    same = BuildStamp(version="0.49.8", source_ref="46a4e9b1234567")
+    server._boot_build = same
+    monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: same)
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+    monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "current", outcome
+        assert "already runs the build on disk" in outcome.line
+        assert handle.stops == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_an_unreachable_runtime_without_failing(
+    tmp_path: Path,
+) -> None:
+    """A silent socket is reported, not fatal — and it is the partial case."""
+    record = SessionRecord(
+        pid=2**22 + 71,
+        kind="daemon",
+        session_id="silentsession",
+        conversation_name="the quiet one",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        version="0.49.8",
+    )
+    outcome = await control.refresh_session(record, timeout_s=0.2)
+    assert outcome.method == "unreachable"
+    assert "did not answer its control socket" in outcome.line
+    assert outcome.method not in control.REFRESH_SETTLED_METHODS
+    assert tmp_path.exists()  # no ambient config root is touched by the dial
+
+
+@pytest.mark.asyncio
+async def test_refresh_all_asks_only_live_sessions_and_reports_each(
+    no_signals, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--all`` walks the record set and reports per session, never signalling."""
+    handle = _RefreshableHandle(reason="busy")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        live = _record_for(record, conversation_name="working")
+        ghost = _record_for(
+            record,
+            pid=2**22 + 73,
+            session_id="gonequiet",
+            conversation_name="quiet",
+        )
+        monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [live, ghost])
+        outcomes = await control.refresh_all(timeout_s=0.2, _root=tmp_path)
+        by_method = {o.method: o for o in outcomes}
+        assert by_method["busy"].session_id == live.session_id
+        assert by_method["unreachable"].session_id == ghost.session_id
+        assert no_signals[0] == [], "the rotation path signals nobody, ever"
+        summary = control.summarize_refresh(outcomes)
+        assert "1 will move when its turn ends" in summary
+        assert "1 unreachable" in summary
+    finally:
+        server.close()
+
+
+def test_summarize_refresh_on_an_empty_machine_says_so() -> None:
+    assert control.summarize_refresh([]) == "no live sessions to refresh"
