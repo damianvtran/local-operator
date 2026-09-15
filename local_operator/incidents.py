@@ -187,7 +187,20 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "gateway timeout",
             "server error",
             "upstream",
-            "provider error",
+            # "provider error" used to sit here and is DELIBERATELY GONE. It was
+            # never a provider's wording: it is the KIND LABEL this harness puts
+            # in front of every wrapped transport failure
+            # (``ProviderError.__str__`` -> "transient provider error: ..."),
+            # so it classified the harness's own sentence rather than the
+            # failure's evidence. Sitting in the ``provider`` rule, which is
+            # ordered AHEAD of ``network``, it swallowed every status-less
+            # transport failure before the network rule was consulted —
+            # including the 2026-09-15 connect failure, whose card told the
+            # operator the provider was failing server-side when the machine
+            # could not open a socket at all. The rule keeps the tokens a
+            # PROVIDER writes about ITSELF (5xx statuses, upstream, gateway),
+            # which is what "genuine 5xx/upstream failures stay on ``provider``"
+            # means; a harness-authored label must not decide a category.
         ),
     ),
     (
@@ -205,6 +218,18 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "certificate",
             "stream disconnected",
             "unexpected eof",
+            # The PRE-CONNECT wordings, listed explicitly rather than left to
+            # the generic "connection" above. That substring happens to appear
+            # in anyio's aggregate ("All connection attempts failed"), so the
+            # aggregate currently lands here by accident; naming the shapes
+            # pins it, and covers the ones no other token reaches — a bare
+            # "ConnectError" class name and the EADDRNOTAVAIL wording the
+            # incident itself carried.
+            "connecterror",
+            "connection attempts failed",
+            "can't assign requested address",
+            "cannot assign requested address",
+            "eaddrnotavail",
         ),
     ),
     ("mcp", ("mcp", "model context protocol", "tool bridge", "circuit breaker")),
@@ -247,8 +272,15 @@ _HINTS: dict[str, str] = {
     "wait for the user.",
     "provider": "The provider is failing server-side: a retry may work; if it "
     "repeats, suggest switching model or provider.",
-    "network": "The connection failed mid-stream: retrying is usually right; if "
-    "it repeats, check connectivity.",
+    # Rewritten after the 2026-09-15 incident, where a PRE-CONNECT connect
+    # failure landed on this hint and told the operator to switch provider —
+    # advice that cannot help when the machine has no working network, and the
+    # reason the operator concluded failover itself was broken. The category
+    # now covers both halves of a connection failure, so the hint names the
+    # machine first and the mid-stream case second.
+    "network": "This machine could not reach the network (or the connection died "
+    "mid-stream): retrying is usually right; if it repeats, check this "
+    "machine's connectivity rather than switching provider.",
     "mcp": "An MCP server is unavailable: its tools are gone until it reconnects. "
     "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "

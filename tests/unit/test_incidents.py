@@ -32,6 +32,9 @@ from local_operator.incidents import (
         ("read timeout while streaming", "network"),
         ("connection reset by peer", "network"),
         ("SSL certificate verify failed", "network"),
+        # The 2026-09-15 incident's exact text: anyio's aggregate carried up
+        # through the harness's own transport wrapper.
+        ("transient provider error: ConnectError: All connection attempts failed", "network"),
         ("maximum context length is 200000 tokens", "context-length"),
         ("the request was too large", "context-length"),
         ("MCP server 'linear' unavailable", "mcp"),
@@ -120,6 +123,53 @@ def test_unknown_has_no_invented_hint():
     incident = classify_incident("a novel failure mode")
     assert incident.category == "unknown"
     assert incident.hint == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The incident, verbatim. This classified ``provider`` because the
+        # harness's own transport wrapper prefixes every wrapped failure with
+        # the kind label "transient provider error", and "provider error" was
+        # a token in the ``provider`` rule — which is ordered AHEAD of
+        # ``network``. A pre-connect failure therefore never reached the rule
+        # written for it, and the card told the operator the provider was
+        # failing server-side while the machine could not open a socket at all.
+        "transient provider error: ConnectError: All connection attempts failed",
+        "transient provider error: ConnectError: [Errno 49] can't assign requested address",
+        "transient provider error: ConnectError: [Errno 61] Connection refused",
+    ],
+)
+def test_a_pre_connect_connect_failure_is_a_network_incident(raw: str) -> None:
+    incident = classify_incident(raw, "deepseek", "deepseek-flash")
+    assert incident.category == "network"
+    assert incident.render().startswith("[session incident (deepseek/deepseek-flash)] network:")
+    # The advice has to name the MACHINE: switching provider cannot help a box
+    # that cannot reach the network, and telling the operator to do so is what
+    # made them read a working cascade as a broken one.
+    assert "machine" in incident.hint
+    assert "switching provider" in incident.hint
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "transient provider error (HTTP 503): upstream reset",
+        "transient provider error (HTTP 502): upstream unavailable",
+        # A provider narrating its OWN upstream trouble keeps ``provider``: it
+        # is the provider's words, not ours, and it is the provider that is
+        # unwell — see the KNOWN IMPRECISION note on the failover classifier,
+        # which leans the same way for the backoff it chooses.
+        "transient provider error: upstream: network is unreachable at edge",
+    ],
+)
+def test_a_genuine_provider_side_failure_stays_a_provider_incident(raw: str) -> None:
+    """The other direction. Removing the harness-authored token must not cost
+    the 5xx/upstream cases their category — their evidence is the provider's
+    own status and wording, which is what the rule now matches on alone."""
+    incident = classify_incident(raw, "deepseek", "deepseek-flash")
+    assert incident.category == "provider"
+    assert "provider" in incident.hint
 
 
 def test_message_type_constant_is_stable():
