@@ -40,7 +40,7 @@ class FakeRegistrant:
         #: ``(reason, to, draining, leaving)`` — see the mirror in
         #: ``test_process_build_bound``: the caller decides the third term and
         #: the fourth (the phrase the same call publishes for the fleet).
-        self.retiring: list[tuple[str, str, bool]] = []
+        self.retiring: list[tuple[str, str, bool, str]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
@@ -247,8 +247,10 @@ async def test_work_arriving_after_the_announce_keeps_the_runtime(disk, monkeypa
     reg = FakeRegistrant()
     handle = FakeHandle()
 
-    async def announce(reason: str, *, to: str = "", draining: bool = False) -> None:
-        reg.retiring.append((reason, to, draining))
+    async def announce(
+        reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        reg.retiring.append((reason, to, draining, leaving))
         if len(reg.retiring) == 1:
             handle._busy = True  # a turn starts between announce and exit, ONCE
 
