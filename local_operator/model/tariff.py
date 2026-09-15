@@ -65,6 +65,14 @@ class TimeOfUseTariff:
     weekdays_only: bool = True
     peak_label: str = "peak"
     off_peak_label: str = "off-peak"
+    #: Abbreviated forms, for the widths where the long word is paid for out of
+    #: something scarcer than it is (design round 1, D4: at a 56-65-cell picker
+    #: the 8-cell ``off-peak`` came out of the model id). ``peak`` is already one
+    #: four-cell word, so only the off-peak side shortens — and ``off`` is not a
+    #: second vocabulary: it is the same word, spelled as far as it fits, beside
+    #: the number it qualifies.
+    short_peak_label: str = "peak"
+    short_off_peak_label: str = "off"
 
     def is_peak(self, moment: datetime | None = None) -> bool:
         """Whether full price is in force at ``moment`` (``None`` → the clock).
@@ -85,15 +93,19 @@ class TimeOfUseTariff:
         """The multiplier to apply to this row's stored (peak) rates at ``moment``."""
         return self.peak_scale if self.is_peak(moment) else self.off_peak_scale
 
-    def window_label(self, moment: datetime | None = None) -> str:
+    def window_label(self, moment: datetime | None = None, *, short: bool = False) -> str:
         """The window in force at ``moment``, spelled for a human.
 
         The complete word rather than an abbreviation: a price that silently
         halves every few hours needs to say why it moved, and ``peak``/``off-peak``
         is the same lower-case hyphenated vocabulary the price column already
-        prints (``free``, ``usage-based``).
+        prints (``free``, ``usage-based``). ``short=True`` is the narrow-width
+        form the caller chooses when the long word would cost a model id cells
+        it needs (see the class's short-label fields).
         """
-        return self.peak_label if self.is_peak(moment) else self.off_peak_label
+        if self.is_peak(moment):
+            return self.peak_label if not short else self.short_peak_label
+        return self.off_peak_label if not short else self.short_off_peak_label
 
 
 #: The only schedule shipped today. The name is the value stored on
@@ -215,17 +227,18 @@ def scale_at(name: Any, moment: datetime | None = None) -> float:
     return schedule.scale_at(moment)
 
 
-def window_label(name: Any, moment: datetime | None = None) -> str | None:
+def window_label(name: Any, moment: datetime | None = None, *, short: bool = False) -> str | None:
     """The window in force for the schedule ``name``, or ``None`` when there is none.
 
     ``None`` is what tells a renderer NOT to print a tag: a row whose schedule is
     unknown must not claim ``peak`` or ``off-peak``, because both are statements
-    about a ratio we do not have.
+    about a ratio we do not have. ``short`` selects the abbreviated spelling for
+    a caller with a measured width budget.
     """
     schedule = get_tariff(name)
     if schedule is None:
         return None
-    return schedule.window_label(moment)
+    return schedule.window_label(moment, short=short)
 
 
 def scale_for(model_info: Any, moment: datetime | None = None) -> float:
@@ -237,9 +250,11 @@ def scale_for(model_info: Any, moment: datetime | None = None) -> float:
     return scale_at(getattr(model_info, "time_of_use", None), moment)
 
 
-def window_label_for(model_info: Any, moment: datetime | None = None) -> str | None:
+def window_label_for(
+    model_info: Any, moment: datetime | None = None, *, short: bool = False
+) -> str | None:
     """The window in force for a registry row's schedule, or ``None`` when it has none."""
-    return window_label(getattr(model_info, "time_of_use", None), moment)
+    return window_label(getattr(model_info, "time_of_use", None), moment, short=short)
 
 
 def moment_for(model_info: Any, usage: Any, moment: datetime | None = None) -> datetime:

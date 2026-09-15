@@ -2212,7 +2212,10 @@ Things that will bite you if you forget them:
   reads the same on every replay. `Usage.at_ms` carries that moment for the
   surfaces that price a REHYDRATED call (a restored session, an attached
   receipt), where "now" would otherwise be off by up to 2x in either direction.
-  A provider-reported dollar (`usd_cost`) is never scaled by any schedule: it is
+  An AGGREGATE carries a stamp only while every call it folds agrees on one; a
+  fold across a window boundary leaves it unset and is priced at the clock, so a
+  row never claims a window that only some of its calls ran in. A
+  provider-reported dollar (`usd_cost`) is never scaled by any schedule: it is
   the provider's own final figure.
 
 - **Adding a component OR a stored column is a schema migration.**

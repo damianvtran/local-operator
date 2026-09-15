@@ -207,3 +207,25 @@ class SimpleUsage:
     def __init__(self, **fields: Any) -> None:
         for name, value in fields.items():
             setattr(self, name, value)
+
+
+def test_the_short_form_is_the_same_word_spelled_as_far_as_it_fits() -> None:
+    """``short=True`` is for a caller with a measured width, not a second vocabulary.
+
+    The picker uses it in the 56-65-cell band, where the 8-cell ``off-peak`` came
+    out of the model id (design round 1, D4). ``peak`` is already four cells, so
+    only the off-peak side abbreviates — and the module-level helper and the
+    row-level one agree about which form they hand back.
+    """
+    assert tariff.window_label(tariff.DEEPSEEK_TOU, _mon(7), short=True) == "peak"
+    assert tariff.window_label(tariff.DEEPSEEK_TOU, _mon(12), short=True) == "off"
+    assert tariff.window_label_for(deepseek_models["deepseek-flash"], _mon(12), short=True) == "off"
+    # An unknown schedule still answers None in both forms: there is no word to
+    # abbreviate for a row whose ratio nobody published.
+    assert tariff.window_label("nope", _mon(12), short=True) is None
+    # And the short form never claims a window the long one would not.
+    for moment, expected in ((_mon(7), True), (_mon(12), False), (_plus_days(5, 7), False)):
+        short = tariff.window_label(tariff.DEEPSEEK_TOU, moment, short=True)
+        long = tariff.window_label(tariff.DEEPSEEK_TOU, moment)
+        assert (short == "peak") is expected, moment
+        assert (long == "peak") is expected, moment

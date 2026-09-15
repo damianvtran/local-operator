@@ -61,6 +61,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     TurnEndEvent,
     Usage,
+    _omit_unset_usage_stamp,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import cost_summary, job_cost, turn_cost
@@ -1825,7 +1826,11 @@ class _FrozenUsage(Usage):
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return handler(_thaw_model(self))
+        # Through the base helper: a subclass serializer REPLACES ``Usage``'s own
+        # rather than composing with it, so the unset ``at_ms`` would come back as
+        # a null on every frozen usage — which is the shape the attach frame's
+        # worst case is made of.
+        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
 
 
 class _FrozenFrontendUsage(FrontendUsage):
@@ -1835,7 +1840,8 @@ class _FrozenFrontendUsage(FrontendUsage):
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return handler(_thaw_model(self))
+        # Same reason as ``_FrozenUsage`` above.
+        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
 
 
 def _thaw_model(value: BaseModel) -> BaseModel:
@@ -4960,6 +4966,17 @@ class FrontendStateStore:
                     # ``Any``, and a duck-typed entry from an embedding host
                     # need not have the attribute.
                     "routed": bool(getattr(entry, "routed", False)),
+                    # The row's time-of-use schedule, carried for the same reason
+                    # as ``routed`` above and left out of the original round trip
+                    # by oversight (review round 1, MINOR 1): without it an
+                    # attached session rendered a tariffed row at its stored PEAK
+                    # price with no window tag while the owner's own picker showed
+                    # the rate in force — the two-surface disagreement the shared
+                    # renderer exists to prevent. Absent from an owner running an
+                    # older build, which reads back as ``None``: "this row's
+                    # prices do not vary by time of day", which is exactly what an
+                    # older build knew.
+                    "time_of_use": getattr(entry, "time_of_use", None),
                 }
             )
         return self.mutate(model_catalogue=rows)
