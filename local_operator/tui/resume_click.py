@@ -37,8 +37,9 @@ order the operator asked for — the UI first, a terminal last:
    either, and it is what stops a click from opening a SECOND terminal for a
    session that is one keystroke away in a terminal the user already has open.
 4. **A terminal** — the original premise genuinely holds, and the spawn below
-   is exactly what it always was. That path is why this module exists and it is
-   deliberately unchanged.
+   runs the argv it always ran. That path is why this module exists. What it no
+   longer does is claim a landing it did not make: it opens a window, or it
+   reports failure.
 
 THREE RUNGS BECAME FOUR when the ordering was corrected (review round 1, R9):
 asking "is anything running?" before discovery let a TUI that happened to be
@@ -101,9 +102,24 @@ when the notification was posted — the user may have opened a terminal in
 between, which is the common case for "I came back to my desk".
 
 Best-effort, like everything on this path: an unreachable viewer falls through
-to the spawn, an unpickable backend falls back to launching the resume argv
-directly, and every failure is silent. The user's recourse is the same either
-way — `lop --resume <id>` in their own terminal.
+to the spawn and nothing here raises. The user's recourse is the same on every
+branch — `lop --resume <id>` in their own terminal.
+
+**A CLICK THAT CANNOT LAND SAYS SO OUT OF BAND, not only on stderr.** The
+receipt the caller prints on the failure branch is right for a hand-run, but a
+real click is handled by a DETACHED helper whose three streams are ``/dev/null``
+(``spawn_detached`` opens them so; the notifier's ``NSTask`` inherits them), so
+that stream has no reader and three reachable failures — ssh, a non-darwin host,
+a hand-edited ``desktop.launch_command`` typo — were clicks that did nothing and
+said nothing, which is the very defect this ladder exists to remove (UX round 2,
+U10). Hence :func:`_notify_click_failed` on that branch.
+
+**AND THE LAST RUNG REPORTS A LANDING, NOT A SPAWN.** It used to end in
+``spawn_detached(["lop", "--resume", <id>])``, a process with no terminal
+attached: nothing appeared, ``open_session`` still answered True, and the
+caller therefore printed nothing — a click indistinguishable from a slow one,
+on the one rung defined by having nothing else to try (UX round 1, U5). See
+:func:`_spawn_terminal`.
 """
 
 from __future__ import annotations
@@ -111,6 +127,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # The spawn package itself is imported INSIDE the functions that need it:
+    # this module is reached from a detached click process where startup cost
+    # is the user's latency, and nothing here constructs a backend at import
+    # time. Only the annotations need the names.
+    from local_operator.spawn.types import EnvMap, SpawnBackend
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +215,11 @@ def open_session(session_id: str) -> bool:
     2. **An installed-but-not-running desktop app**, launched into the
        conversation.
     3. **A running TUI viewer**, switched in place.
-    4. **A terminal**, byte-identical to the behaviour that shipped before
-       viewers existed.
+    4. **A terminal** — the rung that did ship before viewers existed, and the
+       last one: it runs the argv it always ran and reports whether a window
+       opened (see :func:`_spawn_terminal`). It is NOT byte-identical to what
+       shipped — that rung ended in a detached ``lop --resume`` that opened
+       nothing and still answered True (UX round 1, U5).
 
     RUNGS 2 AND 3 USED TO BE THE OTHER WAY ROUND, and that is the defect: a TUI
     that happened to be open swallowed every click before discovery ever ran, so
@@ -226,7 +253,53 @@ def open_session(session_id: str) -> bool:
     # "is anything left?" exactly as it did.
     if _route_to_viewer(session_id, surface=None if app_available else TUI_SURFACE):
         return True
-    return _spawn_terminal(session_id)
+    landed = _spawn_terminal(session_id)
+    if not landed:
+        # THE CLICK'S OWN REPORT, out of band. Nothing above can land, so the
+        # only place left to say so is the channel that reached the user in the
+        # first place — see `_notify_click_failed` for why the receipt alone is
+        # not enough on a real click.
+        _notify_click_failed(session_id)
+    return landed
+
+
+def _notify_click_failed(session_id: str) -> None:
+    """Tell the user, out of band, that a click could not take them anywhere.
+
+    THE RECEIPT HAS NO READER ON A CLICK (UX round 2, U10; agent review round 1,
+    M4). `cli.resume_click` prints ``could not open a terminal for session <id>
+    — run: lop --resume <id>`` to STRDERR, which is correct for the hand-run it
+    is reachable by — but the click chain hands the CLI ``/dev/null`` for stdin,
+    stdout AND stderr: `spawn_detached` opens the notifier that way and the
+    notifier's own ``NSTask``/``sh -c`` inherits it, so the line reaches nobody.
+    Driven end to end (``lsof`` on the CLI: ``0r/1w/2w CHR /dev/null``) on all
+    three reachable failures — ssh, non-darwin, and a typo'd
+    ``desktop.launch_command`` written into ``config.yml`` by hand, whose click
+    time WARNING lands on the same stream. From the chair each was a click that
+    did nothing and said nothing, which is the symptom this whole ladder was
+    raised for.
+
+    BEST-EFFORT BY CONTRACT, exactly like every other call on this path:
+    ``detached_notify`` never blocks and never raises, it is a no-op when
+    notifications are disabled, and a failure here costs the toast and nothing
+    else — the receipt is still printed for whoever is reading a terminal.
+
+    THE COPY IS THE RECEIPT'S, so the two reports of one failure agree. The
+    session id is NOT passed as ``session_id``: that argument is what makes a
+    macOS toast CLICKABLE, and the click it would post is this same ladder —
+    which has just failed. A toast that invites a retry loop is worse than one
+    that names the command the user can run themselves.
+    """
+    try:
+        from local_operator.tui.notify import APP_NAME, detached_notify
+
+        detached_notify(
+            APP_NAME,
+            f"could not open a terminal for session {session_id} — "
+            f"run: lop --resume {session_id}",
+        )
+    except Exception:  # noqa: BLE001 — a toast must never outrank the receipt
+        logger.debug("could not post the failed-click toast", exc_info=True)
 
 
 def _desktop_launch_refused() -> bool:
@@ -294,7 +367,15 @@ def _configured_launch_command() -> list[str]:
         # shlex would strip the backslashes out of every path there.
         parts = shlex.split(raw, posix=sys.platform != "win32")
     except ValueError:
-        logger.debug("desktop.launch_command is not a valid command line")
+        # A WARNING, not a debug: the user's own configured launcher is being
+        # ignored for every click from now on and is worth finding in a log
+        # (UX round 1, U4). The write-time validator in `settings_io` rejects
+        # the value when it is typed into `/settings`; this covers the copy
+        # that reached `config.yml` by hand, or before that validator shipped.
+        logger.warning(
+            "desktop.launch_command is not a valid command line; "
+            "notification clicks fall through to a terminal"
+        )
         return []
     return parts
 
@@ -318,14 +399,15 @@ DESKTOP_LAUNCH_REFUSED_ENV = "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH"
 def _launch_desktop(session_id: str) -> bool:
     """Rung 2: launch the desktop app with the session id.
 
-    DISCOVERY ORDER, and each step is cheaper than the one before it: a
-    configured command (the user's own answer, used verbatim), then the npm bin
-    on PATH (a real existence check via ``which``), then the packaged macOS
-    bundle by id. The ``pnpm dev`` case is deliberately absent — a repository
-    checkout is not reliably discoverable as an installed app, and inventing a
-    third launcher for it would be a second thing to keep in step for a
-    developer-only case. It falls through to the terminal, which is exactly
-    what it did before.
+    DISCOVERY ORDER: the npm bin on PATH first (a real existence check via
+    ``which``), then the packaged macOS bundle by id. A configured
+    ``desktop.launch_command`` REPLACES those two rather than leading them: an
+    explicit answer is not a first try to be silently second-guessed, so the
+    two orders are alternatives and not one chain. The ``pnpm dev`` case is
+    deliberately absent — a repository checkout is not reliably discoverable
+    as an installed app, and inventing a third launcher for it would be a
+    second thing to keep in step for a developer-only case. It falls through
+    to the terminal, which is exactly what it did before.
 
     Every candidate is TRIED in order and abandoned only on a non-zero exit, so
     an uninstalled bundle costs one failed ``open`` rather than a dead click.
@@ -363,6 +445,20 @@ def _launch_desktop(session_id: str) -> bool:
         if _launch_once(argv, env):
             logger.debug("click launched the desktop app: %s", argv[0])
             return True
+    if configured:
+        # A CONFIGURED LAUNCHER THAT CANNOT RUN IS NOT A QUIET FALLBACK (UX
+        # round 1, U4). Discovery failing is ordinary — that is what the rungs
+        # below are for. But a user who set `desktop.launch_command` has stated
+        # where a click should land, and a typo in it sends every click to a
+        # terminal instead, indefinitely, visible nowhere. The write-time
+        # validator rejects the typo at the settings page; this is the log
+        # line for the value that got in another way, and it names the token
+        # that could not be run.
+        logger.warning(
+            "desktop.launch_command (%s) could not be launched; "
+            "notification clicks fall through to a terminal",
+            attempts[0][0],
+        )
     return False
 
 
@@ -436,13 +532,76 @@ def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     return False
 
 
-def _spawn_terminal(session_id: str) -> bool:
-    """Open ``session_id`` in a NEW terminal. True if something was launched.
+def _last_resort_backend(env: EnvMap, detected: SpawnBackend | None) -> SpawnBackend | None:
+    """The backend that can open a window WITHOUT being inside one, or None.
 
-    THE ORIGINAL PATH, unchanged. Reached only when no viewer can take the
-    click, which is the condition the module's first docstring assumed always
-    held. It is the only route on a machine with no TUI running, so its argv
-    and its fallbacks are preserved exactly.
+    DETECTION IS THE WRONG QUESTION ON THE LAST RUNG, and this function is the
+    whole of that argument (UX round 1, U5). Rung 4 runs in a process that by
+    construction has no terminal around it: a notification click, handled by a
+    detached helper whose environment carries none of the markers
+    :func:`~local_operator.spawn.registry.active_backend` keys on. Every other
+    backend answers "is a terminal DISCOVERABLE from here?", which on such a
+    host is a question with no useful answer.
+
+    On darwin that is not "no terminal can be opened":
+    :class:`~local_operator.spawn.apple.TerminalAppBackend` is an ``osascript``
+    doing ``tell application "Terminal"``, which LAUNCHES Terminal.app — it
+    never needs this process to be inside it, and Terminal.app ships with
+    macOS. So it is offered as the guaranteed last candidate, AFTER any
+    detected backend so the user's own terminal still wins when it is
+    recognised.
+
+    ``None`` on every other platform, where nothing here can promise a visible
+    window; rung 4 then reports failure and the caller prints the receipt.
+
+    OVER SSH IT IS ALSO ``None``, and that is honesty rather than a gap.
+    ``osascript`` starts and accepts the script, but the ``tell application``
+    inside it fails for want of a window server — so the spawn would report a
+    landing that never happened, which is precisely the defect this function
+    exists to fix. ``spawn.fallback`` draws that line from the same fact
+    (``terminals.is_ssh``) and puts it in ITS OWN receipt (``no window server
+    over ssh``); the wording is not shared, because this path does not print
+    that receipt — ``cli.resume_click`` prints its generic "could not open a
+    terminal" for every failing branch, and the rung-4 failure toast repeats
+    that sentence verbatim (:func:`_notify_click_failed`, review round 1, N1).
+    """
+    if sys.platform != "darwin":
+        return None
+    from local_operator import terminals
+    from local_operator.spawn.apple import TerminalAppBackend
+
+    if isinstance(detected, TerminalAppBackend):
+        # Already the candidate the registry picked: trying it twice would
+        # report the same refusal twice and delay the failure.
+        return None
+    if terminals.is_ssh(env):
+        return None
+    return TerminalAppBackend()
+
+
+def _spawn_terminal(session_id: str) -> bool:
+    """Open ``session_id`` in a NEW terminal. True if a WINDOW was opened.
+
+    THE ORIGINAL PATH: reached only when no viewer can take the click, which is
+    the condition the module's first docstring assumed always held. It is the
+    only route on a machine with no TUI running, so its argv and its cwd are the
+    ones that always shipped, and the backend it tries FIRST is still the one
+    the registry detects.
+
+    WHAT IT NO LONGER DOES IS CLAIM A LANDING IT DID NOT MAKE (UX round 1, U5).
+    It used to fall through to ``spawn_detached(["lop", "--resume", <id>])``:
+    a process started DETACHED, never waited on, with DEVNULL for all three
+    streams — so no terminal was attached to it, nothing became visible, and
+    the True it returned suppressed the receipt the caller prints on failure.
+    From the user's side that is a click that did nothing and said nothing, on
+    the rung whose entire definition is "there is nothing else".
+
+    So the rung now tries terminal backends ONLY — the detected one, then the
+    darwin launcher that needs no detection (:func:`_last_resort_backend`) —
+    and returns False when none of them opened a window. False is a real
+    answer on this path: ``cli.resume_click`` turns it into the
+    ``lop --resume <id>`` receipt, and :func:`_notify_click_failed` raises the
+    same sentence as a toast for the click that never sees stderr.
     """
     import shutil
 
@@ -479,23 +638,38 @@ def _spawn_terminal(session_id: str) -> bool:
     except Exception:  # noqa: BLE001 — a backend bug must not eat the click
         logger.debug("could not select a terminal backend", exc_info=True)
 
+    candidates: list[SpawnBackend] = []
     if backend is not None:
+        candidates.append(backend)
+    last_resort = _last_resort_backend(env, backend)
+    if last_resort is not None:
+        candidates.append(last_resort)
+
+    # A backend is abandoned only where it opened NOTHING — a missing binary, a
+    # refused socket, an error from its own spawn — and that is the PREMISE the
+    # fall-through rests on, not a claim the interface guarantees. It holds for
+    # the AppleScript and `spawn_detached` backends, which is why the darwin last
+    # resort can be reached safely; it does NOT hold for `CmuxBackend`, whose
+    # `_spawn_surface` answers False both for a failed send AND for a
+    # surface-creating placement it could not read an id out of — so on that one
+    # path a second candidate can follow a window that already exists (review
+    # round 1, M2). The distinction is not lost where it is made:
+    # `spawn/cmux.py:176` is the failed CREATE and `:178-179` is the zero-exit
+    # create whose stdout carried no id, and `_spawn_surface`'s own `bool`
+    # return is what collapses the two by the time this loop sees them. So the
+    # refusal stays narrow for a stated reason rather than an unavailable one:
+    # acting on it needs a tri-state (or a `placed` flag) out of `CmuxBackend`,
+    # i.e. a change to that backend, and this rung's whole value is that a click
+    # which placed nothing still lands somewhere (agent review round 2, M1).
+    for candidate in candidates:
         try:
-            if backend.spawn(launch, env):
+            if candidate.spawn(launch, env):
                 return True
-        except Exception:  # noqa: BLE001 — fall through to the bare launch
+        except Exception:  # noqa: BLE001 — try the next candidate, then report
             logger.debug("terminal backend refused the launch", exc_info=True)
 
-    # No emulator we know: run the resume line directly. On a desktop this
-    # usually does nothing visible, but it is strictly better than dropping
-    # the user's click, and it keeps this path honest about its fallback.
-    try:
-        from local_operator.proc import spawn_detached
-
-        return bool(spawn_detached(list(argv)))
-    except Exception:  # noqa: BLE001
-        logger.debug("resume launch failed", exc_info=True)
-        return False
+    logger.debug("no terminal backend could open a window for %s", session_id)
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
