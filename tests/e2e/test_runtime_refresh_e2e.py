@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 
 import local_operator
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.inbox import SPOOL_RECEIPT_WAKE
 from local_operator.tui.app import OperatorApp
@@ -586,7 +587,14 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     await asyncio.wait_for(
                         viewer.prompt_and_wait("a follow-up sent mid-drain"), timeout=60
                     )
-                assert "retiring" in str(caught.value), str(caught.value)
+                # The refusal is the typed admission category now, and its
+                # sentence deliberately no longer contains the word "retiring":
+                # it named an internal token and the machinery rather than the
+                # session the operator is in (design round 1, D2). What the
+                # caller can act on is still named, and the category is what
+                # lets the viewer tell this refusal from any other failure —
+                # the same pair of pins `test_retiring_refusal.py` carries.
+                assert isinstance(caught.value, RuntimeRetiring), caught.value
                 assert "send it again" in str(caught.value), str(caught.value)
 
                 # (iii) a peer message is spooled for the successor instead.
