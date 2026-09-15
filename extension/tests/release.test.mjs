@@ -198,23 +198,31 @@ test("a transport failure is named as one, not reported as an HTTP status", asyn
   assert.doesNotMatch(output, /returned HTTP/);
 });
 
-// Mirrors BODY_PRINT_LIMIT in chrome-web-store.sh. The straddle test below has
-// to know where the cut falls, which is the one thing about the bound a test
-// cannot discover from the outside.
-const BODY_PRINT_LIMIT = 4000;
-
-// The renderer's and the refusal helper's bounds, read OUT of the script rather
-// than mirrored by hand. A hand-written mirror drifts silently, and these fixtures
-// stop measuring the moment it does: with the bound raised to 400, the two token
-// fixtures below passed while 400 characters of the credential reached the log,
-// because their own sensitivity guards were comparing the fixture against the
+// Every bound these tests measure against is read OUT of chrome-web-store.sh
+// rather than mirrored by hand, including the error-body one whose cut position the
+// straddle tests below have to know. A hand-written mirror drifts silently and the
+// fixtures stop measuring the moment it does: with STATUS_VALUE_LIMIT raised to 400,
+// the two token fixtures passed while 400 characters of the credential reached the
+// log, because their own sensitivity guards were comparing the fixture against the
 // stale mirror. Reading the script keeps them inside the band they probe.
+//
+// A drift fails HERE, before any test registers. Measured: with the constant
+// reformatted in the script, an assert.ok inside the fixtures surfaced as four
+// unrelated test failures while 43 tests silently did not run, and a plain throw
+// became one uncaughtException wrapping the message. Exiting is the only shape that
+// reports exactly what is wrong and runs nothing, which matters because these
+// constants are a precondition for every fixture in this file rather than for the
+// one test that happens to read them first.
 const SCRIPT = await readFile(new URL("../scripts/chrome-web-store.sh", import.meta.url), "utf8");
 function scriptConstant(name) {
   const match = new RegExp(`^${name}=(\\d+)$`, "m").exec(SCRIPT);
-  assert.ok(match, `${name} must be a plain integer assignment in chrome-web-store.sh`);
+  if (!match) {
+    console.error(`release tests: ${name} must be a plain integer assignment in chrome-web-store.sh`);
+    process.exit(1);
+  }
   return Number(match[1]);
 }
+const BODY_PRINT_LIMIT = scriptConstant("BODY_PRINT_LIMIT");
 const STATUS_VALUE_LIMIT = scriptConstant("STATUS_VALUE_LIMIT");
 const STATUS_CHANNEL_LIMIT = scriptConstant("STATUS_CHANNEL_LIMIT");
 const VALUE_PRINT_LIMIT = scriptConstant("VALUE_PRINT_LIMIT");
@@ -822,9 +830,21 @@ test("the stage refusals redact the store's values", async () => {
         () => ({ itemId: extensionId, state: token }),
       ],
       expect: "staged submission returned unexpected state",
+      expectRedaction: true,
+    },
+    {
+      // The escaping this helper shares with the renderer was asserted only by its
+      // own comment: deleting it left the suite green while a value carrying
+      // newlines rendered a 53-line refusal. `expect` here is the escaped form, and
+      // the line count is asserted below.
+      name: "upload ended in unexpected state, newlines escaped",
+      handlers: [() => ({ itemId: extensionId, uploadState: "A\nB\rC\tD\n".repeat(20) })],
+      expect: "upload ended in unexpected state A\\nB\\rC\\tD\\n",
+      // No token in this value: it is here for the escaping and the line count.
+      expectRedaction: false,
     },
   ];
-  for (const { name, handlers, expect } of cases) {
+  for (const { name, handlers, expect, expectRedaction = true } of cases) {
     const error = await runRelease(["stage", "local-operator-extension.zip", VERSION], handlers, {
       token,
       expectFailure: true,
@@ -832,7 +852,17 @@ test("the stage refusals redact the store's values", async () => {
     const output = error.stdout + error.stderr;
     assert.ok(output.includes(expect), `${name}: ${output}`);
     assert.ok(!output.includes(token.slice(0, 8)), `${name}: the token reached the log:\n${output}`);
-    assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), `${name}: ${output}`);
+    if (expectRedaction) {
+      assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), `${name}: ${output}`);
+    }
+    // The refusal goes to stderr and must be exactly one line whatever the value
+    // carries: `validate-store-zip.sh` prints its own line to stdout first, so the
+    // count is taken from stderr, where every refusal lands.
+    assert.equal(
+      error.stderr.trimEnd().split("\n").length,
+      1,
+      `${name}: the refusal rendered ${error.stderr.trimEnd().split("\n").length} lines:\n${error.stderr}`,
+    );
   }
 });
 
