@@ -10,12 +10,14 @@ function of the transcript — so hoisting it lets an episode render through the
 implementation that drifts from it.
 
 KNOWN INCOMPLETENESS, deliberately not resolved by the move: the vocabulary the
-renderer matches on is spread across FOUR modules the runner may not import —
-``local_operator.incidents`` (the four ``SESSION_*_MESSAGE_TYPE`` records),
-``local_operator.session.peer`` (``PEER_MESSAGE_MESSAGE_TYPE``),
-``local_operator.tools.builtin`` (``TODO_REMINDER_MESSAGE_TYPE``) and
-``local_operator.harness.comms`` (``HUB_MESSAGE_TYPE``, this module's only
-import from a package the runner is otherwise allowed to touch). Seven
+renderer matches on is spread across four modules. Three of them the runner may
+not import at all — ``local_operator.incidents`` (the four
+``SESSION_*_MESSAGE_TYPE`` records), ``local_operator.session.peer``
+(``PEER_MESSAGE_MESSAGE_TYPE``) and ``local_operator.tools.builtin``
+(``TODO_REMINDER_MESSAGE_TYPE``) — and the fourth, ``local_operator.harness.comms``
+(``HUB_MESSAGE_TYPE``), is the only one of the four that sits in a package the
+runner may otherwise import: the module itself imports cleanly and its closure
+does not, which is the next paragraph. Seven
 constants, and importing this module leaks **17** modules that
 ``tests/unit/evaluation/runner/test_isolation.py`` denies, so the hoist does not
 by itself make the renderer reachable from an episode: giving those constants a

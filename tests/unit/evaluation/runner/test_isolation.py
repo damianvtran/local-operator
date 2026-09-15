@@ -31,10 +31,10 @@ REPO = Path(__file__).resolve().parents[4]
 # thing this rule exists to keep out of an episode. So "the runner may not
 # import session code" was enforced by intent, not by the test: importing
 # ``session_factory`` yielded an empty leak set while pulling the whole session
-# package in behind it. Both halves are therefore spelled out below: the
-# application modules the runner must stay away from, each accompanied by the
-# ``_``-suffixed siblings that share its name, because naming the module alone
-# leaves the same hole open one name over.
+# package in behind it. The list below therefore spells out both: the
+# application modules the runner must stay away from, and the ``_``-suffixed
+# siblings that share their names, because naming the module alone leaves the
+# same hole open one name over.
 FORBIDDEN_PREFIXES = (
     # Packages: the entry covers every submodule underneath it.
     "local_operator.model",
@@ -125,8 +125,8 @@ def test_runner_core_does_not_import_the_application(module: str) -> None:
     assert not leaked, f"{module} leaked application imports: {leaked}"
 
 
-def _application_module_names(package: Path) -> set[str]:
-    """Module and package names inside ``package``, read from the tree.
+def _public_module_names(package: Path) -> set[str]:
+    """Module and package names in ``package``, read from the tree.
 
     Read from disk rather than by importing: this file's whole subject is that
     an episode must not import the application, and the candidate set has to
@@ -141,38 +141,39 @@ def _application_module_names(package: Path) -> set[str]:
     }
 
 
-def test_denylist_covers_every_sibling_and_submodule_of_the_names_it_bars() -> None:
-    """What shares a barred name's name is barred too, and the tree names them.
+def test_denylist_bars_the_siblings_of_every_name_it_bars() -> None:
+    """What shares a barred name's name is barred too, and the tree finds them.
 
     The predicate matches at a dotted boundary, so ``local_operator.session``
     does NOT cover ``local_operator.session_factory`` — the module that reads
-    the operator's own configuration, and the one this widening was aimed at —
-    while it does cover ``local_operator.session.spend``. Seven hand-written
-    names could not fail for an eighth module added later, so both sets come
-    from the package directory instead, and this name claims exactly what the
-    assertion makes: every sibling and every submodule of every barred name is
-    itself barred.
+    the operator's own configuration, and the one this widening was aimed at.
+    The siblings are named in the list as entries of their own, and this test is
+    what keeps that true: the candidate set comes from the package directory, so
+    an eighth sibling added later fails here without anyone remembering to widen
+    the list.
+
+    Five assertions run today — ``session_factory``, ``session_lease``,
+    ``config_migrations``, ``config_watch``, ``cli_style`` — and each can fail,
+    which is the whole of what this derivation enforces. It is defined relative
+    to the denylist, so it is blind to a *head's* removal: dropping a head
+    deletes the candidate set that would have judged it. ``PINNED_ENTRIES`` is
+    what catches that. The submodule half that used to sit beside this one was
+    dropped rather than counted, because it could not fail: a submodule of a
+    barred package is barred by the predicate itself, which made all 127 of
+    those assertions true by construction.
     """
-    package = REPO / "local_operator"
-    top_level = _application_module_names(package)
-    propagation: dict[str, list[str]] = {}
-    for name in sorted(top_level):
-        if not _leaked({f"local_operator.{name}"}):
-            continue
-        directory = package / name
-        submodules = (
-            [f"local_operator.{name}.{sub}" for sub in sorted(_application_module_names(directory))]
-            if directory.is_dir()
-            else []
-        )
-        siblings = [
-            f"local_operator.{other}" for other in sorted(top_level) if other.startswith(f"{name}_")
+    names = _public_module_names(REPO / "local_operator")
+    siblings: dict[str, list[str]] = {}
+    for name in sorted(names):
+        shares_name = [
+            f"local_operator.{other}" for other in sorted(names) if other.startswith(f"{name}_")
         ]
-        propagation[name] = siblings + submodules
+        if shares_name and _leaked({f"local_operator.{name}"}):
+            siblings[name] = shares_name
     # A check that has nothing to check is how the widening this replaced went
     # unnoticed: it has to be able to fail.
-    assert any(propagation.values()), "no barred name has a sibling or submodule to check"
-    for name, shares_name in sorted(propagation.items()):
+    assert siblings, "no barred name has a sibling to check"
+    for name, shares_name in sorted(siblings.items()):
         for qualified in shares_name:
             assert _leaked({qualified}) == [qualified], (
                 f"{qualified} shares a name with the barred local_operator.{name} "
@@ -180,25 +181,69 @@ def test_denylist_covers_every_sibling_and_submodule_of_the_names_it_bars() -> N
             )
 
 
-#: Entries whose necessity cannot be re-derived from the tree, so dropping one
-#: has to fail a test here instead of passing silently. ``local_operator.paths``
-#: resolves the operator's config directory: the runner's model client reached
-#: it through ``local_operator.logger`` until this PR, and nothing on disk
-#: records that an episode may not read the operator's settings directory.
-BARRED_BY_INTENT = ("local_operator.paths",)
+#: The denylist as reviewed, pinned by hand because nothing else can pin it: a
+#: deleted entry leaves no trace for the tree to judge, and the derivation above
+#: is defined relative to the list, so it goes quiet at exactly the moment the
+#: entry it would have judged disappears. Most of these names are policy rather
+#: than a measured leak — nothing on disk records which modules an episode may
+#: reach, and an entry that is no neighbour of another entry has no second
+#: assertion standing behind it — so a removal here has to fail a test that names
+#: it. The derivation this replaced made exactly that trade: it gained
+#: ``session_lease`` and ``config_watch`` as derived entries but lost the four
+#: entry-level pins the spot-check it replaced carried (``local_operator.session``,
+#: ``local_operator.tools``, ``local_operator.exec_worker``, ``textual``), and
+#: deleting any of those four then passed every test in this file.
+PINNED_ENTRIES = (
+    "local_operator.model",
+    "local_operator.providers",
+    "local_operator.tools",
+    "local_operator.tui",
+    "local_operator.mobile",
+    "local_operator.session",
+    "local_operator.analytics",
+    "local_operator.config",
+    "local_operator.config_migrations",
+    "local_operator.config_watch",
+    "local_operator.credentials",
+    "local_operator.session_factory",
+    "local_operator.session_lease",
+    "local_operator.context_files",
+    "local_operator.resume",
+    "local_operator.paths",
+    "local_operator.cli",
+    "local_operator.cli_style",
+    "local_operator.exec_mode",
+    "local_operator.exec_session",
+    "local_operator.exec_startup",
+    "local_operator.exec_worker",
+    "local_operator.imaging",
+    "local_operator.ansi",
+    "local_operator.incidents",
+    "textual",
+)
 
 
-def test_denylist_keeps_the_entries_the_tree_cannot_vouch_for() -> None:
-    """An entry pinned by intent alone must not be deletable in silence.
+def test_denylist_still_bars_every_entry_it_was_reviewed_with() -> None:
+    """No entry may leave the list in silence, whatever the tree can re-derive.
 
-    With this PR's own fix in place — the runner no longer reaches the
-    application logger — every other assertion in this file still passes with
-    ``local_operator.paths`` removed from ``FORBIDDEN_PREFIXES``, so the entry
-    the runner-logger fix exists to satisfy could go and nothing would say so.
-    Each name here is a measured leak the list has to keep barring.
+    This is a deliberate second copy of the list, and the copy is the point: the
+    live list cannot test itself, and every entry in it is a decision someone
+    made about what an episode may reach. Two of them show why a pin is the only
+    mechanism that works here. ``local_operator.paths`` resolves the operator's
+    config directory, and the runner's model client reached it through
+    ``local_operator.logger`` until this PR; with that fix in place, every other
+    assertion in this file still passes with the entry removed, so the entry the
+    fix exists to satisfy could go unremarked. ``local_operator.session`` is the
+    module the rule is named after, and its removal takes the whole derived half
+    above with it — the candidates, and the assertions that would have failed for
+    them.
+
+    Adding an entry needs no edit here (the check is a subset one, so the list
+    may grow); a removal, and with it the justification somebody wrote down,
+    fails and names the entry.
     """
-    for name in BARRED_BY_INTENT:
-        assert _leaked({name}) == [name], f"{name} is no longer barred"
+    removed = [name for name in PINNED_ENTRIES if name not in FORBIDDEN_PREFIXES]
+    assert not removed, f"the denylist no longer bars {removed}"
 
 
 def test_runner_package_import_is_inert() -> None:

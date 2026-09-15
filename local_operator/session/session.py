@@ -83,10 +83,11 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 # through this same function without importing session code. Only these two
 # names are re-exported, and each has a caller here: ``_default_convert_to_llm``
 # is what the session, its tests and ``session_factory``'s thin alias resolve
-# through this module, and ``_is_todo_reminder`` is what the todo guardrail
-# above uses. ``_injected_user_message`` is renderer-internal — the renderer
-# calls it and nothing outside needs it — so it is deliberately NOT reachable
-# from ``local_operator.session.session``.
+# through this module, and ``_is_todo_reminder`` is called only by
+# ``Session._live_todo_reminders``, far below in this module (no guardrail is
+# defined in this region). ``_injected_user_message`` is renderer-internal —
+# the renderer calls it and nothing outside needs it — so it is deliberately NOT
+# reachable from ``local_operator.session.session``.
 from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
