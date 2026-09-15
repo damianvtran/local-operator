@@ -966,14 +966,23 @@ def test_every_launcher_rejection_names_a_remedy_in_one_readable_line(
         "/tmp/ux-h/bin/does-not-exist --open-session {session}",
         f"{not_executable} --open-session {{session}}",
         "local-operator-ui-not-installed-here",
+        # A QUOTED path with a space: one token to the shell grammar the
+        # validator parses with, several to ``str.split`` — the shape the
+        # page's shed used to fall out of (QA round 1, Q1). It has to be
+        # recognised as the interpolated-value shape all the same.
+        '"/Applications/Local Operator Canary.app/Contents/MacOS/local-operator-ui"'
+        " --open-session {session}",
     ]
     for value in values:
         problem = settings_io.validate(setting, value)
         assert problem, f"{value!r} was accepted"
-        head, sep, advice = problem.partition(settings_io.REJECTION_VALUE_SEP)
-        assert sep, problem
-        # The shape the page's shed opts in on: one token, then the advice.
-        assert len(head.split()) == 1, problem
+        split = settings_io.split_value_rejection(problem)
+        assert split is not None, problem
+        head, advice = split
+        # The head is whatever the user typed as the command's first word —
+        # `shlex`'s token — so it may contain spaces and must not be
+        # re-derived from a token count.
+        assert head and advice, problem
         assert cell_len(advice) <= 74, (cell_len(advice), problem)
         # What went wrong, what it costs, and what to do about it.
         assert "clicks open a terminal" in advice, problem

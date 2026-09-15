@@ -551,11 +551,61 @@ def _validate_openrouter_max_price(value: Any) -> None:
 #: OWN INPUT has to be splittable "value first, advice after" — the value can be
 #: shed (it is what the user typed, and it is still in the row's value column)
 #: while the advice is pinned, then cut with a visible ellipsis. A message that
-#: uses this separator OPTS IN to that ladder; ``tui.widgets.settings_view``
-#: splits on the FIRST occurrence and only when the head is a single token, so
-#: prose notices ("config.yml is unreadable, nothing was written — …") are never
-#: shed (design round 1, D11).
+#: uses this separator OPTS IN to that ladder, and the opt-in is checked by
+#: ASKING THE PRODUCER (:func:`split_value_rejection`) rather than by reading the
+#: head's token count — so prose notices ("config.yml is unreadable, nothing was
+#: written — …") are never shed while a QUOTED launcher path containing a space
+#: is (QA round 1, Q1; design round 2, D16).
 REJECTION_VALUE_SEP = " — "
+
+
+#: The ADVICE half of an interpolated-value rejection — the copy
+#: :func:`_validate_desktop_launch_command` pins after the value.
+#:
+#: NAMED BECAUSE THE RENDERER HAS TO RECOGNISE THE SHAPE INSTEAD OF GUESSING IT.
+#: The page sheds the value half and keeps this one, and it used to decide which
+#: half was which from the head's TOKEN COUNT — the wrong question, because a
+#: QUOTED launcher path containing a space is ONE token to the shell grammar the
+#: validator uses and SEVERAL to ``str.split``. For that shape the ladder
+#: degraded to a plain clip and cut the fault, the consequence and the remedy
+#: together at 80x24 (QA round 1, Q1). Writing the copy once, here, is what lets
+#: the producer and :func:`split_value_rejection` agree by construction.
+ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
+ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
+ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+_VALUE_REJECTION_ADVICE: tuple[str, ...] = (
+    ADVICE_NOT_FOUND,
+    ADVICE_NOT_EXECUTABLE,
+    ADVICE_NOT_ON_PATH,
+)
+
+
+def split_value_rejection(message: str) -> tuple[str, str] | None:
+    """``(value, advice)`` when ``message`` is one THIS MODULE shaped that way.
+
+    The renderer's question is always "which half of this message is the user's
+    own input?" — the answer decides what may be shed and what has to be pinned
+    — and no amount of reading the rendered string answers it reliably: the
+    value is a shlex-parsed token, so it can contain spaces, and the page's
+    prose notices (``config.yml is unreadable, nothing was written — …``,
+    ``could not save — <path> has an unexpected structure…``) carry the same
+    separator in the same place while their HEAD is exactly the part that must
+    not be shed.
+
+    So the producer answers instead. Every value-shaped rejection ENDS in one of
+    :data:`_VALUE_REJECTION_ADVICE`, which nothing else in the tree writes, and
+    matching the TAIL (rather than the first separator) also keeps a value that
+    itself contains the separator split at the right place: the value is
+    whatever precedes the advice, wherever that lands.
+
+    ``None`` means the message is not one of ours — prose, a nested exception's
+    text, a validator that pinned no advice — and the ladder leaves it alone.
+    """
+    for advice in _VALUE_REJECTION_ADVICE:
+        suffix = REJECTION_VALUE_SEP + advice
+        if message.endswith(suffix):
+            return message[: -len(suffix)], advice
+    return None
 
 
 @functools.cache
@@ -589,6 +639,13 @@ def _user_shell_path() -> str | None:
     is a login-shell round trip (bounded inside ``helpers``); caching it is what
     keeps a second refusal free, and asking it last is what keeps it off the
     accept path, where a user is waiting on a keystroke.
+
+    THE CACHE IS PER-PROCESS, and that is safe because it is consulted ONLY on
+    the refusing side (agent review round 2, M2). A stale PATH can therefore
+    produce a FALSE REFUSAL — a directory the login shell gained after this
+    process started is not seen — and never a wrong ACCEPT, because an accepted
+    name still has to satisfy ``shutil.which``, which re-stats. Nothing that
+    refuses is silently allowed through, and the refusal names the way out.
     """
     try:
         import platform
@@ -688,21 +745,12 @@ def _validate_desktop_launch_command(value: Any) -> None:
     executable = parts[0]
     if os.sep in executable or (os.altsep and os.altsep in executable):
         if not os.path.exists(executable):
-            raise ValueError(
-                f"{executable}{REJECTION_VALUE_SEP}does not exist; clicks open a terminal. "
-                "Clear this to discover the app."
-            )
+            raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_FOUND}")
         if not os.access(executable, os.X_OK):
-            raise ValueError(
-                f"{executable}{REJECTION_VALUE_SEP}not executable; clicks open a terminal. "
-                "Clear this to discover the app."
-            )
+            raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_EXECUTABLE}")
         return
     if shutil.which(executable) is None and not _resolvable_for_the_user(executable):
-        raise ValueError(
-            f"{executable}{REJECTION_VALUE_SEP}not on PATH; clicks open a terminal. "
-            "Clear this to discover the app."
-        )
+        raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_ON_PATH}")
 
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:

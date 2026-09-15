@@ -1583,3 +1583,82 @@ class TestTheSubagentModelChoiceRow:
         # the key path (95 cells against 94), so a bound of 74 would admit the
         # string this assertion exists to prevent.
         assert cell_len(setting.help) <= 72, setting.help
+
+
+# ---------------------------------------------------------------------------
+# Which half of a rejection is the user's input (design round 2, D16; QA
+# round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+def _value_rejection(value: str, advice: str) -> str:
+    """The string this module's executable validator would build, verbatim."""
+    return f"{value}{settings_io.REJECTION_VALUE_SEP}{advice}"
+
+
+@pytest.mark.parametrize("advice", settings_io._VALUE_REJECTION_ADVICE)
+def test_a_value_shaped_rejection_splits_at_its_advice(advice: str) -> None:
+    """Both halves come back, whatever the VALUE looks like.
+
+    The head is a ``shlex`` token, so it can contain spaces (a quoted path), the
+    separator itself, or non-ASCII — none of which a token count or a
+    first-separator ``partition`` can be trusted with. The advice is the anchor:
+    it is written once, in this module, and the message ends with it.
+    """
+    for value in (
+        "/usr/local/bin/local-operator-ui",
+        "/Applications/Local Operator Canary.app/Contents/MacOS/local-operator-ui",
+        "/tmp/od — d/has/the/separator/inside-it",
+        "/tmp/ünïcøde/launcher",
+    ):
+        message = _value_rejection(value, advice)
+        assert settings_io.split_value_rejection(message) == (value, advice), message
+        # ...and the copy length the page's 80x24 budget is pinned to.
+        assert cell_len(advice) <= 74, cell_len(advice)
+
+
+def test_a_prose_notice_is_not_a_value_rejection() -> None:
+    """The page keeps the HEAD of these, so recognising them matters.
+
+    Each opens with the phrase that says what happened — the part a shed would
+    remove — while carrying the same separator in the same position a value
+    rejection does. "A message that uses the separator opts in" is true of the
+    PRODUCER, not of the character sequence.
+    """
+    for message in (
+        f"config.yml is unreadable, nothing was written{settings_io.REJECTION_VALUE_SEP}"
+        "ValueError: values is not a mapping at line 3 column 1",
+        f"could not save{settings_io.REJECTION_VALUE_SEP}/tmp/c.yml has an unexpected structure "
+        "that needs repairing before this page can write to it",
+        f"chain needs a first hop{settings_io.REJECTION_VALUE_SEP}expected provider/model",
+        "this setting is retired and cannot be changed",
+        f"/usr/local/bin/nope{settings_io.REJECTION_VALUE_SEP}does not exist",
+    ):
+        assert settings_io.split_value_rejection(message) is None, message
+
+
+def test_the_real_validator_is_what_marks_the_shape(tmp_path, monkeypatch) -> None:
+    """The check the renderer relies on, driven through the producer itself.
+
+    ``desktop.launch_command`` is the only setting whose rejection interpolates
+    the user's input, and the ONLY reason the renderer may shed its head. A
+    validator that stopped ending in ``ADVICE_*`` — a copy edit, a new clause —
+    would silently turn the line back into the plain clip D11 removed, so the
+    link is asserted here rather than assumed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    quoted = (
+        '"/Applications/Local Operator Canary.app/Contents/MacOS/local-operator-ui"'
+        " --open-session {session}"
+    )
+    problem = settings_io.validate(setting, quoted)
+    assert problem is not None
+    split = settings_io.split_value_rejection(problem)
+    assert split is not None, problem
+    value, advice = split
+    # The value is the shlex-parsed first word INCLUDING the spaces the quotes
+    # protected, which is exactly what a token-count predicate got wrong.
+    assert value == quoted.split('"')[1], value
+    assert " " in value
+    assert advice == settings_io.ADVICE_NOT_FOUND, advice
