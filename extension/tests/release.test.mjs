@@ -203,6 +203,10 @@ test("a transport failure is named as one, not reported as an HTTP status", asyn
 // cannot discover from the outside.
 const BODY_PRINT_LIMIT = 4000;
 
+// Mirrors STATUS_VALUE_LIMIT in chrome-web-store.sh, for the same reason: the
+// token fixtures have to put a credential either side of the cut.
+const STATUS_VALUE_LIMIT = 160;
+
 test("an oversized error body is bounded and its truncation is disclosed", async () => {
   // An unbounded echo floods the run log -- a single 400 was measured at
   // 3,000,626 bytes of step output -- which works against the readability this
@@ -598,7 +602,7 @@ test("one unreadable shape cannot blank the rest of the summary", async () => {
     {
       name: "channels that are not an array",
       status: { state: "STAGED", distributionChannels: "nonsense" },
-      expect: ["submitted state=STAGED", '<not an array: "nonsense">'],
+      expect: ["submitted state=STAGED", '<not an array: string value="nonsense">'],
     },
     {
       name: "a scalar entry beside a good one",
@@ -606,12 +610,14 @@ test("one unreadable shape cannot blank the rest of the summary", async () => {
         state: "STAGED",
         distributionChannels: [{ crxVersion: VERSION, deployPercentage: 100 }, "junk"],
       },
-      expect: [`crxVersion=${VERSION} deployPercentage=100`, '<unrenderable entry: "junk">'],
+      expect: [`crxVersion=${VERSION} deployPercentage=100`, '<not an object: string value="junk">'],
     },
     {
       name: "a revision that is not an object",
       status: "STAGED",
-      expect: ["submitted state=<unrenderable state>"],
+      // The offending type and value are named, so this is distinguishable from
+      // the same field arriving as a number or an array.
+      expect: ['submitted <not an object: string value="STAGED">'],
     },
   ];
   for (const { name, status, expect } of cases) {
@@ -629,16 +635,47 @@ test("one unreadable shape cannot blank the rest of the summary", async () => {
   }
 });
 
-test("an absent revision and an empty channel list are reported differently", async () => {
-  const result = await runRelease(["status"], [
-    () => ({
-      itemId: extensionId,
-      submittedItemRevisionStatus: { state: "STAGED", distributionChannels: [] },
-    }),
-  ]);
-  assert.ok(result.stdout.includes("submitted state=STAGED distributionChannels=[]"), result.stdout);
-  // Not the same thing as a revision the store never sent.
-  assert.ok(result.stdout.includes("published <absent>"), result.stdout);
+test("an absent key, a null, an empty list and a wrong type are four answers", async () => {
+  // These all used to render identically or nearly so, which is how a store-side
+  // shape change (or a field the store never filled in) stayed invisible. `state`
+  // in particular is what the first gate reads.
+  const cases = [
+    { name: "absent revision", status: undefined, expect: ["submitted <absent>"], absent: true },
+    { name: "absent channels key", status: { state: "STAGED" }, expect: ["submitted state=STAGED distributionChannels=<absent>"] },
+    { name: "null channels", status: { state: "STAGED", distributionChannels: null }, expect: ["distributionChannels=<null>"] },
+    { name: "empty channels", status: { state: "STAGED", distributionChannels: [] }, expect: ["distributionChannels=[]"] },
+    { name: "absent state", status: { distributionChannels: [] }, expect: ["submitted state=<absent>"] },
+    { name: "null state", status: { state: null, distributionChannels: [] }, expect: ["submitted state=<null>"] },
+    { name: "state of a type it cannot hold", status: { state: { nested: true }, distributionChannels: [] }, expect: ['submitted state=<not a string: object value={"nested":true}>'] },
+  ];
+  const rendered = new Set();
+  for (const { name, status, expect } of cases) {
+    const body = status === undefined
+      ? { itemId: extensionId }
+      : { itemId: extensionId, submittedItemRevisionStatus: status };
+    const result = await runRelease(["status"], [() => body]);
+    for (const fragment of expect) {
+      assert.ok(result.stdout.includes(fragment), `${name}: expected ${JSON.stringify(fragment)} in:\n${result.stdout}`);
+    }
+    rendered.add(result.stdout);
+  }
+  // Seven inputs, and no two of them may read the same on the line a release
+  // owner is diagnosing from.
+  assert.equal(rendered.size, cases.length, "two different shapes rendered identically");
+});
+
+test("revisions of different unexpected types render different markers", async () => {
+  // One constant marker for all three made a string, a number and an array
+  // indistinguishable, which loses the very shape the marker exists to report.
+  const rendered = new Map();
+  for (const [name, status] of [["string", "STAGED"], ["number", 7], ["array", ["STAGED"]]]) {
+    const result = await runRelease(["status"], [
+      () => ({ itemId: extensionId, submittedItemRevisionStatus: status }),
+    ]);
+    assert.ok(result.stdout.includes(`<not an object: ${name} value=`), `${name}: ${result.stdout}`);
+    rendered.set(name, result.stdout);
+  }
+  assert.equal(new Set(rendered.values()).size, 3, "the three revisions rendered identically");
 });
 
 test("the status summary redacts the access token, not only the error body", async () => {
@@ -660,6 +697,53 @@ test("the status summary redacts the access token, not only the error body", asy
   assert.ok(!output.includes(token), "the access token must never reach the log");
   // Redaction must not cost the diagnosis: the rest of the field still shows.
   assert.ok(output.includes("rejected request authorized by <redacted CWS_ACCESS_TOKEN>"), output);
+});
+
+test("a token longer than the value bound is redacted before the cut", async () => {
+  // The bound used to run BEFORE the substitution, so this token lost its tail to
+  // the cut and the surviving 160-character prefix no longer matched the
+  // substitution -- it went into a public run log. 185 characters, offset 0. The
+  // short-token test above cannot see that ordering: it is redacted either way.
+  const token = "ya29." + "STRADDLE-PREFIX-LONG-" + "Z".repeat(160);
+  assert.ok(
+    token.length > STATUS_VALUE_LIMIT,
+    `the token must exceed the bound to measure anything (${token.length} vs ${STATUS_VALUE_LIMIT})`,
+  );
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state: token, distributionChannels: [] },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token.slice(0, 8)), `the token's prefix reached the log:\n${output}`);
+  assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), output);
+});
+
+test("a token straddling the value bound is redacted before the cut", async () => {
+  // The same ordering, one character either side of the cut: bounding first left
+  // the leading half of the credential behind, and a half is still a leak.
+  const token = "ya29.STRADDLE-SECRET-TOKEN-VALUE-ABCDE";
+  // DERIVE the padding from the bound rather than hardcoding it, so the fixture
+  // keeps straddling if the bound moves.
+  const pad = STATUS_VALUE_LIMIT - Math.floor(token.length / 2);
+  const state = "P".repeat(pad) + token + "Q".repeat(400);
+  const start = state.indexOf(token);
+  assert.ok(
+    start < STATUS_VALUE_LIMIT && start + token.length > STATUS_VALUE_LIMIT,
+    `the token must straddle the cut to measure anything (start ${start}, limit ${STATUS_VALUE_LIMIT})`,
+  );
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state, distributionChannels: [] },
+    }),
+  ], { token });
+  const output = result.stdout + result.stderr;
+  assert.ok(!output.includes(token.slice(0, 8)), `the token's prefix survived truncation:\n${output}`);
+  // No `redacted` marker assertion here on purpose: the substitution makes the
+  // field longer, so the bound can cut the MARKER too. The secret is gone either
+  // way, which is the property under test.
 });
 
 test("status refuses arguments it cannot act on", async () => {
