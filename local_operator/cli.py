@@ -728,10 +728,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "after the socket times out, escalate to signals using the "
-            "record's own fields as identity — for a heartbeating-but-"
-            "starved process the socket cannot reach (use after the plain "
-            "stop refused with a fresh heartbeat)"
+            "signal a target the plain stop leaves alone: one that reports a "
+            "turn in flight, or a heartbeating-but-starved process whose "
+            "socket cannot confirm identity (escalating can cut that turn)"
         ),
     )
 
@@ -4812,7 +4811,8 @@ def _resolve_stop_target(
     The same shared resolver `lop send` uses, so every way of addressing a
     peer — name, substring, session id, pid — behaves identically across
     `send` and `stop`. Only the hint strings differ (the stop parser's own
-    flags).
+    flags). Wedged sessions are included because they are stoppable: the
+    ladder's signal rungs exist for them.
     """
     from local_operator.mobile.peer_send import resolve_peer_target
 
@@ -4864,11 +4864,15 @@ def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) 
             from local_operator.session.runtime.control import summarize
 
             print(summarize(outcomes))
-    # Only a refusal (identity unconfirmed, nothing signalled) is partial;
-    # "gone" (already exited) is a clean resolution — the method says which,
-    # so no receipt text is parsed here.
-    refused = any(o.method == "refused" for o in outcomes)
-    return 2 if refused else 0
+    # Anything that did NOT end the session is partial: a refusal (identity
+    # unconfirmed, nothing signalled) and a skip (a turn in flight, nothing
+    # signalled) alike — in both the target is still running, which is what the
+    # caller asked about. "gone" (already exited) is a clean resolution. The
+    # method says which, so no receipt text is parsed here; ``ENDED_METHODS`` is
+    # the one definition of "it is not running any more".
+    from local_operator.session.runtime.control import ENDED_METHODS
+
+    return 2 if any(o.method not in ENDED_METHODS for o in outcomes) else 0
 
 
 def _format_duration(seconds: float) -> str:
