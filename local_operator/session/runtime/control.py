@@ -1135,7 +1135,7 @@ async def stop_session(
             name=name,
             method="draining",
             line=(
-                f'skipped "{name}" (pid {record.pid}) — {_drain_phrase(record)}; stopping '
+                f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
                 "it now cuts the turn it is finishing — it leaves by itself, nothing "
                 f"to do ({_force_remedy(record.pid, _from_a_shell(_command))})"
             ),
@@ -1664,6 +1664,28 @@ def _settle_question(record: SessionRecord) -> tuple[str, str]:
 
     Never raises: ``moved_and_unsettled`` folds every probe failure into
     ``False``, and this is read while composing a receipt for a person.
+
+    WHAT THIS CANNOT DO, measured rather than inferred (design round 3, D8). A
+    runtime whose build DRAINS ON A SIGNAL but PREDATES
+    ``SessionRecord.leaving`` — every build before ``4faad653b``, whose
+    pre-rebase twin ``efee31e42`` is the head the design round drove its
+    ``crossver_drain.py`` cell with — publishes no phrase and answers the
+    retained hedge while it is on its way out, so this classifies it from the
+    marker and the receipt says "ask again in a few seconds" about a session that
+    will be gone by then. It is RECORDED rather than closed because the CLI
+    cannot close it: neither the record nor the wire distinguishes "leaving"
+    from "has not settled" on those builds — the install is what the settle
+    question is about and a signal drain never touches it, while the runtime's
+    own work is a fact an ordinary busy session shares. The cost is one stale
+    receipt on a transient state (the next ask finds the session gone), and the
+    alternative — guessing "leaving" from "busy" — would relabel ordinary busy
+    runtimes for every reader.
+
+    That population is exactly the builds that publish no phrase, which is also
+    why no phrase-carrying runtime reaches here: ``_refresh_if_idle`` answers
+    ``kept: already leaving`` whenever ``_leaving`` is set, and
+    ``announce_retiring`` sets it in the same call that writes the record field,
+    so the phrase and the answer arrive together (both from ``4faad653b`` on).
     """
     if moved_and_unsettled(record.version or "", record.source_ref or ""):
         return "unsettled", ""
@@ -1671,7 +1693,8 @@ def _settle_question(record: SessionRecord) -> tuple[str, str]:
 
 
 def _drain_phrase(record: SessionRecord) -> str:
-    """What to say about a drain whose TRIGGER this front end cannot see.
+    """What to say about a drain whose TRIGGER this front end cannot see, as a
+    CLAUSE that a prose slot can hang a subject on.
 
     Two things now commit a runtime to leaving, and only the runtime knows which
     it was: a termination signal, and a build replaced on disk while a turn was
@@ -1682,11 +1705,21 @@ def _drain_phrase(record: SessionRecord) -> str:
     then serves ``lop sessions``, ``/info``, this ladder and the rotation
     receipt (UX round 2, U8/U9; the reconciliation of PR #1108).
 
+    IT IS A CLAUSE, NOT THE CELL VALUE VERBATIM, and that is the difference
+    design round 3 (D7) filed: the record's phrase is written as a CELL
+    (lowercase, subject-less) because ``lop sessions`` and ``/info`` print it in
+    a column, so '"name" (pid 12, running …) signalled; leaving when its turn
+    ends' reads as a fragment — the receipt had no verb. One copula restores the
+    grammar in every prose slot without a second vocabulary: the caller supplies
+    the subject (``{where}``, ``it``) and this supplies ``is signalled; …``.
+
     The fallback is for a peer running a build that predates the field: it
     answers ``kept: already leaving`` without publishing a phrase, and the
-    sentence it gets is the one that was true before the field existed.
+    clause it gets is the one that was true before the field existed.
     """
-    return record.leaving or "it was signalled and is leaving at its next boundary"
+    if record.leaving:
+        return f"is {record.leaving}"
+    return "was signalled and is leaving at its next boundary"
 
 
 def _refresh_line(record: SessionRecord, running: str, method: str, detail: str) -> str:
@@ -1733,7 +1766,7 @@ def _refresh_line(record: SessionRecord, running: str, method: str, detail: str)
         # peer running an older build of this same branch) still gets an
         # honest receipt: the answer it gave IS its own sentence.
         if record.leaving:
-            return f"{where} {record.leaving}"
+            return f"{where} {_drain_phrase(record)}"
         return (
             f"{where} is already leaving — the exit is scheduled, not queued "
             f"(up to {bound_text(SIGNAL_DRAIN_S)})"

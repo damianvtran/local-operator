@@ -1435,6 +1435,19 @@ class RuntimeServer:
         same call that sends it. ``process._commit_to_leaving`` is the only
         caller that passes both.
 
+        AND THE FRAME CARRIES THE PHRASE TOO, which is the half the phrase
+        existed for and did not yet have (design round 3, D6). ``draining`` says
+        only THAT a drain is in force; it cannot say WHICH trigger committed it,
+        and the app's notice is a SENTENCE about the trigger — it promised a
+        newer build, so a runtime terminated mid-turn told the operator it was
+        switching to a build that does not exist and is not coming. The phrase
+        is the same string the fleet surfaces print (``SessionRecord.leaving``,
+        written two lines up), so both renderings of the commit leave this one
+        method and a viewer that must speak can quote the trigger instead of
+        inferring it. Additive like ``draining`` was: a runtime older than the
+        key sends no ``leaving``, and its frame is read as what it is — the
+        build handover, the only drain such a runtime announces.
+
         Awaited (unlike ``announce_stop``) because its one caller is the
         reaper on the runtime's own loop, which has time to drain: the exit
         follows this frame, and a viewer that receives it late merely goes
@@ -1467,6 +1480,12 @@ class RuntimeServer:
             "from": self._boot_build.label(),
             "to": to,
             "draining": bool(draining),
+            # The trigger's own words, for the sentence a viewer paints: see the
+            # ``leaving`` paragraph above. Sent when the caller has one — a
+            # caller that announces a drain without a phrase (the fallback paths
+            # that never latched) sends ``""``, and the viewer then says the
+            # thing that is true of any drain rather than guessing a trigger.
+            "leaving": leaving,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))

@@ -1185,6 +1185,41 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
 
 
 @pytest.mark.asyncio
+async def test_a_flag_is_refused_as_a_flag_not_resolved_as_a_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U11: ``/stop --force <pid>`` is not a search string over session names.
+
+    ``--force`` belongs to ``lop stop``, which this surface does not run, and
+    nothing here offers it any more — but a user copying the shell shape was
+    answered "no live session matches '--force 62181'" about a session the panel
+    one keystroke away lists as live and draining. The house shape for an
+    argument a surface does not take is a refusal that says so (``/info extra``
+    → "takes no arguments"), and the target resolver is never reached.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_resolve(**kwargs: Any):
+        calls.append(kwargs)
+        return None, [], "no live session matches"
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", fake_resolve)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop --force 62181")
+        await pilot.pause()
+        notices = _notices(app)
+        assert any("takes no flags" in text for text in notices), notices
+        # The remedy the flag was reaching for is named where it exists, and the
+        # session that IS listed is never described as missing.
+        assert any("lop stop" in text for text in notices), notices
+        assert not any("no live session matches" in text for text in notices), notices
+        assert calls == [], calls
+
+
+@pytest.mark.asyncio
 async def test_a_lost_binding_never_tells_the_user_to_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

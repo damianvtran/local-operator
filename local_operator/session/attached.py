@@ -825,8 +825,12 @@ class AttachedSession:
         #: the start, and it is the only moment at which a viewer can warn the
         #: operator before their next message is refused — on the drain rung the
         #: EOF is ~26 s away, and every second of it the composer accepts text
-        #: that will be refused (UX round 3, U1; QA round 3, Q-1).
-        self._drain_callback: Callable[[], Any] | None = None
+        #: that will be refused (UX round 3, U1; QA round 3, Q-1). It is called
+        #: with the frame's ``leaving`` phrase — the trigger's own words — so a
+        #: host can paint a sentence about the trigger that produced the drain
+        #: rather than about drains in general (design round 3, D6), and with
+        #: ``""`` when the runtime predates the key.
+        self._drain_callback: Callable[[str], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -5338,7 +5342,7 @@ class AttachedSession:
         """
         self._refresh_callback = callback
 
-    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
 
         Fired from the ``retiring`` frame itself, so the operator hears it
@@ -5349,15 +5353,22 @@ class AttachedSession:
         the viewer's own now-cold state; QA round 3, Q-1 measured that probe
         reading True for both hands). Fired on the client's reader task, so a
         widget-touching host marshals as it does for every other callback here.
+
+        ``callback`` receives the frame's ``leaving`` phrase — the trigger's own
+        words, empty for a runtime older than the key — because the two triggers
+        are not interchangeable in a sentence a person reads (design round 3,
+        D6: the signal trigger used to be painted with the build's notice).
         """
         self._drain_callback = callback
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive: a runtime older than the field sends no
-        ``draining`` and is therefore read as the idle handover, which is the
-        pre-change behaviour and paints nothing.
+        The frame is additive twice over: a runtime older than the ``draining``
+        field is therefore read as the idle handover, which is the pre-change
+        behaviour and paints nothing, and a runtime older than ``leaving``
+        hands the callback an empty phrase — which is the build handover, the
+        only departure it announces at all.
         """
         if not frame.get("draining"):
             return
@@ -5365,7 +5376,7 @@ class AttachedSession:
         if callback is None:
             return
         try:
-            callback()
+            callback(str(frame.get("leaving") or ""))
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 

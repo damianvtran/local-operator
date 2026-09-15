@@ -37,9 +37,12 @@ from typing import Any
 import pytest
 
 from local_operator.session.errors import RuntimeRetiring, admission_error
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
     DRAIN_NOTICE,
+    DRAIN_NOTICE_OTHER,
     RESTORE_SEAM,
+    SIGNAL_DRAIN_NOTICE,
     OperatorApp,
     _is_retiring_refusal,
     _retiring_notice_text,
@@ -311,7 +314,7 @@ async def test_a_draining_announcement_paints_the_notice(monkeypatch: Any, tmp_p
         await pilot.pause()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
 
-        app._on_runtime_draining()
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
         await pilot.pause()
         notices = _notices(app)
         assert [n._text for n in notices] == [DRAIN_NOTICE], [n._text for n in notices]
@@ -327,6 +330,61 @@ async def test_a_draining_announcement_paints_the_notice(monkeypatch: Any, tmp_p
         app._on_runtime_refreshed()
         await pilot.pause()
         assert [n._text for n in _notices(app)] == [DRAIN_NOTICE], [n._text for n in _notices(app)]
+
+
+@pytest.mark.asyncio
+async def test_the_notice_states_the_trigger_the_frame_named(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """D6: a signalled runtime is not told about a build that does not exist.
+
+    Both triggers commit through one seam and both announce ``draining`` true,
+    so the flag alone cannot pick the sentence — and the one it used to pick
+    promised a newer build to a runtime that had been terminated mid-turn, where
+    there is no newer build and no successor coming. The frame now carries the
+    trigger's own words, and the three cells below are the whole rule: the
+    signal gets its own sentence, the build keeps the one written for it, and a
+    phrase this build cannot place (a newer runtime's) gets neither.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+
+        app._on_runtime_draining(LEAVING_ON_SIGNAL)
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [SIGNAL_DRAIN_NOTICE], _notices(app)
+        assert "newer build" not in SIGNAL_DRAIN_NOTICE, SIGNAL_DRAIN_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_an_unplaceable_phrase_gets_no_other_triggers_words(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """The two fallbacks, each answering the frame it actually got.
+
+    An EMPTY phrase is a runtime older than the key, and the only drain such a
+    runtime announces is the build handover, so it keeps that sentence. A phrase
+    this build cannot place is a NEWER runtime's trigger, and painting it the
+    build notice is the falsehood D6 filed one version over — so it gets the
+    one sentence that ``draining`` alone establishes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+
+        app._on_runtime_draining("")
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [DRAIN_NOTICE], _notices(app)
+
+        app._on_runtime_draining("leaving because a trigger this build has never heard of")
+        await pilot.pause()
+        texts = [n._text for n in _notices(app)]
+        assert texts[-1] == DRAIN_NOTICE_OTHER, texts
+        assert DRAIN_NOTICE_OTHER != DRAIN_NOTICE
 
 
 @pytest.mark.asyncio
@@ -360,17 +418,27 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
     notice: the idle rung sends the same op with ``draining`` false, and a
     runtime from before the field sends no ``draining`` at all. Both must stay
     silent — a viewer that guessed from its own state called them all draining
-    (QA round 3, Q-1).
+    (QA round 3, Q-1). The phrase is forwarded verbatim (or as ``""`` when the
+    runtime predates the key), because the app's sentence is chosen from it
+    (design round 3, D6).
     """
     from local_operator.session.attached import AttachedSession
 
     facade = AttachedSession.__new__(AttachedSession)
     fired: list[str] = []
-    facade._drain_callback = lambda: fired.append("drain")  # type: ignore[method-assign]
+    facade._drain_callback = lambda leaving: fired.append(leaving)  # type: ignore[method-assign]
 
+    facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_ON_SIGNAL})
+    assert fired == [LEAVING_ON_SIGNAL], fired
+
+    facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_FOR_BUILD})
+    assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD], fired
+
+    # An older runtime: the key is absent, so the app hears "" and paints the
+    # build sentence — the only departure that runtime announces.
     facade._on_retiring_frame({"op": "retiring", "draining": True})
-    assert fired == ["drain"]
+    assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD, ""], fired
 
     facade._on_retiring_frame({"op": "retiring", "draining": False})
     facade._on_retiring_frame({"op": "retiring"})  # older runtime: no field
-    assert fired == ["drain"], fired
+    assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD, ""], fired

@@ -30,7 +30,12 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
-from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_S,
+    bound_text,
+)
 from local_operator.tui.widgets.info_panel import (
     INFO_COPY_KEY,
     InfoScreen,
@@ -1343,6 +1348,47 @@ def test_below_the_note_floor_the_words_survive_even_though_the_age_does_not(
     assert "not answering" in rows[0], rows[0]
     assert "last heartbeat" not in rows[0], rows[0]
     assert "181 MB" not in rows[0], rows[0]
+
+
+@pytest.mark.parametrize("width", [56, 40])
+def test_below_the_note_floor_a_draining_row_keeps_its_own_words(width: int) -> None:
+    """U10: the drain is legible at the width the ladder is shed at.
+
+    Below ``_NOTE_MIN`` every meta is shed and only ``short_meta`` survives, and
+    a leaving row had none — so on the narrow shelf the state that changes what
+    the operator may safely do next rendered as a bare ``● <name>``, while a
+    wedged row next to it kept "not answering". The compact form carries the
+    bound where the phrase has one, so the narrow reader is told both that it is
+    leaving and how long that can take, and it is derived from the same
+    ``SIGNAL_DRAIN_S`` the long phrase spells out.
+    """
+
+    def row(phrase: str) -> str:
+        line = SessionLine(
+            pid=4245,
+            kind="daemon",
+            state="live",
+            session_id="c1d2e3f4a5b6",
+            conversation_name="uxnarrow01",
+            model_label="test/mock",
+            uptime_s=2.0,
+            rss_bytes=125_000_000,
+            busy=True,
+            leaving=phrase,
+        )
+        snapshot = _snapshot(sessions=SessionsInfo(lines=(line,), total=1, live=1))
+        rows = [text for text in _lines(snapshot, width=width) if "uxnarrow" in text]
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    signalled = row(LEAVING_ON_SIGNAL)
+    assert f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})" in signalled, signalled
+
+    # The build trigger names no bound and gets none: the phrase promises none,
+    # so the compact form must not invent one.
+    build = row(LEAVING_FOR_BUILD)
+    assert "leaving for build" in build, build
+    assert "min" not in build, build
 
 
 def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:
