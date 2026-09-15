@@ -70,6 +70,7 @@ from local_operator.session.runtime.types import (
     DESKTOP_WATCH_LEASE_S,
     EVENT_MUTE_CAPABILITY,
     EVENT_MUTE_DROP_TYPES,
+    EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
     ClientLocality,
@@ -1116,6 +1117,13 @@ class RuntimeServer:
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
+                # The exclusive-move fence is advertised ONLY by a handle that
+                # carries the safe retirement latch, because the fence's promise
+                # is a re-check at that latch (``begin_retire``). A reduced
+                # handle lacking it would advertise a guarantee it cannot keep,
+                # and the desktop gates the move on seeing this exact string —
+                # so a partial owner must NOT have it.
+                + ([EXCLUSIVE_MOVE_CAPABILITY] if hasattr(handle, "begin_retire") else [])
                 # A SECOND string for the same op, because the one above is a
                 # bare presence flag with no version handshake and cannot say
                 # "this owner also pages pre-compaction history". The page
@@ -1175,6 +1183,21 @@ class RuntimeServer:
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
         # the phone bridge and a follower terminal at once.
         self._clients: dict[int, _ClientConn] = {}
+        #: The attach connection that reserved an EXCLUSIVE move, or ``None``.
+        #: Set on this loop in the same synchronous step that counts the other
+        #: observers, so a viewer arriving after the count cannot be missed:
+        #: ``_on_connection`` refuses a new attach while the fence is held. It
+        #: is cleared on a definite refusal and left set once retirement
+        #: commits, because a retiring runtime must not admit a facade that
+        #: would then engage a successor from its own stale cwd.
+        self._exclusive_move_fence: _ClientConn | None = None
+        #: Whether the retirement LATCH has committed for this runtime. Read by
+        #: the exclusive-move fence release: ``request_stop`` can raise after
+        #: ``begin_retire`` has already committed, and that is precisely the
+        #: state the retained fence exists for — the runtime is going away and a
+        #: facade admitted now would engage the successor from its own cwd
+        #: (review round 2, N6). Monotonic: a runtime never un-latches.
+        self._retirement_committed = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -1829,6 +1852,15 @@ class RuntimeServer:
             writer.close()
             return
 
+        if kind == "attach" and self._exclusive_move_fence is not None:
+            # REGISTRATION FENCE (review R3). An exclusive move has reserved
+            # this runtime for one facade and is retiring it; a facade admitted
+            # here would engage the successor from its OWN cwd, which is exactly
+            # the contradictory-successor race the fence exists to prevent. The
+            # check is one synchronous read on this loop, placed BEFORE the
+            # insertion below so it cannot race the reservation.
+            writer.close()
+            return
         if kind == "daemon":
             # At most ONE daemon connection — a new dial evicts the old, which
             # is also the reconnect path after a daemon restart.
@@ -2621,7 +2653,60 @@ class RuntimeServer:
                 # its two siblings are: these are lifecycle ops that must not
                 # trigger the post-ack refresh (the exemption list below), and
                 # a dispatcher that has no ``conn`` cannot make that call.
-                detail = await self._retire_for("moved")
+                # EXCLUSIVITY (review R3). A move is honoured by retiring,
+                # and every facade attached at that moment engages its own
+                # successor from its OWN ``_cwd`` -- so a sibling desktop
+                # window or terminal that never learned the new target asks
+                # for a runtime in the OLD directory, and whichever engage
+                # wins decides where the session actually works. The bounded
+                # answer is to refuse the move while another ACTUAL attach is
+                # registered rather than ship a cross-facade propagation
+                # protocol this release does not have.
+                exclusive = bool(frame.get("exclusive"))
+                if exclusive and EXCLUSIVE_MOVE_CAPABILITY not in self._record.capabilities:
+                    # Fail CLOSED. An old owner ignores the unknown field and
+                    # would retire unguarded, so the desktop only sends it
+                    # after reading this capability off the record; reaching
+                    # here means a caller sent it blind, and the honest answer
+                    # is a refusal, never a legacy retire.
+                    detail = "kept: this runtime cannot move exclusively; /reload first"
+                elif exclusive:
+                    # Reserved BEFORE the first await, on this loop: the
+                    # check-and-reserve is one synchronous step so a viewer
+                    # attaching afterwards cannot slip behind the count and
+                    # be missed (``_on_connection`` honours the fence).
+                    self._exclusive_move_fence = conn
+                    committed = False
+                    try:
+                        observers = self._other_observers(conn)
+                        if observers > 0:
+                            detail = (
+                                "kept: This session is open in another terminal or attached "
+                                "client. Disconnect that client, then move again."
+                            )
+                        else:
+                            detail = await self._retire_for("moved", exclusive_owner=conn)
+                            committed = detail == "retiring"
+                    finally:
+                        # CLEARED ON EVERY DEFINITE REFUSAL, and the funnel is
+                        # this ``finally`` rather than the two exits above it:
+                        # ``_retire_for`` has refusal returns of its own (not
+                        # idle, no graceful stop, work arriving before the
+                        # latch), and every one of them is a runtime that is
+                        # STAYING ALIVE and must therefore admit viewers again.
+                        # Leaving one of those paths latched would refuse every
+                        # later attach for the rest of this runtime's life — an
+                        # outage caused by a refused move. It is RETAINED only
+                        # once retirement has really committed, because from
+                        # then on a facade admitted here would engage the
+                        # successor from its own cwd after the move's owner is
+                        # gone. ``_retirement_committed`` is the latch's own
+                        # record of that, which is how a ``request_stop`` that
+                        # raises AFTER committing keeps the fence (N6).
+                        if not committed and not self._retirement_committed:
+                            self._exclusive_move_fence = None
+                else:
+                    detail = await self._retire_for("moved")
             elif op == "refresh_if_idle":
                 # The viewer-side belt for the runtime's own self-refresh
                 # (design-runtime-autorefresh §3.3): a `lop --resume` in the
@@ -2889,7 +2974,13 @@ class RuntimeServer:
             return ""
         return f" ({boot.label()} → {to})"
 
-    async def _retire_for(self, reason_label: str, *, to: str = "") -> str:
+    async def _retire_for(
+        self,
+        reason_label: str,
+        *,
+        to: str = "",
+        exclusive_owner: _ClientConn | None = None,
+    ) -> str:
         """Retire this runtime iff it is idle, announcing ``reason_label``.
 
         The shared body of the two viewer-driven retirements — a stale build
@@ -2918,6 +3009,21 @@ class RuntimeServer:
         if not callable(request_stop):
             return "kept: this runtime cannot stop itself gracefully"
         await self.announce_retiring(reason_label, to=to)
+        if exclusive_owner is not None and self._other_observers(exclusive_owner) > 0:
+            # THE FENCE IS RE-CHECKED AT THE LATCH, not only at admission. The
+            # announcement above is an await, and the initial count is a sample:
+            # without this a viewer that attached during it would be counted by
+            # nobody and the move would commit with a sibling already registered
+            # — the R3 race in its narrowest form. ``_on_connection`` refuses new
+            # attaches while the fence is held, so this recheck plus that gate
+            # close the window from both sides. A refusal here RELEASES the
+            # fence: nothing was retired, so the runtime must admit viewers
+            # again.
+            self._exclusive_move_fence = None
+            return (
+                "kept: This session is open in another terminal or attached "
+                "client. Disconnect that client, then move again."
+            )
         # The ONE await between decision and stop, so the final check is a LATCH
         # and not another sample: a ``prompt`` admitted in this gap would open a
         # turn that ``request_stop`` then aborts one await later. ``begin_retire``
@@ -2931,6 +3037,11 @@ class RuntimeServer:
         if callable(begin_retire):
             if not begin_retire("runtime-retired", self._retire_detail(to)):
                 return "kept: work arrived while retiring was announced"
+            # THE LATCH HAS COMMITTED, recorded here rather than derived by the
+            # caller from this function's return value: the stop below can
+            # raise, and a raise must not read as "nothing committed" (review
+            # round 2, N6).
+            self._retirement_committed = True
         else:
             # A reduced/older handle without the latch keeps today's re-check
             # rather than retiring unguarded.

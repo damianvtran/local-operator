@@ -71,6 +71,27 @@ PROTOCOL_VERSION = 5
 DESKTOP_WATCH_CAPABILITY = "desktop-watch-v1"
 DESKTOP_WATCH_LEASE_S = 45.0
 
+#: Additive attach capability: this owner can retire its runtime for a
+#: desktop MOVE under an exclusivity fence (``retire_now`` with
+#: ``exclusive: true``).
+#:
+#: WHY A CAPABILITY AND NOT JUST A NEW FIELD. A move changes the directory a
+#: successor runtime spawns in, and a successor is engaged by EVERY facade that
+#: was attached when the retire landed — each from its OWN ``_cwd``. Two facades
+#: with different directories therefore request contradictory successors, and a
+#: sibling that does not read the rewritten desktop marker can win that race with
+#: the OLD path. Propagating the new target to arbitrary siblings is a broad
+#: cross-viewer protocol this release deliberately does not ship, so the bounded
+#: answer is to refuse a move while another ACTUAL attach is registered.
+#:
+#: An old owner ignores the unknown ``exclusive`` field and would retire anyway,
+#: so the desktop must never send it without first seeing this string in the
+#: owner's record: the capability is what makes the refusal fail-CLOSED on old
+#: owners instead of silently unsynchronised. Advertised only by an owner whose
+#: handle carries the safe retirement latch (``begin_retire``), because the
+#: fence promises a re-check at that latch and a reduced handle cannot honour it.
+EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).
