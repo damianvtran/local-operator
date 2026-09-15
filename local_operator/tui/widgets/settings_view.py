@@ -4213,7 +4213,27 @@ class SettingsView(Vertical):
             # they had done something wrong (UX round 2, U16).
             text.append(self._notice, style=faint)
         elif self._error:
-            text.append(self._error, style=error)
+            # THE REJECTION LADDER (design round 1, D11). This was the ONE
+            # branch of this line with no floor: `.settings-view-detail`
+            # (`height: 2`, no wrap) CLIPS WITHOUT A MARK, every other branch
+            # here was given a shed or a `truncate_cells` floor for exactly that
+            # reason, and the content this PR put in it is the first on the page
+            # whose LENGTH IS THE USER'S OWN INPUT. Measured both ways on the
+            # author's own typo and on the designer's longer path: the typo fits
+            # at 100x30 (77 cells of a 94-cell budget) but the 126-cell path lost
+            # 33 cells there — stopping mid-word at "…does-not-exist does not
+            # exist, so clicks" — and 50 at 80x24, where the fault itself is cut
+            # and the consequence is gone, with no `…` to say anything had gone.
+            #
+            # A sentence that stops mid-clause reads as a rendering fault, and
+            # the half that is lost is the half that explains why the typo
+            # matters — so the VALUE goes before the ADVICE, and the advice is
+            # what is pinned. The value is the part the user can re-read: it is
+            # their own input, still in the row's value column above while the
+            # editor is open, and it is the only part of the message that grows
+            # with what they typed. See ``settings_io.REJECTION_VALUE_SEP`` for
+            # the shape and what opts into it.
+            text.append_text(self._rejection_render(error))
         elif row is None:
             pass
         elif row.kind == "hop":
@@ -4331,6 +4351,37 @@ class SettingsView(Vertical):
         # routed through the same helper so all five surfaces behave alike and
         # a future state that DOES repeat a detail line is covered for free.
         self._detail.update_if_changed(text)
+
+    def _rejection_render(self, style: Style) -> Text:
+        """One rejection, shed so WHAT WENT WRONG always survives (D11).
+
+        Two rungs and a floor, walked in order — the full message where it fits,
+        then the ADVICE ALONE, then the advice cut with a visible `…`:
+
+            <value> — <advice>  →  <advice>  →  truncate_cells(<advice>)
+
+        The mark is the point of the floor. This line does not wrap, so a string
+        handed over intact is REMOVED by the widget rather than shortened, and
+        the shapes that lost content that way are the ones this file spends
+        three comments warning about (D1/D2/D9/D12).
+
+        What OPTS IN is the shape, not a call site: only a message that opens
+        with a single token before :data:`settings_io.REJECTION_VALUE_SEP` is
+        split — that is the interpolated-value shape — so prose notices
+        (``config.yml is unreadable, nothing was written — …``, ``could not
+        save — <path> has an unexpected structure…``) keep their head, which is
+        the part that says what happened. ``tests/unit/tui/test_settings_view``
+        asserts both directions.
+        """
+        width = self._detail_width()
+        value, sep, advice = self._error.partition(settings_io.REJECTION_VALUE_SEP)
+        rungs = [self._error]
+        if sep and value.strip() and len(value.split()) == 1:
+            rungs.append(advice)
+        for rung in rungs:
+            if cell_len(rung) <= width:
+                return Text(rung, style=style)
+        return Text(truncate_cells(rungs[-1], width), style=style)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:

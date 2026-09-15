@@ -988,9 +988,20 @@ requested destination is the DESKTOP UI, and the terminal is the fallback.
    a spawn: the backend the registry detected is tried, then on macOS the
    AppleScript Terminal backend, which LAUNCHES Terminal.app and needs no
    terminal around this process — detection is the wrong question on a rung
-   that only ever runs where none is discoverable — and nothing else. A rung
-   that opened no window returns False, and `lop resume-click` then prints the
-   `lop --resume <id>` receipt rather than claiming a landing it did not make.
+   that only ever runs where none is discoverable — and nothing else. THAT
+   macOS CANDIDATE IS WITHHELD OVER SSH, where there is no window server for its
+   `tell application` to reach: osascript would accept the script and the spawn
+   would report a landing that never happened, so an ssh session reports failure
+   instead. A rung that opened no window returns False.
+
+   The failure is then REPORTED TWICE, because the two reports have different
+   readers. `lop resume-click` prints the `lop --resume <id>` receipt to stderr
+   — what a hand-run gets, and what makes the path debuggable from a terminal —
+   and the ladder posts the same sentence through `tui.notify.detached_notify`
+   as well. A real click has no terminal to print into: the notifier is spawned
+   with all three streams on `/dev/null` and its `NSTask` inherits them, so an
+   ssh session, a non-darwin host and a hand-edited `desktop.launch_command`
+   typo were otherwise clicks that did nothing and said nothing.
 
 Rung 3 is asked for "whatever is left" rather than for a named surface, which is
 what keeps the fallback identical for viewer types this build does not have; the
