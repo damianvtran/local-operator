@@ -10,7 +10,7 @@ import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
+import { DEFAULT_PORT, getLocal, isRedactedToken, touchSurface } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
 import { withOwnership } from "./ownership";
@@ -256,6 +256,28 @@ async function daemonPort(): Promise<number> {
   return port ?? DEFAULT_PORT;
 }
 
+/**
+ * Refresh the driven surface's `lastUsedAt` for the `tabs` listing, AFTER the
+ * command has answered.
+ *
+ * Deliberately here rather than inside `requireSurface` (where it used to run):
+ * it is presentation-only bookkeeping, and on the critical path it cost every
+ * command two session-storage round trips on the single serialized store lane
+ * — see `state.touchSurface` for the measurement that made that the fleet's
+ * dominant cost. Two properties keep the move honest:
+ *
+ *   * It runs in the dispatch TAIL, so no reply waits on it, and the throttled
+ *     write continues after the response frame is on the socket.
+ *   * It is scoped to `request.params.tab`, the handle THIS command drove. A
+ *     handle-less or redacted one is passed through untouched and simply misses
+ *     the map lookup (the redacted form is not a key), so it can neither stamp
+ *     nor resurrect a surface it does not own.
+ */
+function noteSurfaceUse(tab: unknown): void {
+  if (typeof tab !== "string" || !tab) return;
+  fireAndForget(touchSurface(tab, Date.now()), "surface recency write");
+}
+
 async function respond(response: Response, generation: number): Promise<void> {
   if (generation !== wireGeneration) {
     // The request this answers arrived on a connection that has since been
@@ -372,6 +394,13 @@ async function dispatch(
     } else {
       await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: String(error), data: {} } }, generation);
     }
+  } finally {
+    // A FAILED command still drove the surface, so recency is refreshed on both
+    // arms: the listing's job is to say which tab this session last touched, and
+    // a timeout is a touch. Throttled and fire-and-forget, so this cannot delay
+    // the answer above or the OLD `requireSurface` cost of a write per command
+    // comes back through the tail.
+    noteSurfaceUse(request.params.tab);
   }
 }
 

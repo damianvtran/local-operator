@@ -1,7 +1,7 @@
 import { BridgeCommandError } from "./driver/errors";
 import { dropLogCapture } from "./log-capture";
 import { CHROME_API_DEADLINE_MS, CDP_ATTACH_DEADLINE_MS, CDP_DEADLINE_MS, deadline } from "./settle";
-import { getSurfaces, removeSurface, resolveSurfaceToken, touchSurface, type StoredSurface } from "./state";
+import { getSurfaces, removeSurface, resolveSurfaceToken, type StoredSurface } from "./state";
 
 // Re-exported so the many existing `import { BridgeCommandError } from
 // "./cdp"` sites stay valid; see driver/errors.ts for why the value's home
@@ -50,11 +50,14 @@ export async function requireSurface(token: unknown): Promise<StoredSurface> {
     await pruneSurface(String(token), surface.tabId);
     throw new BridgeCommandError("tab_closed", "the browser tab was closed");
   }
-  // Recency for the `tabs` listing; best-effort, never on the command's
-  // critical path for correctness. Conditional on the entry still existing so
-  // it cannot resurrect a concurrently-pruned surface (finding m5).
-  surface.lastUsedAt = Date.now();
-  await touchSurface(String(token), surface.lastUsedAt);
+  // Recency for the `tabs` listing is refreshed by the DISPATCH TAIL, after
+  // this command has replied (`worker.ts`, `noteSurfaceUse`). It used to run
+  // here, which put a whole-map `get(surfaces)` AND `set(surfaces)` in front of
+  // every reply, on the one module-global store lane every other session's
+  // mutation queues behind. This function is the wrong place for bookkeeping
+  // that nothing branches on: the only reader is the `tabs` listing's sort, and
+  // a stamp that is seconds old sorts identically. See `state.touchSurface`
+  // for the measurement.
   return surface;
 }
 
