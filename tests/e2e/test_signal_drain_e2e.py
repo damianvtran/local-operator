@@ -24,6 +24,9 @@ control socket:
 
 * a BROADCAST SIGTERM mid-turn is survived: every turn completes, nothing is
   recorded as cut off, and each runtime leaves at its own boundary instead;
+* a signalled runtime's pending exit is READABLE (record, ``/info`` row and the
+  frame's own phrase), and the refusal it hands an admission names the SIGNAL
+  rather than the build handover whose sentence it used to inherit;
 * a signal with nothing in flight is still immediate (the fast branch);
 * a DELIBERATE stop is still prompt mid-turn — via ``lop stop``'s own ladder and
   via ``stop_all`` — and no signal is sent for it;
@@ -780,6 +783,37 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
             while time.monotonic() < deadline and not heard:
                 await asyncio.sleep(0.1)
             assert heard == [LEAVING_ON_SIGNAL], heard
+
+            # MAJOR-2 (agent review round 4; design round 4, D10): the refusal a
+            # SIGNALLED runtime hands an admission must not be the build story.
+            # ``prompt`` refuses for the whole of any drain and ``begin_drain``
+            # latches from the signal arm too, so the gate is reachable while this
+            # runtime is still alive and still finishing its turn — by any
+            # admission that does not ride the running turn. ``prompt_and_wait``
+            # is that op: a loop, a second viewer, a supervisor or a CLI caller
+            # uses it, and an interactive composer's mid-turn text does not (it
+            # steers). Asserted against the RECORD read one line above, so the two
+            # surfaces of this one drain are compared in the same breath.
+            from local_operator.session.errors import RuntimeRetiring
+
+            with pytest.raises(RuntimeRetiring) as refused:
+                await asyncio.wait_for(
+                    rig.viewers["drainvis01"].prompt_and_wait("a message sent mid-drain"),
+                    timeout=30,
+                )
+            refusal = refused.value
+            with capsys.disabled():
+                print(
+                    f"\n=== the refusal this signalled runtime hands an admission ===\n"
+                    f"record:  {published}\n"
+                    f"refusal: {refusal}"
+                )
+            assert refusal.HEAD == RuntimeRetiring.HEAD_SIGNALLED, refusal.HEAD
+            assert "newer build" not in str(refusal), str(refusal)
+            assert RuntimeRetiring.TAIL in str(refusal), str(refusal)
+            # And nothing was cut by the refusal: the turn is still the one the
+            # signal asked this runtime to finish.
+            assert rig.children["drainvis01"].poll() is None, "a refusal signals nothing"
 
             # THE OPERATOR'S NEXT MOVE: a plain stop must refuse and say what
             # insisting would cost, rather than cut the turn.

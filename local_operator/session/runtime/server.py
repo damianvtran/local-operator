@@ -1444,9 +1444,16 @@ class RuntimeServer:
         is the same string the fleet surfaces print (``SessionRecord.leaving``,
         written two lines up), so both renderings of the commit leave this one
         method and a viewer that must speak can quote the trigger instead of
-        inferring it. Additive like ``draining`` was: a runtime older than the
-        key sends no ``leaving``, and its frame is read as what it is — the
-        build handover, the only drain such a runtime announces.
+        inferring it. Additive like ``draining`` was — a runtime older than the
+        key sends no ``leaving``, and its frame is read off the fields it DOES
+        carry (``reason``/``to``: ``stale-build`` for the released build
+        handover, ``shutdown-drain`` — ``process._SIGNAL_DRAIN_REASON`` — for the
+        signal drain this branch added before it added this key). That reader is
+        :func:`types.leaving_phrase_for_frame`, and it exists because the
+        simpler rule — "no phrase means the build handover" — was true of every
+        RELEASED runtime and false of this branch's own intermediate builds,
+        which signal-drained into it (design round 4, D9; agent review round 4,
+        MAJOR-1).
 
         Awaited (unlike ``announce_stop``) because its one caller is the
         reaper on the runtime's own loop, which has time to drain: the exit
@@ -1481,10 +1488,14 @@ class RuntimeServer:
             "to": to,
             "draining": bool(draining),
             # The trigger's own words, for the sentence a viewer paints: see the
-            # ``leaving`` paragraph above. Sent when the caller has one — a
-            # caller that announces a drain without a phrase (the fallback paths
-            # that never latched) sends ``""``, and the viewer then says the
-            # thing that is true of any drain rather than guessing a trigger.
+            # ``leaving`` paragraph above. ``""`` means THIS FRAME NAMED NO
+            # TRIGGER — it is what every runtime older than this key sends, this
+            # branch's own pre-D6 builds included, and the viewer answers it by
+            # reading the ``reason``/``to`` above and only then falling back to a
+            # sentence that is true of any drain (design round 4, D9). It is
+            # deliberately not "the build handover": that reading painted a
+            # signalled runtime with the build sentence (agent review round 4,
+            # MAJOR-1).
             "leaving": leaving,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
@@ -2985,6 +2996,15 @@ class RuntimeServer:
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+            if isinstance(exc, RuntimeRetiring) and exc.trigger:
+                # WHICH DEPARTURE, as one of the enumerated tokens — the same
+                # shape as ``error_count`` below, and for the same reason: the
+                # far side rebuilds the sentence from the category, so the only
+                # thing that may ride along is a value from a closed set. An
+                # older client drops the unknown field and rebuilds the sentence
+                # it has always rebuilt, which is what such a client's own
+                # runtime means (design round 4, D10).
+                frame["error_trigger"] = exc.trigger
             if isinstance(exc, ProfileRegistryUnavailable) and exc.count is not None:
                 # The count rides as its own INTEGER field so the attach client
                 # can rebuild the actionable wording locally. Without it the

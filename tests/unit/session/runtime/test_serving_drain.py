@@ -32,6 +32,7 @@ from local_operator.session.runtime.inbox import (
     peek_inbox,
 )
 from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.types import SIGNAL_DRAIN_CAUSE
 from local_operator.session.session import Session
 
 
@@ -70,7 +71,10 @@ class DrainHost:
 
     begin_drain = ServingSessionHandle.begin_drain
     begin_retire = ServingSessionHandle.begin_retire
-    _retiring_refusal = staticmethod(ServingSessionHandle._retiring_refusal)
+    # Bound like any other method: ``_retiring_refusal`` reads the handle's own
+    # latched cause to choose its sentence, so the stub has to hand it ``self``
+    # (design round 4, D10).
+    _retiring_refusal = ServingSessionHandle._retiring_refusal
     _spool_for_successor = ServingSessionHandle._spool_for_successor
     receive_peer_message = ServingSessionHandle.receive_peer_message
     _note_deliberate_stop = ServingSessionHandle._note_deliberate_stop
@@ -201,6 +205,61 @@ def test_begin_drain_latches_while_a_turn_is_running(tmp_path: Path) -> None:
     assert isinstance(refusal, RuntimeRetiring)
     assert "runtime-retired" not in str(refusal)
     assert session.notes == [], "no turn is being cut off, so no cut-off may be recorded"
+
+
+def test_the_refusal_describes_the_departure_the_handle_latched(tmp_path: Path) -> None:
+    """D10/MAJOR-2: one gate, two departures, and the sentence follows the cause.
+
+    ``prompt`` refuses for the whole of ANY drain, and ``begin_drain`` latches
+    from the SIGTERM arm too — so this accessor served a signalled runtime the
+    build sentence, "the one it loaded is gone from disk", under a notice that
+    correctly said the session had been signalled to stop. The cause the handle
+    latched is the discriminator, and it survives to the exit rung because
+    ``process._drain_for`` re-passes ``drain.cause`` to ``begin_retire``.
+
+    BOTH HALVES ARE PINNED HERE, because the fix would be just as wrong the
+    other way round: the build handover keeps the sentence the design rounds
+    measured for it, and the signal arm is the one that had none of its own.
+    """
+    host, _session = _host(tmp_path, busy=True)
+
+    assert host.begin_drain(SIGNAL_DRAIN_CAUSE, "SIGTERM: drained to the turn's end") is True
+    signalled = host._retiring_refusal()
+    assert isinstance(signalled, RuntimeRetiring)
+    assert signalled.HEAD == RuntimeRetiring.HEAD_SIGNALLED, signalled.HEAD
+    assert "newer build" not in str(signalled), str(signalled)
+    assert "send it again" in str(signalled), "the one act left still has to be named"
+    assert SIGNAL_DRAIN_CAUSE not in str(signalled), str(signalled)
+
+    host, _session = _host(tmp_path, busy=True)
+    assert host.begin_drain("runtime-retired", " (0.54.33@7fe8b10 → 0.54.39@dec7933)") is True
+    build = host._retiring_refusal()
+    assert isinstance(build, RuntimeRetiring)
+    assert build.HEAD == RuntimeRetiring.HEAD, build.HEAD
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "retiring", "probably-fine", RuntimeRetiring.SIGNAL, RuntimeRetiring.BUILD],
+)
+def test_only_the_two_enumerated_triggers_cross_the_transport(token: str) -> None:
+    """The decode validates the token, because the far side rebuilds SENTENCES.
+
+    ``admission_error`` is the only entry point that turns a peer's frame into a
+    local exception, and its contract is the module docstring's: an enumerated
+    category and nothing else — which is why the count is an int and not a
+    string. A trigger is therefore admitted only from the closed set, and
+    anything else (including absent, which is what an older runtime sends) means
+    "this raiser cannot name its departure": the default sentence.
+    """
+    from local_operator.session.errors import admission_error
+
+    decoded = admission_error(RuntimeRetiring.code, None, token)
+    assert isinstance(decoded, RuntimeRetiring)
+    expected = (
+        RuntimeRetiring.HEAD_SIGNALLED if token == RuntimeRetiring.SIGNAL else RuntimeRetiring.HEAD
+    )
+    assert decoded.HEAD == expected, (token, decoded.HEAD)
 
 
 def test_begin_retire_still_records_the_cut_off_it_owes(tmp_path: Path) -> None:

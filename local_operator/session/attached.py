@@ -110,6 +110,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.types import leaving_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     ATTACHMENT_KEY,
@@ -5355,9 +5356,12 @@ class AttachedSession:
         widget-touching host marshals as it does for every other callback here.
 
         ``callback`` receives the frame's ``leaving`` phrase — the trigger's own
-        words, empty for a runtime older than the key — because the two triggers
-        are not interchangeable in a sentence a person reads (design round 3,
-        D6: the signal trigger used to be painted with the build's notice).
+        words, read off the frame's ``reason``/``to`` when a runtime older than
+        the key sends none — because the two triggers are not interchangeable in
+        a sentence a person reads (design round 3, D6: the signal trigger used to
+        be painted with the build's notice; design round 4, D9: the frames that
+        carry no key at all). Only a frame that establishes NEITHER trigger
+        reaches the host as ``""``.
         """
         self._drain_callback = callback
 
@@ -5366,17 +5370,31 @@ class AttachedSession:
 
         The frame is additive twice over: a runtime older than the ``draining``
         field is therefore read as the idle handover, which is the pre-change
-        behaviour and paints nothing, and a runtime older than ``leaving``
-        hands the callback an empty phrase — which is the build handover, the
-        only departure it announces at all.
+        behaviour and paints nothing, and a runtime older than ``leaving`` has
+        its trigger read off the frame's ``reason``/``to`` by
+        :func:`types.leaving_phrase_for_frame`.
+
+        THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
+        ``""`` on the grounds that an absent phrase is "the build handover, the
+        only departure it announces at all" — true of a runtime from ``main`` or
+        a release, where the stale-build path is the sole ``draining=True``
+        caller, and FALSE of this branch's own intermediate builds, which
+        announce both triggers with no phrase and so handed a signalled runtime
+        the build sentence (design round 4, D9; agent review round 4, MAJOR-1).
+        The frame's own words are on the wire in every one of those builds, so
+        they decide; a frame that names neither trigger still yields ``""``, and
+        the host paints the sentence that is true of any drain.
         """
         if not frame.get("draining"):
             return
         callback = self._drain_callback
         if callback is None:
             return
+        phrase = str(frame.get("leaving") or "") or leaving_phrase_for_frame(
+            str(frame.get("reason") or ""), str(frame.get("to") or "")
+        )
         try:
-            callback(str(frame.get("leaving") or ""))
+            callback(phrase)
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 

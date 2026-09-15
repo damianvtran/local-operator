@@ -69,6 +69,7 @@ from local_operator import buildwatch as _buildwatch
 from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_CAUSE,
     SIGNAL_DRAIN_S,
 )
 
@@ -1286,7 +1287,7 @@ async def _drain_for_signal(
         reason=f"leaving after {sig_name}",
         detail=f"{sig_name}: drained to the end of the turn in flight",
         loaded=_drain_loaded_label(runtime),
-        cause="runtime-shutdown",
+        cause=SIGNAL_DRAIN_CAUSE,
         leaving=LEAVING_ON_SIGNAL,
     )
     if drain is None:

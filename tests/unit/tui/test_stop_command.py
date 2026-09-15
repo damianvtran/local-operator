@@ -1196,6 +1196,11 @@ async def test_a_flag_is_refused_as_a_flag_not_resolved_as_a_target(
     one keystroke away lists as live and draining. The house shape for an
     argument a surface does not take is a refusal that says so (``/info extra``
     → "takes no arguments"), and the target resolver is never reached.
+
+    UX round 4 (U12) added the one flag that HAD a spelling on this surface:
+    ``--all`` is how the shell says ``/stop all``, so that arm names the fan-out
+    the user was reaching for while every other flag keeps the single-session
+    sentence unchanged.
     """
     calls: list[dict[str, Any]] = []
 
@@ -1217,6 +1222,17 @@ async def test_a_flag_is_refused_as_a_flag_not_resolved_as_a_target(
         assert any("lop stop" in text for text in notices), notices
         assert not any("no live session matches" in text for text in notices), notices
         assert calls == [], calls
+
+        # U12: the SHELL's spelling of this surface's own fan-out is answered with
+        # the spelling that works. ``/stop --all`` is ``lop stop --all`` reaching for
+        # ``/stop all``, and the single-session remedy above says nothing about it.
+        app._run_slash_command("/stop --all")
+        await pilot.pause()
+        notices = _notices(app)
+        assert any("/stop all" in text for text in notices), notices
+        # Not a blanket clause on every flag: ``--force`` still gets the sentence
+        # that names what it was reaching for (``lop stop --force``), unchanged.
+        assert sum("the fan-out is /stop all" in text for text in notices) == 1, notices
 
 
 @pytest.mark.asyncio

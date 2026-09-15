@@ -17627,20 +17627,22 @@ class OperatorApp(App[None]):
         ``leaving`` is the frame's phrase — the TRIGGER's own words — and the
         sentence is chosen from it rather than from ``draining`` alone, because
         one flag cannot tell a build handover from a termination and the two do
-        not describe the same thing (design round 3, D6). An empty phrase is a
-        runtime older than the key, which announces the build handover and
-        nothing else, so :data:`DRAIN_NOTICE` is the accurate sentence for it;
-        a phrase this build does not know gets the neutral one rather than
-        another trigger's.
+        not describe the same thing (design round 3, D6). A phrase this build
+        does not know gets the neutral sentence rather than another trigger's,
+        and so does an EMPTY one: it is a runtime that published no trigger at
+        all, which — since ``AttachedSession._on_retiring_frame`` reads the
+        frame's own ``reason``/``to`` before it gives up (design round 4, D9) —
+        means nothing on the frame named one. An absent phrase used to mean
+        "the build handover" here, which was true of a released runtime and
+        false of this branch's own intermediate builds, so a signalled runtime
+        was painted the build sentence while its record said the opposite
+        (agent review round 4, MAJOR-1; UX round 4, U13).
 
         One row, while the composer still accepts text that will be refused.
         """
         if self._interaction is None:
             return
-        if not leaving:
-            notice = DRAIN_NOTICE
-        else:
-            notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
         self._notice_for(self._interaction, notice, "note")
 
     def _announce_refresh_completed(self) -> None:
@@ -28666,10 +28668,19 @@ class OperatorApp(App[None]):
             # flag was reaching for named where it exists: this ladder stops a
             # session deliberately and promptly, and it deliberately does NOT
             # cut a draining turn — only the shell's ``--force`` does.
+            #
+            # THE FAN-OUT IS NAMED WHEN THAT IS WHAT WAS REACHED FOR. ``--all``
+            # is the shell's (``lop stop --all``) spelling of this surface's own
+            # ``/stop all``, so answering it with the single-session remedy told
+            # the user about the thing they did not ask for while their actual
+            # kill switch went unmentioned (UX round 4, U12). One clause, added
+            # only on the arm it applies to, so every other flag keeps the
+            # sentence the design round measured.
+            fan_out = "; the fan-out is /stop all" if target.lower() == "--all" else ""
             self._system_notice(
                 f"/stop takes no flags — got {target!r}. Send /stop <pid> to stop a session "
                 "deliberately; `lop stop <pid> --force` from a shell is the one that cuts a "
-                "draining turn.",
+                f"draining turn{fan_out}.",
                 "warning",
             )
             return

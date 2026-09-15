@@ -1200,7 +1200,11 @@ class AttachClient:
             return
         from local_operator.session.errors import admission_error
 
-        known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
+        known = admission_error(
+            str(reply.get("error_code", "")),
+            reply.get("error_count"),
+            reply.get("error_trigger"),
+        )
         if known is not None:
             raise known
         raise RuntimeError(str(reply.get("message", "request failed")))
@@ -1299,7 +1303,11 @@ class AttachClient:
         if reply.get("op") == "error":
             from local_operator.session.errors import admission_error
 
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
+            known = admission_error(
+                str(reply.get("error_code", "")),
+                reply.get("error_count"),
+                reply.get("error_trigger"),
+            )
             if known is not None:
                 raise known
             raise RuntimeError(str(reply.get("message", "request failed")))
