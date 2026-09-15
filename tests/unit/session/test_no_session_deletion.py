@@ -308,10 +308,49 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # already holds — and only in the case where the refused move found no marker
     # there at all, so the unlink restores that absence. No caller input becomes
     # part of the path, and the target is that one FILE, never a directory.
+    #
+    # The qualified owner is the CURRENT nested name. The move transaction was
+    # refactored under the per-session lock, which renamed `move_session`'s body
+    # to `_move_session`; the entry kept naming the pre-refactor function and both
+    # deletion guards then failed as stale (review R5 / QA Q1). The permission it
+    # grants is unchanged and deliberately still exactly one FILE.
     (
-        "local_operator/server/utils/desktop_sessions.py::move_session.restore_marker",
+        "local_operator/server/utils/desktop_sessions.py::_move_session.restore_marker",
         "<path>.unlink",
         "the <sessions>/<id>/desktop.json FILE this call's own move created",
+    ),
+    # The atomic marker writer's own staging cleanup and publication, in the
+    # ONE ``_stage_and_replace`` both halves of the marker contract share (the
+    # forward write and the rollback). The unlink removes the TEMP STAGE this
+    # call created one line earlier, in the same directory as the marker it is
+    # publishing; the receiver is a local `Path` for a unique
+    # `.desktop.json.<uuid>.tmp` name, so no caller input and no session
+    # directory can reach it, and the staged file is a FILE by construction and
+    # is removed only on the failure path — the success path consumes it
+    # through `os.replace`. The replace is same-directory temp onto the marker
+    # FILE: `os.replace` onto a FILE path cannot remove a directory, and the
+    # destination is the fixed `DESKTOP_MARKER_NAME` basename joined onto the
+    # session directory the caller already holds.
+    (
+        "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
+        "<path>.unlink",
+        "the .desktop.json.<uuid>.tmp staging FILE this write created",
+    ),
+    (
+        "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
+        "os.replace",
+        "the .desktop.json.<uuid>.tmp staging FILE -> desktop.json FILE",
+    ),
+    # The local publication's in-memory store swap. `<path>.replace` is this
+    # guard's heuristic reading of `store.replace(state)` — the receiver is a
+    # FrontendStateStore, not a path, and this function's only directory-ish
+    # input is a plain string it never opens. Adding the entry here keeps the
+    # allow-list's shape key honest while the `_NEAR_DISPLACERS` entry below
+    # records the same reading for the neighbourhood test.
+    (
+        "local_operator/session/attached.py::AttachedSession._publish_working_directory",
+        "<path>.replace",
+        "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
@@ -1195,6 +1234,12 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
         # self.replace(state) = in-memory snapshot swap
         "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
+        # Same receiver, same reason: the local publication installs an accepted
+        # directory onto the in-memory FrontendStateStore before the desktop
+        # bridge repaints from it. `store.replace(state)` is a state swap, never
+        # a path operation, and this function holds no session-directory path at
+        # all (it is handed a plain directory string).
+        "local_operator/session/attached.py::AttachedSession._publish_working_directory",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade

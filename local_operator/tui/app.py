@@ -40317,8 +40317,14 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 116
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 119
     public members, and a positive ``isinstance`` walks every one of them.
+    (It was 116 on the main this rebase resolved against; this change added
+    ``cwd``, ``supports_exclusive_move`` and ``set_local_cwd_callback`` to the
+    viewer surface, and a main that keeps growing the protocol moves the figure
+    again — which is why the number beside the measurement is RECOMPUTED with
+    ``len(typing._get_protocol_attrs(...))`` rather than adjusted by the size of
+    one's own change.)
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
 

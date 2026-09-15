@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -3600,11 +3601,19 @@ class MoveClient:
     def __init__(self, answer: str = "retiring") -> None:
         self.answer = answer
         self.ops: list[str] = []
+        #: The exclusivity flags this double was asked with, so a test can assert
+        #: the ROUTE asked for the fence rather than trusting that it did.
+        self.exclusive_calls: list[bool] = []
         # ``is_cold`` and ``move_will_wait`` both read this.
         self.connected = True
+        # Advertised exactly as a real owner does (``EXCLUSIVE_MOVE_CAPABILITY``
+        # in its record). The move path fails CLOSED without it, so a double that
+        # omitted it would exercise the refusal rather than the move.
+        self.supports_exclusive_move = True
 
-    async def retire_now(self) -> str:
+    async def retire_now(self, *, exclusive: bool = False) -> str:
         self.ops.append("retire_now")
+        self.exclusive_calls.append(exclusive)
         return self.answer
 
     def close(self) -> None:
@@ -3617,6 +3626,10 @@ class LegacyMoveClient:
     A class rather than a ``SimpleNamespace`` for the reason the warm tests
     record: ``dispose()`` tests the client for set membership, and a
     ``SimpleNamespace`` defines ``__eq__`` and so is unhashable.
+
+    Deliberately WITHOUT ``supports_exclusive_move``: this is the skew case, and
+    the move path must fail closed on it (refuse with the update sentence) rather
+    than retire a runtime that would ignore the exclusivity flag.
     """
 
     connected = True
@@ -4083,16 +4096,21 @@ async def test_a_retried_move_with_the_same_request_id_replays_the_first_receipt
 
 
 @pytest.mark.asyncio
-async def test_a_failed_move_does_not_spend_its_request_id(move_api) -> None:
-    """A refused move leaves the receipt row UNRESOLVED rather than claiming an
-    outcome, so the same request can be retried once the reason for the refusal
-    is gone — here, once the turn that was running has finished.
+async def test_a_pending_move_is_indeterminate_and_a_new_id_moves(move_api) -> None:
+    """A PENDING receipt row is INDETERMINATE, not retryable (review R1).
 
-    The retry is the SAME request id and the SAME body, because that is what a
-    retry IS: the fingerprint is the body's hash, so a client that changed its
-    mind about the directory is a new request with a new id, and it gets the
-    honest ``ReceiptConflict`` rather than a replay of an answer to a question it
-    no longer asks.
+    This test used to assert the opposite — that a refused move left its row
+    unresolved so the SAME request id could be retried once the reason for the
+    refusal had gone. That is no longer true of a move, and the reason is the
+    relative path: a retry resolves its target against the directory the first
+    attempt may ALREADY have moved to, so ``cwd="child"`` retried after a
+    partial success moves the session a second time (``child/child``), and an
+    absolute retry can undo a later accepted move. The contract is at-most-once
+    (``retry_safe=False``): a pending row answers the indeterminate refusal, and
+    a client that still wants the move issues a NEW id.
+
+    The row is still left unresolved, so nothing is lost — what changed is that
+    the WIRE no longer offers to re-execute it.
     """
     client, app, root = move_api
     before, after = root / "before", root / "after"
@@ -4111,12 +4129,17 @@ async def test_a_failed_move_does_not_spend_its_request_id(move_api) -> None:
 
         bridge.remote.runtime_idle = lambda: True  # type: ignore[method-assign]
         retried = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=request)
+        assert retried.status_code == 409, retried.text
+        assert "indeterminate" in retried.json()["detail"]
+        assert double.ops == [], "a pending receipt must not re-execute the move"
 
-        assert retried.status_code == 200, retried.text
-        assert retried.json()["result"]["cwd"] == str(after)
-        assert (
-            retried.json()["result"]["replayed"] is False
-        ), "a refused move recorded an outcome the retry then replayed"
+        fresh = _move_body(str(after))
+        moved = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=fresh)
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["result"]["cwd"] == str(after)
+        # The new id is a fresh RUN, not a replay: the pending row it shares the
+        # store with was never given an outcome to replay.
+        assert moved.json()["result"]["replayed"] is False
         assert double.ops == ["retire_now"]
 
 
@@ -4174,7 +4197,12 @@ async def test_the_move_route_is_advertised_by_session_move_only(move_api) -> No
     features = response.json()["result"]["features"]
 
     assert response.status_code == 200, response.text
-    assert features["session_move"] == 1
+    # 2, not 1: the move now refuses while another actual attach is registered
+    # (review R3), so a renderer must not promise the old unconditional
+    # behaviour. And the replacement frame is its own key, because a renderer
+    # that cannot consume it must keep its move controls disabled even here.
+    assert features["session_move"] == 2
+    assert features["frontend_replace"] == 1
     assert features["commands"] == 1
     assert features["session_catalogue"] == 3
 
@@ -4345,8 +4373,9 @@ async def test_concurrent_move_waits_for_refusal_rollback(move_api) -> None:
             return await super().acquire()
 
     class RefuseFirst(MoveClient):
-        async def retire_now(self) -> str:
+        async def retire_now(self, *, exclusive: bool = False) -> str:
             self.ops.append("retire_now")
+            self.exclusive_calls.append(exclusive)
             if len(self.ops) == 1:
                 entered.set()
                 await release.wait()
@@ -4413,6 +4442,625 @@ async def test_a_move_is_published_in_the_state_the_chip_reads(move_api) -> None
         assert await _published_cwd(client, sid) == str(
             after
         ), "the receipt moved but the stream the chip reads did not"
+
+
+@pytest.mark.asyncio
+async def test_the_move_publishes_an_explicit_replacement_frame(move_api) -> None:
+    """DESKTOP-ONLY ``frontend.replace``, ordered by the BRIDGE's own cursor.
+
+    Not an ordinary ``frontend.update``, and that distinction is the whole fix
+    (review R4). A local move installs an accepted directory on the facade
+    WITHOUT the owner's epoch or sequence moving, so a delta would carry the
+    owner's UNCHANGED tuple and the shipped renderer drops a same-sequence
+    update as stale — measured against the real reducer, which leaves a cold
+    viewer painting the old directory forever. The bridge's own outer cursor is
+    what advances here, so the frame is ordered against everything else on this
+    stream, and the payload keeps the true owner clock.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        # A subscriber that NEGOTIATED the frame, i.e. the renderer build this
+        # ships with; without one the move would (correctly) refuse instead.
+        bridge.subscribe(frontend_replace=True)
+        assert await _published_cwd(client, sid) == str(before)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+
+        frames = [frame for frame, _size in bridge.replay if frame["type"] == "frontend.replace"]
+        assert frames, "a local move must publish a replacement, not leave the paint stale"
+        frame = frames[-1]
+        assert frame["session_id"] == sid
+        assert frame["epoch"] == bridge.epoch, "the frame is ordered by the BRIDGE's cursor"
+        assert frame["seq"] > 0
+        payload = frame["payload"]
+        sync = payload["frontend"]
+        assert sync["snapshot"]["cwd"] == str(after)
+        # THE COMPANION REDUCER'S IDENTITY CHECK, on both halves of the wire:
+        # ``acceptFrontendReplace`` rejects a frame whose ``payload.frontend``
+        # names another session, because a replacement is a FULL projection.
+        assert sync["snapshot"]["session_id"] == sid
+        # NO FALSE OWNER DELTA BESIDE IT: the local installation of the accepted
+        # directory must not reach desktop subscribers as an ordinary
+        # ``frontend.update``, which is the same-sequence delta the real
+        # renderer drops. The frame above is the only paint path here.
+        deltas = [f for f, _size in bridge.replay if f["type"] == "frontend.update"]
+        assert all(
+            "cwd" not in (delta["payload"].get("changes") or {}) for delta in deltas
+        ), "the move emitted a false owner delta beside the replacement"
+        # THE OWNER'S CLOCK IS UNTOUCHED: this replaces the paint projection, it
+        # does not advance the runtime's revision, so the next real owner delta
+        # at N+1 still applies.
+        assert sync["epoch"] == sync["snapshot"]["epoch"]
+        assert sync["sequence"] == sync["snapshot"]["sequence"]
+        assert payload["cold"] is True, "a cold facade reports itself as cold"
+        # REPLAYABLE: a viewer that reconnects gets it rather than a torn paint.
+        assert frame in [f for f, _size in bridge.replay]
+
+
+@pytest.mark.asyncio
+async def test_a_move_refuses_while_an_older_desktop_viewer_is_mounted(move_api) -> None:
+    """Never a successful move with a viewer that cannot repaint.
+
+    The replacement frame is the only thing that carries the accepted directory
+    to an already-mounted cold viewer, so performing the move under one would
+    leave it silently stale while the receipt claimed success. Refused BEFORE
+    anything is mutated, and the sentence names the action.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        bridge.subscribe()  # legacy: no frontend_replace negotiated
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 409, response.text
+        assert "Update the desktop app" in response.json()["detail"]
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(before)
+        assert bridge.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_a_move_asks_the_owner_for_the_exclusive_fence(move_api) -> None:
+    """The desktop's endorsement of the owner-side exclusivity check (R3).
+
+    Asking without the fence would retire a runtime that another facade is
+    attached to, and that facade would engage the successor from its own stale
+    cwd — the contradictory-successor race the fence exists to prevent.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+        assert double.exclusive_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_owner_answer_is_503_and_keeps_the_target_marker(move_api) -> None:
+    """An UNKNOWN owner outcome is not a refusal: reconcile, never roll back.
+
+    The retire request reached the owner and no definitive answer came back, so
+    it may already have accepted the new directory. Publishing 409 and restoring
+    the old marker would overwrite a committed move with a stale one (contract
+    §A); 503 is the ladder's own "reconcile before retrying" answer.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+
+        async def explode(*, exclusive: bool = False) -> str:
+            double.exclusive_calls.append(exclusive)
+            raise ConnectionError("owner connection lost: socket closed")
+
+        double.retire_now = explode  # type: ignore[method-assign]
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 503, response.text
+        assert "reconcile" in response.json()["detail"]
+        # The transport detail is NOT echoed: it names sockets and control ports.
+        assert "socket closed" not in response.json()["detail"]
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(after)
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_move_is_settled_under_the_lock_before_the_next(
+    move_api,
+) -> None:
+    """Contract §A's reconciliation, as an observation with both outcomes.
+
+    After an UNKNOWN owner outcome the bridge's own field is optimistic, so the
+    next operation settles the durable copy against it BEFORE resolving anything
+    against that field — under the same move lock the transaction holds.
+    Agreement lets the move proceed (the durable target is what a successor is
+    spawned from); a genuine disagreement is reported for the caller to
+    reconcile rather than resolved by preferring one copy, which is how a
+    committed move used to be overwritten with a stale one.
+    """
+    client, app, root = move_api
+    before, after, third = root / "before", root / "after", root / "third"
+    for directory in (before, after, third):
+        directory.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+
+        async def lost(*, exclusive: bool = False) -> str:
+            double.exclusive_calls.append(exclusive)
+            raise ConnectionError("owner connection lost")
+
+        double.retire_now = lost  # type: ignore[method-assign]
+        unavailable = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert unavailable.status_code == 503, unavailable.text
+        assert bridge.cwd_unconfirmed is True
+
+        async def answers(*, exclusive: bool = False) -> str:
+            double.exclusive_calls.append(exclusive)
+            double.ops.append("retire_now")
+            return "retiring"
+
+        double.retire_now = answers  # type: ignore[method-assign]
+        settled = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(third))
+        )
+        assert settled.status_code == 200, settled.text
+        assert settled.json()["result"]["cwd"] == str(third)
+        assert bridge.cwd_unconfirmed is False, "a definite move settles the doubt"
+
+        # A durable copy that no longer matches this bridge's belief — what an
+        # eviction, a restart or a foreign writer leaves behind.
+        marker = _marker_path(root, sid)
+        marker.write_text(json.dumps({"version": 1, "cwd": str(before)}))
+        bridge.cwd_unconfirmed = True
+        retired_before = list(double.ops)
+        refused = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert refused.status_code == 409, refused.text
+        assert "could not be confirmed" in refused.json()["detail"]
+        assert double.ops == retired_before, "a move resolved against an unconfirmed field"
+        assert bridge.cwd == str(third)
+        assert json.loads(marker.read_text())["cwd"] == str(before), "the refusal mutated state"
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_published_atomically_and_never_left_staged(move_api) -> None:
+    """Atomic publication at 0600, with no staging file left behind (R2).
+
+    The old writer truncated the authoritative file in place and chmodded it
+    afterwards, so a failure between the two left it world-readable and a reader
+    racing the write saw an empty document rather than either answer.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+        marker = _marker_path(root, sid)
+        assert json.loads(marker.read_text())["cwd"] == str(after)
+        assert marker.stat().st_mode & 0o777 == 0o600
+        assert [
+            path.name for path in marker.parent.glob(f".{marker.name}.*")
+        ] == [], "the staging file must be consumed by os.replace, never left behind"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_marker_refuses_before_anything_is_mutated(move_api) -> None:
+    """Only ``FileNotFoundError`` means "no marker" (review R2).
+
+    The old ``except OSError`` read a permission failure, a directory in the
+    marker's place, or an I/O error as ABSENCE — and absence is exactly the
+    branch whose rollback DELETES the authoritative record. Every other read
+    failure therefore refuses before the first mutation, carrying the real
+    cause, so a marker this process cannot read is never silently discarded.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        marker = _marker_path(root, sid)
+        marker.unlink()
+        # A DIRECTORY where the marker belongs: ``read_bytes`` raises
+        # ``IsADirectoryError``, an OSError the old code reported as "absent".
+        marker.mkdir()
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 409, response.text
+        assert "cannot read the session's working-directory marker" in response.json()["detail"]
+        assert marker.is_dir(), "the unreadable marker must not be replaced or removed"
+        assert double.ops == [], "a refusal before mutation must not retire the owner"
+        assert bridge.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_marker_write_refuses_and_leaves_the_live_marker_intact(
+    move_api, monkeypatch
+) -> None:
+    """A refused publication is a refusal, not a partial write (review R2).
+
+    The old writer truncated the authoritative file and chmodded it afterwards,
+    so a failure between the two left it empty and world-readable and there was
+    no restoration path for a write that happened before the rollback ``try``.
+    The staging writer makes a partial mutation impossible: the failure lands
+    on a file nothing reads, and the refusal carries the filesystem's own
+    message instead of a bare 500.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        marker = _marker_path(root, sid)
+        original = marker.read_bytes()
+        real_replace = os.replace
+
+        def failing_replace(source, destination, *args, **kwargs):  # noqa: ANN001
+            # Only the MARKER's publication fails. ``os.replace`` is the shared
+            # stdlib function, so a blanket patch would break unrelated writes
+            # (every other staged file in the process) rather than the one
+            # boundary under test.
+            if Path(destination).name == module.DESKTOP_MARKER_NAME:
+                raise OSError("read-only volume")
+            return real_replace(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(module.os, "replace", failing_replace)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 409, response.text
+        assert "cannot write the session's working-directory marker" in response.json()["detail"]
+        monkeypatch.undo()
+        assert marker.read_bytes() == original, "the live marker was partially written"
+        assert [path.name for path in marker.parent.glob(f".{marker.name}.*")] == []
+        assert double.ops == [], "nothing reached the owner, so nothing may be retired"
+        assert bridge.cwd == str(before)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_journal_write_never_re_executes_a_relative_move(
+    move_api, monkeypatch
+) -> None:
+    """The reviewer's R1 reproduction, and the later-move case beside it.
+
+    ``retry_safe=True`` let a PENDING row run the move again, and a relative
+    target is resolved against the directory the first attempt had ALREADY
+    moved to — so a retry of ``cwd="child"`` moved the session a second time
+    (``child/child``) rather than replaying the first answer. The journal is
+    at-most-once now: the pending row answers the indeterminate refusal, and
+    the original id can never undo a move that was accepted after it.
+    """
+    client, app, root = move_api
+    session_root = root / "relative"
+    (session_root / "child").mkdir(parents=True)
+    third = root / "third"
+    third.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(session_root))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        request_id = str(uuid.uuid4())
+        relative = {"request_id": request_id, "cwd": "child"}
+
+        real_finish = DesktopReceipts._finish
+        finishes: list[str] = []
+
+        def failing_finish(self, key, result):  # noqa: ANN001
+            finishes.append(key)
+            if len(finishes) == 1:
+                # AFTER the operation completed: exactly the reviewer's
+                # injection, and the shape of a real crash between the durable
+                # side effects and the journal row.
+                raise OSError("journal write failed")
+            return real_finish(self, key, result)
+
+        monkeypatch.setattr(DesktopReceipts, "_finish", failing_finish)
+        with pytest.raises(OSError, match="journal write failed"):
+            await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=relative)
+        assert bridge.cwd == str(session_root / "child")
+        assert double.ops == ["retire_now"]
+
+        retried = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=relative)
+        assert retried.status_code == 409, retried.text
+        assert "indeterminate" in retried.json()["detail"]
+        assert double.ops == ["retire_now"], "the pending row re-executed the move"
+        assert bridge.cwd == str(session_root / "child"), "the retry moved a second time"
+
+        moved = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory",
+            json=_move_body(str(third)),
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["result"]["cwd"] == str(third)
+
+        # AND THE ORIGINAL ID CANNOT UNDO IT: pending stays pending, and the
+        # accepted directory is what the bridge, the facade and the marker hold.
+        again = await client.post(f"/v1/desktop/sessions/{sid}/working-directory", json=relative)
+        assert again.status_code == 409, again.text
+        assert bridge.cwd == str(third)
+        assert bridge.remote.cwd == str(third)
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(third)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_http_waiter_joins_the_marker_writer(move_api, monkeypatch) -> None:
+    """R2/Q2: the writer is not abandoned, and the lock is not released under it.
+
+    The defect was that cancelling the HTTP waiter unwound the route while the
+    real marker writer was still inside its worker thread: ``move_lock`` was
+    released, the orphaned write then landed, and a LATER accepted move's
+    durable marker was overwritten by the abandoned one — an eviction or restart
+    then resumed the session in the refused directory. The route now owns one
+    task spanning claim, serialized move and ``_finish``, and joins it through a
+    repeatable cancellation, so the interleaving cannot happen.
+
+    The second half is the contract's own consequence: cancellation can FINISH
+    an accepted move after its HTTP caller leaves. The durable record, the
+    bridge and the facade agree, and the caller reconciles instead of being told
+    the move was rolled back.
+    """
+    client, app, root = move_api
+    before, after, third = root / "before", root / "after", root / "third"
+    for directory in (before, after, third):
+        directory.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+
+        entered = threading.Event()
+        release = threading.Event()
+        writes: list[str] = []
+        original = module.write_desktop_marker
+        blocking = True
+
+        def slow_write(directory, target, **kwargs):  # noqa: ANN001
+            nonlocal blocking
+            if blocking:
+                blocking = False
+                entered.set()
+                assert release.wait(10), "the test never released the writer"
+            original(directory, target, **kwargs)
+            writes.append(str(target))
+
+        monkeypatch.setattr(module, "write_desktop_marker", slow_write)
+        request_id = str(uuid.uuid4())
+        task = asyncio.create_task(
+            client.post(
+                f"/v1/desktop/sessions/{sid}/working-directory",
+                json={"request_id": request_id, "cwd": str(after)},
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 10), "the writer never started"
+        # THE LOCK IS STILL HELD WHILE THE WRITER RUNS. This is the assertion
+        # the old code failed at this exact instant.
+        assert bridge.move_lock.locked(), "cancellation released the transaction early"
+
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The owned transaction finished, so every copy names the SAME directory.
+        assert bridge.cwd == str(after)
+        assert bridge.remote.cwd == str(after)
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(after)
+        assert not bridge.move_lock.locked()
+        assert writes == [str(after)], "a stray write from the abandoned attempt"
+
+        # The row that the cancelled waiter never saw is a FINISHED one, so the
+        # same id replays it instead of re-executing anything.
+        replayed = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory",
+            json={"request_id": request_id, "cwd": str(after)},
+        )
+        assert replayed.status_code == 200, replayed.text
+        assert replayed.json()["result"]["replayed"] is True
+        assert replayed.json()["result"]["cwd"] == str(after)
+
+        # AND THE SECOND MOVE ENTERS ONLY AFTER THE FIRST FINISHED: the
+        # contract's "no worker from operation A may be running when operation B
+        # acquires the move lock". The write order is the proof.
+        second = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(third))
+        )
+        assert second.status_code == 200, second.text
+        assert writes == [str(after), str(third)]
+        assert bridge.cwd == str(third)
+        assert bridge.remote.cwd == str(third)
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(third)
+        assert [path.name for path in _marker_path(root, sid).parent.glob(".desktop.json.*")] == []
+
+
+def _drain(sub: Any) -> list[dict[str, Any]]:
+    """Every frame queued for one subscriber, oldest first."""
+    frames: list[dict[str, Any]] = []
+    while not sub.queue.empty():
+        frame, _size = sub.queue.get_nowait()
+        frames.append(frame)
+    return frames
+
+
+@pytest.mark.asyncio
+async def test_two_desktop_windows_on_one_bridge_both_get_the_replacement(move_api) -> None:
+    """Several windows, ONE attach — which is what the owner's fence counts.
+
+    ``_other_observers`` counts attach CONNECTIONS, not desktop windows behind
+    one bridge, so a second window must not make a move refuse. Both windows
+    still have to be repainted, and both receive the frame the move publishes.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        windows = [bridge.subscribe(frontend_replace=True) for _ in range(2)]
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        _drain(windows[0])
+        _drain(windows[1])
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 200, response.text
+        for window in windows:
+            replacements = [
+                frame for frame in _drain(window) if frame["type"] == "frontend.replace"
+            ]
+            assert replacements, "a mounted window was left painting the old directory"
+            assert replacements[-1]["payload"]["frontend"]["snapshot"]["cwd"] == str(after)
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_viewer_cannot_mount_across_a_move(move_api, monkeypatch) -> None:
+    """The fence covers the mount, not only the preconditions (contract §C).
+
+    A viewer that negotiated nothing receives no ``frontend.replace`` and would
+    therefore be stale for the rest of its life if it mounted while a move was
+    between its precondition check and its publication. A COMPATIBLE viewer is
+    admitted throughout (it can render the frame), and once the move is over a
+    legacy mount is legitimate again because the normal snapshot carries the
+    accepted directory.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+        entered = threading.Event()
+        release = threading.Event()
+        original = module.write_desktop_marker
+        blocking = True
+
+        def slow_write(directory, target, **kwargs):  # noqa: ANN001
+            nonlocal blocking
+            if blocking:
+                blocking = False
+                entered.set()
+                assert release.wait(10)
+            original(directory, target, **kwargs)
+
+        monkeypatch.setattr(module, "write_desktop_marker", slow_write)
+        task = asyncio.create_task(
+            client.post(
+                f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        assert bridge.move_in_progress
+        with pytest.raises(module.LegacySubscriberDuringMove):
+            bridge.subscribe()
+        compatible = bridge.subscribe(frontend_replace=True)
+        release.set()
+        response = await task
+        assert response.status_code == 200, response.text
+        assert not bridge.move_in_progress
+        assert compatible.frontend_replace is True
+        # AFTER publication the snapshot is authoritative, so a legacy mount is
+        # admitted again rather than refused forever.
+        assert bridge.subscribe().frontend_replace is False
+
+
+@pytest.mark.asyncio
+async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkeypatch) -> None:
+    """The additive query flag is what a mounted legacy viewer is judged by.
+
+    Without it a renderer negotiates nothing and the route refuses it for the
+    duration of a move — an actionable 409 rather than a silent stale paint —
+    and with it the subscription is admitted carrying the flag the move's own
+    precondition reads back.
+
+    The stream body is stubbed because ``ASGITransport`` buffers a response
+    until the app RETURNS, and the real generator is an SSE loop that only ends
+    when the client leaves; the subject here is the two hand-offs on either side
+    of the response — the query flag into the subscription, and the refusal into
+    the status code — not the frames themselves.
+    """
+    client, app, root = move_api
+    before = root / "before"
+    before.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    url = f"/v1/desktop/sessions/{sid}/events"
+    negotiated: list[bool] = []
+    real_subscribe = module.DesktopSessionBridge.subscribe
+
+    def spy(self, *, frontend_replace: bool = False):  # noqa: ANN001
+        negotiated.append(frontend_replace)
+        return real_subscribe(self, frontend_replace=frontend_replace)
+
+    async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
+        # An async generator with nothing to yield: the response completes
+        # immediately instead of holding the ASGI transport open forever.
+        if False:  # pragma: no cover — keeps this a generator
+            yield {}
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "subscribe", spy)
+    monkeypatch.setattr(module.DesktopSessionBridge, "events", no_frames)
+    async with pool.session(sid) as bridge:
+        bridge.move_in_progress = True
+        legacy = await client.get(url)
+        assert legacy.status_code == 409, legacy.text
+        assert "Update the desktop app" in legacy.json()["detail"]
+        assert negotiated == [False], "the legacy mount did not present itself as legacy"
+        admitted = await client.get(url, params={"frontend_replace": 1})
+        assert admitted.status_code == 200, admitted.text
+        assert negotiated == [False, True], "the route dropped the negotiated flag"
+        bridge.move_in_progress = False
 
 
 @pytest.mark.asyncio
