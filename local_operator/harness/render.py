@@ -10,14 +10,28 @@ function of the transcript — so hoisting it lets an episode render through the
 implementation that drifts from it.
 
 KNOWN INCOMPLETENESS, deliberately not resolved by the move: the vocabulary the
-renderer matches on is spread across the application, and three of its homes are
-still modules the runner may not import — ``local_operator.incidents`` (the four
-session records), ``local_operator.session.peer`` (peer deliveries) and
-``local_operator.tools.builtin`` (the todo reminder). Importing this module from
-an episode therefore leaks the three, and through ``session.peer`` the whole
-``local_operator.session`` package, so the hoist does not by itself make the
-renderer reachable from an episode: giving those constants a neutral home is
-that stage's first move, not this one's.
+renderer matches on is spread across FOUR modules the runner may not import —
+``local_operator.incidents`` (the four ``SESSION_*_MESSAGE_TYPE`` records),
+``local_operator.session.peer`` (``PEER_MESSAGE_MESSAGE_TYPE``),
+``local_operator.tools.builtin`` (``TODO_REMINDER_MESSAGE_TYPE``) and
+``local_operator.harness.comms`` (``HUB_MESSAGE_TYPE``, this module's only
+import from a package the runner is otherwise allowed to touch). Seven
+constants, and importing this module leaks **17** modules that
+``tests/unit/evaluation/runner/test_isolation.py`` denies, so the hoist does not
+by itself make the renderer reachable from an episode: giving those constants a
+neutral home is that stage's first move, not this one's.
+
+``harness.comms`` is the home that reads as clean and is not. It imports
+``local_operator.session.peer`` and ``local_operator.session.transcript`` at
+module level for ``PEER_MESSAGE_MESSAGE_TYPE`` and ``TRANSCRIPT_FILENAME``, so
+moving the six constants in ``incidents``, ``session.peer`` and ``tools.builtin``
+still leaks **8**
+(``incidents``, ``paths``, ``session``, ``session.attachments``,
+``session.creation``, ``session.peer``, ``session.spend``,
+``session.transcript``) — all of it through this one import. ``HUB_MESSAGE_TYPE``
+must leave ``harness.comms`` for the neutral module too: that seventh constant
+takes the residual to zero, which is why a plan built on three homes would do
+the move, re-probe, and still find the module unimportable.
 """
 
 from __future__ import annotations

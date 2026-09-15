@@ -22,10 +22,6 @@ REPO = Path(__file__).resolve().parents[4]
 # model client and the secret resolver are the two places a real episode must
 # touch the operator's store); both defer that import, so they are absent here
 # by construction rather than by luck.
-# provider_client.py and host_secrets.py are the deliberate exceptions (the
-# model client and the secret resolver are the two places a real episode must
-# touch the operator's store); both defer that import, so they are absent here
-# by construction rather than by luck.
 #
 # The predicate (:func:`_leaked`) matches a name EXACTLY or at a DOTTED
 # boundary, so one entry stands for a package and everything under it, and not
@@ -129,25 +125,80 @@ def test_runner_core_does_not_import_the_application(module: str) -> None:
     assert not leaked, f"{module} leaked application imports: {leaked}"
 
 
-def test_denylist_covers_the_siblings_of_every_module_it_names() -> None:
-    """The hole the widening was aimed at stays closed, by name.
+def _application_module_names(package: Path) -> set[str]:
+    """Module and package names inside ``package``, read from the tree.
 
-    ``local_operator.session_factory`` is what the test let through while the
-    rule claimed session code was barred; it is not covered by
-    ``local_operator.session`` because the match is at a dotted boundary.
-    Pinned here so that dropping the entry fails a test that says why, rather
-    than silently reopening the hole the widening closed.
+    Read from disk rather than by importing: this file's whole subject is that
+    an episode must not import the application, and the candidate set has to
+    cover a module no test has imported yet. Private modules are skipped — the
+    denylist bars public entry points, and ``__init__`` is not one.
     """
-    for name in (
-        "local_operator.session_factory",
-        "local_operator.config_migrations",
-        "local_operator.cli_style",
-        "local_operator.exec_worker",
-        "local_operator.session.spend",
-        "local_operator.tools.builtin",
-        "textual.widgets",
-    ):
-        assert _leaked({name}) == [name], name
+    return {
+        child.stem if child.suffix == ".py" else child.name
+        for child in package.iterdir()
+        if not child.name.startswith("_")
+        and (child.suffix == ".py" or (child / "__init__.py").is_file())
+    }
+
+
+def test_denylist_covers_every_sibling_and_submodule_of_the_names_it_bars() -> None:
+    """What shares a barred name's name is barred too, and the tree names them.
+
+    The predicate matches at a dotted boundary, so ``local_operator.session``
+    does NOT cover ``local_operator.session_factory`` — the module that reads
+    the operator's own configuration, and the one this widening was aimed at —
+    while it does cover ``local_operator.session.spend``. Seven hand-written
+    names could not fail for an eighth module added later, so both sets come
+    from the package directory instead, and this name claims exactly what the
+    assertion makes: every sibling and every submodule of every barred name is
+    itself barred.
+    """
+    package = REPO / "local_operator"
+    top_level = _application_module_names(package)
+    propagation: dict[str, list[str]] = {}
+    for name in sorted(top_level):
+        if not _leaked({f"local_operator.{name}"}):
+            continue
+        directory = package / name
+        submodules = (
+            [f"local_operator.{name}.{sub}" for sub in sorted(_application_module_names(directory))]
+            if directory.is_dir()
+            else []
+        )
+        siblings = [
+            f"local_operator.{other}" for other in sorted(top_level) if other.startswith(f"{name}_")
+        ]
+        propagation[name] = siblings + submodules
+    # A check that has nothing to check is how the widening this replaced went
+    # unnoticed: it has to be able to fail.
+    assert any(propagation.values()), "no barred name has a sibling or submodule to check"
+    for name, shares_name in sorted(propagation.items()):
+        for qualified in shares_name:
+            assert _leaked({qualified}) == [qualified], (
+                f"{qualified} shares a name with the barred local_operator.{name} "
+                "but is not barred itself"
+            )
+
+
+#: Entries whose necessity cannot be re-derived from the tree, so dropping one
+#: has to fail a test here instead of passing silently. ``local_operator.paths``
+#: resolves the operator's config directory: the runner's model client reached
+#: it through ``local_operator.logger`` until this PR, and nothing on disk
+#: records that an episode may not read the operator's settings directory.
+BARRED_BY_INTENT = ("local_operator.paths",)
+
+
+def test_denylist_keeps_the_entries_the_tree_cannot_vouch_for() -> None:
+    """An entry pinned by intent alone must not be deletable in silence.
+
+    With this PR's own fix in place — the runner no longer reaches the
+    application logger — every other assertion in this file still passes with
+    ``local_operator.paths`` removed from ``FORBIDDEN_PREFIXES``, so the entry
+    the runner-logger fix exists to satisfy could go and nothing would say so.
+    Each name here is a measured leak the list has to keep barring.
+    """
+    for name in BARRED_BY_INTENT:
+        assert _leaked({name}) == [name], f"{name} is no longer barred"
 
 
 def test_runner_package_import_is_inert() -> None:
