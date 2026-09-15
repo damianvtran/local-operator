@@ -73,11 +73,22 @@ class MoveIndeterminate(Exception):
 
     :attr:`detail` is the underlying cause — transport errno, a marker path, the
     three copies that disagreed — and is deliberately NOT on the wire: it names
-    sockets, control ports and directories. It is LOGGED at the raise site
-    instead, because a 503 whose cause is recorded nowhere leaves an operator
-    with a generic "reconcile" and no thread to pull. The ONE second message is
-    for the publication failure, where the move itself is confirmed and only the
-    viewer's repaint is not.
+    sockets, control ports and directories. Both raise sites LOG it instead,
+    because a 503 whose cause is recorded nowhere leaves an operator with a
+    generic "reconcile" and no thread to pull: the transport/unknown-outcome
+    raise logs the exception with ``exc_info`` where it is still live
+    (``session/attached.py``, ``set_working_directory``), and the settlement logs
+    all four readbacks plus the path and errno of a repair write that failed
+    (``server/utils/desktop_sessions.py``, ``_settle_unconfirmed_move``).
+
+    :attr:`message` is overridden by exactly two callers, and both sentences are
+    deliberate. The publication failure
+    (``AttachedSession._publish_working_directory``) is its own sentence because
+    the move itself IS confirmed there and only the viewer's repaint is not. The
+    settlement refusal (``_settle_unconfirmed_move``) is its own because the
+    directory is genuinely unresolved — and it names the action (reconnect, then
+    reconcile) rather than the transport. Both carry :data:`code`, so a renderer
+    keys on the condition instead of on the prose.
     """
 
     code = "move_outcome_unknown"
