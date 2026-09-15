@@ -59,7 +59,7 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Extension version | 0.1.17 |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; a revision of it) |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `ae560d4d8` — the merge commit of #1167, i.e. `main` itself at dispatch time |
+| Source commit | `ae560d4d8` — the merge commit of #1167, i.e. `main` itself at dispatch time. `main` has since moved on (0.55.9 runtime release, no `extension/` changes), so `git rev-parse origin/main:extension` still returns the tree hash below |
 | `extension/` tree hash | `bc3cfba6c13623b036588afd67cb109426821056` (`git rev-parse ae560d4d8:extension`) |
 | Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.12, v0.1.10 and earlier* |
 | Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.17`) |
@@ -67,9 +67,9 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Submission route | **Automated** — `chrome-web-store.yml`, [run 35036966759](https://github.com/damianvtran/local-operator/actions/runs/35036966759), dispatched by `damianvtran` at 2026-09-15T23:43:57Z with `ref=main` `version=0.1.17` |
 | Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.17` once the store reports the revision `STAGED` |
 | Store state | `PENDING_REVIEW` at 100% — the store reports `submittedItemRevisionStatus` `state=PENDING_REVIEW`, `crxVersion=0.1.17`, `deployPercentage=100` |
-| State last checked | 2026-09-15T23:52Z — promote run [35037244157](https://github.com/damianvtran/local-operator/actions/runs/35037244157), which refused at gate 1 and printed the store's own fields |
+| State last checked | 2026-09-15T23:47:46Z (the run's own timestamp) — promote run [35037244157](https://github.com/damianvtran/local-operator/actions/runs/35037244157), created 23:47:46Z, ended 23:50:05Z having refused at gate 1 and printed the store's own fields |
 | Approval timestamp | *pending — append when the review completes* |
-| Previously published | v0.1.15 (live 2026-09-14) |
+| Previously published | v0.1.15, `PUBLISHED` at 100% (state confirmed by the probe above; the *publication date* is not evidenced by any run — see the promotion-route note) |
 
 **One number, one tree — but read this before citing a SHA for 0.1.17.** The rule
 is that a submitted version names exactly one tree; what makes 0.1.17 clean is the
