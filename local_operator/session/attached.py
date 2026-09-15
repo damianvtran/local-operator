@@ -5912,6 +5912,21 @@ class AttachedSession:
         return self._frontend_store.pending_gate
 
     @property
+    def has_running_job(self) -> bool:
+        """Whether the owner's roster still shows a running child, clone-free.
+
+        The retention predicate (``SessionInteraction.retained_for_auto_work``)
+        asks this on every canonical delta of every leased source, and it used to
+        ask it through ``frontend_state`` — a full deep copy of canonical state
+        for one boolean. Raised exactly the way that property raises when the
+        store has not synchronized, because this replaces its read on that path
+        and a caller must not read "no running child" for "no state yet".
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.has_running_job()
+
+    @property
     def epoch(self) -> str:
         """The owner epoch without the full-state clone.
 

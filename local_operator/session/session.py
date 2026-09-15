@@ -6867,6 +6867,19 @@ class Session:
         return self._frontend_state_store.pending_gate
 
     @property
+    def has_running_job(self):  # type: ignore[no-untyped-def]
+        """Whether any child is still running, without the state clone.
+
+        The third member of this family (``pending_gate``, ``epoch``): the
+        retention predicate that decides whether a leased viewer may be disposed
+        asks this as a boolean on every delta of every source, and it could only
+        answer through the whole-state clone before. See the store's own method
+        for why sharing the frozen roster is safe where sharing a model-valued
+        field is not.
+        """
+        return self._frontend_state_store.has_running_job()
+
+    @property
     def epoch(self):  # type: ignore[no-untyped-def]
         """The runtime's epoch without the full-state clone.
 

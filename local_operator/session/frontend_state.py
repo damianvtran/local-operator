@@ -1481,6 +1481,60 @@ def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) 
     )
 
 
+def _capped_overlap_tail(old: Sequence[Any], trajectory: Sequence[Any]) -> list[Any] | None:
+    """The appended tail when ``trajectory`` is ``old`` with rows evicted from the front.
+
+    THE second half of the append/replacement decision, and the one that decides
+    whether a long-running child costs one row per frame or five hundred. The
+    writer keeps a bounded window: it appends one row and deletes the oldest past
+    ``TRAJECTORY_CAP`` (``harness/subagent.py``, ``relay``). A prefix test cannot
+    see that -- eviction breaks ``new[:len(old)] == old`` on EVERY append once the
+    window is full -- so the old classifier called a full-cap rotation a
+    "replacement" and shipped all 500 rows per job per frame (measured: ~634 KB
+    per frame against 6.5 KB for the uncapped shape, on 6 children).
+
+    WHY THE RESULT IS EXACT RATHER THAN APPROXIMATE. The receiver's rule is
+    already ``(old + tail)[-CAP:]``, for the plain append branch and this one
+    alike. So if ``old`` and ``trajectory`` share a NONEMPTY overlap of ``k`` rows
+    at the front of ``trajectory``/back of ``old``, and ``trajectory`` is exactly
+    ``CAP`` long, then ``len(old) + len(tail) - CAP == len(old) - k``: the
+    receiver's own trim drops precisely the rows before the overlap and lands on
+    ``trajectory``. No new wire field, no capability handshake, and an older
+    receiver that already trims at the cap reconstructs it without knowing the
+    owner evicted anything.
+
+    WHY A STAMP IS ONLY A CANDIDATE. ``_lo_seq`` counts RELAYS, so it locates an
+    overlap cheaply but cannot establish one: a restart can reissue stamps, two
+    rows can be equal, and an interior edit can leave both endpoints agreeing.
+    Every returned tail is therefore backed by one full element-wise comparison of
+    the proposed overlap, and an unprovable input returns ``None`` so the caller
+    keeps the replacement it has always sent. That is the conservative direction
+    on purpose -- a wrong tail ships the WRONG ROWS to a viewer, which is worse
+    than shipping too many.
+
+    Refused deliberately, each for its own reason: a window shorter than the cap
+    (a front deletion cannot be reconstructed by append+trim, even when every
+    surviving row is an equal suffix), an empty or over-cap prior, a zero-length
+    or full-length overlap (nothing to append), and a non-integer or non-monotone
+    stamp pair. Those all fall back to the existing full replacement.
+    """
+    if len(trajectory) != _TRAJECTORY_CAP or not 0 < len(old) <= _TRAJECTORY_CAP:
+        return None
+    tail_start = _trajectory_row_seq(old[-1])
+    head_start = _trajectory_row_seq(trajectory[0])
+    if tail_start is None or head_start is None:
+        return None
+    # The stamp distance between the two windows IS the overlap: at the cap the
+    # stamps advance by one per retained row, so the row that was last in ``old``
+    # sits exactly that far into ``trajectory``.
+    overlap = tail_start - head_start + 1
+    if not 0 < overlap < len(trajectory) or overlap > len(old):
+        return None
+    if list(old[len(old) - overlap :]) != list(trajectory[:overlap]):
+        return None
+    return list(trajectory[overlap:])
+
+
 def _freeze_job(job: "JobState") -> "JobState":
     """Detach the owning model and freeze every nested canonical value."""
     values = {
@@ -2013,6 +2067,196 @@ def _freeze_state_jobs(
     """Detach the incoming owning models, or preserve already-owned jobs on scalar updates."""
     jobs = state.jobs if jobs_are_canonical else (_freeze_job(job) for job in state.jobs)
     return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+
+
+def _freeze_retained_rows(rows: Iterable[Any]) -> _FrozenSequence:
+    """Freeze one job's retained window into the immutable rows canonical state holds.
+
+    This is the per-ROW half of a ``jobs`` delta — the only part of it that
+    scales with the retained WINDOW rather than with the delta — and it is the
+    same work the payload rebuild always did, just reached directly: every row
+    goes through :func:`_freeze_value` exactly as it did when the rebuilt
+    ``trajectory`` was validated by pydantic and then frozen by
+    :func:`_freeze_job`. An already-frozen row comes back BY IDENTITY (the
+    ``_FrozenSequence``/``_FrozenMapping`` arm of that function), which is what
+    lets a proven prefix be reused without walking it again.
+    """
+    return _FrozenSequence(_freeze_value(row) for row in rows)
+
+
+def _extend_retained_window(retained: _FrozenSequence, appends: Iterable[Any]) -> _FrozenSequence:
+    """The next retained window from a PROVEN prefix plus this delta's appended rows.
+
+    ``retained`` must already have been proven unchanged by
+    :meth:`_FollowerTrajectoryWindows.prove`; this function's only job is to add
+    the delta's rows and honour the cap, so its cost is the APPENDED rows rather
+    than the window they land in.
+
+    Returns ``retained`` ITSELF when the delta appended nothing. That identity is
+    load-bearing rather than an optimisation: a roster tick that changed only
+    scalars must leave the canonical job holding the very object the memo
+    describes, or the next tick's proof fails and every delta after it pays a
+    full re-freeze.
+
+    The cap is EXPRESSED here rather than refused, and the equivalence is exact:
+    the rebuild path this replaces applied ``del rows[: len(rows) - CAP]`` to
+    ``list(prior.trajectory) + appends`` before freezing, so the surviving rows
+    are the same objects in the same order, re-frozen the same way. Dropping the
+    memo instead would cost the whole window on every delta of exactly the shape
+    this work was measured against (a window sitting AT the cap), which is the
+    residual PR #1123 documents on the producer side.
+    """
+    frozen = [_freeze_value(row) for row in appends]
+    if not frozen:
+        return retained
+    combined = (*retained, *frozen)
+    if len(combined) > _TRAJECTORY_CAP:
+        combined = combined[len(combined) - _TRAJECTORY_CAP :]
+    return _FrozenSequence(combined)
+
+
+@dataclass(frozen=True)
+class _FollowerRowWindow:
+    """One job's frozen retained window, as this follower's canonical state holds it.
+
+    ``rows`` is held by REFERENCE and is the whole proof — see
+    :class:`_FollowerTrajectoryWindows`. ``tail`` is the same window's last row,
+    also by reference, as a second witness of the same fact.
+    """
+
+    rows: _FrozenSequence
+    tail: Any
+
+
+class _FollowerTrajectoryWindows:
+    """Per-job memo of a FOLLOWER's frozen retained window, so a delta costs the delta.
+
+    WHY THIS EXISTS. ``FrontendStateStore.apply_update`` is the follower's whole
+    reducer: it runs on the event loop of every attached viewer, once per
+    canonical delta per session (``AttachedSession._on_frontend_update``). For a
+    ``jobs`` delta it used to rebuild every job from scratch — ``list(prior
+    .trajectory)`` per job extended with ``job_trajectory_appends``, then
+    ``FrontendSessionState.model_validate`` re-validating every retained row,
+    then ``_freeze_state_jobs`` re-freezing every row — which the coupling audit
+    measured at 6.8-9.3 ms per delta on a 6-child roster at a 500-row retained
+    window, i.e. 14-19 % of a core per attached session streaming at the
+    producer's 20/s cadence. The retained window is the one part of that work the
+    delta does not change, so it is frozen once and reused.
+
+    THE PROOF, and why it is a proof rather than a heuristic. The memo records
+    the ``_FrozenSequence`` object the reducer INSTALLED as a job's trajectory.
+    A reuse is granted only when the PREVIOUS canonical job's ``trajectory`` IS
+    that exact object. Two properties make that conclusive here:
+
+    * ``_FrozenSequence`` is an immutable tuple subclass and every row it holds
+      is a ``_FrozenMapping`` (or a scalar), so a window that has not been
+      replaced cannot have changed — the identity is not a cache key standing in
+      for the content, it IS the content, and the memo holds the only other
+      reference to it.
+    * the reducer is the only writer of ``_state``, and it installs windows with
+      ``model_copy(update=...)`` (no re-coercion) and freezes through
+      ``_freeze_value``'s already-frozen arm (identity), so the installed object
+      is the memo's object and not an equal copy of it.
+
+    A ``(count, last_seq)`` fingerprint would NOT be sufficient, and the reason
+    is recorded in the open producer-side PR #1123: a child's second attempt
+    rebinds the row list and restarts the row stamps at zero, so count and stamp
+    range can describe two different attempts. Counting has a second failure on
+    this side specifically — the follower's window is a bounded PAGE, so its
+    length is not even a function of the runtime's roster history.
+
+    EVERY PATH THAT REFUSES A REUSE, enumerated because a stale window would ship
+    the WRONG ROWS to a viewer, which is this cache's whole risk. Each of these is
+    exercised by a test in ``tests/unit/session/test_follower_row_window.py``:
+
+    * ``job_trajectory_replacements`` -- the runtime itself says the window is a
+      replacement, not a suffix. Checked before the memo is consulted.
+    * a job ENTERING the roster (no prior canonical job) or one whose canonical
+      trajectory is a different object than the recorded window -- a
+      ``seed_job_trajectory`` page installs a freshly frozen window, a
+      ``replace()``/``replace_and_notify()`` re-seat clears the memo outright,
+      and a job whose rows arrive any other way simply misses.
+    * a job LEAVING the roster (``retain``), so an entry cannot outlive its job
+      and pin that job's rows for the life of the store.
+    * an EPOCH move (``prove``'s ``epoch`` argument), i.e. the follower is now
+      reading a different lineage's state.
+    * a window whose recorded TAIL row is no longer the previous window's last
+      row. On today's reducer the immutable container already settles this, so
+      the witness cannot disagree through ``apply_update``; it is kept as an O(1)
+      guard against a future reducer that installs a MUTABLE row container, where
+      the container identity alone would stop being a proof.
+    * the DEGRADED path, which drops the memo (see ``apply_update``).
+
+    The ``_TRAJECTORY_CAP`` front-trim is deliberately NOT in that list: it is
+    expressed by :func:`_extend_retained_window` and proven equal to the rebuild
+    path it replaces, for the reason recorded there.
+    """
+
+    __slots__ = ("_by_job", "_epoch")
+
+    def __init__(self, epoch: str) -> None:
+        self._by_job: dict[str, _FollowerRowWindow] = {}
+        self._epoch = epoch
+
+    def reset(self, epoch: str) -> None:
+        """Bind to ``epoch`` and forget every window.
+
+        Called by the two paths that re-seat canonical state from a PAYLOAD
+        (``replace``/``replace_and_notify``, and the degraded delta that ends in
+        one): those rebuild rows instead of extending them, so no identity proof
+        can cross them.
+        """
+        self._by_job.clear()
+        self._epoch = epoch
+
+    def forget(self, job_id: str) -> None:
+        """Drop ``job_id``'s entry; the next delta for it pays a full freeze."""
+        self._by_job.pop(job_id, None)
+
+    def retain(self, job_ids: Iterable[str]) -> None:
+        """Drop every entry for a job that is no longer on the roster."""
+        live = set(job_ids)
+        for job_id in [key for key in self._by_job if key not in live]:
+            del self._by_job[job_id]
+
+    def prove(self, job_id: str, prior: Any, *, epoch: str) -> _FrozenSequence | None:
+        """The frozen window for ``prior``, or ``None`` when it cannot be proven.
+
+        Returns the entry's own object, so the caller installs the window the
+        memo describes rather than an equal copy of it — that is what keeps the
+        next delta's proof an identity check.
+        """
+        if epoch != self._epoch:
+            self.reset(epoch)
+            return None
+        entry = self._by_job.get(job_id)
+        if entry is None:
+            return None
+        # A job that has just appeared has no previous window to extend, and an
+        # entry surviving from an earlier roster would be exactly the stale
+        # window this memo must never ship.
+        if prior is None:
+            self.forget(job_id)
+            return None
+        if prior.trajectory is not entry.rows:
+            self.forget(job_id)
+            return None
+        rows = entry.rows
+        if rows and rows[-1] is not entry.tail:
+            self.forget(job_id)
+            return None
+        return rows
+
+    def remember(self, job_id: str, rows: _FrozenSequence) -> None:
+        """Record the window canonical state now holds for ``job_id``.
+
+        A window with no rows is not remembered: there is nothing to reuse, and
+        an entry for it could only ever produce a hit that proves nothing.
+        """
+        if not rows:
+            self.forget(job_id)
+            return
+        self._by_job[job_id] = _FollowerRowWindow(rows, rows[-1])
 
 
 def _public_job(job: JobState) -> JobState:
@@ -3588,6 +3832,12 @@ class FrontendStateStore:
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
         self._todo_sequences: dict[str, int] = {}
         self._todo_seed_floor = state.sequence
+        #: The follower's per-job memo of the frozen retained windows it has
+        #: installed, so a ``jobs`` delta costs the appended rows rather than the
+        #: window they land in. Deliberately NOT named for the producer-side memo
+        #: in flight on this class: see ``_FollowerTrajectoryWindows`` for the
+        #: proof, the refusals, and why the two caches cannot share one.
+        self._follower_windows = _FollowerTrajectoryWindows(state.epoch)
         #: The accumulator for a host whose session exposes none (a reduced
         #: facade, a test double). ONE arithmetic site still: this is the same
         #: ``SessionSpend``, not a second sum computed here.
@@ -3739,6 +3989,27 @@ class FrontendStateStore:
             )
         return value
 
+    def has_running_job(self) -> bool:
+        """Whether any canonical job is still RUNNING, without cloning the state.
+
+        The sibling of :attr:`pending_gate`, and it exists for the same measured
+        reason: ``state`` deep-copies every job, usage component and trajectory
+        row so no caller can mutate the store's instance, and the retention
+        predicate that asks this question read it through ``state`` for a
+        boolean. The audit measured that clone at 0.19-0.58 ms per call, ~90 % of
+        a whole scalar delta, on a path every owner delta of every leased source
+        walks (``SessionInteraction.retained_for_auto_work``).
+
+        ``self._state.jobs`` is already frozen — an immutable row sequence of
+        frozen job models — so a read-only scan of it is safe to share, unlike
+        the model-valued fields ``read_field``'s allow-list excludes. This is a
+        PREDICATE rather than a ``read_jobs`` accessor on purpose: handing the
+        job shells out would let a caller reach ``__pydantic_extra__``, which is
+        a mutable mapping on an otherwise frozen model, and not sharing that is
+        exactly the invariant ``state``'s clone protects.
+        """
+        return any(getattr(job, "status", "") == "running" for job in self._state.jobs)
+
     @property
     def pending_gate(self) -> "PendingGateState | None":
         """The pending gate alone, WITHOUT cloning the whole state.
@@ -3760,11 +4031,18 @@ class FrontendStateStore:
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._todo_sequences.clear()
         self._todo_seed_floor = state.sequence
-        # Canonical state re-seated from a PAYLOAD rather than rebuilt from the
-        # session, so the rows a cached retained window describes may be gone or
-        # rewritten. Drop the memo; the next roster tick pays one full freeze
-        # instead of reusing a window nothing proves is still this job's.
+        # BOTH memos die here, and for the same reason from two directions.
+        # Canonical state is re-seated from a PAYLOAD rather than extended from
+        # the jobs already present, so the rows either cache describes may be
+        # gone or rewritten, and the windows a snapshot installs are freshly
+        # parsed objects that merely LOOK like the ones being described.
+        #
+        # The producer's memo (#1123) keys on the SESSION's list identity; the
+        # follower's keys on the rows canonical state itself holds. A store is
+        # only ever one of the two, but `replace` is shared, so both are cleared
+        # here rather than in two conditioned branches.
         self._trajectory_windows.clear()
+        self._follower_windows.reset(state.epoch)
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
         """Install a proven wire snapshot without reaching into subscribers."""
@@ -3799,6 +4077,15 @@ class FrontendStateStore:
         if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
             raise ValueError("frontend update is not the next state sequence")
         if update.degraded:
+            # The window proof is a statement about THIS follower's objects, not
+            # about them being COMPLETE, so a shed body does not make it wrong —
+            # the local window is simply missing the rows that frame carried,
+            # exactly as it was before this memo existed. The memo is dropped
+            # anyway, because this arm ends in a resync that re-seats state from
+            # a snapshot: one full re-freeze on a path that already pays a socket
+            # round trip buys the certainty that no window survives a lineage the
+            # follower has just declared untrustworthy.
+            self._follower_windows.reset(self._state.epoch)
             self._state = self._state.model_copy(update={"sequence": update.sequence})
             for subscriber in list(self._subscribers):
                 subscriber(update.model_copy(deep=True))
@@ -3807,6 +4094,9 @@ class FrontendStateStore:
         # A malformed field later in a jobs delta must not advance a plan's
         # watermark: validation either installs the entire update or nothing.
         todo_sequences = dict(self._todo_sequences)
+        # The frozen window each rebuilt job will carry, positionally aligned
+        # with ``changes["jobs"]``. Built here, installed AFTER validation.
+        windows: list[_FrozenSequence] = []
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
@@ -3814,26 +4104,58 @@ class FrontendStateStore:
             for raw in changes["jobs"]:
                 job_id = str(raw.get("id", ""))
                 prior = previous.get(job_id)
-                if job_id in replacements:
-                    trajectory = []
-                else:
-                    trajectory = list(prior.trajectory if prior is not None else [])
-                trajectory.extend(update.job_trajectory_appends.get(job_id, []))
-                # Defensive mirror of the runtime-side eviction: even a
-                # misbehaving runtime cannot grow a follower without bound.
-                if len(trajectory) > _TRAJECTORY_CAP:
-                    del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
-                raw["trajectory"] = trajectory
+                # A runtime that says "this is a replacement" has told us the
+                # window is not a suffix, so the memo is not consulted at all.
+                window = None
+                if job_id not in replacements:
+                    proven = self._follower_windows.prove(job_id, prior, epoch=update.epoch)
+                    if proven is not None:
+                        window = _extend_retained_window(
+                            proven, update.job_trajectory_appends.get(job_id, ())
+                        )
+                if window is None:
+                    # The unproven path, unchanged: rebuild the window and freeze
+                    # every one of its rows.
+                    trajectory = (
+                        []
+                        if job_id in replacements
+                        else list(prior.trajectory if prior is not None else [])
+                    )
+                    trajectory.extend(update.job_trajectory_appends.get(job_id, []))
+                    # Defensive mirror of the runtime-side eviction: even a
+                    # misbehaving runtime cannot grow a follower without bound.
+                    if len(trajectory) > _TRAJECTORY_CAP:
+                        del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
+                    window = _freeze_retained_rows(trajectory)
+                # The reducer has always OVERWRITTEN any trajectory a caller put
+                # in the payload with this reconstruction, so dropping it from the
+                # validated body changes nothing a caller could observe — except
+                # that pydantic no longer walks the retained window its result was
+                # about to be discarded from.
+                raw.pop("trajectory", None)
+                # ``JobState``'s before-validator derives ``trajectory_length``
+                # from the payload's own rows when — and only when — the caller
+                # supplied no count. The payload no longer carries rows here, so
+                # the same derivation is done from the window that will actually
+                # be installed. Keyed on PRESENCE, like the validator: an
+                # explicit-but-invalid count must still reach pydantic and be
+                # refused rather than be quietly replaced by a local length.
+                if "trajectory_length" not in raw:
+                    raw["trajectory_length"] = len(window)
                 raw["todos"] = _wire_value(prior.todos) if prior is not None else None
                 if job_id in update.job_todo_updates and update.sequence > todo_sequences.get(
                     job_id, -1
                 ):
                     raw["todos"] = update.job_todo_updates[job_id]
                     todo_sequences[job_id] = update.sequence
+                windows.append(window)
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
             retained = {str(row["id"]) for row in rebuilt}
             todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
+            # A job that left the roster takes its window's entry with it, or the
+            # memo would pin that job's rows for the life of the store.
+            self._follower_windows.retain(retained)
         # Validate only the supplied fields, through the MODEL rather than a
         # bare TypeAdapter: its before-validators normalize Usage/ModelSpec,
         # and extra='allow' preserves fields introduced by a newer runtime.
@@ -3858,8 +4180,39 @@ class FrontendStateStore:
             if name in FrontendSessionState.model_fields
         }
         normalized.update(patch.model_extra or {})
+        if windows:
+            # Install the frozen windows the loop above produced, by IDENTITY:
+            # ``model_copy`` does not re-coerce (so the retained rows survive as
+            # the objects they already were) and ``_freeze_value`` returns an
+            # already-frozen window unchanged, which is what keeps the memo's
+            # object and canonical state's object the same one.
+            #
+            # ``zip(strict=True)`` because the two lists are the same roster read
+            # twice — ``rebuilt`` and the model validated from it — and a
+            # misalignment would install one child's rows on another. Naming that
+            # here is cheaper than trusting an ordering invariant to survive the
+            # next edit to this method.
+            normalized["jobs"] = _FrozenSequence(
+                _freeze_job(job.model_copy(update={"trajectory": window}))
+                for job, window in zip(patch.jobs, windows, strict=True)
+            )
         candidate = self._state.model_copy(update=normalized)
-        self._state = _freeze_state_jobs(candidate, jobs_are_canonical="jobs" not in changes)
+        # ``jobs_are_canonical`` is now true on the jobs path too: the windows
+        # above are frozen and the shells around them are frozen here, so the
+        # whole-roster re-freeze this flag used to force on every jobs delta is
+        # the cost this change removes. The flag's remaining job is the OTHER
+        # case — a delta that did not touch the roster, whose jobs are the ones
+        # canonical state already holds.
+        self._state = _freeze_state_jobs(candidate, jobs_are_canonical=True)
+        # Record what canonical state now HOLDS, so the next delta can prove
+        # those windows by identity. Done after the install rather than beside
+        # the loop above: a delta that fails validation never reaches here, and a
+        # memo describing a window no state holds is a stale entry waiting to be
+        # refused. The unproven path records too — a rebuild produces a window
+        # the next delta inherits.
+        if windows:
+            for job, window in zip(self._state.jobs, windows, strict=True):
+                self._follower_windows.remember(job.id, window)
         self._todo_sequences = todo_sequences
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
@@ -3965,9 +4318,19 @@ class FrontendStateStore:
                 if prior is None or prior.todos != job.todos:
                     todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
+                # THREE arms, in order of cost, and the middle one is what keeps
+                # a long-running child cheap. See `_capped_overlap_tail` for the
+                # algebra and the refusals.
+                appended = None
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
+                    # The window rotated past its cap (or was rebuilt). Recover
+                    # the appended tail when the rotation is provable, so a full
+                    # window costs one row per frame rather than all 500; only a
+                    # genuinely unprovable difference pays a replacement.
+                    appended = _capped_overlap_tail(old, trajectory)
+                if appended is None:
                     # The runtime's list rotated past its cap (or was rebuilt):
                     # a suffix no longer exists, so ship a replacement once
                     # rather than the whole list disguised as appends forever.

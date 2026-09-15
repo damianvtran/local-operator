@@ -746,7 +746,18 @@ def test_noop_refresh_consumes_no_sequence_for_model_list_fields() -> None:
 
 
 def test_rotated_trajectory_ships_replacement_and_follower_stays_bounded() -> None:
-    """N2: past TRAJECTORY_CAP the delta is a replacement, never endless appends."""
+    """N2: past TRAJECTORY_CAP the delta is a replacement, never endless appends.
+
+    REPLACEMENT *for these rows*, and the reason is now a property of the rows
+    rather than of the cap: the classifier proves a rotation row for row from the
+    rows' ``_lo_seq`` stamps, so a STAMPED rotation ships the appended tail with no
+    marker (see ``test_frontend_row_window``, ``_capped_overlap_tail``). These rows
+    carry no stamp, nothing about the overlap can be proven, and the delta keeps
+    the replacement it has always sent. The precondition is asserted rather than
+    assumed so this cell cannot drift into the proven-tail case and quietly stop
+    covering the fallback it exists for.
+    """
+    from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
     from local_operator.harness.subagent import TRAJECTORY_CAP
 
     owner = FrontendStateStore(_state(jobs=[]))
@@ -764,6 +775,10 @@ def test_rotated_trajectory_ships_replacement_and_follower_stays_bounded() -> No
     follower.apply_update(seed)
     for round_no in range(1, 4):
         rotated = [{"type": "e", "n": index + round_no} for index in range(TRAJECTORY_CAP)]
+        assert all(TRAJECTORY_SEQ_KEY not in row for row in rotated), (
+            "stamping these rows makes the rotation provable, which ships a tail "
+            "instead of a replacement -- this cell is the unprovable fallback"
+        )
         update = owner.mutate(jobs=[JobState(id="child", type="task", trajectory=rotated)])
         assert update is not None
         assert update.job_trajectory_replacements == ["child"]
