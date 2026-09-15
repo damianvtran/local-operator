@@ -2894,6 +2894,15 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except TimeoutError as exc:
+        # NOT "could not deliver": a read deadline expiring means no
+        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
+        # already in the owner's socket buffer, and the receiver commits before
+        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
+        # invites a duplicate steer or wake. Same split, and the same words, as
+        # the send TOOL's arm below it.
+        _peer_red(f"no delivery confirmation: {exc}")
+        return 1
     except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
         # ValueError covers a read fault the frame reader could still surface
         # (e.g. an oversized non-welcome line): it must become the same soft,
@@ -3205,7 +3214,7 @@ def sessions_command(args: argparse.Namespace) -> int:
     }
     show_why = any(why.values())
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} "
+        f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
         f"{'MODEL':<{MODEL_COLUMN_WIDTH}} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} "
         f"{'HB_AGE':>7}"
@@ -3231,8 +3240,9 @@ def sessions_command(args: argparse.Namespace) -> int:
         model = _fit_cell(row["model_label"] or "", MODEL_COLUMN_WIDTH)
         needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
+        state = _state_cell(row["state"])
         line = (
-            f"{row['state']:<7} "
+            f"{state:<{STATE_COLUMN_WIDTH}} "
             f"{('—' if stored else str(row['pid'])):>7} "
             f"{(row['kind'] or '—'):<7} {_pad_cell(needs, NEEDS_COLUMN_WIDTH)} "
             f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
@@ -4479,12 +4489,28 @@ def wake_command(args: argparse.Namespace) -> int:
         # every other non-running state (round 2, D14): the surface points at
         # `lop wake install` elsewhere, and here no wake-subsystem action can
         # help at all, so it names the two commands that can.
+        #
+        # The remedy names the ladder's FIRST rung, with the forced rung's cost
+        # beside it (design round 2, D3). A lapsed beat — which is what this
+        # line describes — is exactly what `_identity_by_start_time` admits, so
+        # `lop stop --pid N` is the rung that acts on this state; `--force`
+        # re-reads the record only while the beat is still inside
+        # `HEARTBEAT_TIMEOUT_S` (`control._identity_by_record`), so here it cannot
+        # convert a refusal into a stop. It stays named for the shape it IS for —
+        # an owner that is still beating but silent — with what running it
+        # does. "It will not recover on its own" stays gone with it: a stale
+        # beat is evidence the owner stopped reporting, not a forecast about a
+        # long turn that may simply finish (``registry.classify``).
         print(
             _wrap_status(
                 f"{session_id} (pid {pid}) has not sent a heartbeat in "
-                f"{_format_duration(age)}; it holds the session lease, so its wake "
-                f"cannot fire. It will not recover on its own — 'lop sessions' shows "
-                f"it, 'lop stop --pid {pid}' ends it",
+                f"{_format_duration(age)} and is not answering its socket; it holds "
+                f"the session lease, so its wake cannot fire while it does not "
+                f"answer. Nothing here can recover it — 'lop sessions' shows it; "
+                f"'lop stop --pid {pid}' asks it to stop and signals it if it will "
+                f"not answer, while 'lop stop --pid {pid} --force' signal-stops the "
+                f"process, discarding its in-flight turn, for an owner that is "
+                f"still beating but silent",
                 "wedged:",
             )
         )
@@ -4505,6 +4531,36 @@ def _elide_id(session_id: str, width: int) -> str:
     if len(session_id) <= width:
         return session_id
     return session_id[: max(width - 1, 1)] + "…"
+
+
+#: Width of `lop sessions`' leading STATE column, in display CELLS.
+#:
+#: Sized for the one human PHRASE it can carry rather than for the tokens
+#: around it (``wedged`` is 6 cells, ``not answering`` 13). The column used to
+#: be 7 and printed the raw token, which is fine for a script and not for the
+#: one person-facing place the wake surfaces send a reader to (design round 2,
+#: D5; QA Q1). ``--json``'s ``state`` key is untouched: it is the wire value.
+STATE_COLUMN_WIDTH = 13
+
+
+def _state_cell(state: str) -> str:
+    """The STATE cell for a person, from the state token a machine reads.
+
+    ``wedged`` is the one value in this column that is a verdict rather than a
+    word: ``lop wake status`` ends its wedge line with "'lop sessions' shows
+    it", so this table is where an operator arrives, and it was the only
+    person-facing surface where the token stood with no sentence to qualify it.
+    It reads as ``not answering`` — the phrase every other surface uses, and the
+    one the adjacent ``HB_AGE`` column measures — while ``--json`` keeps
+    ``wedged`` for the ~15 call sites and the desktop catalogue's
+    ``status.code`` that branch on it.
+
+    ``stale`` deliberately keeps its token: it means the record's pid is GONE,
+    which is a different fact from this one rather than a longer way of saying
+    the same thing, and the state whose wording this change is about is the one
+    where the process is still there.
+    """
+    return "not answering" if state == "wedged" else state
 
 
 #: Width of `lop sessions`' trailing WHY column, in display CELLS.

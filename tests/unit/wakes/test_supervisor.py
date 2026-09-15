@@ -989,6 +989,21 @@ async def test_a_wedged_runtime_is_named_rather_than_timing_out(
     assert engagements == [], "a wedged session must not burn an engage deadline"
     message = " ".join(r.getMessage() for r in caplog.records)
     assert "wedged" in message and "4242" in message and "312" in message, message
+    # The sentence's own contract, since this log line is the only place a
+    # supervisor operator reads it: the measured age, no forecast about whether
+    # the owner will come back (a stale beat is the runtime's OWN loop falling
+    # behind — ``registry.classify`` — so it supports neither a death nor a
+    # recovery claim), and the remedy named as the rung that acts on a lapsed
+    # beat WITH the forced rung's cost beside it. ``--force`` re-reads a
+    # record only while its beat is inside ``HEARTBEAT_TIMEOUT_S``
+    # (``control._identity_by_record``), so naming it alone sent the operator
+    # to a flag that cannot admit this shape, and pricing it is what keeps the
+    # deliberate signal a deliberate choice.
+    assert "has not reported for 312s" in message, message
+    assert "'lop stop --pid 4242' asks it to stop" in message, message
+    assert "'lop stop --pid 4242 --force' signal-stops the process" in message, message
+    assert "discarding its in-flight turn" in message, message
+    assert "recovers or is stopped" not in message, message
 
 
 def test_the_wedged_probe_reads_the_registry_classification(

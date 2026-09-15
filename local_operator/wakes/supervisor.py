@@ -574,21 +574,30 @@ async def _has_live_runtime(config_dir: Path, session_id: str) -> bool:
 
 
 def wedged_runtime(config_dir: Path, session_id: str) -> tuple[int, float] | None:
-    """``(pid, heartbeat_age_s)`` when a runtime for ``session_id`` is WEDGED.
+    """``(pid, heartbeat_age_s)`` when a runtime for ``session_id`` has gone quiet.
 
     The last silent dead-end. A runtime whose process is alive but whose
     heartbeat has gone stale past ``HEARTBEAT_TIMEOUT_S`` is invisible to
     :func:`_has_live_runtime` (``find_runtime_record`` filters to ``live``, so
     the supervisor engages) *and* blocks that engage: ``_lease_holder`` sees
     the live pid holding the transcript lease and refuses to spawn, so every
-    pass burns its whole deadline and the wake never fires while the wedge
-    persists. Before this, the only trace was an ordinary timeout line,
+    pass burns its whole deadline and the wake never fires while it persists.
+    Before this, the only trace was an ordinary timeout line,
     indistinguishable from a slow cold start.
 
-    NOTHING HERE TOUCHES THE WEDGED SESSION. The lease is not broken and the
+    WHAT THE STATE IS AND IS NOT (``registry.classify`` owns this rule). The
+    beat is authored by the runtime's own event loop, so this reading covers a
+    frozen process AND a healthy one starved by a long turn — the measured
+    false positives were 105.8 s and 205.8 s against a 45 s timeout — and it is
+    therefore "the owner has not reported and is not answering", never a
+    verdict that the process is dead. Callers word it that way.
+
+    NOTHING HERE TOUCHES THE QUIET SESSION. The lease is not broken and the
     process is not signalled: the safe repair belongs to the runtime's own
     watchdog, and a supervisor that killed a session's process on a heartbeat
     heuristic could destroy work a merely-slow runtime was in the middle of.
+    Naming the forced stop is the operator's decision to make, not this
+    process's (see ``_engage_one``'s sentence).
 
     It is NOT side-effect free, though, and round 2 (R10) was right that
     saying so was a false claim of purity. This delegates to
@@ -662,15 +671,30 @@ async def _engage_one(
         if wedge is not None:
             pid, age_s = wedge
             if _skip_log.should_log(session_id, "wedged"):
+                # No promise, in either direction. The owner is not answering
+                # (that is the whole of what a stale beat establishes), so the
+                # sentence says the wake is overdue rather than that it will
+                # fire later; and the remedy names the rung that ACTS on a
+                # lapsed beat, with the forced rung's cost beside it so the
+                # operator picks deliberately. Which rung reaches which shape is
+                # the ladder's own rule (``control._identity_by_record`` re-reads
+                # a record only while its beat is inside ``HEARTBEAT_TIMEOUT_S``,
+                # so --force cannot convert a refusal into a stop here) — see
+                # ``info.render.not_answering_clause``.
                 logger.warning(
-                    "wedged: skipping %s — a runtime exists (pid %d) but its heartbeat is "
-                    "%.0fs stale, so it holds the transcript lease without serving; the "
-                    "wake is %.1fs overdue and cannot fire until that process recovers "
-                    "or is stopped",
+                    "wedged: skipping %s — a runtime exists (pid %d) and has not "
+                    "reported for %.0fs, so it holds the transcript lease without "
+                    "answering; the wake is %.1fs overdue. Nothing here can recover "
+                    "it — 'lop stop --pid %d' asks it to stop and signals it if it "
+                    "will not answer, while 'lop stop --pid %d --force' "
+                    "signal-stops the process, discarding its in-flight turn, for "
+                    "an owner that is still beating but silent",
                     session_id,
                     pid,
                     age_s,
                     overdue_s,
+                    pid,
+                    pid,
                 )
             return False
         # Only the conditions we just cleared: reaching here means the session

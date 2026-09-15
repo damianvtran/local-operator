@@ -11,7 +11,16 @@ session.
 Publication is staged-write + rename so a scanner never reads a torn record,
 and every write rewrites the heartbeat, so "is this process alive" is two
 checks with no coordination: pid liveness (a SIGKILLed process leaves its
-record behind) and heartbeat freshness (a live pid whose owner wedged).
+record behind) and heartbeat freshness (a live pid whose owner has stopped
+reporting).
+
+**Freshness is EVIDENCE, not a verdict.** The beat is authored by the
+runtime's own event loop, so on the in-process kinds (``daemon``, ``exec``)
+a long turn or a starved scheduler stalls it while the process is
+demonstrably working — measured on this host at 105.8 s and 205.8 s against a
+45 s timeout. A stale beat therefore says the owner is not answering, and
+nothing more: not that it is dead, not that its workload stopped. The words
+on every surface follow that rule (:func:`classify`).
 
 **A dead record is evidence, not litter.** ``scan`` used to unlink a record as
 soon as its pid was proven gone, which is precisely the file the attention
@@ -42,7 +51,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
 from local_operator.paths import config_dir
 from local_operator.procstate import is_zombie
@@ -267,8 +276,10 @@ def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     **The zombie probe is opt-in via `check_zombie`**, because on macOS it
     costs a `ps` fork — measured at 3.9 ms, against ~1 µs for signal-0 — and
     `scan()` runs on every `lop` invocation. Paying that per live session on
-    startup would trade a rare stale row for a routine slowdown. `scan` asks
-    for it only where the answer changes what a user is told.
+    startup would trade a rare stale row for a routine slowdown.
+    :func:`classify` derives the policy (probe only where the answer changes
+    what a user is told) and `scan` delegates to it, so the rule has one home
+    for every reader.
 
     The probe itself lives in :func:`local_operator.procstate.is_zombie`, which
     is the one implementation the lease and the resume path share: a holder
@@ -288,6 +299,73 @@ def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     return not check_zombie or not is_zombie(pid)
 
 
+class Liveness(NamedTuple):
+    """One record's liveness verdict, plus the two facts behind it.
+
+    The FIELDS are as load-bearing as the state: a caller that wants the age
+    without re-deriving it (the sidebar tooltip, ``/info``'s row, the wake
+    supervisor's sentence) reads it here rather than deciding for itself what
+    a clock step or a future-dated stamp means.
+    """
+
+    state: Literal["live", "wedged", "stale"]
+    pid_alive: bool
+    heartbeat_age_s: float
+
+
+def classify(
+    record: DiscoveryRecord,
+    *,
+    now: float | None = None,
+    check_zombie: bool | None = None,
+) -> Liveness:
+    """The single owner of the ``live`` / ``wedged`` / ``stale`` vocabulary.
+
+    Two facts, no more: pid liveness and heartbeat freshness.
+
+    - ``stale`` — the pid is gone. Nothing is left to talk to.
+    - ``wedged`` — the pid exists and the owner has not written a beat inside
+      ``HEARTBEAT_TIMEOUT_S``. **DEGRADED-RESPONSIVENESS EVIDENCE, and that is
+      the whole of the claim.** The beat is authored by the runtime's own
+      event loop, so for the in-process kinds a long turn, a starved
+      scheduler or a loop parked in a blocking call produces exactly this
+      reading while the process executes work — measured on this host at
+      105.8 s and 205.8 s gaps against a 45 s timeout, with CPU time
+      advancing. It is therefore NOT proof the process is dead, NOT proof its
+      workload stopped, and NOT a diagnosis; every surface that renders it
+      says the owner is not ANSWERING rather than that it is broken (see
+      ``session.catalog.CatalogEntry.status`` and the wake supervisor's
+      sentence).
+    - ``live`` — the pid exists and the beat is fresh. The converse caveat
+      applies: it says the owner reported recently, and nothing about whether
+      its control socket is free this instant.
+
+    The word ``wedged`` is kept as the STATE because ~15 call sites and the
+    desktop catalogue's ``status.code`` branch on it, and a rename would
+    change a wire value to restate a sentence; the honesty lives in the words
+    a person reads, which is where it was missing.
+
+    ``check_zombie=None`` derives the probe policy rather than making every
+    caller restate it (a ``ps`` fork on macOS, so it is spent only where the
+    answer changes what a user is told): probe when the heartbeat has already
+    gone quiet, which is either an owner that stopped reporting or a process
+    that died without being reaped. Pass a bool to force it.
+    """
+    moment = time.time() if now is None else now
+    # Clamped: a stamp dated in the future is clock skew, never evidence
+    # against the process, so it can only make this register quieter.
+    age = max(0.0, moment - record.heartbeat_at)
+    zombie_probe = age > HEARTBEAT_INTERVAL_S * 1.5 if check_zombie is None else check_zombie
+    alive = pid_alive(record.pid, check_zombie=zombie_probe)
+    if not alive:
+        state: Literal["live", "wedged", "stale"] = "stale"
+    elif age > HEARTBEAT_TIMEOUT_S:
+        state = "wedged"
+    else:
+        state = "live"
+    return Liveness(state=state, pid_alive=alive, heartbeat_age_s=age)
+
+
 def scan(
     root: Path | None = None,
     dirname: str = RUN_DIRNAME,
@@ -297,12 +375,19 @@ def scan(
     ``wedged`` / ``stale``.
 
     - ``stale``: pid is gone — the record is moved aside (:func:`_reap_dead_record`).
-    - ``wedged``: pid alive but heartbeat older than the timeout — the owner
-      is stuck; the daemon shows it degraded and keeps the record.
+    - ``wedged``: pid alive but the owner has not reported for longer than
+      the timeout. The daemon keeps the record and shows it degraded; the
+      verdict's exact weight is :func:`classify`'s to state, and it is not a
+      claim that the process is dead.
     - ``live``: pid alive and heartbeating.
 
     Unparseable records are deleted, not moved: a torn file has no pid to key
     a sidecar on and nothing an "why did this die" reader could use.
+
+    It stays the one implementation of the state rule — the tuple shape is
+    deliberate, because ~15 call sites read it positionally and most want
+    only the state. A caller that also wants the AGE asks the same record's
+    :func:`classify` rather than widening this return type.
 
     ``parse`` is what makes the rule above usable by both namespaces without a
     second copy of it: the classification reads only ``pid`` and
@@ -330,20 +415,20 @@ def scan(
             except OSError:
                 pass
             continue
-        # The zombie probe costs a `ps` fork on macOS, so it is spent only on
-        # records whose heartbeat has already gone quiet: a healthy runtime
-        # beats every 15 s, so a gap means either a wedge or a process that
-        # died without being reaped. That is exactly the case that used to
-        # report `live` with 0B RSS for 45 s (round 3, U10), and it keeps the
-        # common path (every session, every `lop` invocation) fork-free.
-        quiet = now - record.heartbeat_at > HEARTBEAT_INTERVAL_S * 1.5
-        if not pid_alive(record.pid, check_zombie=quiet):
+        # The zombie probe is the CLASSIFIER's policy now, not this
+        # function's: it costs a `ps` fork on macOS, so it is spent only on
+        # records whose heartbeat has already gone quiet — a healthy runtime
+        # beats every 15 s, so a quiet stamp means either an owner that stopped
+        # reporting or a process that died without being reaped. That is exactly
+        # the case that used to report `live` with 0B RSS for 45 s (round 3,
+        # U10), and it keeps the common path (every session, every `lop`
+        # invocation) fork-free. The reaping stays HERE, because it is this
+        # function's contract with its callers rather than a fact about the
+        # record.
+        verdict = classify(record, now=now)
+        if not verdict.pid_alive:
             _reap_dead_record(directory, path, record.pid)
-            out.append((record, "stale"))
-        elif now - record.heartbeat_at > HEARTBEAT_TIMEOUT_S:
-            out.append((record, "wedged"))
-        else:
-            out.append((record, "live"))
+        out.append((record, verdict.state))
     return out
 
 

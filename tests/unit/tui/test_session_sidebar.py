@@ -1369,6 +1369,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     describes. Enumerating it here would assert a pairing no surface renders;
     the companion test drives the real render path instead.
     """
+    from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
@@ -1383,7 +1384,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     #: glyph a row drew is a contradiction the user would have to resolve.
     ALLOWED = {
         NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
-        WEDGED_MARKER: {"Not responding"},
+        WEDGED_MARKER: {WEDGED_STATUS},
         ATTACHED_MARKER: {"Open"},
         IDLE_MARKER: {"Ready"},
         WAKE_MARKER: {"Scheduled", "Stopped"},
@@ -1598,12 +1599,13 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
     """
     from textual.geometry import Region
 
+    from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
 
     #: Which words may accompany each glyph on an unseen row.
     ALLOWED = {
         "✓": {"Unseen completion"},
-        "✗": {"Unseen error", "Not responding"},
+        "✗": {"Unseen error", WEDGED_STATUS},
         "⊘": {"Unseen interruption"},
         "!": {"Approval needed", "Answer needed"},
     }
@@ -2591,3 +2593,78 @@ async def test_a_sidebar_row_names_the_rung_when_the_ladder_had_to_escalate():
             assert "⊘" in row, (rung, row)
             assert "✗" not in row, (rung, row)
             assert entry.status == words, (rung, entry.status)
+
+
+def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
+    """The sidebar's words for a stale beat: what was measured, and no more.
+
+    A stale beat is real evidence that the owner is not answering, so the row
+    must stay degraded — the reported fault was never that this state was
+    visible. What the beat cannot support is a verdict on the PROCESS: it is
+    written by the runtime's own event loop, so a long turn produces it on a
+    session that is demonstrably working (105.8 s and 205.8 s measured against
+    the 45 s timeout). "Not responding" asserted one anyway. This string is
+    also the desktop catalogue's ``status.label``, so it travels to the app
+    unchanged; the age is printed beside the state so the reader is given the
+    measurement the sentence is made of rather than a bare adjective.
+    """
+    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.tui.widgets.session_picker import WEDGED_MARKER, row_state_mark
+
+    row = SessionRow(
+        "q" * 12,
+        time.time(),
+        "quiet owner",
+        live_state="wedged",
+        heartbeat_age_s=243.0,
+    )
+    status = CatalogEntry(row).status
+    assert status == f"{WEDGED_STATUS} (last heartbeat 4m ago)"
+    assert "responding" not in status
+
+    # No measurement (a cold render, a hand-built row): the state survives and
+    # the number is absent rather than invented.
+    bare = SessionRow("q" * 12, time.time(), "quiet owner", live_state="wedged")
+    assert CatalogEntry(bare).status == WEDGED_STATUS
+
+    # And the words still pair with the glyph the row draws: the whole point of
+    # the wording change is that this state stays distinguishable from ordinary
+    # progress, not that it is softened out of sight.
+    assert row_state_mark(row, 0)[0] == WEDGED_MARKER
+
+
+def test_decorate_rows_carries_the_age_the_registry_measured(tmp_path) -> None:
+    """The tooltip's number comes from ``registry.classify``, not a second
+    subtraction in the catalog.
+
+    Two implementations of one quantity are free to disagree about a clock step
+    or a future-dated stamp, and the surface that would be believed is the one
+    in front of the user. The classifier is therefore the only place the age is
+    computed, and this asserts the value reaches the row the sidebar paints.
+    """
+    import json
+
+    from local_operator.session.catalog import decorate_rows
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id="quiet0000001",
+        conversation_name="quiet owner",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+    )
+    record.heartbeat_at = time.time() - 243
+    directory = registry.run_dir(tmp_path)
+    # Written directly: ``publish`` stamps a fresh heartbeat by design, and a
+    # quiet owner is exactly one whose beat stopped arriving.
+    (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()))
+
+    rows = decorate_rows(tmp_path, [SessionRow("quiet0000001", time.time(), "quiet owner")])
+    assert [row.live_state for row in rows] == ["wedged"]
+    age = rows[0].heartbeat_age_s
+    assert age is not None and 242 <= age <= 246, age

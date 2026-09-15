@@ -9,6 +9,7 @@ caught once for both callers.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import pytest
@@ -37,6 +38,11 @@ class _Record:
         self.control_port = 1
         self.control_key = "k"
         self.started = started
+        # The resolver refuses a record that has stopped reporting, and it words
+        # that refusal with the measured age, so the double carries the stamp
+        # every real record has. Four minutes is past ``HEARTBEAT_TIMEOUT_S``
+        # (45 s) — the state a plain send refuses.
+        self.heartbeat_at = time.time() - 240
 
 
 def _scan(records: "list[tuple[Any, str]]"):
@@ -148,7 +154,7 @@ def test_an_all_digit_target_resolves_as_a_pid(fake_scan) -> None:
     # A wedged pid is reported as such through the pid path, not as "no match".
     fake_scan([(a, "wedged")])
     record, _c, error = peer_send.resolve_peer_target(target="48213")
-    assert record is None and "wedged" in error
+    assert record is None and "has not reported for 4m" in error
     record, _c, error = peer_send.resolve_peer_target(target="48213", include_wedged=True)
     assert record is a
 
@@ -199,7 +205,11 @@ def test_only_live_records_are_eligible(fake_scan) -> None:
     fake_scan([(wedged, "wedged")])
     record, _c, error = peer_send.resolve_peer_target(target="slow")
     assert record is None
-    assert "not responding" in error
+    # The measured age, and no promise about when the silence ends: the old
+    # sentence said "not responding ... try again shortly", which invented both
+    # a cause and a timetable (see ``_not_dialable``).
+    assert "has not reported for 4m" in error, error
+    assert "shortly" not in error, error
 
 
 def test_a_broadcast_substring_skips_an_unstarted_session(fake_scan) -> None:
