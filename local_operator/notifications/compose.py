@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from local_operator.tui.notify import (
     APP_NAME,
@@ -136,6 +136,87 @@ def gate_body(kind: str, gate_title: str, gate_detail: str) -> str:
     if subject and gate_title and not subject.lower().startswith(gate_title.lower()):
         subject = f"{gate_title}: {subject}".strip().rstrip(":").strip()
     return subject or BODIES.get(kind, BODY_COMPLETE)
+
+
+#: ``focus_policy`` values a ``notification`` frame may carry.
+#:
+#: ``when_unfocused`` is "raise this unless the user is already looking at the
+#: app". It is the right policy for a frame sent down a session's OWN stream:
+#: that stream exists because the app is displaying that session, so the card is
+#: on screen already and a banner on top of it is pure interruption.
+#:
+#: ``always`` is the policy for the machine-wide feed, and it is the fix for a
+#: defect that made the whole feature silent. The feed's frames are about
+#: sessions the app is NOT displaying, and the Electron notifier suppresses
+#: ``when_unfocused`` whenever ANY window is focused — so reusing the bridge's
+#: payload verbatim meant the commonest state of all (user in the app on
+#: session A while B finishes) announced nothing, on any surface, at all. The
+#: policy is therefore DERIVED PER COMPLETION from what the app is displaying
+#: (see ``server/utils/desktop_feed.py``), not copied from the bridge.
+FOCUS_WHEN_UNFOCUSED = "when_unfocused"
+FOCUS_ALWAYS = "always"
+
+
+def notification_payload(
+    kind: NotificationKind,
+    *,
+    session_dir: Path | None,
+    token: str,
+    session_id: str,
+    session_name: str = "",
+    focus_policy: str = FOCUS_WHEN_UNFOCUSED,
+) -> dict[str, Any]:
+    """The ``notification`` frame's payload, built in ONE place.
+
+    TWO TRANSPORTS SHIP THIS PAYLOAD — a session bridge's own SSE stream and
+    the machine-wide feed — and they must agree BYTE FOR BYTE. That is not
+    tidiness: ``dedupe_key`` is what makes the desktop collapse the pair into
+    one banner, and it is ``kind:session:token`` built from the durable
+    completion token. Two hand-maintained copies of this dict is one field away
+    from two banners for one completion, which is the single failure the whole
+    arbitration exists to prevent. So the builder is shared rather than
+    mirrored, and the only parameter the two callers may differ on is
+    ``focus_policy`` — a ROUTING field, per :data:`FOCUS_ALWAYS`.
+
+    The composer is called THROUGH THE PACKAGE (``notifications.compose``),
+    not through this module's own global, and that indirection is load-bearing.
+    The public entry point is what a wrapper or a test patches, and the failure
+    contract T-B13 pins is stated against it: a composer that raises costs the
+    BANNER, never the receipt sync the frame rides on
+    (``test_a_compose_failure_costs_the_banner_not_the_attention_frame``). A
+    module-local call routes around that patch, so the guard stops being
+    exercised while the suite stays green — the one shape of bug this project
+    treats as worse than a failing test.
+
+    ``token`` is the durable completion token, never a bridge sequence:
+    ``acquire()`` mints a new epoch and resets its sequence after a detached
+    interval, so a seq-keyed dedupe re-toasts the same completion on every
+    reconnect. The key's prefix is the frame's own kind, so a dedupe-map dump
+    cannot read an error banner as ``complete:``.
+    """
+    # Imported here rather than at module scope: the package imports THIS
+    # module, so a top-level `from local_operator import notifications` would
+    # be a cycle.
+    from local_operator import notifications
+
+    composed = notifications.compose(kind, session_dir=session_dir, session_name=session_name)
+    return {
+        "contract": NOTIFICATION_CONTRACT_VERSION,
+        "kind": composed.kind,
+        "title": composed.title,
+        "status": composed.status,
+        "body": composed.body,
+        "body_is_snippet": composed.body_is_snippet,
+        # Additive since the first draft of this frame; a renderer that does
+        # not know the field simply shows the body, which is already the right
+        # thing to do with it.
+        "body_is_failure": composed.body_is_failure,
+        "title_is_session_name": composed.title_is_session_name,
+        "dedupe_key": f"{composed.kind}:{session_id}:{token}",
+        "completion_token": token,
+        "session_name": composed.title if composed.title_is_session_name else None,
+        "focus_policy": focus_policy,
+    }
 
 
 def compose(

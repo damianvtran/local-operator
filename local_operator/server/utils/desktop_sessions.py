@@ -1298,10 +1298,12 @@ class DesktopSessionBridge:
         ):
             return
         try:
-            from local_operator.notifications import (
-                NOTIFICATION_CONTRACT_VERSION,
-                compose,
-            )
+            # The payload builder calls the PUBLIC composer
+            # (`notifications.compose`), which is the seam T-B13 patches, so a
+            # composer that raises is caught here and costs the BANNER — never
+            # the attention frame published above, which is the sync this bridge
+            # exists for.
+            from local_operator.notifications import notification_payload
 
             # The LIVE name wins over the sidecar: a rename reaches frontend
             # state before it reaches `title.json`, and `compose` falls back to
@@ -1314,41 +1316,25 @@ class DesktopSessionBridge:
             # `compose` reads up to 128 KiB for the title and 64 KB for the
             # preview, and `refresh_attention` runs on the event loop. Off-loop
             # for the same reason the store read above is.
-            composed = await asyncio.to_thread(
-                compose,
+            #
+            # THE PAYLOAD IS BUILT BY THE SHARED BUILDER, not inline. The feed
+            # ships the same payload for the same completion and the desktop
+            # collapses the pair on `dedupe_key`; two dict literals would be one
+            # field away from two banners for one turn. The bridge takes the
+            # default `focus_policy` (`when_unfocused`) because this stream
+            # exists only while an app is DISPLAYING the session — the card is
+            # on screen already, so a banner on top of it is the interruption
+            # the policy exists to prevent. The feed derives `always` instead:
+            # its frames are about sessions nobody is looking at.
+            payload = await asyncio.to_thread(
+                notification_payload,
                 state["kind"],
                 session_dir=self.root / "sessions" / self.session_id,
+                token=token,
+                session_id=self.session_id,
                 session_name=session_name,
             )
-            self.publish(
-                "notification",
-                {
-                    "contract": NOTIFICATION_CONTRACT_VERSION,
-                    "kind": composed.kind,
-                    "title": composed.title,
-                    "status": composed.status,
-                    "body": composed.body,
-                    "body_is_snippet": composed.body_is_snippet,
-                    # Additive since the first draft of this frame; a renderer
-                    # that does not know the field simply shows the body, which
-                    # is already the right thing to do with it.
-                    "body_is_failure": composed.body_is_failure,
-                    "title_is_session_name": composed.title_is_session_name,
-                    # Keyed on the DURABLE completion token rather than on this
-                    # bridge's sequence: `acquire()` mints a new epoch and
-                    # resets `sequence` to 0 after a detached interval, so a
-                    # seq-keyed dedupe re-toasts the same completion on every
-                    # reconnect. The prefix is the frame's own kind (round 1,
-                    # n1): a token has exactly one kind, so it costs nothing,
-                    # and a store or dedupe-map dump no longer reads as an
-                    # error banner mislabelled `complete:`.
-                    "dedupe_key": f"{composed.kind}:{self.session_id}:{token}",
-                    "completion_token": token,
-                    "session_name": composed.title if composed.title_is_session_name else None,
-                    "focus_policy": "when_unfocused",
-                },
-                replay=False,
-            )
+            self.publish("notification", payload, replay=False)
         except Exception:  # noqa: BLE001 — chrome must not cost the attention poll
             logger.debug("notification compose failed for %s", self.session_id, exc_info=True)
 
@@ -2447,6 +2433,40 @@ class DesktopSessions:
             )
 
         return await asyncio.to_thread(acknowledge)
+
+    def bridged_notify_sessions(self) -> set[str]:
+        """The FEED's key domain for sessions whose bridge will announce them.
+
+        REVIEW ROUND 1, R10. The feed's ``bridged`` hook compares against
+        ``session/<id>`` keys, and the route used to hand it ``set(pool.bridges)``
+        — bare session ids. The two never intersected, so the exclusion was
+        silently dead and every bridged session got a second, machine-wide
+        banner composed for it. Returning the prefixed form from HERE rather
+        than letting the feed normalise is deliberate: the pool is the thing that
+        knows its own keys, and a conversion at the consumer would have to be
+        repeated for every future consumer that gets it wrong the same way.
+
+        A BRIDGE ALONE IS NOT ENOUGH, and that is the second half of the finding.
+        A pooled bridge can be retained after its last subscriber left — that is
+        what ``BRIDGE_COUNT`` and ``bridge.users`` exist for — and such a bridge
+        publishes to nobody, so excluding it would open a background-notification
+        HOLE where the prefix fix had just closed a duplicate-banner one. The
+        predicate is therefore a LIVE, non-overflowing subscriber that can
+        actually notify: the same filter ``_live_leases`` applies, plus
+        ``can_notify``. Deliberately NOT ``_live_leases`` itself — that one
+        requires ``watch_lock`` and is read under it, while this runs from the
+        feed's poller, which must never take a lock the runtime's watch path can
+        hold.
+        """
+        now = time.monotonic()
+        return {
+            f"session/{session_id}"
+            for session_id, bridge in list(self.bridges.items())
+            if any(
+                not sub.overflow and sub.expires > now and sub.can_notify
+                for sub in list(bridge.subscribers.values())
+            )
+        }
 
     async def claim_notification(self, session_id: str, token: str) -> bool:
         """Claim the right to TOAST ``token``; exactly one surface ever wins.

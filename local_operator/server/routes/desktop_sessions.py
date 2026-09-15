@@ -37,6 +37,7 @@ from local_operator.server.models.desktop_sessions import (
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
+    PresenceReceipt,
     SessionList,
     SessionSearch,
     SessionSnapshot,
@@ -46,12 +47,14 @@ from local_operator.server.models.desktop_sessions import (
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.retire import RETIRING_STATE_ATTR, DaemonRetiring
 from local_operator.server.utils.desktop_commands import OWNER_COMMANDS, native_action
+from local_operator.server.utils.desktop_feed import DesktopFeed
 from local_operator.server.utils.desktop_receipts import (
     DesktopReceipts,
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import (
     CHILD_PAGE_LIMIT,
+    SUBSCRIBER_COUNT,
     DesktopSessionBridge,
     DesktopSessions,
     LegacySubscriberDuringMove,
@@ -67,6 +70,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.session.session_search import search_store
 from local_operator.slash_commands import slash_command_for
 
@@ -116,6 +120,54 @@ class Notified(Input):
     # The two routes are otherwise unrelated — this one claims the right to
     # notify and NEVER acknowledges a read.
     completion_token: RequestID
+
+
+class PresenceWindow(Input):
+    """The desktop window's REAL state, as reported by its main process.
+
+    NOT the renderer's ``document.visibilityState``/``hasFocus()``. The UI
+    already documents that pair as unsound (a throttled window the user is
+    looking at reports ``hidden``; a window behind another app reports
+    ``visible``), and the backend cannot re-derive the truth from anything it
+    holds. Electron main owns the window, so main reports it here and the
+    backend believes it — which is the only judgement this field carries.
+
+    ``exists`` is separate from ``visible`` on purpose: a macOS app with every
+    window closed is alive in the dock and CAN raise a banner, but it is
+    displaying nothing, so a `session_id` it reports must not be read as "that
+    conversation is on screen".
+    """
+
+    exists: StrictBool = False
+    focused: StrictBool = False
+    visible: StrictBool = False
+    minimized: StrictBool = False
+
+
+class PresenceBeat(Input):
+    """One desktop delivery-presence heartbeat.
+
+    ``subscription_id`` is the id ``GET /v1/desktop/events`` handed the client
+    in its ``open`` frame. The lease is held AGAINST that live SSE socket, which
+    is what makes ``can_notify`` mean "whoever holds this can actually deliver"
+    rather than "an app once said yes" — a dropped socket revokes the claim.
+
+    ``can_notify_kinds`` is REQUIRED to be honest about what the app can
+    deliver. The feed carries completions only, so the gate path keeps its
+    existing per-session lease and its existing toast; an app that claimed every
+    kind here would silence a background session's parked question with nothing
+    to replace it.
+    """
+
+    subscription_id: str = Field(min_length=1, max_length=64)
+    can_notify: StrictBool
+    can_notify_kinds: list[str] = Field(default_factory=list, max_length=8)
+    #: The conversation the app is showing, or "" for none. Constrained to the
+    #: 12-hex session-id shape when present so a malformed id is a 422 rather
+    #: than a value that silently matches no session and therefore reads as
+    #: "nothing is on screen".
+    session_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{12}$")
+    window: PresenceWindow = Field(default_factory=PresenceWindow)
 
 
 class SessionTarget(Input):
@@ -1469,3 +1521,107 @@ async def events(
         },
         background=BackgroundTask(release_once),
     )
+
+
+def feed(request: Request) -> DesktopFeed:
+    """The process's ONE desktop feed, created lazily beside the session pool.
+
+    A process singleton rather than per-request state for the same reason the
+    daemon registry is: the whole point of this channel is that a completion in
+    a session nobody has open is still announced, and a per-connection poller
+    would make the cost of listening scale with the number of listeners. It also
+    means the delivery lease has exactly one owner to attribute it to.
+    """
+    value = getattr(request.app.state, "desktop_feed", None)
+    if value is None:
+        pool = host(request)
+        value = DesktopFeed(
+            request.app.state.config_manager.config_dir,
+            # Read-only and by reference: the feed needs to know which sessions
+            # already have a stream so it never races one, and it must never
+            # ACQUIRE anything of its own — see the module docstring. The hook
+            # returns the FEED's key domain (``session/<id>``) and only for
+            # bridges that will actually announce — see
+            # ``DesktopSessions.bridged_notify_sessions``.
+            bridged=pool.bridged_notify_sessions,
+        )
+        request.app.state.desktop_feed = value
+    return value
+
+
+@router.get("/v1/desktop/events")
+async def desktop_events(request: Request):
+    """The machine-wide event feed: attention, catalogue and notifications.
+
+    NO BRIDGE IS ACQUIRED AND NO RUNTIME IS SPAWNED. That is the property this
+    route exists for — watching every session on the machine must not attach
+    every session on the machine — and it is asserted directly in
+    ``tests/unit/server/test_desktop_feed.py``.
+
+    Unlike the per-session stream there is nothing to release eagerly before
+    headers either: the subscriber table has its own ceiling and an unknown
+    session cannot be asked for. The release is still wired to BOTH the
+    generator's teardown and the response's background task, because a client
+    that disconnects between headers and body would otherwise leak a subscriber
+    and keep the process's poller alive for its lifetime.
+    """
+    engine = feed(request)
+    if len(engine.subscribers) >= SUBSCRIBER_COUNT:
+        raise HTTPException(503, "Too many desktop feed subscribers")
+    subscription = engine.subscribe()
+    released = False
+
+    async def release_once() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        engine.unsubscribe(subscription)
+
+    async def stream():
+        try:
+            async for frame in engine.events(subscription):
+                yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+        finally:
+            await release_once()
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+        background=BackgroundTask(release_once),
+    )
+
+
+@router.post("/v1/desktop/presence", response_model=CRUDResponse[PresenceReceipt])
+async def desktop_presence(
+    body: PresenceBeat,
+    request: Request,
+):
+    """Record "a desktop app is here and can attempt a banner", and where.
+
+    A ROUTE RATHER THAN A FILE WRITTEN BY THE APP. The app may be paired to a
+    backend on another host, so it cannot write to this machine's filesystem;
+    the server aggregates what its live subscriptions report and materialises
+    that where every sibling process can read it. Local and remote apps then
+    behave identically, which is the whole reason the presence is server-side.
+
+    The lease is held against the SUBSCRIPTION, so an id the server does not
+    know is refused rather than believed: a claim to deliver for a socket that
+    does not exist is exactly the "presence that cannot deliver" this mechanism
+    must not manufacture.
+    """
+    engine = feed(request)
+    if body.subscription_id not in engine.subscribers:
+        raise HTTPException(404, "Unknown desktop feed subscription")
+    engine.presence.update(
+        body.subscription_id,
+        can_notify=bool(body.can_notify),
+        can_notify_kinds=list(body.can_notify_kinds),
+        session_id=body.session_id,
+        window=body.window.model_dump(),
+    )
+    return reply(PresenceReceipt(lease_seconds=int(PRESENCE_TTL_S)))

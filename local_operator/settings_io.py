@@ -494,6 +494,17 @@ SECTIONS: tuple[Section, ...] = (
         "Server endpoints and exact-model metadata. Use /login to connect; "
         "reselect with /model saved to apply model changes.",
     ),
+    # LIVE: the click handler is a FRESH PROCESS every time it runs
+    # (``lop resume-click`` is spawned by the notification), so it reads config
+    # at click time and an edit lands on the very next click. Nothing is
+    # threaded through a running session, which is why this cannot be
+    # NEW_SESSIONS like the knobs that gate a session's construction.
+    Section(
+        "desktop",
+        "Desktop app",
+        Scope.LIVE,
+        "Where a notification click sends you when the desktop app is not running.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -2124,6 +2135,44 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.READONLY,
         default=50,
         help="Deprecated. Superseded by the compaction engine.",
+    ),
+    Setting(
+        key="desktop.launch_command",
+        path=("desktop", "launch_command"),
+        section="desktop",
+        label="launch command",
+        # TEXT, NOT LIST, and the reason is the separator rather than the type.
+        # ``Kind.LIST`` is a COMMA-SEPARATED token list (``web_search.providers``
+        # and the OpenRouter host slugs), and a comma is a legal character in an
+        # argv word — a path, a title, an argument. Storing argv in a
+        # comma-delimited field would therefore corrupt a perfectly valid
+        # command line silently, at click time, on the one path a user has no
+        # other way to reach. The string is split with ``shlex`` by the reader,
+        # which is the same grammar the user would type into a shell.
+        #
+        # ``{session}`` is substituted rather than appended, so an install whose
+        # launcher wants the id somewhere other than last can say so without a
+        # second setting.
+        kind=Kind.TEXT,
+        # RESTATED, not imported from the reader, matching the `tui.theme`
+        # precedent above: this module is loaded by every CLI invocation and by
+        # the TUI, and reaching into `tui.resume_click` from here would be an
+        # import edge in the wrong direction for one empty string. The
+        # divergence that restating invites is guarded by name:
+        # `tests/unit/test_settings_io.py::_consumer_defaults` maps this key to
+        # `resume_click.DESKTOP_LAUNCH_COMMAND_DEFAULT`, and
+        # `test_every_default_matches_its_consumer` fails if the two part ways.
+        default="",
+        help=(
+            "Empty = discover the app (the packaged bundle, then the npm bin). "
+            "Otherwise the command to launch it, with {session} where the "
+            "session id goes, e.g. 'local-operator-ui --open-session {session}'."
+        ),
+        placeholder="local-operator-ui --open-session {session}",
+        # Empty is the DEFAULT that must not be disturbed, and it has a real
+        # meaning here ("discover it for me"), so it clears the key rather than
+        # storing "".
+        empty_unsets=True,
     ),
 )
 

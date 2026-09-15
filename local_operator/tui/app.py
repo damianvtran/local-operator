@@ -713,6 +713,43 @@ _BAND_SETTLE_PASSES = 3
 #: deliberately not half-built here.
 _BACKGROUND_NOTIFY_MAX_PER_TICK = 3
 
+
+def _announceable_kind(entry: CatalogEntry) -> str:
+    """The notification kind a catalog row is announced under.
+
+    Extracted so the SKIP rule below and the deliverer cannot disagree about
+    which kind a row carries: an unknown kind falls back to ``complete`` in
+    both, and a future kind is announced under the house sentence rather than
+    dropped.
+    """
+    from local_operator.tui.notify import CONTEXTS
+
+    return entry.completion_kind if entry.completion_kind in CONTEXTS else "complete"
+
+
+def _desktop_owns_completion(directory: Path, entry: CatalogEntry) -> bool:
+    """Whether a connected desktop app will raise this row's banner itself.
+
+    RUNG 2 ABOVE RUNG 3 (design §4.1). A desktop app holding the machine-wide
+    feed composes every background completion, so a TUI that also announced it
+    would be the duplicate one rung down — and on a machine with both apps the
+    winner would otherwise be whichever polls faster.
+
+    PER ROW, NOT ONCE AT THE TOP OF THE SCAN, because the presence is narrowed
+    by kind: the feed carries completions only, so an ``interrupted`` row —
+    which the desktop never banners — must still be announced here. The gate
+    path is untouched as well: a parked ``ask``/``approval`` arrives as
+    ``entry.row.pending`` and is already skipped above, and its toast keeps the
+    per-session lease it has always used.
+
+    Reads the machine-wide presence through its 2 s cache, so a scan with many
+    rows pays one filesystem read, not one per row.
+    """
+    from local_operator.session.runtime.presence import desktop_delivery_present
+
+    return desktop_delivery_present(directory, _announceable_kind(entry))
+
+
 #: Longest gap, in observer ticks (~1 s each), between two retries of a
 #: completion whose delivery failed. The retry interval starts at one tick and
 #: DOUBLES after every barren attempt until it reaches this.
@@ -22171,7 +22208,7 @@ class OperatorApp(App[None]):
         # read once on a lock screen with nothing to check it against. Note the
         # sidebar's own `CatalogEntry.state_description` keeps the two distinct
         # as well — it is only the GLYPH that folds.
-        kind = entry.completion_kind if entry.completion_kind in CONTEXTS else "complete"
+        kind = _announceable_kind(entry)
         surface = cmux_surface_id()
         backend = "cmux" if surface is not None else "detached"
         store = AttentionStore(config_dir() / "attention.db")
@@ -22358,11 +22395,21 @@ class OperatorApp(App[None]):
                     or entry.row.pending
                     or entry.id == current
                     or entry.row.live_state not in _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES
+                    or _desktop_owns_completion(directory, entry)
                 ):
                     # A pending row is a GATE, not a finished turn: the runtime
                     # already announces those itself (`_announce_pending`), and
                     # a second toast for one parked question is the duplicate
                     # that routing was built to avoid.
+                    #
+                    # `_desktop_owns_completion` is RUNG 2 ABOVE RUNG 3: a
+                    # connected desktop app composes this row's banner from the
+                    # machine-wide feed, so announcing it here as well is the
+                    # same duplicate one rung down. It is checked per ROW rather
+                    # than once at the top of the scan because the presence is
+                    # narrowed by kind — the feed carries completions only, so
+                    # an `interrupted` row, which the desktop never banners,
+                    # must still be announced here.
                     #
                     # The `live_state` test is the SAME rule as the
                     # `entry.id == current` skip beside it, applied to a window

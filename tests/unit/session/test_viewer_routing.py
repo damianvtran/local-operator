@@ -36,6 +36,8 @@ from local_operator.session.runtime.viewer_server import (
     ViewerServer,
 )
 from local_operator.session.runtime.viewers import (
+    DESKTOP_SURFACE,
+    TUI_SURFACE,
     VIEWER_HEARTBEAT_TIMEOUT_S,
     ViewerRecord,
     publish_viewer,
@@ -724,3 +726,177 @@ def test_a_bad_key_is_refused_without_a_reply(viewer_root):
         assert asyncio.run(probe()) == b"", "an authenticated reply must never follow a bad key"
     finally:
         server.close()
+
+
+def test_a_reachable_desktop_takes_the_click_ahead_of_any_tui():
+    """REVIEW ROUND 1, R9: the operator asked for UI-FIRST, and it was replaced.
+
+    The previous order put an already-displaying viewer first, then recency, and
+    left the desktop preference as a TIE-BREAK between two viewers the user had
+    never focused — so a TUI focused once, ever, outranked it for good. Nothing
+    in the request authorized that: the requested destination is the desktop UI,
+    and a click that switches a terminal instead is decided by incidental focus
+    history. The tests below are the ones that used to pin the recency-first
+    order; they are changed WITH the behaviour rather than left to fail.
+    """
+    desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="x",
+        focused_at=100.0,
+    )
+    focused_tui = ViewerRecord(
+        pid=2, surface="tui", control_port=2, control_key="b", current_session="y", focused_at=500.0
+    )
+    assert choose_viewer([desktop, focused_tui], "wanted") is desktop
+
+    # A TUI that is ALREADY displaying the target does not outrank the UI
+    # either: that is the same recency-first substitution, one rung lower, and
+    # the exact shape the reviewer reproduced as "the same user intent can
+    # switch a terminal instead of opening the preferred app".
+    showing_tui = ViewerRecord(
+        pid=3,
+        surface="tui",
+        control_port=3,
+        control_key="d",
+        current_session="wanted",
+        focused_at=900.0,
+    )
+    assert choose_viewer([desktop, showing_tui], "wanted") is desktop
+
+    # A WINDOWLESS desktop is still the UI, and its recreation path is what the
+    # operator's "app is alive, its window is closed" click needs — so it is a
+    # rung-1 candidate even though it cannot be "already displaying" anything.
+    windowless = ViewerRecord(
+        pid=4,
+        surface="desktop",
+        control_port=4,
+        control_key="e",
+        current_session="wanted",
+        has_window=False,
+    )
+    assert choose_viewer([windowless, focused_tui], "wanted") is windowless
+
+    # WITHIN the chosen surface the cheap orders are unchanged, which is what
+    # keeps a click on a desktop from being decided by pid: an already-displaying
+    # desktop is a no-op switch, then recency, then pid is a stable last tie.
+    other_desktop = ViewerRecord(
+        pid=5,
+        surface="desktop",
+        control_port=5,
+        control_key="f",
+        current_session="z",
+        focused_at=900.0,
+    )
+    displaying_desktop = ViewerRecord(
+        pid=6,
+        surface="desktop",
+        control_port=6,
+        control_key="g",
+        current_session="wanted",
+    )
+    assert choose_viewer([other_desktop, displaying_desktop], "wanted") is displaying_desktop
+    assert choose_viewer([desktop, other_desktop], "wanted") is other_desktop
+
+    # ...and pid still breaks a tie between two EQUALLY recent desktops (both
+    # never focused), so a repeated click is stable rather than alternating.
+    idle_desktop = ViewerRecord(
+        pid=9, surface="desktop", control_port=9, control_key="c", current_session="x"
+    )
+    second_desktop = ViewerRecord(
+        pid=7, surface="desktop", control_port=7, control_key="h", current_session="x"
+    )
+    assert choose_viewer([idle_desktop, second_desktop], "wanted") is second_desktop
+    assert choose_viewer([second_desktop, idle_desktop], "wanted") is second_desktop
+
+
+def test_a_desktop_that_cannot_switch_is_not_a_first_rung():
+    """Rung 1 requires ``can_switch``: a desktop that cannot be told to display
+    the session cannot take the click, and pretending otherwise would strand it
+    instead of falling through to the TUI that can."""
+    mute_desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="x",
+        can_switch=False,
+    )
+    tui = ViewerRecord(pid=2, surface="tui", control_port=2, control_key="b", current_session="y")
+    assert choose_viewer([mute_desktop, tui], "wanted") is tui
+    # On its own it is not a candidate at all, which is the caller's signal to
+    # fall through to discovery rather than to wait on a dead window.
+    assert choose_viewer([mute_desktop], "wanted") is None
+
+
+def test_the_surface_narrowing_asks_about_one_surface_at_a_time():
+    """The click ladder tries the UI, then the installed app, then whatever is
+    left — so it has to be able to ask "is there a desktop?" and "is there a
+    TUI?" as separate questions rather than inferring one from the other."""
+    desktop = ViewerRecord(
+        pid=1, surface="desktop", control_port=1, control_key="a", current_session="x"
+    )
+    tui = ViewerRecord(pid=2, surface="tui", control_port=2, control_key="b", current_session="y")
+
+    assert choose_viewer([desktop, tui], "wanted", surface=DESKTOP_SURFACE) is desktop
+    assert choose_viewer([desktop, tui], "wanted", surface=TUI_SURFACE) is tui
+    # No mismatch ever comes back: a surface question with no viewer on that
+    # surface is an absent answer, not the other surface's.
+    assert choose_viewer([tui], "wanted", surface=DESKTOP_SURFACE) is None
+    assert choose_viewer([desktop], "wanted", surface=TUI_SURFACE) is None
+    # Narrowing is a FILTER, not a preference: it does not change what the
+    # unfiltered call answers.
+    assert choose_viewer([desktop, tui], "wanted") is desktop
+
+
+def test_a_windowless_viewer_that_names_the_session_is_not_already_displaying():
+    """DESIGN REVIEW m2, the routing half.
+
+    Closing the last window on macOS leaves the app alive in the dock, and its
+    record may still name the conversation it was showing. Reading that id as
+    "already displayed" would answer the click with a no-op — nothing on screen,
+    no window, no switch — which is the reported defect rather than its fix.
+    """
+    windowless = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=False,
+    )
+    assert needs_switch(windowless, "wanted") is True
+    # It is still a CANDIDATE (its app can be told to recreate the window).
+    assert choose_viewer([windowless], "wanted") is windowless
+
+    windowed = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=True,
+    )
+    assert needs_switch(windowed, "wanted") is False
+
+
+def test_a_record_without_the_window_field_reads_as_having_one():
+    """Additive on the wire: an older build's record must keep working.
+
+    Every TUI is windowed, so the default has to be the permissive one — a
+    default of ``False`` would make every existing record's `current_session`
+    worthless and turn a click that used to be a no-op into a /resume.
+    """
+    record = ViewerRecord.from_json(
+        {
+            "pid": 1,
+            "surface": "tui",
+            "control_port": 1,
+            "control_key": "a",
+            "current_session": "s",
+        }
+    )
+    assert record.has_window is True
+    assert needs_switch(record, "s") is False

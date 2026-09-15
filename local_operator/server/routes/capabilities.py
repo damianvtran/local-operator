@@ -157,6 +157,29 @@ async def capabilities():
                 # renderer that does not see it shows the backend update action
                 # instead of calling them.
                 "diagnostics": 1,
+                # The machine-wide desktop event feed and its delivery-presence
+                # lease. TWO keys rather than one, because each has a consumer
+                # that can be absent independently:
+                #
+                # * `desktop_feed` gates `GET /v1/desktop/events` AND
+                #   `POST /v1/desktop/presence`. Absent ⇒ the app opens no
+                #   feed, beats no presence, and keeps its 5 s catalogue poll
+                #   and its per-session notification path verbatim.
+                # * `desktop_presence` gates the backend's READ of the
+                #   presence: with it absent the backend composes no
+                #   machine-wide expectation, so nothing is suppressed on the
+                #   strength of a lease nobody publishes. An app that may not
+                #   publish a viewer record should also not claim presence,
+                #   which is why the two travel together from the client's
+                #   side.
+                #
+                # NEITHER is a bump of `notification_contract`, which stays 1:
+                # the `notification` payload is unchanged (modulo the derived
+                # `focus_policy` routing field, which the client already
+                # special-cases) and a renderer that ignores the new frame
+                # types keeps working.
+                "desktop_feed": 1,
+                "desktop_presence": 1,
             },
         },
     )
