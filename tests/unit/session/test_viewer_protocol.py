@@ -1186,9 +1186,14 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # why the undeclared-member check above does not fire for it — the two
     # figures answer different questions and this one counts the facade's extra
     # surface either way.
-    assert len(viewer_only) == 58, (
+    #
+    # 58 → 59 is the same rung's second read. ``owner_reachable`` is the "is there
+    # a LIVE owner to dial" half of ``is_cold``, split out because that property's
+    # third disjunct is a mid-resync state: an owner ``Session`` has no client at
+    # all, so the question does not exist for it.
+    assert len(viewer_only) == 59, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 58, and the aggregate floor is set at 40 against that number. A "
+        "says 59, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

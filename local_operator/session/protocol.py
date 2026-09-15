@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 121 public members and a POSITIVE
+    than stylistic. This protocol carries 122 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -607,7 +607,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     replacement is published through, 120 once the drain notice's
     ``set_drain_callback`` joined the viewer contract, 121 once the desktop's
     interrupt rung needed ``interrupt`` to stop a turn without ending the
-    session), so recompute it rather
+    session, 122 once the same rung needed ``owner_reachable`` so a mid-resync
+    viewer could not be read as an absent owner), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1252,6 +1253,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         Not the kill switch (:meth:`request_stop` ends the session and its
         process); this ends one turn and leaves both running.
+        """
+        ...
+
+    @property
+    def owner_reachable(self) -> bool:
+        """Whether a live owner exists to ask — reachability, not sync state.
+
+        Distinct from :attr:`is_cold`, whose third disjunct (``not
+        _ready_for_events``) is a RESYNC state that is true of a connected,
+        serving session mid-refresh; a caller deciding whether to dial must not
+        read a mid-resync viewer as an absent owner. Declared here because the
+        desktop interrupt route reads it off a duck-typed bound facade to choose
+        between an ``idle`` answer and dialling the owner.
         """
         ...
 
