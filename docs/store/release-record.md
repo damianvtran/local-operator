@@ -148,7 +148,7 @@ That defect was fixed on the RUNTIME side (an older extension is driven, not
 refused), and the advisory only reads the version the extension reports — so the
 live 0.1.10 build benefits without any upload at all.
 
-## v0.1.12 — submitted 2026-09-13, pending review as of 2026-09-13
+## v0.1.12 — submitted 2026-09-13, published 2026-09-14
 
 | Field | Value |
 | --- | --- |
@@ -158,13 +158,13 @@ live 0.1.10 build benefits without any upload at all.
 | Source commit | `7c78b6eda` (merge commit of PR #1026 on `main`) |
 | `extension/` tree hash | `3069532b9f2ac82fb6603f2ec5e2f453639ac008` (the deterministic input pin — see the audit note above) |
 | Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.10, v0.1.8 and earlier* |
-| Artifact size | 13 files, no source maps (size as reported by the store listing once published) |
+| Artifact size | 113KiB as reported by the store listing; 13 files, no source maps |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
 | Submission route | **Automated** — `chrome-web-store.yml`, [run 34731860480](https://github.com/damianvtran/local-operator/actions/runs/34731860480), dispatched with `ref=7c78b6eda` `version=0.1.12` |
-| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.12` once the store reports the revision `STAGED` |
-| Store state | `PENDING_REVIEW` (submitted with `STAGED_PUBLISH`); nothing on the listing has changed yet |
-| State last checked | 2026-09-13 |
-| Approval timestamp | *pending — append when the review completes and the promoted revision is live* |
+| Promotion route | **Developer-initiated, not our workflows** — no `chrome-web-store-promote.yml` run for 0.1.12 ever succeeded (the last successful promote anywhere is 0.1.10's, run 34610983340, 2026-09-11); see the note below |
+| Store state | **`PUBLISHED` at 100%** — the store reports `publishedItemRevisionStatus.state = PUBLISHED`, `distributionChannels = [crxVersion 0.1.12, deployPercentage 100]` |
+| State last checked | 2026-09-15T22:42Z — store `fetchStatus`, read through the diagnostics added in PR #1160 (promote run 35032253219) |
+| Approval timestamp | *not recorded by any workflow* — see the note below |
 | Previously published | v0.1.10, live during this review |
 
 **First submitted revision carrying both halves of the stale-worker defect.** The
@@ -185,17 +185,52 @@ both PRs agreed to hold the store dispatch so the operator paid one review wait
 rather than two for the same defect. That version therefore never existed on the
 store, and reading it as a skipped release is correct.
 
-**Review queue expectations.** Google publishes no SLA for review, and an
-extension using `debugger` with `<all_urls>` routinely draws extended manual
-review: 0.1.8 took ~4.5 days, 0.1.10 cleared the next day. Do not cancel the
-pending review to force a resubmission — cancelling forfeits the accrued queue
-position with no visibility into how close it was.
+**How it was published: developer-initiated, and not by these workflows.** The
+Chrome Web Store API v2 `publishers.items.publish` reference settles the branch
+that matters — `STAGED_PUBLISH`: "After approval the submission will be staged and
+can then be published by the developer", against `DEFAULT_PUBLISH`: "The
+submission will be published immediately on approval"
+(https://developer.chrome.com/docs/webstore/api/reference/rest/v2/publishers.items/publish).
+An approved staged revision therefore cannot go live by itself, so the publication
+was an explicit developer action. What our records cannot say is *whose*: no
+`chrome-web-store-promote.yml` run for 0.1.12 ever succeeded, the last successful
+promote anywhere is 0.1.10's (run 34610983340, 2026-09-11), and between the last
+gate-1 refusal of the other session's pending submission (`state != STAGED`,
+2026-09-15T05:31Z) and the first gate-2 refusal (2026-09-15T17:31Z) the only
+store-workflow activity was three refused *stage* attempts for 0.1.17
+(08:38:31Z, 11:40:38Z, 14:43:01Z). It was published from the publisher dashboard,
+or by an out-of-band API call, by an operator or session this checkout holds no
+record of. The documented process is not implicated: staging defers publication,
+exactly as this file assumes.
 
-**Until this publishes**, the live store build stays `0.1.10`, where a stale
-worker still leaves the popup's Allow/Deny permanently disabled. Anyone
-exercising the fix before publication must load `main` unpacked **and patch the
-built port constant off `4099` first**, or the harness will dial the operator's
-real daemon (documented on PR #1026; the committed capture script guards it).
+**A correction to an earlier revision of this entry, kept visible rather than
+quietly dropped.** Two claims were wrong and are fixed here: the gate-2 refusal
+sequence begins 2026-09-15T17:31Z, not 05:31Z (05:31Z was still a gate-1 refusal,
+so the submitted revision became `STAGED` between the two), and a claim that no
+other store workflow ran in the window was false for the three 0.1.17 stage
+attempts listed above.
+
+**The queue as of 2026-09-15T22:42Z**, the only recorded store read: the
+*submitted* revision is a later **0.1.15** (submitted 2026-09-14, run 34886613253,
+with `STAGED_PUBLISH`), and `fetchStatus` reports it `STAGED` at 100%. Five
+subsequent 0.1.17 stage attempts were refused with
+`FAILED_PRECONDITION`/`NOT_UPDATEABLE` — "you may not edit or publish an item that
+is in review". Two cautions for whoever acts on it: a promote dispatch must name
+the version that is actually staged (naming a published version fails safely on
+the version mismatch, but before PR #1160 said nothing about why), and `main` has
+since been renumbered to **0.1.17**, so promoting the staged **0.1.15** would put
+a tree older than `main` on the store. The slot is holding a superseded revision,
+which is a decision for whoever owns the renumber rather than a mechanical
+promote. Note also that the `v0.1.15` entry above still reads "NOT submitted",
+which its own 2026-09-14 submission falsifies: this file protects *shipped*
+entries, that entry is not mine, and it is flagged here for its owner rather than
+edited.
+
+**Live now.** The store build is 0.1.12, so the earlier instruction to exercise
+the fix from an unpacked build of the merge commit no longer applies — the
+installed extension updates in place under the same item id, with no re-pairing.
+The port-4099 hazard is still worth remembering for anyone running the capture
+harness against a local build.
 
 ## v0.1.10 — submitted 2026-09-10, published 2026-09-11
 
