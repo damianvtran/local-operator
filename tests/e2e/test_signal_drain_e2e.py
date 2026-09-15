@@ -776,7 +776,11 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
                     f"\n=== stop against a draining runtime ===\n{outcome.method}: {outcome.line}"
                 )
             assert outcome.method == "draining", outcome.line
-            assert "was signalled" in outcome.line and "--force" in outcome.line
+            # The refusal quotes the RECORD's own phrase rather than composing a
+            # trigger-specific sentence: a build-replaced drain reaches this same
+            # branch, and "was signalled" would be false for it (PR #1108
+            # reconciliation, U8/U9).
+            assert target.leaving in outcome.line and "--force" in outcome.line
             assert outcome.method in control.LEFT_ALONE_METHODS
             assert rig.children["drainvis01"].poll() is None, "a refusal signals nothing"
 
@@ -826,8 +830,10 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
 
     Asserted: the runtime leaves at the BOUND (not at the end of the turn) with
     the expiry line naming that bound; the turn never completes; and the durable
-    outcome a successor reads is the honest ``runtime-shutdown`` rather than a
-    silent disappearance.
+    outcome a successor reads is an ERROR rather than a silent disappearance —
+    the message names the cut when the cut wins the race, but the token is not
+    pinned (see the comment at the assertion: the classifier deliberately
+    prefers a real tool error over its own generic cause).
     """
     config = headless_tui_env
     bound_s = 3.0
@@ -875,7 +881,19 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
                 )
 
                 state = AttentionStore().state(conversation_identity(directory))
-                assert state.get("cause") == "runtime-shutdown", state
+                # THE CAUSE TOKEN IS NOT GUARANTEED, and asserting it made this
+                # cell flake under load (F1, QA round 2).
+                # ``Session._classify_cut_off`` leaves an event that already
+                # carries a real error untouched — the tool's OWN teardown error
+                # is a more specific diagnosis than "the runtime went away" — so
+                # ``runtime-shutdown`` is attached only when the abort wins the
+                # race against that error. Both shapes are honest and neither
+                # claims the turn succeeded, so what is asserted is the property
+                # that actually holds: an ERROR whose turn never completed, on a
+                # run that really did leave at the bound (asserted above, from
+                # the log line and the elapsed time).
+                assert state.get("kind") == "error", state
+                assert state.get("cause") in ("", "runtime-shutdown"), state
             finally:
                 await session.dispose()
     finally:

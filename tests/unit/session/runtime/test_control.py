@@ -865,7 +865,7 @@ async def test_a_runtime_that_is_already_leaving_is_asked_before_it_is_stopped(
     try:
         outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
         assert outcome.method == "draining", outcome.line
-        assert "was signalled" in outcome.line, outcome.line
+        assert LEAVING_ON_SIGNAL in outcome.line, outcome.line
         assert "cuts the turn" in outcome.line, outcome.line
         assert "--force" in outcome.line, outcome.line
         # The refusal is a PARTIAL result (the target is still running) and is
@@ -882,6 +882,134 @@ async def test_a_runtime_that_is_already_leaving_is_asked_before_it_is_stopped(
         assert no_signals[0] == [], "and still without a signal"
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_quotes_the_drains_own_reason(no_signals) -> None:
+    """The refusal is trigger-agnostic, because the drain now is (PR #1108).
+
+    Two things commit a runtime to leaving — a termination signal and a build
+    replaced on disk while a turn was in flight — and ``process._commit_to_leaving``
+    publishes both to the same record field through the same call. The ladder
+    therefore refuses to cut either one, and the sentence it paints has to come
+    from the record: a hard-coded "it was signalled" would state the wrong
+    reason for every build-driven drain, on the one line the operator reads to
+    decide whether to insist.
+    """
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_FOR_BUILD)
+    try:
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert LEAVING_FOR_BUILD in outcome.line, outcome.line
+        assert "was signalled" not in outcome.line, outcome.line
+        assert handle.stops == [], "the socket rung must not run for a draining target"
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_offers_only_a_remedy_its_reader_can_act_on(
+    no_signals,
+) -> None:
+    """UX round 2, U7: the TUI paints this line and parses no flags at all.
+
+    The refusal is composed in the shared module and painted verbatim by both
+    front ends, so it used to name ``--force`` — a flag of ``lop stop`` — on a
+    surface whose ``/stop`` takes only a target: ``/stop --force <id>`` answers
+    "no live session matches '--force <id>'" about a session that is live and
+    listed. A surface must never offer an action it cannot accept, so the remedy
+    is named in the reader's own vocabulary: the flag for the CLI, the shell for
+    the TUI.
+
+    Both directions are asserted. A fix that dropped the flag everywhere would
+    remove the escape from the one front end that HAS it, which is the half this
+    test exists to keep.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        cli = await control.stop_session(
+            target, timeout_s=3.0, _root=config_dir(), _command="lop stop"
+        )
+        assert cli.method == "draining", cli.line
+        assert "--force to stop it anyway" in cli.line, cli.line
+
+        tui = await control.stop_session(
+            target, timeout_s=3.0, _root=config_dir(), _command="/stop"
+        )
+        assert tui.method == "draining", tui.line
+        assert "--force to stop it anyway" not in tui.line, tui.line
+        assert f"lop stop --force {target.pid}" in tui.line, tui.line
+
+        # AND THE FIRST REMEDY IS NOTHING. Exit 2 plus a lone "--force to stop
+        # it anyway" reads as "this did not work, retry if you meant it", when
+        # the exit is already scheduled and the answer for almost everyone is to
+        # let the turn finish (UX round 2, NIT-2).
+        for outcome in (cli, tui):
+            assert "it leaves by itself, nothing to do" in outcome.line, outcome.line
+
+        # Neither line stopped or signalled anything, on either surface.
+        assert handle.stops == []
+        assert no_signals[0] == []
+    finally:
+        server.close()
+
+
+def test_the_wait_line_names_its_bound_once_and_in_one_unit() -> None:
+    """D4/U5: two bounds, one unit — and neither vocabulary in the wrong mouth.
+
+    The drain bound and the ladder's grace are 120 s and 150 s. Printed as ``(up
+    to 2 min)`` and ``waiting up to 150s`` they read as different KINDS of
+    number, inviting the reader to wonder whether they are the same wait (design
+    round 2, D4). ``bound_text`` is the one formatter both go through; this
+    pins its output and the two sentences that carry it.
+
+    The TUI's form is asserted to stay out of the kill vocabulary for the reason
+    its reader is different: ``SIGKILL`` and "drain" are the CLI's words, and the
+    app paints this line verbatim into a notice that had always promised
+    "waiting for it to answer" (design round 2, D2).
+    """
+    assert control.bound_text(120.0) == "2 min"
+    assert control.bound_text(150.0) == "2.5 min"
+    assert control.bound_text(3.0) == "3s"
+    assert control.bound_text(1800.0) == "30 min"
+
+    cli = control._wait_line("beta", 1676, from_a_shell=True)
+    assert cli == 'waiting up to 2.5 min for "beta" (pid 1676) to drain before SIGKILL'
+    tui = control._wait_line("beta", 1676, from_a_shell=False)
+    assert "SIGKILL" not in tui and "drain" not in tui, tui
+    # The BOUND survives into the TUI's own words — the whole point of (U5): the
+    # pause is minutes long and an unannounced one reads as a hang.
+    assert "2.5 min" in tui, tui
+
+    # Both bound-bearing sentences now state their bound through the ONE
+    # formatter, so neither can drift into a second unit on its own.
+    assert control.bound_text(control.SIGTERM_GRACE_S) in cli
+    stub = SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id="stub01234567",
+        conversation_name="stub",
+        cwd="/tmp",
+        model_label="test/mock",
+        control_port=1,
+        control_key="k",
+    )
+    receipt = control._refresh_line(stub, "0.55.0@46a4e9b", "draining", "")
+    assert f"(up to {control.bound_text(control.SIGNAL_DRAIN_S)})" in receipt, receipt
+    # ...and it is the receiver's bound in that sentence, not the sender's: the
+    # receipt describes how long the RUNTIME will finish its turn for.
+    assert control.SIGNAL_DRAIN_S != control.SIGTERM_GRACE_S
 
 
 @pytest.mark.asyncio
@@ -967,16 +1095,116 @@ async def test_an_unsettled_install_is_reported_as_unsettled_not_current(
         assert "ask again" in outcome.line, outcome.line
 
         # The sibling answer keeps its own, settled meaning: the two are one
-        # line of code apart and must not be merged by a later reader.
+        # line of code apart and must not be merged by a later reader. The stamp
+        # and the marker are set so that "current" is PROVEN here rather than
+        # assumed — the record says it runs the build on disk, the disk says the
+        # same thing, and the marker has aged past the settle, which is the only
+        # combination that earns a zero exit.
+        from local_operator import update as update_mod
+        from local_operator.update import BuildStamp
+
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+
         async def _matches(*_args: Any, **_kwargs: Any) -> dict[str, str]:
             return {"op": "ack", "detail": "kept: build on disk matches"}
 
         monkeypatch.setattr(control, "_exchange", _matches)
-        matched = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        matching = _record_for(record, version="0.49.9", source_ref="f4a70b9cdef")
+        matched = await control.refresh_session(matching, timeout_s=1.0)
         assert matched.method == "current", matched
         assert matched.method in control.REFRESH_SETTLED_METHODS
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_retired_hedge_is_settled_here_instead_of_read_as_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/U6/O1: the fleet alive when the install moves answers the OLD sentence.
+
+    ``lop refresh``'s own docstring says its first run is ``lop-update``, so the
+    command is invoked INSIDE the settle window — and inside that window every
+    live runtime is still executing the PREVIOUS build's code, which knows ONE
+    sentence for both "matches" and "has not settled". Folding that sentence
+    into ``current`` (exit 0) tells a rotating script the fleet is done while
+    every member of it is about to retire: the harm the runtime-side fix exists
+    to remove, on a runtime that cannot carry the fix. The design, UX and QA
+    rounds reproduced it independently on this head (design D1, UX U6, QA O1,
+    all three quoting the machine having the real tool install as the witness).
+
+    So the CLI settles the question itself, from the stamp the record PUBLISHED
+    and the marker on disk now. Both directions are asserted, because a check
+    that answered ``unsettled`` for everything would be as wrong as the one it
+    replaces: the same record, past the settle, is honestly ``current``.
+    """
+    from local_operator import buildwatch
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    server, record = await _serve()
+    try:
+
+        async def _hedge(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            # Verbatim the pre-#1141 runtime's answer, quoted from the constant
+            # rather than retyped: if that sentence ever moves, this cell fails
+            # loudly instead of quietly testing a string nobody sends.
+            return {"op": "ack", "detail": buildwatch.KEPT_MATCHES_OR_UNSETTLED}
+
+        monkeypatch.setattr(control, "_exchange", _hedge)
+        target = _record_for(record, version="0.49.8", source_ref="46a4e9b1234567")
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
+        # The install moved, and NOBODY has judged it yet — which is what the
+        # hedge admits with its second clause and what the old caller threw away.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 0.5)
+        outcome = await control.refresh_session(target, timeout_s=1.0)
+        assert outcome.method == "unsettled", outcome
+        assert outcome.method not in control.REFRESH_SETTLED_METHODS
+        assert "ask again" in outcome.line, outcome.line
+
+        # Past the settle the same hedge is the true answer: the disk has not
+        # moved beyond what the record says, so there is nothing to ask again
+        # for. The ladder still does not call it ``moved`` — the runtime never
+        # committed to retiring — but it is settled.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+        settled = await control.refresh_session(target, timeout_s=1.0)
+        assert settled.method == "current", settled
+        assert settled.method in control.REFRESH_SETTLED_METHODS
+
+        # A record that published NO stamp cannot be second-guessed: with
+        # nothing to compare, the runtime's own answer stands.
+        monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 0.5)
+        anonymous = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        assert anonymous.method == "current", anonymous
+    finally:
+        server.close()
+
+
+def test_the_retired_hedge_is_a_prefix_of_the_live_answer() -> None:
+    """The cross-version contract itself, pinned in one assertion.
+
+    A runtime started before this change answers ``kept: build on disk matches
+    (or has not settled)`` and will keep answering it until build skew retires
+    it, so the matcher has to keep accepting that sentence for ever. It does so
+    by matching the shorter, live answer as a PREFIX — the two constants are one
+    edit apart and the day somebody "tidies" the retired string out of the
+    module is the day the fleet that exists at update time stops being routed at
+    all: the answer falls to the generic ``kept`` branch and a diagnosis becomes
+    "was not moved: …".
+    """
+    from local_operator import buildwatch
+
+    assert buildwatch.KEPT_MATCHES_OR_UNSETTLED.startswith(buildwatch.KEPT_MATCHES)
+    assert buildwatch.KEPT_MATCHES != buildwatch.KEPT_MATCHES_OR_UNSETTLED
 
 
 def _make_stale(monkeypatch: pytest.MonkeyPatch, server: Any) -> None:

@@ -4631,13 +4631,22 @@ WHY_COLUMN_WIDTH = 48
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
 #:
 #: A phrase, not an enum: the field's whole purpose is to say what is happening
-#: in the words the operator needs ("signalled; leaving when its turn ends"), so
-#: it is bounded like WHY rather than abbreviated to a token nobody could read.
-#: Wide enough for the shipped phrase in full, so the common case is not cut and
-#: a cut one is visibly marked (`_fit_cell`). The column appears only when some
-#: row carries a value, exactly like WHY and LAST_ACTIVE — a listing with no
-#: draining runtime is byte-for-byte what it was before.
-LEAVING_COLUMN_WIDTH = 40
+#: in the words the operator needs (``signalled; leaving when its turn ends (up
+#: to 2 min)``), so it is bounded like WHY rather than abbreviated to a token
+#: nobody could read. Wide enough for the shipped phrase in full, so the common
+#: case is not cut and a cut one is visibly marked (`_fit_cell`). The column
+#: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
+#: — a listing with no draining runtime is byte-for-byte what it was before.
+#:
+#: WIDENED FROM 40 when the phrase grew the drain’s bound (UX round 2, U9): the
+#: row that carries this is the one the operator reads most, and
+#: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
+#: can take away. The number is the phrase’s own cell width and is pinned
+#: against it by ``tests/unit/test_cli_sessions.py`` rather than imported — this
+#: module keeps session internals out of its module scope on purpose (see the
+#: header) — so a reword there fails loudly here instead of silently cutting
+#: the new clause off the row.
+LEAVING_COLUMN_WIDTH = 51
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.

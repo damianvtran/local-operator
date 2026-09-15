@@ -1743,6 +1743,20 @@ class SessionRow(NamedTuple):
     #: ``"approval"`` / ``"ask"`` when the session is waiting for a PERSON.
     #: The needs-you marker, and the reason a row sorts first.
     pending: str | None = None
+    #: The record's own phrase when the runtime has been SIGNALLED and is
+    #: finishing the work in flight before it leaves (``LEAVING_ON_SIGNAL``);
+    #: ``""`` otherwise.
+    #:
+    #: SEPARATE FROM ``live_state`` ON PURPOSE. A draining runtime is busy, so
+    #: ``busy`` is true of it — but it is the wrong fact to lead with, and
+    #: ``live_state`` is a TOKEN that several surfaces branch on (the transport
+    #: spelling ``status_code``, the ranking in ``session_category``). Adding a
+    #: third value there would be a contract change made to carry a phrase,
+    #: which is the same call the CLI's LEAVING column made instead of teaching
+    #: STATE a new word (design round 2, D3). Carried as its own field, the row
+    #: can say it in the runtime's words — the ones `lop sessions` and `/info`
+    #: print — without teaching every consumer a new token (UX round 2, U8).
+    leaving: str = ""
     #: How many wakes are scheduled, and whether they are dormant because the
     #: session was deliberately stopped.
     wakes: int = 0

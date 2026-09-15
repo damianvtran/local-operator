@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
@@ -214,14 +215,20 @@ def test_a_draining_target_is_settled_and_says_the_bound(capsys) -> None:
     assert "leaving" in out
     # The claim is about the METHOD, not the stub's own prose: the real line is
     # built by ``control._refresh_line``, which is where the bound is named.
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
     line = control._refresh_line(
-        _session_record(),
-        "0.54.48",
-        "draining",
-        "",
+        replace(_session_record(), leaving=LEAVING_ON_SIGNAL), "0.54.48", "draining", ""
     )
-    assert "was signalled" in line and "its next boundary" in line
+    # The RECORD's phrase, quoted: the receipt cannot tell a signalled drain from
+    # a build-replaced one, and the record is where the trigger wrote which it
+    # was (PR #1108 reconciliation).
+    assert LEAVING_ON_SIGNAL in line
     assert f"up to {SIGNAL_DRAIN_S / 60:.0f} min" in line
+    # A peer whose build predates the field answers ``kept: already leaving``
+    # with nothing published, and still gets a true sentence.
+    bare = control._refresh_line(_session_record(), "0.54.48", "draining", "")
+    assert "leaving" in bare
 
 
 def test_an_unsettled_install_is_partial_not_clean(capsys) -> None:

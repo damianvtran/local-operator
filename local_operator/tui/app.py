@@ -29162,8 +29162,22 @@ class OperatorApp(App[None]):
             self._stop_all_armed_at = None
             self._system_notice("no sessions to stop")
             return
+        drained = frozenset(rec.pid for rec in targets if (getattr(rec, "leaving", "") or ""))
         rows: list[tuple[int, str, str]] = [
-            (rec.pid, rec.conversation_name or rec.session_id, "") for rec in targets
+            (
+                rec.pid,
+                rec.conversation_name or rec.session_id,
+                # A TARGET THE PRESS WILL DECLINE IS MARKED IN THE LISTING, which
+                # is where the operator decides: the second press asks a draining
+                # runtime again and leaves it alone (the ladder refuses to cut
+                # the turn it is finishing), so a listing that presents it as one
+                # more session to stop promises a stop that will not happen. The
+                # outcome line already reconciles the count afterwards; this is
+                # the same fact one step earlier, where it can still change the
+                # decision (UX round 2, NIT-1).
+                " (already leaving)" if rec.pid in drained else "",
+            )
+            for rec in targets
         ]
         if own_local:
             own_name = getattr(own, "conversation_name", "") or getattr(own, "session_id", "")
@@ -29177,6 +29191,14 @@ class OperatorApp(App[None]):
         # off the painted block (D2-1).
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        if drained:
+            # Named once, above the rows: every marked row below is a session the
+            # press ASKS again and then leaves alone — the plain count would read
+            # as "these will all be stopped".
+            lines[0] = (
+                f"will stop {total} session{'s' if total != 1 else ''} "
+                f"({len(drained)} already leaving — asked again, then left alone):"
+            )
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
             # The qualifier rides inside the truncation budget so it can

@@ -3096,9 +3096,12 @@ class RuntimeServer:
             return "kept: already leaving"
         newer = process_mod._build_changed(self._boot_build)
         if newer is None:
+            # The sentences are module constants, not literals: the caller
+            # routes on them, so a reword here must break that match loudly
+            # rather than fall through to its generic ``kept`` branch.
             if buildwatch.pending_build(self._boot_build) is not None:
-                return "kept: the install on disk has not settled yet"
-            return "kept: build on disk matches"
+                return buildwatch.KEPT_UNSETTLED
+            return buildwatch.KEPT_MATCHES
         logger.info(
             "session runtime: viewer asked for a refresh; build on disk is %s, loaded %s",
             newer.label(),

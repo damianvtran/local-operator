@@ -2474,6 +2474,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "forked",
         "live_state",
         "pending",
+        # The drain. In the signature because it ARRIVES WHILE THE LIST IS OPEN —
+        # a SIGTERM to a runtime the operator is looking at is exactly the event
+        # a picker has to repaint for — and because it now changes what the row
+        # SAYS (``CatalogEntry.status`` names it ahead of "Working"), so two rows
+        # differing only here are not the same row on screen (UX round 2, U8).
+        "leaving",
         "wakes",
         "wakes_dormant",
         "kind",
