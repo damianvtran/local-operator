@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -658,8 +659,32 @@ async def test_client_carries_provider_usage_and_cost_into_the_decision() -> Non
     assert decision.cost_micros == 42100
 
 
+#: Monday 2026-09-14 07:00 UTC — inside DeepSeek's 06:00-10:00 peak window, and
+#: stable for the reader (a fixed date, not "next Monday").
+_DEEPSEEK_PEAK_MOMENT = datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc)
+
+
+def _freeze_deepseek_peak(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin DeepSeek's schedule to a peak instant for the rest of the test.
+
+    The registry stores DeepSeek's PEAK list rates, so `838 micro-USD` is the
+    published peak figure for the canary tokens below; the schedule itself reads
+    the clock when a usage carries no stamp (``tariff.moment_for``). Freezing it
+    keeps the assertion about the ARITHMETIC at the published rates rather than
+    about what time the suite happens to run, which would otherwise halve to 419
+    for the ~79% of the week that is off-peak. (The window behaviour itself is
+    pinned in ``tests/unit/model/test_tariff.py`` and the ledger's own
+    clock-independence in ``tests/unit/analytics/test_model.py``.)
+    """
+    from local_operator.model import tariff
+
+    monkeypatch.setattr(tariff, "now_utc", lambda: _DEEPSEEK_PEAK_MOMENT)
+
+
 @pytest.mark.asyncio
-async def test_a_direct_provider_call_is_priced_from_the_registry_table() -> None:
+async def test_a_direct_provider_call_is_priced_from_the_registry_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A direct provider states tokens and NO dollar amount, and the evidence
     must still bill the call.
 
@@ -678,7 +703,14 @@ async def test_a_direct_provider_call_is_priced_from_the_registry_table() -> Non
       would double-count it at 50x the real rate (1992 rather than 838);
     * ``reasoning_tokens`` are a SUBSET of ``output_tokens`` and are not
       billed on top (adding them gives 1118).
+
+    The clock is FROZEN to DeepSeek's peak window because the figure asserted is
+    the registry's published PEAK table price and the schedule reads the clock
+    when a usage carries no stamp of its own. Left to the wall clock this passes
+    at 07:00 UTC and fails at noon at exactly half (419) -- see
+    ``_freeze_deepseek_peak``.
     """
+    _freeze_deepseek_peak(monkeypatch)
 
     current = observation()
     usage = Usage(
@@ -732,7 +764,9 @@ async def test_a_reported_zero_is_a_known_zero_and_is_not_re_estimated() -> None
 
 
 @pytest.mark.asyncio
-async def test_the_table_prices_the_route_that_actually_served() -> None:
+async def test_the_table_prices_the_route_that_actually_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The price comes from the SERVED spec, not the requested one.
 
     ``stream_with_failover`` rewrites the request to a fallback and stamps the
@@ -742,8 +776,11 @@ async def test_the_table_prices_the_route_that_actually_served() -> None:
 
     The request here names a model the registry cannot price at all, so a
     fallback to it would read 0: the non-zero answer can only come from the
-    stamp.
+    stamp. The clock is frozen for ``test_a_direct_provider_call_is_priced_from_
+    the_registry_table``'s reason: 838 is DeepSeek's PEAK table price and the
+    schedule would otherwise read the wall clock.
     """
+    _freeze_deepseek_peak(monkeypatch)
 
     current = observation()
     usage = Usage(
