@@ -403,7 +403,9 @@ def test_an_absent_extra_hides_the_tool_and_answers_in_words(monkeypatch, tree) 
     assert lsp.build_lsp_tool() is None
 
     result = asyncio.run(
-        lsp.execute_lsp("call-1", {"action": "symbols", "path": "pkg/lib.py"}, context=_ctx(tree))
+        lsp.execute_lsp(
+            "call-1", {"action": "symbols", "path": "pkg/lib.py"}, None, None, _ctx(tree)
+        )
     )
     assert result.is_error is True
     assert "jedi is not installed" in result.text
