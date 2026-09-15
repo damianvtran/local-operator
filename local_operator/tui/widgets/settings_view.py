@@ -274,6 +274,14 @@ _MARKER_WIDTH = 2
 #: rather than as an abbreviation (design round 1, D4).
 _LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
 
+#: Cells of a rejected value the rejection line keeps beside its advice — the
+#: marked tail of rung 2 in :meth:`SettingsView._rejection_render`. 18 is what
+#: the widest slot this page has leaves once the mark, the separator and the
+#: pinned advice are paid for: 1 + 18 + 3 + 71 = 93 of the 94 cells at 100x30,
+#: so the token a failed click is about stays on screen at that width instead of
+#: being dropped without a trace (design round 2, D16).
+_VALUE_TAIL_CELLS = 18
+
 #: Rows of the page's own chrome that sit outside the two columns: the title,
 #: the rule, the columns' top padding, the two-row detail line, and the two-row
 #: hint footer. The pane's height is derived from the VIEW's height through this
@@ -4221,9 +4229,11 @@ class SettingsView(Vertical):
             # whose LENGTH IS THE USER'S OWN INPUT. Measured both ways on the
             # author's own typo and on the designer's longer path: the typo fits
             # at 100x30 (77 cells of a 94-cell budget) but the 126-cell path lost
-            # 33 cells there — stopping mid-word at "…does-not-exist does not
+            # 32 cells there — stopping mid-word at "…does-not-exist does not
             # exist, so clicks" — and 50 at 80x24, where the fault itself is cut
             # and the consequence is gone, with no `…` to say anything had gone.
+            # (The 32 is the PAINTED line against the row's own budget, 94 cells
+            # at 100x30 — agent review round 2, N3.)
             #
             # A sentence that stops mid-clause reads as a rendering fault, and
             # the half that is lost is the half that explains why the typo
@@ -4353,35 +4363,67 @@ class SettingsView(Vertical):
         self._detail.update_if_changed(text)
 
     def _rejection_render(self, style: Style) -> Text:
-        """One rejection, shed so WHAT WENT WRONG always survives (D11).
+        """One rejection, shed so WHAT WENT WRONG always survives (D11/D16).
 
-        Two rungs and a floor, walked in order — the full message where it fits,
-        then the ADVICE ALONE, then the advice cut with a visible `…`:
+        Three rungs and a floor, walked in order — the full message where it
+        fits, then the value's TAIL beside the pinned advice, then the advice
+        alone behind a mark, then the advice cut with a visible `…`:
 
-            <value> — <advice>  →  <advice>  →  truncate_cells(<advice>)
+            <value> — <advice>  →  …<tail of value> — <advice>
+                                →  … <advice>  →  truncate_cells(<advice>)
 
-        The mark is the point of the floor. This line does not wrap, so a string
-        handed over intact is REMOVED by the widget rather than shortened, and
-        the shapes that lost content that way are the ones this file spends
-        three comments warning about (D1/D2/D9/D12).
+        The mark is the point of the second and third rungs and of the floor.
+        This line does not wrap, so a string handed over intact is REMOVED by
+        the widget rather than shortened, and the shapes that lost content that
+        way are the ones this file spends three comments warning about
+        (D1/D2/D9/D12).
 
-        What OPTS IN is the shape, not a call site: only a message that opens
-        with a single token before :data:`settings_io.REJECTION_VALUE_SEP` is
-        split — that is the interpolated-value shape — so prose notices
-        (``config.yml is unreadable, nothing was written — …``, ``could not
-        save — <path> has an unexpected structure…``) keep their head, which is
-        the part that says what happened. ``tests/unit/tui/test_settings_view``
-        asserts both directions.
+        THE FLOOR TRUNCATES THE ADVICE, not the last rung, because
+        `truncate_cells` marks its own cut and a leading `…` in front of a
+        trailing one reads as a rendering fault rather than as "there is more
+        sentence" — the line `ask_picker` draws for the same reason. At those
+        widths (54 cells at 60x20, 34 at 40x16) the trailing mark is still the
+        one thing that cannot be missing, so nothing goes wordlessly.
+
+        RUNG 3 IS NOT A RARE FALLBACK (design round 2, D16). Rung 1 needs
+        ``cell_len(value) + 3 + 71 <= width``, so at 80x24 it needs a value of
+        ZERO cells — rung 3 is what every realistic launcher command gets there
+        — and at 100x30 it is reached by any value longer than 20 cells
+        (``/usr/local/bin/launch`` is 21). An earlier shape painted the advice
+        alone in that state, which neither says a word was dropped nor names the
+        subject the sentence is about, on the one line whose job is to explain a
+        failed click. Hence the leading `…`, and rung 2 in front of it for the
+        widths where the room exists to keep the token itself.
+
+        The mark cannot lie: rung 2 is one cell longer than rung 1 (the mark
+        replaces the head of the value), so it is only reached once rung 1 was
+        already over budget — i.e. when the value really was longer than the
+        tail it keeps.
+
+        What OPTS IN is the PRODUCER, not a shape read back off the string:
+        only a message :func:`settings_io.split_value_rejection` recognises as
+        interpolated-value copy is split. Prose notices (``config.yml is
+        unreadable, nothing was written — …``, ``could not save — <path> has an
+        unexpected structure…``) keep their head, which is the part that says
+        what happened; a TOKEN COUNT was the old test and it got the quoted
+        path wrong, so a launcher whose path contains a space lost the fault,
+        the consequence and the remedy at once (QA round 1, Q1).
+        ``tests/unit/tui/test_settings_view`` asserts both directions.
         """
         width = self._detail_width()
-        value, sep, advice = self._error.partition(settings_io.REJECTION_VALUE_SEP)
+        split = settings_io.split_value_rejection(self._error)
+        floor = self._error
         rungs = [self._error]
-        if sep and value.strip() and len(value.split()) == 1:
-            rungs.append(advice)
+        if split is not None:
+            value, advice = split
+            tail = _value_tail(value, _VALUE_TAIL_CELLS)
+            rungs.append(f"\u2026{tail}{settings_io.REJECTION_VALUE_SEP}{advice}")
+            rungs.append(f"\u2026 {advice}")
+            floor = advice
         for rung in rungs:
             if cell_len(rung) <= width:
                 return Text(rung, style=style)
-        return Text(truncate_cells(rungs[-1], width), style=style)
+        return Text(truncate_cells(floor, width), style=style)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
@@ -5750,6 +5792,33 @@ def _suggestion_detail(row: ModelRow) -> str:
     if price:
         parts.append(price)
     return " · ".join(parts)
+
+
+def _value_tail(text: str, cells: int) -> str:
+    """The END of ``text`` in ``cells`` cells: the mirror of `truncate_cells`.
+
+    The value column above the rejection line paints the TAIL of the command —
+    a real edit leaves the caret at the end — so the tail is the part a user can
+    match against the value they can still see while the editor is open, and
+    keeping the head instead would name a directory they cannot check.
+
+    Slices through ``rich.cells.cell_len`` rather than ``len``, the same one
+    width model `truncate_cells` uses, so a wide glyph in a path cannot overflow
+    the budget it was measured against. The caller owns the mark: rung 2 needs
+    the `…` OUTSIDE this width so it can be counted separately from the value's
+    own 18 cells.
+    """
+    if cell_len(text) <= cells:
+        return text
+    kept: list[str] = []
+    spent = 0
+    for char in reversed(text):
+        size = cell_len(char)
+        if spent + size > cells:
+            break
+        kept.append(char)
+        spent += size
+    return "".join(reversed(kept))
 
 
 def _render_value(value: Any) -> str:

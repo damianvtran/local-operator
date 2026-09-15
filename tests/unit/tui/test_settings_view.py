@@ -5301,13 +5301,13 @@ async def test_the_effort_row_renders_expands_and_resets(tmp_path: Path) -> None
 async def test_a_rejection_whose_length_is_the_user_input_never_clips_unmarked(
     size: tuple[int, int],
 ) -> None:
-    """D11. This branch was the one content on the detail line with no floor.
+    """D11/D16. This branch was the one content on the detail line with no floor.
 
     The line is a fixed-height ``Static`` with no wrap, so a string handed to it
-    intact is REMOVED rather than shortened — and the new launcher rejection is
-    the first content on the page whose length is the USER'S OWN INPUT. Measured
-    on the designer's frames and re-driven here: a 126-cell path painted 93 cells
-    at 100x30, stopping mid-word at "...does-not-exist does not exist, so clicks",
+    intact is REMOVED rather than shortened — and the launcher rejection is the
+    first content on the page whose length is the USER'S OWN INPUT. Measured on
+    the designer's frames and re-driven here: a 126-cell path painted 93 cells at
+    100x30, stopping mid-word at "...does-not-exist does not exist, so clicks",
     and 76 at 80x24, which lost the fault itself and the entire consequence
     clause — with no ``…`` either time to say anything had gone.
 
@@ -5315,6 +5315,14 @@ async def test_a_rejection_whose_length_is_the_user_input_never_clips_unmarked(
     typed and can still read in the row's own value column while the editor is
     open, and it is the only part of the message that grows with their input.
     The consequence is therefore readable at every width this page measures.
+
+    AND THE SHED SAYS SO (design round 2, D16). Rung 1 needs a value of <= 20
+    cells at 100x30 and of ZERO cells at 80x24, so dropping the value is the
+    COMMON case for a launcher command, not an edge: a line that then painted the
+    advice alone would read as a complete sentence about nothing. The line that
+    drops the value therefore starts with a mark, and at 100x30 it keeps the
+    token's own tail beside the advice so the command the failed click is about
+    is still named on screen.
     """
 
     long_path = "/tmp/ux-h/bin/with/a/rather/deep/nested/launcher/dir/does-not-exist"
@@ -5341,28 +5349,142 @@ async def test_a_rejection_whose_length_is_the_user_input_never_clips_unmarked(
         assert "does not exist" in line, line
         # ...and so is what it costs, which is the clause the clip used to eat.
         assert "clicks open a terminal" in line, line
-        # Nothing is cut wordlessly: the line is either the whole message or it
-        # ends in a visible mark, and at these widths it is the advice alone.
-        assert line.endswith("\u2026") or "to discover the app" in line, line
-        # ...including the way out, which is the half the error displaces (U12).
-        assert "Clear this to discover the app." in line or line.endswith("\u2026"), line
-        # The value is the segment that gave way, at both widths.
+        # ...and the way out, which is the half the error displaces (U12).
+        assert "Clear this to discover the app." in line, line
+        # The value half is the segment that gave way, and BOTH widths say so:
+        # the drop is marked, so "complete sentence, nothing missing" is never
+        # what this line claims when it has shed something (D16).
         assert long_path not in line, line
+        assert line.startswith("\u2026"), line
+        # At 100x30 the room is there for rung 2, so the executable is still
+        # NAMED — by the tail of the path, which is what the value column above
+        # paints. At 80x24 there is no room (74 cells against a 93-cell rung) and
+        # the mark is what carries the honesty instead.
+        if view._detail_width() >= 93:
+            assert "does-not-exist" in line, line
+            # A mark in FRONT of a tail: two marks would mean the mark above the
+            # value's own cut was counted as the value's head.
+            assert not line.startswith("\u2026\u2026"), line
+        else:
+            assert "does-not-exist" not in line, line
         # And the input is still the user's to fix, on the row that refused it.
         assert view._editing == "desktop.launch_command", view._editing
         assert long_path in view._buffer
 
 
 @pytest.mark.asyncio
-async def test_a_prose_rejection_keeps_the_head_that_says_what_happened() -> None:
-    """The shed is opt-in by SHAPE, not a rule about every rejection.
+@pytest.mark.parametrize("size", [(60, 20), (40, 16)])
+async def test_a_rejection_cut_below_every_rung_carries_one_mark(
+    size: tuple[int, int],
+) -> None:
+    """The floor is the ADVICE, and the line carries one `…`, not two.
 
-    Only a message that opens with a SINGLE TOKEN before
-    ``settings_io.REJECTION_VALUE_SEP`` is the interpolated-value shape. The
-    page's other rejections open with a phrase ("config.yml is unreadable,
-    nothing was written", "could not save"), and shedding THEIR head would
-    remove the part that says what happened in order to save cells on the part
-    that says what to do — the opposite trade.
+    Below the widths this page is measured at, the advice alone stops fitting too
+    (73 cells against a 54-cell row at 60x20 and 34 at 40x16), so the line is cut
+    and has to say so. What it must not do is stack the floor's own mark behind
+    rung 3's leading one: two ellipses on one line read as a rendering fault
+    rather than as "there is more sentence" (the line `ask_picker` draws for the
+    same reason). A cut line is self-evidently incomplete, so one mark is enough
+    to keep the drop honest — there is no state here where something goes
+    wordlessly.
+    """
+
+    long_path = "/tmp/ux-h/bin/with/a/rather/deep/nested/launcher/dir/does-not-exist"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "desktop.launch_command")
+        await pilot.pause()
+        view.action_activate()
+        await pilot.pause()
+        view._buffer = f"{long_path} --open-session {{session}}"
+        view._caret = len(view._buffer)
+        view._commit_edit()
+        await pilot.pause()
+
+        assert view.error_text, "the typo was accepted, so nothing was refused"
+        line = view.render_lines_for_test()[-1]
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), line)
+        assert line.count("\u2026") == 1, line
+        assert line.endswith("\u2026"), line
+        assert line.startswith("does not exist"), line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+async def test_a_quoted_launcher_path_keeps_the_advice_it_used_to_lose(
+    size: tuple[int, int],
+) -> None:
+    """QA round 1, Q1. A quoted path with a space is a rejection like any other.
+
+    The ladder used to decide which half of the message was the user's value from
+    the HEAD'S TOKEN COUNT, and a quoted launcher path containing a space is ONE
+    token to the shell grammar the validator uses while being SEVERAL to
+    ``str.split`` — so the shape a macOS user writes most often fell through to a
+    plain clip and lost the fault, the consequence and the remedy together. At
+    80x24 the line stopped at ``…/Contents/MacOS/local…``: the sentence explained
+    the typo to nobody.
+
+    What is asserted here is the whole contract at both widths — the advice is
+    pinned, the shed is marked, and the token is named where there is room — for
+    the shape the old predicate could not see.
+    """
+
+    quoted = (
+        '"/Users/damian/Applications/Local Operator Canary.app/Contents/MacOS/'
+        'local-operator-ui" --open-session {session}'
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        _select(view, "desktop.launch_command")
+        await pilot.pause()
+        view.action_activate()
+        await pilot.pause()
+        view._buffer = quoted
+        view._caret = len(view._buffer)
+        view._commit_edit()
+        await pilot.pause()
+
+        assert view.error_text, "the quoted path was accepted, so nothing was refused"
+        # The producer, not a token count, is what tells the renderer this is the
+        # interpolated-value shape.
+        split = settings_io.split_value_rejection(view.error_text)
+        assert split is not None, view.error_text
+        value, advice = split
+        assert value == quoted.split('"')[1], value
+        assert " " in value, "the whole point of this shape is a space in the token"
+
+        line = view.render_lines_for_test()[-1]
+        assert cell_len(line) <= view._detail_width(), (cell_len(line), line)
+        assert advice in line, line
+        assert "clicks open a terminal" in line, line
+        assert "Clear this to discover the app." in line, line
+        assert line.startswith("\u2026"), line
+        if view._detail_width() >= 93:
+            assert "local-operator-ui" in line, line
+        else:
+            assert "local-operator-ui" not in line, line
+
+
+@pytest.mark.asyncio
+async def test_a_prose_rejection_keeps_the_head_that_says_what_happened() -> None:
+    """The shed is what the PRODUCER opts in to, not a rule about every rejection.
+
+    Only a message ``settings_io.split_value_rejection`` recognises — i.e. one
+    that ENDS in the advice an interpolated-value rejection pins — is the shape
+    the ladder splits. The page's other rejections open with a phrase
+    ("config.yml is unreadable, nothing was written", "could not save") and carry
+    the same separator inside it, and shedding THEIR head would remove the part
+    that says what happened in order to save cells on the part that says what to
+    do — the opposite trade.
+
+    The test is a PROSE message with a separator that an earlier predicate could
+    not tell from a value (a single-token head is not the question any more: it
+    got the quoted launcher path wrong, QA round 1 Q1).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(80, 24)) as pilot:

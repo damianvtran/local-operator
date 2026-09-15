@@ -653,9 +653,14 @@ def _spawn_terminal(session_id: str) -> bool:
     # `_spawn_surface` answers False both for a failed send AND for a
     # surface-creating placement it could not read an id out of — so on that one
     # path a second candidate can follow a window that already exists (review
-    # round 1, M2). Narrowing the refusal is not available here: the backend
-    # reports a bool and nothing else, and this rung's whole value is that a
-    # click which placed nothing still lands somewhere.
+    # round 1, M2). The distinction is not lost where it is made:
+    # `spawn/cmux.py:176` is the failed CREATE and `:178-179` is the zero-exit
+    # create whose stdout carried no id, and `_spawn_surface`'s own `bool`
+    # return is what collapses the two by the time this loop sees them. So the
+    # refusal stays narrow for a stated reason rather than an unavailable one:
+    # acting on it needs a tri-state (or a `placed` flag) out of `CmuxBackend`,
+    # i.e. a change to that backend, and this rung's whole value is that a click
+    # which placed nothing still lands somewhere (agent review round 2, M1).
     for candidate in candidates:
         try:
             if candidate.spawn(launch, env):
