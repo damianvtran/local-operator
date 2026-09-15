@@ -250,9 +250,10 @@ async def test_a_draft_with_no_caret_of_its_own_lands_at_the_end() -> None:
 
     Serialised from the seat that measured it. Step A/B: the user's next words
     used to be glued IN FRONT of the returned message (measured as one message
-    reading `second message [bash:2]are you there?`) — and since round 3 the
-    returned draft lands behind a SEAM (a blank line), so the next words are
-    their own paragraph rather than a continuation of the sentence above. Step C: the row's own
+    reading `second message [bash:2]are you there?`) — and since round 4 THIS
+    route's handback lands behind a SEAM (a blank line; the drain route has shown
+    one since round 3), so the next words are their own paragraph rather than a
+    continuation of the sentence above. Step C: the row's own
     `/resume` advice typed there was consumed as a command and took the message
     with it, leaving the screen with no composer text at all. With the caret at
     the end, the words append (the message is intact and first) and a `/resume`

@@ -837,6 +837,19 @@ async def _begin_drain(
     else:
         reason = "retiring for a build replaced on disk"
     delay = random.uniform(0, _build_stagger_seconds())  # noqa: S311 — jitter, not security
+    if stop.is_set():
+        # BEFORE the log and before the announce, and both orders are the point:
+        # the log line below says no new work will be admitted and the frame
+        # says the same to the operator, and a stop that has already landed
+        # means nothing will refuse — the row stays in the transcript and the
+        # claim is false (review round 4, MINOR 3, and NIT 3 one surface down).
+        #
+        # This closes the COMMONEST of the two ways the latch can be denied, not
+        # the class: a ``_disposing`` flip inside ``begin_drain`` still leaves
+        # the frame sent with no latch taken (review round 5, NIT 1), which the
+        # announce-first ordering — invariant (iii) — makes structurally
+        # unavoidable rather than fixable here.
+        return None  # its path owns the exit
     logger.info(
         "session runtime: %s (loaded %s; %s); no new work will be admitted, in-flight work "
         "finishes first (pid %d)",
@@ -845,15 +858,6 @@ async def _begin_drain(
         detail,
         os.getpid(),
     )
-    if stop.is_set():
-        # BEFORE the announce, and that order is the point: ``draining=True``
-        # tells the operator that admissions are about to be refused, and a stop
-        # that has already landed means nothing will refuse — the drain row
-        # would claim a state the session is not in, on a row that stays in the
-        # transcript (review round 4, MINOR 3). The re-check below still covers a
-        # stop that arrives DURING the announce; the announce-first order itself
-        # is invariant (iii) and unchanged.
-        return None  # its path owns the exit
     announce = getattr(runtime, "announce_retiring", None)
     if callable(announce):
         try:

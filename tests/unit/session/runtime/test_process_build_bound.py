@@ -342,6 +342,33 @@ async def test_an_idle_runtime_keeps_todays_soft_refresh(disk, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_stop_that_already_landed_keeps_the_frame_and_the_latch(disk, monkeypatch) -> None:
+    """Review round 5, MINOR 2: the pre-announce re-check, driven.
+
+    It is one line and nothing failed if it were reverted. With ``stop`` already
+    set, ``_begin_drain`` must neither send the ``draining`` frame — which tells
+    the operator admissions are closing — nor take the latch, because the stop
+    path owns the exit and this runtime is refusing nothing. The claim the code
+    makes is the COMMONEST of the two latch denials, not the class: a
+    ``_disposing`` flip inside ``begin_drain`` still leaves the frame sent,
+    which the announce-first ordering makes structurally unavoidable.
+    """
+    poll = child_mod._BuildPoll(
+        newer=NEW, idle=False, hard_stale=True, files_gone=False, declines=3
+    )
+    reg = FakeRegistrant()
+    handle = FakeHandle(busy=True)
+    stop = asyncio.Event()
+    stop.set()
+
+    drain = await child_mod._begin_drain(poll, handle, reg, stop)
+
+    assert drain is None, "a stop that already landed must keep the exit"
+    assert reg.retiring == [], "the frame promised refusals that cannot come"
+    assert not handle.drained, "the latch must not be taken once the stop owns the exit"
+
+
+@pytest.mark.asyncio
 async def test_a_handle_without_the_drain_latch_keeps_serving(disk, monkeypatch) -> None:
     """An older host cannot refuse admissions, so it must not pretend to leave:
     the bound keeps its old behaviour rather than walking away mid-stream."""

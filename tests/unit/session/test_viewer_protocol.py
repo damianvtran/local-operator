@@ -1812,6 +1812,18 @@ def test_the_quoted_isinstance_member_count_is_still_true() -> None:
     from local_operator.tui.app import _is_viewer
 
     walked = len(_get_protocol_attrs(ViewerSessionProtocol))
+    # THE LINEAGE IS PROSE, and it is the line a rebase moves: the parenthetical
+    # history in `protocol.py` stops at a figure that has to equal the walk too,
+    # or the docstring recites a chain ending one member short of the count it is
+    # defending (review round 5, NIT 4 — 116→117 was exactly this line).
+    lineage = re.search(r"past it \((.*?)\), so", ViewerSessionProtocol.__doc__ or "", re.S)
+    assert lineage, "the count lineage is missing or was reworded"
+    tail = max(int(n) for n in re.findall(r"\d+", lineage.group(1)))
+    assert tail == walked, (
+        f"the count lineage ends at {tail} but a positive check walks {walked}: "
+        "the docstring's own rule is that a member added or removed without "
+        "updating the prose is a failure rather than a slow lie"
+    )
     for doc, where in (
         (ViewerSessionProtocol.__doc__ or "", "session/protocol.py"),
         (_is_viewer.__doc__ or "", "tui/app.py::_is_viewer"),
