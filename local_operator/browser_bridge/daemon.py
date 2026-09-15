@@ -1694,7 +1694,11 @@ class BridgeService:
         stopped running).
 
         The lag is `observed cycle − PING_INTERVAL_S`, i.e. this tick's body plus
-        whatever the loop and scheduler added on either side. LEVELS ARE
+        whatever the loop and scheduler added on either side. A tick that FAILED
+        (the supervisor's backoff before it re-runs) shows up here as lag too,
+        and that is the right reading rather than a false positive: during the
+        backoff this loop was not evaluating liveness either, which is the exact
+        distinction the line exists to publish. LEVELS ARE
         DELIBERATE: the daemon runs at WARNING in production (`browser serve`
         configures no logging, and the launchd/supervisor log it writes to is
         WARNING-and-above), so a per-tick INFO line would be written nowhere. The
