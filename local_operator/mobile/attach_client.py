@@ -1234,11 +1234,17 @@ class AttachClient:
             return
         from local_operator.session.errors import admission_error
 
+        # ``getattr``, because this decoder's callers include CONSTRUCTION-FREE
+        # doubles: three cells drive a real op over ``object.__new__(AttachClient)``
+        # with ``_request_frame`` stubbed, so the phrase this connection would
+        # have heard is absent rather than empty. Absent evidence and "this
+        # frame named no trigger" are the same thing to the decoder, and a
+        # double must not have to know the member exists to exercise the path.
         known = admission_error(
             str(reply.get("error_code", "")),
             reply.get("error_count"),
             reply.get("error_trigger"),
-            self._drain_phrase,
+            getattr(self, "_drain_phrase", ""),
         )
         if known is not None:
             raise known
