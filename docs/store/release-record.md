@@ -191,371 +191,46 @@ review: 0.1.8 took ~4.5 days, 0.1.10 cleared the next day. Do not cancel the
 pending review to force a resubmission — cancelling forfeits the accrued queue
 position with no visibility into how close it was.
 
-**Promotion route — unresolved, recorded rather than guessed.** The revision went
-live, but nothing on the forge says how it got there. `chrome-web-store-promote.yml`
-ran for 0.1.12 only as failures: the last gate-1 refusal (state not yet `STAGED`)
-at 2026-09-14T17:36Z, and from 2026-09-15T05:31Z a sequence of gate-2 refusals
-that PR #1160's diagnostics later explained as a version mismatch, not a fault.
-No successful promote dispatch exists in the window, and no other store or release
-workflow ran between 2026-09-14T15:00Z and 2026-09-15T06:00Z. The listing reads
-`Version 0.1.12, Updated September 14, 2026` and the store reports `PUBLISHED` at
-100%. The revision was therefore published either through the publisher
-dashboard's manual publish or automatically on approval — and **the documented
-process does not say which**. That is worth resolving: if `STAGED_PUBLISH`
-auto-publishes on approval, the promote workflow's role needs restating, because
-"wait for `STAGED`, then promote" describes a step that may already have happened.
+**How it was published — developer-initiated, and our workflows did not do it.**
+Google's publish reference settles the branch that matters: `STAGED_PUBLISH` means
+the submission "will be staged and can then be published by the developer" once
+approved, while `DEFAULT_PUBLISH` is the variant that publishes immediately on
+approval. So an approved staged revision cannot go live by itself, and the
+publication was an explicit developer action. What our own records cannot say is
+*whose*: the last successful `chrome-web-store-promote.yml` run anywhere is
+34610983340 (0.1.10, 2026-09-11), every promote dispatch since has failed, and the
+only store workflow that ran in the window between the last gate-1 refusal
+(2026-09-15T05:31Z) and the first gate-2 refusal (2026-09-15T17:31Z) was the
+0.1.15 *stage*. The revision was therefore published from the publisher dashboard
+or by an out-of-band API call, by an operator or session this checkout has no
+record of. The documented process is not implicated: staging defers publication,
+exactly as this file assumes.
 
-**The queue as of 2026-09-15T22:4xZ.** The *submitted* revision is a later
-**0.1.15** (submitted 2026-09-14T19:23:41Z with `STAGED_PUBLISH`;
-`fetchStatus` now reports it `STAGED` at 100%). So 0.1.15 — not 0.1.12 — is what a
-promote dispatch would act on, and five subsequent stage attempts for 0.1.17 were
-refused while it occupies the single queue slot. A promote dispatch must name the
-version that is actually staged: naming an already-published version fails safely
-(the gate refuses on the version mismatch) but, before PR #1160, said nothing
-about why.
+**The record's own misreadings, corrected.** Two claims in an earlier revision of
+this entry were wrong and are fixed here rather than quietly dropped: the gate-2
+sequence begins at 2026-09-15T17:31Z, not 05:31Z (05:31Z was still a gate-1
+refusal, so the submitted revision became `STAGED` between the two); and "no other
+store or release workflow ran in that window" was false — the 0.1.15 stage ran
+inside it.
 
-**Until this publishes**, the live store build stays `0.1.10`, where a stale
-worker still leaves the popup's Allow/Deny permanently disabled. Anyone
-exercising the fix before publication must load `main` unpacked **and patch the
-built port constant off `4099` first**, or the harness will dial the operator's
-real daemon (documented on PR #1026; the committed capture script guards it).
+**The queue as of 2026-09-15T23:00Z.** The *submitted* revision is a later
+**0.1.15** (submitted 2026-09-14T19:24:54Z with `STAGED_PUBLISH`; `fetchStatus`
+now reports it `STAGED` at 100%), and five 0.1.17 stage attempts were refused
+with `FAILED_PRECONDITION`/`NOT_UPDATEABLE` — "you may not edit or publish an
+item that is in review" — the earliest three of them while 0.1.15 was still in
+review. Two cautions for whoever acts on it: a promote dispatch must name the
+version that is actually staged (naming a published version fails safely on the
+version mismatch, but before PR #1160 said nothing about why), and `main` has
+since been renumbered to **0.1.17**, so promoting the staged **0.1.15** would put
+a tree older than `main` on the store — the queue slot is holding a superseded
+revision, which is a decision for whoever owns the renumber rather than a
+mechanical promote. Note also that the `v0.1.15` entry elsewhere in this file
+still reads "NOT submitted", which its own submission on 2026-09-14 falsifies;
+that entry is not mine to edit, so it is flagged here for its owner.
 
-## v0.1.10 — submitted 2026-09-10, published 2026-09-11
+**Live now.** The store build is 0.1.12, so the earlier instruction to
+exercise the fix from an unpacked build of this merge commit no longer applies —
+the installed extension auto-updated in place under the same item id, with no
+re-pairing. The port-4099 hazard is still worth remembering for anyone running
+the capture harness against a local build.
 
-| Field | Value |
-| --- | --- |
-| Extension version | 0.1.10 (**the live published version**) |
-| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
-| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `7ad53a5e1` (`chore(extension): bump version to 0.1.10 and add store publishing guidance`, PR #907, squash-merged to `main`) |
-| `extension/` tree hash | `7d5585a6d430ae57b4cc0948f148ffa4c9c8fa5b` (the deterministic input pin — see the audit note above) |
-| Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.8 below* |
-| Artifact size | 13 files, no source maps; 104KiB as reported by the store listing |
-| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
-| Submission route | **Automated** — `chrome-web-store.yml`, [run 34489484307](https://github.com/damianvtran/local-operator/actions/runs/34489484307), dispatched with `ref=7ad53a5e1` `version=0.1.10` |
-| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 34610983340](https://github.com/damianvtran/local-operator/actions/runs/34610983340), dispatched with `version=0.1.10` |
-| Store state | `PUBLISHED` (promoted 2026-09-11 ~14:35 UTC) |
-| State last checked | 2026-09-11 |
-| Approval timestamp | 2026-09-11 — review completed and the approved revision was promoted the same day; confirmed live on the listing as "Updated September 11, 2026" |
-| Previously published | v0.1.8, live during review (promoted 2026-09-10, run 34482703148) |
-
-**Third release through the automated path, both halves of it.** The stage run
-validated and submitted in one pass — `validated Chrome Web Store package v0.1.10
-(13 files, no source maps)`, then `submitted ... v0.1.10 with STAGED_PUBLISH
-(PENDING_REVIEW)` — and the promote run later reported `promoted Chrome Web Store
-extension ... v0.1.10 to PUBLISHED`. v0.1.7 was the first release to go out that
-way on both halves (see its entry below); the releases before it involved a
-dashboard step.
-
-**What this version carries.** Four merged PRs landed in the `extension/` tree
-between v0.1.8's source commit (`ff9b16b5`) and this one:
-
-- **#766** (`e3cb1ebc8`) — removes the deterministic jitter from the pairing
-experience; the user-reported "jittery pairing code" fix. This is why the
-release matters to users.
-- **#798** (`ee146fb73`) — makes tab allocation exception-safe and ownership
-durable. Adds `OWNER_REFUSED` and four `owner_*` methods to `protocol.gen.ts`.
-- **#782** (`be2546ec0`) — release tooling only: the store script surfaces the
-store's own rejection reason instead of a bare `curl: (22)`. Not shipped in the
-store package (it is absent from the `extension/store-package-files.txt`
-allowlist, which is what defines the thirteen zipped files).
-- **#907** (`7ad53a5e1`) — the version bump itself, plus the store-publishing
-guidance now carried in `AGENTS.md`.
-
-**Why this version is 0.1.10 and not 0.1.9.** 0.1.9 was never submitted. It was
-bumped in the tree, but #798 then changed nine `extension/` files — including
-`protocol.gen.ts` — **without** bumping the version, so "0.1.9" no longer named a
-single tree and could not be pinned by this record. #907 bumped to 0.1.10 to
-restore the version-to-tree correspondence before submitting. There is therefore
-no v0.1.9 entry in this file and none should be added: no artifact with that
-version ever reached the store.
-
-**Permissions unchanged from v0.1.8.** No permission was added, removed, or
-altered, which is why the automated path applied without a dashboard step. The
-standing rule in `submission-checklist.md` sends any permission-adding package to
-a human, because the Chrome Web Store API cannot set permission justifications.
-
-**Review duration: bounded to a ~12-hour window, not measured.** The store
-reports no approval time in either workflow log, so this is bounded from run
-history the same way the v0.1.7 entry below is:
-
-- Submitted 2026-09-10T14:31Z (run 34489484307).
-- A promote attempted 2026-09-11T02:35Z, ~12 hours later, **failed** with
-  `Chrome Web Store publish failed: only an approved STAGED revision can be
-  promoted` (run 34555183445) — so the revision was still unapproved then.
-- The promote succeeded 2026-09-11T14:34Z (run 34610983340), so it was approved
-  by then.
-
-Approval therefore landed between 2026-09-11T02:35Z and 2026-09-11T14:34Z —
-between ~12 and ~24 hours after submission, against ~4.5 days for v0.1.8. Both
-are ordinary for an extension carrying `debugger` plus broad host access; do not
-read the difference as a trend from two samples.
-
----
-
-## v0.1.8 — submitted 2026-09-06, published 2026-09-10
-
-| Field | Value |
-| --- | --- |
-| Extension version | 0.1.8 (published 2026-09-10; **superseded by v0.1.10**) |
-| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
-| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `ff9b16b5` (`feat(extension): scoped Allow (domain/site/once) and dangerous allow-all setting (0.1.8)`, PR #672, squash-merged to `main`) |
-| `extension/` tree hash | `0605d9a5c34a2681c49665a8b9e8aaaada89c50b` (the deterministic input pin — see the audit note above) |
-| Artifact SHA-256 | *not recoverable — see note below* |
-| Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
-| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
-| Submission route | **Automated** — `chrome-web-store.yml`, [run 34000911184](https://github.com/damianvtran/local-operator/actions/runs/34000911184), dispatched with `ref=main` `version=0.1.8` |
-| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 34482703148](https://github.com/damianvtran/local-operator/actions/runs/34482703148), dispatched with `version=0.1.8` |
-| Store state | `PUBLISHED`, 100% deployment |
-| State last checked | 2026-09-10 |
-| Approval timestamp | 2026-09-10 — appended when review completed; superseded by v0.1.10 on 2026-09-11 |
-| Previously published | v0.1.7, live at 100% during review (promoted 2026-09-04, run 33926643637) |
-
-**Second release to go out through the automated path**; v0.1.7 was the first
-(staged run 33815585846, promoted run 33926643637). Every release *before v0.1.7*
-was a manual dashboard upload. The workflow validated and submitted in one run:
-`validated Chrome Web Store package v0.1.8 (12 files, no source maps)`, then
-`submitted ... v0.1.8 with STAGED_PUBLISH (PENDING_REVIEW)`.
-
-**Why there is no artifact hash for this entry.** The automated path builds the
-zip on an ephemeral GitHub runner, uploads it straight to the store, and retains
-nothing — the run publishes no build artifact and logs no digest, so no local
-copy of the uploaded file exists to hash. Do **not** fill this row in by running
-`pnpm --dir extension build:zip` here: as the audit note above explains, `zip`
-stamps entries with current mtimes, so a rebuild's hash would be a *different*
-number that never identified the uploaded file, and the rebuild would also
-overwrite `extension/local-operator-extension.zip`. Audit this release by its
-`extension/` tree hash (step 1 above), which pins the build input exactly and
-needs no artifact. Recording the digest in the workflow output is the durable
-fix, and it is a natural companion to the deterministic-`build:zip` follow-up
-noted under v0.1.5.
-
-**Permissions: byte-identical to the v0.1.7 base.** QA verified that the only
-diff in the built manifest is the version string and re-indentation — no
-permission added, removed, or changed. That is why the automated path applied:
-the standing rule in `submission-checklist.md` sends any permission-adding
-package to a human in the dashboard, because the Chrome Web Store API cannot set
-permission justifications.
-
----
-
-## v0.1.7 — submitted 2026-09-03, published 2026-09-04
-
-| Field | Value |
-| --- | --- |
-| Extension version | 0.1.7 (**the live published version** as of 2026-09-06) |
-| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
-| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `63d1f175` (`fix(release): make store environment verification reachable from the workflow token`, PR #589) |
-| `extension/` tree hash | `c8b694bb2a06213cff4786fe6f844538986afbaa` (the deterministic input pin — see the audit note above) |
-| Artifact SHA-256 | *not recoverable — see note below* |
-| Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
-| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
-| Submission route | **Automated** — `chrome-web-store.yml`, [run 33815585846](https://github.com/damianvtran/local-operator/actions/runs/33815585846), dispatched with `ref=main` `version=0.1.7` |
-| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 33926643637](https://github.com/damianvtran/local-operator/actions/runs/33926643637) |
-| Store state | `PUBLISHED`, 100% deployment |
-| State last checked | 2026-09-06 |
-| Approval timestamp | *exact time not available — bounded below* |
-| Previously published | v0.1.0 (v0.1.5 was submitted but superseded before it went live) |
-
-**Recorded retrospectively on 2026-09-06**, while adding the v0.1.8 entry. This
-entry was missed at release time, which is the gap it exists to close: the file
-had gone straight from v0.1.8 to v0.1.5 while v0.1.7 was the version actually
-live. Every field above is derived from the workflow logs and the git object DB
-rather than from memory; the fields those sources cannot establish say so
-instead of carrying a plausible number.
-
-**This was the first release to go out through the automated path**, both
-halves of it — submitted by `chrome-web-store.yml` and published by
-`chrome-web-store-promote.yml`, with no dashboard step. The logs read:
-
-```
-EXPECTED_VERSION: 0.1.7
-validated Chrome Web Store package v0.1.7 (12 files, no source maps)
-submitted Chrome Web Store extension omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.7 with STAGED_PUBLISH (PENDING_REVIEW)
-promoted Chrome Web Store extension omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.7 to PUBLISHED
-```
-
-**Why the source commit is the *staged* run's `headSha`, not the promote run's.**
-The promote run (33926643637) reports `headSha` `5cbea141` — a later `main`
-commit that merely still carried 0.1.7 in the manifest. Promotion publishes the
-already-uploaded revision and builds nothing, so its checkout is not the build
-input. The commit that produced the artifact is the staged run's `headSha`,
-`63d1f175`, whose `extension/manifest.json` and `package.json` both read `0.1.7`
-(verified with `git show`). Use the tree hash above when auditing.
-
-**Why there is no artifact hash for this entry.** Same reason as v0.1.8: the
-automated path builds on an ephemeral runner and retains nothing. Confirmed for
-this release specifically — the artifacts API reports `total_count = 0` for both
-run 33815585846 and run 33926643637, and neither log contains a digest. Audit by
-the `extension/` tree hash, and do not rebuild `build:zip` to manufacture a hash
-(see the audit note above for why a rebuild's hash is a different number).
-
-**Approval timestamp: exact time unknown, bounded to a ~24-hour window.** The
-Chrome Web Store does not report an approval time in either workflow log, and no
-`fetchStatus` call was made at the time. What the run history does establish:
-
-- Submitted 2026-09-03T22:59:35Z (run 33815585846).
-- A promote attempted 2026-09-03T23:01:50Z, ~2 minutes later, **failed** with
-  `Chrome Web Store publish failed: only an approved STAGED revision can be
-  promoted` (run 33815763092) — so the revision was still unapproved then.
-- The promote succeeded 2026-09-04T22:42:40Z, so it was approved by then.
-
-Approval therefore landed between 2026-09-03T23:01:50Z and 2026-09-04T22:42:40Z.
-That failed promote is worth knowing operationally: the promote workflow is not
-idempotent against an unapproved revision and fails closed rather than waiting.
-
-**Permissions: unchanged from the v0.1.5 base.** `git diff 37289774 63d1f175
--- extension/manifest.json` shows only the version string; the permission array
-(`debugger`, `tabs`, `tabGroups`, `scripting`, `storage`, `alarms`,
-`webNavigation`, `notifications`) and host `<all_urls>` are identical. That is
-why this one could take the automated path — no justification field to fill in
-by hand.
-
-**What shipped in it** (`37289774..63d1f175`, extension-affecting commits):
-session-named tab groups (#555), a browser bridge that stays usable when the
-heartbeat writer dies (#563), and two release-workflow fixes (#585, #589).
-Note **v0.1.6 never shipped** — #555 bumped the manifest to 0.1.6 and #563
-superseded it with 0.1.7 before any submission, so no 0.1.6 entry is owed.
-
----
-
-## v0.1.5 — submitted 2026-09-02, pending review as of 2026-09-02
-
-| Field | Value |
-| --- | --- |
-| Extension version | 0.1.5 (submitted; **not yet the approved version**) |
-| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
-| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `37289774` (`chore(release): bump version to 0.44.38`) |
-| `extension/` tree hash | `9fe12bde271cc84f060922d8d254d22d046b7e6a` (the deterministic input pin — see the audit note above) |
-| Artifact SHA-256 | `724f3f91117f166263c462801a9a73c27d0a4787bd4e5c5dcb6374a2d56d2d0a` (uploaded file only; not reproducible) |
-| Artifact size | 45,262 bytes, 12 files, no source maps |
-| Bridge protocol version | `PROTO_VERSION = 1` |
-| Submission route | **Manual dashboard upload** |
-| Store state | `PENDING_REVIEW`, 100% deployment |
-| State last checked | 2026-09-02 |
-| Approval timestamp | *pending — append when review completes* |
-| Previously published | v0.1.0, live at 100% during review |
-
-**Refresh the state rows** with a `fetchStatus` call — the same read-only API
-`extension/scripts/chrome-web-store.sh` uses — rather than trusting the values
-above. "Pending review" is a snapshot from the submission date; Chrome review
-usually resolves within days, so if that date is well in the past, assume the
-row is stale and re-check before relying on it. Append the approval timestamp
-and promote this heading when it lands. Note there is no status-only workflow to
-dispatch — both store workflows write (`stage` uploads and submits, `promote`
-publishes), so a read-only status check has to be the hand-rolled API call, and
-that needs a temporary IAM grant which must be revoked afterwards. Read the
-warning under "Release-automation verification" before making it. The dashboard
-shows the same state with no grant at all, which is the cheaper check when you
-only need to eyeball it.
-
-**Follow-up: make `build:zip` deterministic.** `build.mjs` invokes `zip` without
-normalising timestamps, which is why the archive hash above cannot be
-regenerated. Normalising mtimes and passing `-X` (verified locally to produce
-identical hashes across repeated builds) would make a rebuild hash-comparable
-and let this record drop the three-step audit procedure for a single check.
-
-**Why this one was uploaded by hand.** 0.1.5 adds the `tabGroups` permission,
-which 0.1.0 did not request. Permission justifications exist only in the
-dashboard — the Chrome Web Store API v2 cannot set them, and Chrome forbids
-scripting the extensions gallery, so no automation can fill that field. The
-justification pasted was the `tabGroups` entry in `permissions.md`, verbatim.
-
-**Permissions declared** (matches the built `dist/manifest.json`, not the
-source list): `debugger`, `tabs`, `tabGroups`, `scripting`, `storage`, `alarms`,
-`webNavigation`, `notifications`, plus host `<all_urls>`. The only delta from
-the published v0.1.0 is `tabGroups`.
-
-**Pre-upload validation.** Built from a clean `extension/` working tree at the
-recorded commit: `pnpm typecheck` clean, 67/67 tests passing, and
-`scripts/validate-store-zip.sh` confirming the archive matches the reviewed
-`store-package-files.txt` allowlist, that manifest and package versions agree,
-and that no source maps are present.
-
-**User-visible changes since the published v0.1.0** (`5cbb91e1..37289774`):
-multi-tab surfaces so parallel sessions each own a tab, session-based tab
-grouping (what `tabGroups` is for), site approval as a first-class agent-legible
-flow with queued concurrent approvals and explicit loopback all-port grants, an
-MV3 reconnect alarm so a suspended worker wakes, owned tabs closing before the
-final response, and fixes to snapshot ref resolution, AX wrapper traversal,
-hidden-tab scrolling, and popup pairing feedback.
-
-### Release-automation verification performed on this date
-
-The automated path was audited against the live GitHub and GCP APIs so the next
-release can use it. All checks passed.
-
-- **Both protected environments** (`chrome-web-store`,
-  `chrome-web-store-production`): one required reviewer, custom deployment
-  branch policy allowing exactly `main`, and all four release variables defined
-  at environment scope with identical values. Verified by running the real
-  `extension/scripts/verify-release-environment.sh` against the live API — the
-  same script the workflows run before authenticating.
-- **`CWS_EXTENSION_ID`** matches the permanent ID hardcoded in
-  `chrome-web-store.sh`; no repository- or organization-scoped copies of any
-  release variable exist, which the script would reject.
-- **WIF provider** `local-operator-main` in pool `github-releases`
-  (project `pivotal-tower-456213-u5`, number `778402241192`): ACTIVE, issuer
-  `https://token.actions.githubusercontent.com`, the documented three-entry
-  attribute mapping, and attribute condition
-  `assertion.repository_id == "922327641" && assertion.ref == "refs/heads/main"`.
-  The numeric repository ID was confirmed to be this repository's real ID.
-- **Service account** `cws-publisher@pivotal-tower-456213-u5.iam.gserviceaccount.com`
-  exists and is enabled, carries exactly one binding —
-  `roles/iam.workloadIdentityUser` to the WIF principalSet scoped by that
-  repository ID — and holds no service-account key. `chromewebstore`,
-  `iamcredentials`, and `sts` APIs are enabled on the project.
-- **End-to-end authorization proven.** The service account was added under
-  Developer Dashboard → Account, and a read-only `fetchStatus` call made as that
-  service account returned HTTP 200 with the correct item ID. This is the one
-  link that cannot be checked from configuration alone, because it lives only in
-  the dashboard. **Reproducing this call requires a temporary
-  `roles/iam.serviceAccountTokenCreator` grant that MUST be revoked immediately
-  afterwards — see the warning below before running it.**
-
-**Warning — read before calling `fetchStatus` by hand.** A human cannot mint a
-token for the publishing service account by design: the only binding on it is
-`roles/iam.workloadIdentityUser` for the GitHub principalSet, so nobody at a
-keyboard can produce a store credential. Testing the call therefore requires
-temporarily granting yourself `roles/iam.serviceAccountTokenCreator`. When this
-audit did that, the grant was removed immediately and the resulting IAM policy
-was diffed against a pre-test capture to confirm it was byte-identical.
-
-**Never leave that role in place.** A standing human token-creator binding
-defeats the entire reason this release path uses workload identity federation
-instead of a stored key: it recreates the durable human-usable credential that
-WIF exists to eliminate. Capture the policy before granting, revoke straight
-after, and diff to prove the revert — do not rely on remembering.
-
----
-
-## v0.1.0 — first public release
-
-| Field | Value |
-| --- | --- |
-| Extension version | 0.1.0 |
-| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
-| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `5cbb91e1` (`feat: Local Operator browser extension and browser bridge`) |
-| `extension/` tree hash | `2d6fa2b3d0665a241071fa8e74e91184530d5be3` (derived from the source commit while backfilling this entry) |
-| Bridge protocol version | `PROTO_VERSION = 1` (at `5cbb91e1`) |
-| Artifact SHA-256 | *never recorded — see note below* |
-| Artifact size | ~31 KB (the only surviving fingerprint, from the original checklist) |
-| Submission route | Manual dashboard upload (first publication) |
-| Store state | `PUBLISHED`, 100% deployment |
-| State last checked | 2026-09-02 |
-
-First publication, gated on Radient, Inc. business verification and the EEA
-trader declaration rather than on anything in the package. Declared the original
-seven permissions plus `<all_urls>` — `tabGroups` did not yet exist.
-
-Artifact SHA-256 was not recorded at the time; this file was created during the
-0.1.5 release. The approximate size above is the only surviving fingerprint. The
-source commit still pins the tree, so the contents can be rebuilt and inspected,
-but nothing ties them to the specific file that was uploaded. This gap is
-exactly what the fields above exist to prevent — note that even a recorded
-SHA-256 would only have identified the uploaded artifact, not enabled a
-hash-comparable rebuild, until `build:zip` is made deterministic.
