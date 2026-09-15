@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
@@ -73,6 +74,97 @@ from local_operator.session.frontend_state import (
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.session.session_search import search_store
 from local_operator.slash_commands import slash_command_for
+
+logger = logging.getLogger(__name__)
+
+#: How many event-loop turns a dispatched admission is given to report a DIRECT
+#: refusal before the reply is sent without it. Deliberately the same shape and
+#: size as ``serving.py::_ADMISSION_PRELUDE_TURNS``, and for the same reason:
+#: the refusals worth reporting (a closing session, a full queue, a rejected
+#: reservation) are raised before the owner does any real work, so a few turns
+#: surface them; anything later is a turn that is genuinely under way, which
+#: belongs in the transcript rather than in this receipt. Turns rather than
+#: seconds — see :func:`admit_receipt_request`.
+_ADMISSION_PRELUDE_TURNS = 3
+
+#: The two phrases this host ADDS to ``admission.detail``. ``status`` is a
+#: one-word literal by contract (``AdmissionDetail``), so the phrase is the only
+#: place a caller can read HOW the owner took the request — the third case being
+#: the owner's own ack, passed through verbatim — and a renderer that promises
+#: "sends when this step finishes" needs exactly that distinction. A started
+#: turn must not be described as queued, or the reverse.
+QUEUED_ADMISSION_DETAIL = "queued behind the turn already running"
+HANDED_OVER_ADMISSION_DETAIL = "admitted; the owner's acknowledgement was still in flight"
+
+
+def _log_detached_admission(task: "asyncio.Task[tuple[str, bool]]") -> None:
+    """Never let a dispatched admission become an unretrieved exception.
+
+    The reply has already been sent by the time this runs, so a failure here
+    has no caller left to reach: it is a log line, and swallowing it silently
+    is what would make the next occurrence undiagnosable. Mirrors
+    ``serving.py::_log_detached_admission``, which exists for the same reason.
+    """
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("a receipt's request failed after admission: %s", error)
+
+
+async def admit_receipt_request(
+    remote: Any, text: str, *, command_id: str, images: list[dict[str, str]]
+) -> tuple[str, bool, bool]:
+    """Admit one receipt's request on the owner without parking the reply.
+
+    Returns ``(detail, duplicate, queued)``.
+
+    WHY IT IS DISPATCHED RATHER THAN AWAITED. ``admit_prompt`` is an ack on the
+    owner's ``prompt``/``steer`` op, and the ``prompt`` op resolves that ack on
+    the DURABLE TRANSCRIPT APPEND, never on queue insertion
+    (``serving.py::prompt``: "ACK is the durable transcript append, never
+    insertion into this queue"). Awaiting it while a turn is running therefore
+    parks this reply for the whole of that turn; past the client's
+    ``ACK_TIMEOUT_S`` (15 s) the caller is told the owner is unavailable and, on
+    retry under the same request id, that the outcome is indeterminate — while
+    the goal is set and the turn is queued. That is the failure the sibling host
+    already answers this way (``serving.py::_admit_without_waiting_for_the_turn``):
+    give the admission its prelude so a DIRECT refusal still reaches the caller,
+    then let it run detached and SAY what happened in the receipt.
+
+    A turn already running takes the text the way both other hosts take it — the
+    TUI's ``_submit_prompt`` and ``serving.py::_complete_unconsumed_action``
+    steer when the session is streaming — so ``/goal <text>`` mid-turn behaves
+    here as it does on one Enter in the terminal. That choice also keeps the
+    ack off the turn: ``steer`` answers on queue insertion ("steering queued"),
+    where ``prompt`` would wait for the append.
+
+    ``queued`` is the reading of the owner's own state taken before the call,
+    which is what a caller reports: True means a turn was already running, so
+    this text is taken alongside it rather than starting one of its own.
+
+    AN OWNER FROM BEFORE THE ``steer`` OP: the call fails, and — because the
+    failure is not one of the DIRECT refusals the prelude reports — it is logged
+    by :func:`_log_detached_admission` rather than turned into a receipt error
+    for a goal that IS set. The same skew already governs the ``steer`` mode of
+    ``/messages``, so this adds no new compatibility surface.
+    """
+    queued = bool(getattr(remote, "is_streaming", False))
+    task = asyncio.ensure_future(
+        remote.admit_prompt(text, command_id=command_id, images=images, steer=queued)
+    )
+    for _ in range(_ADMISSION_PRELUDE_TURNS):
+        if task.done():
+            break
+        await asyncio.sleep(0)
+    if task.done():
+        # A direct refusal re-raises here, into the caller's error arm, exactly
+        # as it did while this awaited the ack.
+        detail, duplicate = task.result()
+        return detail, duplicate, queued
+    task.add_done_callback(_log_detached_admission)
+    return (QUEUED_ADMISSION_DETAIL if queued else HANDED_OVER_ADMISSION_DETAIL), False, queued
+
 
 router = APIRouter(tags=["Desktop sessions"], dependencies=[Depends(require_desktop)])
 RequestID = Annotated[
@@ -1090,6 +1182,59 @@ async def prompt(session_id: str, body: Prompt, request: Request):
         )
 
 
+def desktop_viewer_must_submit(receipt_type: Any) -> bool:
+    """Whether THIS route owes the request a slash receipt carries.
+
+    The receipt vocabulary is shared with the runtime and the ownership rule is
+    one predicate — :func:`runtime_must_complete`: the RUNTIME submits the
+    request only when the dialing client did NOT declare that receipt type as
+    its own. The desktop viewer is a DECLARING client — ``AttachedSession``
+    dials with ``slash_consumers=list(SLASH_ACTION_RECEIPTS)`` on every surface,
+    ``desktop`` included — so for the receipts in that vocabulary the runtime
+    deliberately stands down, and the submit is this host's job.
+
+    MEMBERSHIP COMES FIRST, and that clause is load-bearing rather than
+    decorative: ``runtime_must_complete`` answers False both for "the client
+    declared this type" and for "this is not an action receipt at all", so the
+    bare inversion would claim every notice — including one carrying no request —
+    as this host's to complete.
+
+    THE ASSUMPTION, named because nothing here can enforce it: this host claims
+    the WHOLE vocabulary because the desktop bridge declares the whole list
+    unconditionally (``session/attached.py``), where the runtime reads a
+    PER-CONNECTION declaration. A future client kind that declares a SUBSET
+    would have the runtime complete a request this route also admits — two user
+    turns from one command. The two sides must keep declaring the same list; the
+    guard file below and ``tests/unit/session/runtime/test_action_receipt_completion.py``
+    pin the halves each can see.
+
+    The function-local import is what keeps the drift guard honest: the tuple is
+    read AT CALL TIME, so a test that extends the vocabulary watches this answer
+    change, where a module-level binding would freeze the answer it set out to
+    check.
+
+    NOT THE TUI'S FULL RULE, deliberately. The TUI also completes a TYPELESS
+    legacy goal receipt (``tui/app.py``'s ``legacy_goal``: an older owner that
+    reported ``stored`` and never admitted the turn). This host cannot: a
+    receipt with no ``type`` is not in the vocabulary, no declaration covers it,
+    and the runtime a desktop session talks to is never older than the client
+    that spawned it.
+    """
+    from local_operator.session.runtime.types import (
+        SLASH_ACTION_RECEIPTS,
+        runtime_must_complete,
+    )
+
+    # The two halves of the one rule, read in the order that makes them true:
+    # the type is an action receipt, and this host declared it (so the runtime
+    # stood down and the submit is ours). They coincide today because the
+    # declaration IS the vocabulary; both are stated so a change to either half
+    # has one place to be made and one test to fail.
+    return receipt_type in SLASH_ACTION_RECEIPTS and not runtime_must_complete(
+        receipt_type, SLASH_ACTION_RECEIPTS
+    )
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/commands", response_model=CRUDResponse[CommandReceipt]
 )
@@ -1165,12 +1310,57 @@ async def command(session_id: str, body: Command, request: Request):
                     422 if outcome.data["code"] == "loop_invalid" else 409, outcome.text
                 )
             consumed = outcome.data.get("request", "")
-            attached = outcome.data.get("type") in {"team_attached", "agent_attached"}
-            if attached and (consumed or body.images):
-                # The runtime returns attachment metadata, not a started turn.
-                # Match its typed discriminator rather than blindly submitting
-                # any string a listing/picker happens to call a request.
-                detail, duplicate = await bridge.remote.admit_prompt(
+            # The receipt's typed discriminator is the ONLY thing that decides
+            # whether a request still needs a home — the runtime returns
+            # attachment metadata for an attach and the goal text for a goal,
+            # never a started turn — and it is read through the shared
+            # vocabulary so a newly declared receipt cannot be missed here.
+            # See ``desktop_viewer_must_submit`` for the ownership rule.
+            #
+            # ORDER, matching the TUI's (``app.py::_cmd_goal``): the goal is
+            # stored and the receipt built BEFORE this admits anything — so
+            # "goal set" describes the state the run began under — and the
+            # admission is reported INSIDE that same receipt rather than as a
+            # second answer the caller has to correlate.
+            #
+            # Two deliberate differences from the TUI path, both inherited from
+            # the attach admissions this branch already served:
+            # * the text submitted is the receipt's own ``request`` — the
+            #   argument as the runtime recorded it — with the body's structured
+            #   images passed straight through. There is no composer here, so
+            #   there is no attachment map to resolve ``[Image #N]`` markers or
+            #   collapsed pastes against, unlike ``_submit_command_prompt``;
+            # A NON-EMPTY request is the other half, and images alone are not a
+            # substitute for it: an action-less receipt (``/agent clear`` returns
+            # ``agent_attached`` with an empty request) carries no ask, and the
+            # body's staged images are the CALLER's, not the receipt's — an
+            # image-only turn opened for one is a paid turn and a durable row
+            # nobody asked for. Images still ride along with a real request:
+            # ``consumed`` is what admits, and they are passed with it.
+            #
+            # ORDER, matching the TUI's (``app.py::_cmd_goal``): the goal is
+            # stored and the receipt built BEFORE this admits anything — so
+            # "goal set" describes the state the run began under — and the
+            # admission is reported INSIDE that same receipt rather than as a
+            # second answer the caller has to correlate.
+            #
+            # Deliberate difference from the TUI path, documented here: the text
+            # submitted is the receipt's own ``request`` — the argument as the
+            # runtime recorded it — and the body's structured images are passed
+            # through unchanged. There is no composer on this host, so there is
+            # no attachment map to resolve ``[Image #N]`` markers or collapsed
+            # pastes against, unlike ``_submit_command_prompt``.
+            #
+            # The admission is DISPATCHED, not awaited: a reply parked on a
+            # running turn's durable append is answered 503 past the client's
+            # ack deadline and reads as indeterminate on retry while the goal is
+            # set and the turn is queued. ``admit_receipt_request`` carries the
+            # reasoning, the steer choice that matches both other hosts, and the
+            # phrase in ``admission.detail`` that tells a caller which of the two
+            # dispositions it got (queued and started share the same ``status``).
+            if desktop_viewer_must_submit(outcome.data.get("type")) and consumed:
+                detail, duplicate, _queued = await admit_receipt_request(
+                    bridge.remote,
                     str(consumed),
                     command_id=body.request_id,
                     images=[image.model_dump() for image in body.images],
