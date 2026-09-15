@@ -19,8 +19,16 @@ from local_operator.tools import builtin
 def _force_browser_available(monkeypatch):
     """The inventory assertion spans the full default surface including
     ``browser``, whose builder is gated on a reachable CMUX browser that CI
-    lacks; force the predicate so the ordering test is deterministic."""
+    lacks; force the predicate so the ordering test is deterministic.
+
+    The app's browser host is forced OFF for the same reason, and explicitly:
+    it is a THIRD term of the same ``createIf`` gate, so a developer with the
+    desktop app running would otherwise flip every host-diagnosis assertion in
+    this file from a probe that has nothing to do with the test. Tests that
+    need it ON say so themselves.
+    """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "ui_browser_advertisable", lambda: False)
 
 
 if TYPE_CHECKING:
@@ -644,7 +652,7 @@ def test_build_system_blocks_wires_the_browser_flags_it_renders_with(monkeypatch
     with a real tool list and asserts on what actually ships.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     # Browser present: usage prose, no playbook, no inventory note.
     with_browser = build_system_blocks(
@@ -681,7 +689,7 @@ def test_rendering_system_md_without_flags_still_ships_a_browser_section() -> No
     unreachable rather than merely unused.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     bare = render_template("system.md", {})
     assert (usage in bare) != (setup in bare), "neither section shipped"
@@ -697,7 +705,7 @@ def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> Non
     `{"has_browser": False, "no_browser": True}` under the caller's dict fixed
     the empty case but made a caller who supplied only `has_browser=True`
     inherit `no_browser=True`, so the prompt asserted "Browser work goes
-    through the `browser` tool" AND "the host has neither backend connected...
+    through the `browser` tool" AND "no browser host is connected...
     set it up with the user" — 686 characters contradicting the paragraph
     above them.
 
@@ -709,7 +717,7 @@ def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> Non
     single-case test cannot see.
     """
     usage = "Browser work goes through the `browser` tool"
-    setup = "the host has neither backend"
+    setup = "no browser host is connected"
 
     # Every representable input: absent, half-supplied either way, and both.
     values: list[dict[str, Any]] = [{}]
@@ -739,7 +747,7 @@ def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> 
     """`reviewer`, `scout`, `manager` and `architect` seeds omit `browser`.
 
     Their tool list therefore has no browser on a host that has one. Telling
-    such a child "the host has neither backend connected... do that setup with
+    such a child "no browser host is connected... do that setup with
     the user" is factually wrong and actionably wrong — it invites a read-only
     subagent to walk the operator through an install it cannot use. It is also
     the exact inversion of the principle stated for the no-browser note:
@@ -756,7 +764,7 @@ def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> 
     instructions, inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
 
     # The false claims must be absent.
-    assert "the host has neither backend" not in instructions
+    assert "no browser host is connected" not in instructions
     assert "NO browser tool" not in inventory
     assert "no cmux CLI is reachable" not in inventory
     # The prohibition must still be present, with the true diagnosis.
@@ -764,6 +772,34 @@ def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> 
     assert "A browser IS available on this host" in inventory
     assert "never install or script a browser engine" in inventory.lower()
     # And it must not advertise a tool it does not have.
+    assert not any(line.startswith("- browser") for line in inventory.splitlines())
+
+
+def test_a_restricted_role_is_told_the_HOST_has_a_browser_on_the_app_only_host(
+    monkeypatch,
+) -> None:
+    """The same diagnosis for the third host, and the case the predicate missed.
+
+    `createIf` has three host terms; `_host_browser_backend_available` had two,
+    so on a host where the app answers and nothing else does the gate put the
+    tool in every ordinary session's list while a restricted child got the
+    note saying no browser host is connected — a claim the note's own sibling
+    rule names as worse than saying nothing, and one the rewritten no_browser
+    copy would then invite the child to "set up".
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin, "ui_browser_advertisable", lambda: True)
+
+    instructions, inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
+
+    assert "no browser host is connected" not in instructions
+    assert "NO browser tool" not in inventory
+    assert "was not given the browser tool" in inventory
+    assert "A browser IS available on this host" in inventory
+    # The app-only host is a host the predicate must have SEEN, not merely one
+    # whose absence happened to be harmless: with the term removed the same
+    # render falls back to the setup playbook.
     assert not any(line.startswith("- browser") for line in inventory.splitlines())
 
 
