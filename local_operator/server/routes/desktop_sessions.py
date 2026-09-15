@@ -496,8 +496,11 @@ async def errors() -> AsyncIterator[None]:
         # ``detail.message`` when ``detail`` is an object.
         #
         # ``error.detail`` is deliberately NOT echoed — it names sockets, control
-        # ports and directories — and is logged at its raise site instead, which
-        # is where the cause still exists to be named.
+        # ports and directories — and is logged at each raise site instead, which
+        # is where the cause still exists to be named: the transport raise in
+        # ``AttachedSession.set_working_directory`` (where the exception is still
+        # live) and the settlement refusal in ``_settle_unconfirmed_move`` (with
+        # all four readbacks).
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (

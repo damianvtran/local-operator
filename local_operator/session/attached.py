@@ -2489,6 +2489,20 @@ class AttachedSession:
             # ``_cwd`` is LEFT at the new value so the next engage cannot spawn
             # at a directory the owner may already have left; the caller
             # reconciles instead of claiming either answer.
+            #
+            # LOGGED HERE because this is the ONE place the cause is still a live
+            # exception, and this raise is the most common indeterminate case:
+            # ``MoveIndeterminate.detail`` is deliberately kept off the wire (it
+            # names sockets and control ports), so without this the operator the
+            # 503 sends off to "reconnect and reconcile" has no trace of WHY
+            # (review round 3, MINOR-2). The exception is chained, so the
+            # transport's own frames stay reachable too.
+            logger.error(
+                "move of %s left an unknown owner outcome: %s",
+                self._session_id,
+                error,
+                exc_info=True,
+            )
             raise MoveIndeterminate(str(error)) from error
         except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
             self._cwd = previous

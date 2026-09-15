@@ -452,6 +452,49 @@ def _live_owner_cwd(root: Path, session_id: str) -> str | None:
     return None
 
 
+def _cwd_is_unconfirmed(root: Path, session_id: str, marker_cwd: str | None, resolved: str) -> bool:
+    """Whether a bridge being BUILT must treat ``resolved`` as unconfirmed.
+
+    WHY THIS EXISTS AT ALL (review round 3, MAJOR-1). The doubt used to live
+    only in the bridge that watched the unknown outcome fail, and that is a copy
+    in one process's memory: an eviction at ``BRIDGE_COUNT`` or a plain server
+    restart rebuilt the bridge from the MARKER — the very copy the failed
+    operation wrote — so the doubt was discarded on exactly the path the finding
+    named, and the next move resolved a relative target against it and rewrote
+    the durable marker from that base. A successor could then be engaged in a
+    directory no party confirmed, while the docs promised the doubt was settled
+    against the owner.
+
+    The signature of a half-applied move is durable and readable here: a marker
+    that names a DIFFERENT directory from the one the session's LIVE owner
+    reports in its own record (``registry.scan``; not a value this server wrote).
+    An owner still running in ``before`` while the marker says ``after`` can only
+    mean the move did not take — a move is honoured by retiring the owner, and a
+    definite refusal restores every copy — so the marker is a failed write and
+    the bridge must reconcile before it acts on it.
+
+    Deliberately NARROW, because a false positive costs a move: the doubt is only
+    reconstructed when a marker exists and carries a cwd, and when a live owner
+    disagrees with the resolved directory. A cold session (no record), a settled
+    session (record == marker) and a checkpoint-only directory (no marker to
+    doubt) all stay confirmed. The one conservative direction is an owner in the
+    seconds of its own retirement: the outgoing record can still name the old
+    directory while the successor has not published yet, which flags the doubt
+    for that window. That refuses the next move with a reconcile sentence instead
+    of acting on a possibly-stale copy, and it clears as soon as the successor's
+    own record lands — the safe side of the line this finding is about.
+
+    No separate read is needed for the two arguments: ``marker_cwd`` is the
+    cwd the caller already got from the marker (``None`` when the directory came
+    from the checkpoint fallback), and ``resolved`` is the directory the bridge
+    will run with, so this asks only the question the marker cannot answer.
+    """
+    if not marker_cwd:
+        return False
+    owner = _live_owner_cwd(root, session_id)
+    return bool(owner) and not _same_directory(owner, resolved)
+
+
 async def _settle_unconfirmed_move(
     bridge: DesktopSessionBridge, marker_dir: Path, read_marker: Callable[[], bytes | None]
 ) -> None:
@@ -512,12 +555,30 @@ async def _settle_unconfirmed_move(
     observed = f"marker={durable!r} bridge={bridge.cwd!r} facade={facade!r} owner={owner!r}"
 
     if owner and owner == facade and owner != durable:
-        await asyncio.to_thread(
-            write_desktop_marker,
-            marker_dir,
-            Path(owner),
-            model=stored_draft_model(read_desktop_marker(marker_dir)),
-        )
+        # The write is wrapped because this branch is entered PRECISELY when the
+        # same file could not be written a moment ago: a second failure escaped
+        # as a raw ``OSError`` out of the route, which answers 500 in a ladder
+        # where every neighbour is a mapped 409/503 and the route's own contract
+        # is that the failure classes below are the ladder's (review round 3,
+        # MINOR-1). The state is unresolved either way, so it is reported as
+        # such — never as a refusal, which would tell the client to act on a
+        # directory nobody confirmed.
+        try:
+            await asyncio.to_thread(
+                write_desktop_marker,
+                marker_dir,
+                Path(owner),
+                model=stored_draft_model(read_desktop_marker(marker_dir)),
+            )
+        except OSError as error:
+            logger.error(
+                "could not repair the unconfirmed move for %s in %s: %s",
+                bridge.session_id,
+                marker_dir,
+                observed,
+                exc_info=True,
+            )
+            raise MoveIndeterminate(observed) from error
         bridge.cwd = owner
         bridge.cwd_unconfirmed = False
         logger.warning(
@@ -823,6 +884,7 @@ class DesktopSessionBridge:
         cwd: str,
         *,
         retiring: Callable[[], bool] | None = None,
+        cwd_unconfirmed: bool = False,
     ) -> None:
         self.root, self.session_id, self.cwd = root, session_id, cwd
         # Why this bridge must not start a runtime, asked of the daemon's own
@@ -876,7 +938,13 @@ class DesktopSessionBridge:
         #: resolves anything against this bridge: see
         #: :func:`_settle_unconfirmed_move`. Never a retry token — the receipt
         #: journal is what makes the request at-most-once.
-        self.cwd_unconfirmed = False
+        #:
+        #: ALSO RECONSTRUCTED AT CONSTRUCTION by the pool, from the durable
+        #: evidence (``marker != the live owner's record``, see
+        #: :func:`_cwd_is_unconfirmed`), because a doubt that lives only in the
+        #: bridge that watched the failure is discarded by the eviction and
+        #: restart paths this flag exists to cover (review round 3, MAJOR-1).
+        self.cwd_unconfirmed = cwd_unconfirmed
 
     def has_legacy_subscriber(self) -> bool:
         """Whether any LIVE subscriber cannot consume ``frontend.replace``."""
@@ -2711,7 +2779,16 @@ class DesktopSessions:
             if bridge is None:
                 path = self.root / "sessions" / session_id
 
-                def locate() -> str:
+                def locate() -> tuple[str, str | None]:
+                    """This session's opening directory, and the MARKER's own value.
+
+                    The second element is provenance, not decoration: it is what
+                    lets the caller ask
+                    :func:`_cwd_is_unconfirmed` whether the directory is a
+                    durable claim a failed move could have written (the marker),
+                    or the checkpoint fallback for a pre-checkpoint transcript,
+                    which has no marker to doubt.
+                    """
                     if not path.is_dir() or not is_user_session(path):
                         raise KeyError("Unknown session")
                     # Through the TOLERANT reader, not ``json.loads``: a marker this
@@ -2725,7 +2802,7 @@ class DesktopSessions:
                     stored = read_desktop_marker(path)
                     marker_cwd = (stored or {}).get("cwd")
                     if isinstance(marker_cwd, str) and marker_cwd:
-                        return marker_cwd
+                        return marker_cwd, marker_cwd
                     # The cold facade restores cwd from the durable canonical
                     # checkpoint. This fallback is only used by pre-checkpoint
                     # transcripts, whose historical launch directory is unknown.
@@ -2735,13 +2812,16 @@ class DesktopSessions:
                     from local_operator.session.transcript import Transcript
 
                     checkpoint = Transcript(path).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                    return str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent)
+                    return (
+                        str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
+                        None,
+                    )
 
                 # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
                 # daemon too: that is what lets "the 503 is the LATCH answering" be
                 # read as a control in the evidence rather than as an artefact of
                 # routing.
-                cwd = await asyncio.to_thread(locate)
+                cwd, marker_cwd = await asyncio.to_thread(locate)
                 self.assert_admitting()  # THE REFUSAL, before anything is built
                 if len(self.bridges) >= BRIDGE_COUNT:
                     idle = [b for b in self.bridges.values() if b.users == 0]
@@ -2750,7 +2830,17 @@ class DesktopSessions:
                     oldest = min(idle, key=lambda b: b.touched)
                     del self.bridges[oldest.session_id]
                 bridge = DesktopSessionBridge(
-                    self.root, session_id, cwd, retiring=self.retiring_probe
+                    self.root,
+                    session_id,
+                    cwd,
+                    retiring=self.retiring_probe,
+                    # Reconstructed from the durable evidence BEFORE the bridge
+                    # can be handed out, so the doubt survives the eviction and
+                    # restart paths that rebuild it (review round 3, MAJOR-1).
+                    # Off the loop: it reads the run directory through discovery.
+                    cwd_unconfirmed=await asyncio.to_thread(
+                        _cwd_is_unconfirmed, self.root, session_id, marker_cwd, cwd
+                    ),
                 )
                 self.bridges[session_id] = bridge
             else:

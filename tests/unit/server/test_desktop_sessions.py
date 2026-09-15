@@ -4811,6 +4811,184 @@ async def test_an_unconfirmed_move_is_repaired_from_the_live_owners_record(
 
 
 @pytest.mark.asyncio
+async def test_the_doubt_survives_an_eviction_and_refuses_a_relative_move(
+    move_api, monkeypatch
+) -> None:
+    """Review round 3, MAJOR-1: the doubt must be DURABLE, not per-bridge memory.
+
+    ``cwd_unconfirmed`` used to be set only on the bridge that watched the
+    unknown outcome fail, so an eviction at ``BRIDGE_COUNT`` (or a plain server
+    restart) rebuilt the bridge from the marker — the copy the failed operation
+    itself wrote — and the next move resolved its target against that base and
+    rewrote the marker from it. The reviewer's probe reproduced the harm end to
+    end:
+
+        REBUILT: rebuilt_cwd='…/after' unconfirmed=False
+        FOLLOW-UP AFTER EVICTION: 200 {"result": {"cwd": "…/after/child"}}
+        MARKER AFTER: …/after/child
+
+    The durable evidence is the disagreement between the marker and the LIVE
+    owner's own record, so the rebuilt bridge must arrive already doubting and a
+    later move must reconcile instead of re-executing.
+    """
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    async with pool.session(sid) as bridge:
+        await _bind_refusing_client(bridge)
+        publish(
+            SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id=sid,
+                conversation_name="synthetic owner record",
+                cwd=str(before),
+                model_label="test/model",
+                control_port=0,
+                control_key="synthetic",
+            ),
+            root,
+        )
+        _failing_rollback(monkeypatch)
+        refused = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert refused.status_code == 503, refused.text
+        assert bridge.cwd_unconfirmed is True
+        assert json.loads(marker.read_text())["cwd"] == str(after), "failed rollback"
+
+    # THE EVICTION, through the pool's own eviction statement, then a rebuild
+    # through the real pool path — so it is the reconstruction that runs here
+    # and not a value carried over from the bridge that saw the failure.
+    pool.bridges.pop(sid)
+    async with pool.session(sid) as rebuilt:
+        assert rebuilt is not bridge
+        assert rebuilt.cwd == str(after), "the marker is what the rebuild opens at"
+        assert rebuilt.cwd_unconfirmed is True, "the doubt did not survive the rebuild"
+        follow_up = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory",
+            json=_move_body(str(after / "child")),
+        )
+        assert follow_up.status_code == 503, follow_up.text
+        assert _error_code(follow_up) == "move_outcome_unknown"
+        # The harm this test exists for: the unconfirmed base must not be
+        # rewritten into the durable copy, and no relative target resolved.
+        assert json.loads(marker.read_text())["cwd"] == str(after)
+        assert not (after / "child").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_bridge_stays_confirmed_without_a_disagreeing_owner(move_api) -> None:
+    """The reconstruction is NARROW on purpose: it must not invent a doubt.
+
+    A doubt refuses the next move, so a false positive is a real cost. A cold
+    session (no owner record at all) and a live owner whose own record agrees
+    with the marker both stay confirmed.
+    """
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    client, app, root = move_api
+    before = root / "before"
+    before.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+
+    # (1) no record: the session is cold and the marker is the only account.
+    async with pool.session(sid) as bridge:
+        assert bridge.cwd == str(before)
+        assert bridge.cwd_unconfirmed is False
+
+    # (2) a live owner that AGREES with the marker: the settled case.
+    publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=sid,
+            conversation_name="synthetic owner record",
+            cwd=str(before),
+            model_label="test/model",
+            control_port=0,
+            control_key="synthetic",
+        ),
+        root,
+    )
+    pool.bridges.pop(sid)
+    async with pool.session(sid) as rebuilt:
+        assert rebuilt.cwd == str(before)
+        assert rebuilt.cwd_unconfirmed is False, "an agreeing owner is not a doubt"
+
+    # And a move from that state is an ordinary no-op, not a reconcile refusal.
+    unchanged = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(before))
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["result"]["outcome"] == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_repair_write_is_reported_as_indeterminate(move_api, monkeypatch) -> None:
+    """Review round 3, MINOR-1: the repair write needs its own handler.
+
+    That branch is entered precisely because the same file could not be written
+    a moment ago, so a second failure used to escape as a raw ``OSError`` — a 500
+    in a ladder whose neighbours are mapped 409/503 and whose route says it has
+    no ``OSError`` clause. The state is unresolved either way, so the honest
+    answer is the indeterminate class.
+    """
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    marker = _marker_path(root, sid)
+    async with pool.session(sid) as bridge:
+        await _bind_refusing_client(bridge)
+        publish(
+            SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id=sid,
+                conversation_name="synthetic owner record",
+                cwd=str(before),
+                model_label="test/model",
+                control_port=0,
+                control_key="synthetic",
+            ),
+            root,
+        )
+        _failing_rollback(monkeypatch)
+        refused = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert refused.status_code == 503, refused.text
+
+        def explode(*args: Any, **kwargs: Any) -> None:
+            raise OSError("read-only volume")
+
+        monkeypatch.setattr(module, "write_desktop_marker", explode)
+        follow_up = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(before))
+        )
+        assert follow_up.status_code == 503, follow_up.text
+        assert _error_code(follow_up) == "move_outcome_unknown"
+        # Unresolved, and honestly so: nothing was repaired and nothing moved.
+        assert bridge.cwd_unconfirmed is True
+        assert json.loads(marker.read_text())["cwd"] == str(after)
+
+
+@pytest.mark.asyncio
 async def test_a_failed_replacement_publication_is_not_reported_as_success(
     move_api, monkeypatch
 ) -> None:

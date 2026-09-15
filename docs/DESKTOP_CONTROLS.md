@@ -107,7 +107,9 @@ All paths start `/v1/desktop/sessions/{id}` unless noted.
   unreadable/unwritable marker, another client attached, an older desktop
   window). An UNKNOWN owner outcome — the retire request left the process and no
   definitive answer came back, or a rollback could not run — is a `503
-  {"code":"move_outcome_unknown","message":...}`: nothing is rolled back, the
+  {"detail":{"code":"move_outcome_unknown","message":...}}` (`code` and `message`
+  ride under `detail`, the envelope every other error body on this API uses and
+the one the desktop client reads): nothing is rolled back, the
   receipt stays pending, and the client reconciles against actual owner state
   before claiming either directory. The request is also at-most-once
   (`retry_safe=False`): a pending row is answered 409 indeterminate rather than

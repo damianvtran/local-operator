@@ -432,8 +432,10 @@ retire, an absent or unenterable directory, a marker that cannot be read or
 written, another client attached (below), or an older desktop window (below). An
 UNKNOWN owner outcome is NOT a refusal: if the retire request left the process
 and no definitive answer came back, the owner may already have accepted, so the
-answer is `503 {"code": "move_outcome_unknown", "message": ...}` — the
-named-condition shape this ladder already uses — nothing is rolled back, and the
+answer is `503 {"detail": {"code": "move_outcome_unknown", "message": ...}}` — the
+named-condition shape this ladder already uses (the `code`/`message` pair sits
+under `detail`, which is what the shipped error handler and the desktop client
+both read) — nothing is rolled back, and the
 client reconciles before claiming either directory. A client must not treat
 every move failure as a 409 refusal.
 

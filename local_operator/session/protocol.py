@@ -604,8 +604,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     118 once the same move needed ``supports_exclusive_move`` so a desktop host
     can fail CLOSED against an owner that would ignore the exclusivity flag, 119
     once it needed the ``set_local_cwd_callback`` seam the move's local
-    replacement is published through), so
-    recompute it rather than adjusting it by the size of your own change.
+    replacement is published through), so recompute it rather than adjusting it
+    by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
