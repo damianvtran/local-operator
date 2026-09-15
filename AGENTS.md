@@ -2203,6 +2203,18 @@ Things that will bite you if you forget them:
   Cost is an ESTIMATE (list price × tokens; it cannot see a plan, discount, or
   free tier) and is labelled as one, same discipline as the component split.
 
+- **Cost is priced at RECORD time under the tariff in force at the CALL's own
+  moment, and a stored figure is final.** A row whose prices vary by time of day
+  names its schedule (`ModelInfo.time_of_use` → `model/tariff.py`), the price
+  fields hold the PEAK list rates, and `price_snapshot` evaluates the schedule at
+  the call's own `ts_ms` rather than at read time — so a historical row is never
+  repriced when the window (or a later tariff change) moves, and the same row
+  reads the same on every replay. `Usage.at_ms` carries that moment for the
+  surfaces that price a REHYDRATED call (a restored session, an attached
+  receipt), where "now" would otherwise be off by up to 2x in either direction.
+  A provider-reported dollar (`usd_cost`) is never scaled by any schedule: it is
+  the provider's own final figure.
+
 - **Adding a component OR a stored column is a schema migration.**
   `COMPONENT_KEYS` maps to one `c_<key>` column each in `store._SCHEMA`. A
   database from an older release is upgraded on open by `AnalyticsStore._migrate`
