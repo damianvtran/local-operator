@@ -819,6 +819,14 @@ class AttachedSession:
         #: shows the cold state for a refresh the user did not ask for. See
         #: ``_go_cold(refresh=True)``.
         self._refresh_callback: Callable[[], Any] | None = None
+        #: Told the moment the ``retiring`` frame ARRIVES (not at the close),
+        #: and only when the runtime says it is DRAINING. The refresh callback
+        #: above is the end of the handover and owns the re-engage; this one is
+        #: the start, and it is the only moment at which a viewer can warn the
+        #: operator before their next message is refused — on the drain rung the
+        #: EOF is ~26 s away, and every second of it the composer accepts text
+        #: that will be refused (UX round 3, U1; QA round 3, Q-1).
+        self._drain_callback: Callable[[], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -3127,6 +3135,9 @@ class AttachedSession:
             on_frontend_update=lambda data: (
                 self._on_frontend_update(data) if self._client is client else None
             ),
+            on_retiring=lambda frame: (
+                self._on_retiring_frame(frame) if self._client is client else None
+            ),
         )
         try:
             await client.connect(record, self._session_id)
@@ -5326,6 +5337,37 @@ class AttachedSession:
         ``starting…`` state covers the ~1 s the re-engage takes.
         """
         self._refresh_callback = callback
+
+    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+        """Told when the runtime announces a departure that is REFUSING work.
+
+        Fired from the ``retiring`` frame itself, so the operator hears it
+        ~26 s before the socket closes rather than after — and only when the
+        frame says ``draining``, because the idle handover refuses nothing and
+        announcing it would put a row on every ordinary refresh (the case
+        ``OperatorApp._on_runtime_refreshed``'s docstring used to assert from
+        the viewer's own now-cold state; QA round 3, Q-1 measured that probe
+        reading True for both hands). Fired on the client's reader task, so a
+        widget-touching host marshals as it does for every other callback here.
+        """
+        self._drain_callback = callback
+
+    def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
+        """A ``retiring`` frame arrived; act on it while the runtime is alive.
+
+        The frame is additive: a runtime older than the field sends no
+        ``draining`` and is therefore read as the idle handover, which is the
+        pre-change behaviour and paints nothing.
+        """
+        if not frame.get("draining"):
+            return
+        callback = self._drain_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
+            logger.debug("drain callback failed", exc_info=True)
 
     def runtime_idle(self) -> bool:
         """Whether the bound runtime is doing nothing a refresh would lose.

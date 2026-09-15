@@ -809,6 +809,53 @@ def _noneditable_install(tmp_path: Path, *, stamp: str) -> tuple[Path, Path]:
     return prefix, tree
 
 
+def _completion_attention(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
+    """The turn-outcome rows this session's transcript carries, in order.
+
+    The durable equivalent of the viewer's cut-off vocabulary: a drain that
+    aborted a turn writes an ``error`` row, a turn that finished writes
+    ``complete``. Read from the JSONL rather than the screen because the words
+    appear in payloads that have nothing to do with this turn.
+    """
+    durable = (config_dir / "sessions" / session_id / "transcript.jsonl").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    rows = [json.loads(line) for line in durable.splitlines() if line.strip()]
+    return [
+        row["payload"]["details"]
+        for row in rows
+        if row.get("type") == "custom"
+        and isinstance(row.get("payload"), dict)
+        and row["payload"].get("custom_type") == "completion_attention"
+    ]
+
+
+def _completion_attention_report(config_dir: Path, session_id: str) -> str:
+    """Which of the two ways a missing latch happened, in words.
+
+    "The latch must land while the turn is STILL running" is false in two
+    opposite situations, and they are different diagnoses: the drain was LATE
+    (the bug this stage exists for), or the turn DIED of the deletion — its
+    turn's prelude imports a package module from disk, and this stage has just
+    removed the tree that module lives in. The completion rows tell them apart,
+    so a red cell names its cause instead of reporting both as one
+    (review round 3, MINOR 1).
+    """
+    rows = _completion_attention(config_dir, session_id)
+    killed = [
+        row
+        for row in rows
+        if row.get("kind") == "error" and "No module named" in str(row.get("reason", ""))
+    ]
+    if killed:
+        return (
+            "THE DELETED TREE KILLED THE TURN, NOT A LATE DRAIN — the child's own "
+            f"site-packages is what a function-local import in its turn prelude "
+            f"reaches for, and this cell removed it: {killed!r}"
+        )
+    return f"the turn's completion rows so far: {rows!r}"
+
+
 def _install_probe(prefix: Path) -> list[str]:
     """What the CHILD's own interpreter says about the install it will run from.
 
@@ -908,6 +955,32 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         viewer = await AttachedSession.connect(
             record, session_id, config_dir=config, takeover_factory=_never_take_over
         )
+        await viewer.prompt("warm the turn's module path")
+        # WARM THE PRELUDE FIRST, then delete. A turn's prelude imports its
+        # classifier's module from DISK on the first provider request
+        # (a function-local import in ``configure.py``), while
+        # ``frontend_state`` says ``streaming`` from the moment the turn is
+        # ADMITTED — before that request. Deleting in that gap kills the turn
+        # with ``No module named 'local_operator.model.effort_classifier'``,
+        # which has nothing to do with the drain: QA round 3 measured the margin
+        # at 0.03 s and reproduced the failure deterministically 30 ms earlier,
+        # which is why this cell went red once on a loaded runner. One completed
+        # turn puts that module in the child's ``sys.modules``, so the tree this
+        # cell removes is no longer on the path a live turn needs. Readiness,
+        # not a retry (QA round 3; review round 3, MINOR 1) — and the wait is on
+        # the turn's own durable COMPLETION rather than on ``streaming``, which
+        # is a reading the submit has not yet flipped when this line runs.
+        transcript = config / "sessions" / session_id / "transcript.jsonl"
+        warm_deadline = time.monotonic() + 120
+        while time.monotonic() < warm_deadline:
+            if "Hello from the mock provider!" in transcript.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the warm-up turn never completed")
+
         await viewer.prompt("please [bash:12]")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -934,7 +1007,9 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         assert "loaded module tree is gone" in drain_lines[0], drain_lines[0]
         assert getattr(
             viewer.frontend_state, "streaming", False
-        ), "the latch must land while the turn is STILL running"
+        ), "the latch must land while the turn is STILL running — " + _completion_attention_report(
+            config, session_id
+        )
 
         # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with
         # the process still resident, holding the session's lease.
@@ -952,19 +1027,12 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         )
         assert "Hello from the mock provider!" in durable, "the live turn never completed"
         # ... and the session recorded that turn as COMPLETE, which is the
-        # durable equivalent of the viewer's cut-off vocabulary (that vocabulary
-        # belongs to the stages above, where a viewer exists to paint it — the
-        # raw JSONL is not the instrument for it: the words appear in payloads
-        # that have nothing to do with this turn). A drain that aborted the turn
-        # writes an ERROR attention row for it, so the kind is the assertion.
-        rows = [json.loads(line) for line in durable.splitlines() if line.strip()]
-        attention = [
-            row["payload"]["details"]
-            for row in rows
-            if row.get("type") == "custom"
-            and isinstance(row.get("payload"), dict)
-            and row["payload"].get("custom_type") == "completion_attention"
-        ]
+        # durable equivalent of the viewer's cut-off vocabulary. A drain that
+        # aborted the turn writes an ERROR attention row for it, so the kind is
+        # the assertion. Both turns are covered: the warm-up one above finished
+        # before the deletion, and an error row from EITHER is the drain cutting
+        # a turn off.
+        attention = _completion_attention(config, session_id)
         assert attention, f"no completion was recorded at all:\n{durable[-2000:]}"
         assert [
             row for row in attention if row.get("kind") == "error"

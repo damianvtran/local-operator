@@ -49,13 +49,19 @@ class FakeRegistrant:
         self._attaches = 0
         self.closed = False
         self._boot_build = boot
-        self.retiring: list[tuple[str, str]] = []
+        #: ``(reason, to, draining)`` — the third term is the frame's own
+        #: verdict that admissions are about to be refused, which is what a
+        #: viewer's notice is gated on. Recorded here because the CALLER is
+        #: what decides it: a double that dropped the keyword would make the
+        #: announce fail into the caller's `except` and read as "not
+        #: announced" rather than "announced without the fact".
+        self.retiring: list[tuple[str, str, bool]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
 
-    async def announce_retiring(self, reason: str, *, to: str = "") -> None:
-        self.retiring.append((reason, to))
+    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
+        self.retiring.append((reason, to, draining))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -164,7 +170,9 @@ async def test_a_busy_runtime_drains_once_the_bound_trips(disk, monkeypatch) -> 
     task = asyncio.ensure_future(_reaper(handle, reg, stop))
 
     assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
-    assert reg.retiring == [("stale-build", NEW.label())], "announced once, at drain start"
+    assert reg.retiring == [
+        ("stale-build", NEW.label(), True)
+    ], "announced once, at drain start, and the frame SAYS a refusal is in force"
     assert handle.drain_cause == "runtime-retired"
     assert "declined" in handle.drain_detail, handle.drain_detail
     assert not stop.is_set() and not handle.disposed, "in-flight work must never be aborted"
@@ -308,7 +316,7 @@ async def test_a_latched_drain_wins_over_the_soft_rung_at_the_exit(disk, monkeyp
     handle._busy = False  # the turn ends and the exit path opens up
     assert await _wait_for(lambda: stop.is_set()), "the drain never took the exit"
     assert draws == [(0, child_mod.BUILD_STAGGER_S)], "exactly one stagger, drawn at drain start"
-    assert reg.retiring == [("stale-build", NEW.label())], "one departure, one announce"
+    assert reg.retiring == [("stale-build", NEW.label(), True)], "one departure, one announce"
     await task
 
 
@@ -328,7 +336,9 @@ async def test_an_idle_runtime_keeps_todays_soft_refresh(disk, monkeypatch) -> N
     await asyncio.wait_for(_reaper(handle, reg, stop), timeout=5)
     assert stop.is_set() and handle.disposed
     assert not handle.drained, "an idle runtime never needs the hard-stale latch"
-    assert reg.retiring == [("stale-build", NEW.label())]
+    assert reg.retiring == [
+        ("stale-build", NEW.label(), False)
+    ], "an idle refresh refuses nothing, so the frame must not say it does"
 
 
 @pytest.mark.asyncio

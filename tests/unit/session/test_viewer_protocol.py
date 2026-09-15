@@ -1171,9 +1171,15 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # has no host above it to repaint, so it must not grow that callback either.
     # Both are ADDITIONS in the direction the aggregate floor does not guard, and
     # the figure is exact on purpose — edited deliberately, never relaxed.
-    assert len(viewer_only) == 56, (
+    #
+    # 56 → 57 is the drain notice's own seam: the app paints the row that says a
+    # handover is REFUSING work from the runtime's ``retiring`` frame, so it
+    # reads ``set_drain_callback`` off a duck-typed binding. Viewer-only for the
+    # same reason as the rest of this block — an owner session has no wire to
+    # hear that frame on, and the frame is the only honest source for the fact.
+    assert len(viewer_only) == 57, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 56, and the aggregate floor is set at 40 against that number. A "
+        "says 57, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
