@@ -1158,6 +1158,20 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         {"subscription_id": "0" * 32, "visible": False, "can_notify": False},
     ),
     _DoorRoute("warm", "POST", "/v1/desktop/sessions/{session_id}/warm", {}),
+    # Added with the route, for the reason this test exists: ``/interrupt`` takes
+    # a bridge like every other row, so on a latched daemon it must answer the
+    # typed refusal and claim no receipt — the row is what proves the new route
+    # is INSIDE the door rather than beside it (the same reason
+    # ``/mcp/credentials`` carries one). It is listed after ``/stop`` in the
+    # route table and deliberately here too, because the two are the pair a
+    # reader is most likely to confuse: ``stop`` is the kill switch and this is
+    # the turn rung, and BOTH must refuse once the daemon has latched.
+    _DoorRoute(
+        "interrupt",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/interrupt",
+        {"request_id": "01234567-89ab-cdef-0123-456789abcdef"},
+    ),
 )
 
 #: Routes that refuse WITHOUT the door, because they never take a bridge: a

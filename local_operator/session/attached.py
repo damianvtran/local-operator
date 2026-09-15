@@ -1962,6 +1962,29 @@ class AttachedSession:
         return self._client is None or not self._client.connected or not self._ready_for_events
 
     @property
+    def owner_reachable(self) -> bool:
+        """Whether there is a LIVE OWNER to ask — reachability only, no sync state.
+
+        The honest term for "can this facade dial the owner", and deliberately NOT
+        ``is_cold``. That predicate is three disjuncts and its third is
+        ``not _ready_for_events``, which is a RESYNC state: ``_refresh_display_history``
+        and the degraded-delta resync clear it while the client stays connected and
+        the runtime keeps serving for the whole of a frontend sync plus a history
+        page load. A caller that folded that into "no owner" would treat a live,
+        mid-resync session as absent — exactly the conflation ``/move``'s seam
+        already grades MAJOR in this file (see ``set_working_directory``: "Liveness
+        of the socket is the honest term"), and the reason the desktop interrupt
+        route read a streaming session as ``idle`` and stopped nothing.
+
+        A True answer promises only that a client object exists and its socket is
+        up. It says NOTHING about whether work is running — that is the caller's
+        question, and on the desktop route it is answered from the follower's
+        published roster, which stays readable throughout a resync because the
+        store is installed from the attach snapshot and updated by deltas.
+        """
+        return self._client is not None and self._client.connected
+
+    @property
     def can_ever_bind(self) -> bool:
         """Whether a bind attempt on this facade could EVER succeed.
 
@@ -6998,6 +7021,39 @@ class AttachedSession:
             return  # nothing to abort on; the local end is what the app shows
         task = asyncio.create_task(client.abort())
         task.add_done_callback(_log_abort_failure)
+
+    async def interrupt(self) -> str:
+        """Stop this session's CURRENT WORK and return the owner's receipt.
+
+        THE AWAITING TWIN OF :meth:`abort`, and the reason it exists is the
+        receipt. The control frame is the same one — the runtime's ``abort`` op
+        (``ServingSessionHandle.abort``), which stops this turn, cancels the
+        children it started and spares backgrounded ``bash`` jobs. What
+        :meth:`abort` throws away is the runtime's own sentence describing what
+        actually settled; a caller that has a user waiting on the press (the
+        desktop's Stop button and Esc) must be able to show it instead of
+        guessing. ``abort`` keeps its fire-and-forget shape for its existing
+        callers, which have no request left to answer into.
+
+        NOT the kill switch. ``request_stop`` ends the session and its process;
+        this ends one turn and leaves both running, which is what a button
+        labelled "stop this session's current work" promises. There is no
+        escalation ladder here and deliberately so: a ladder only works where
+        the second rung is offered on screen, and this surface has none — a
+        second press is simply a second interrupt, a no-op because nothing is
+        left.
+
+        RAISES when there is no attached client rather than resolving a
+        no-op, so the caller can tell "nothing to interrupt" from "the owner
+        went away". The desktop route maps a cold session to an ``idle`` answer
+        before it reaches here, so this raise is the genuine transport failure
+        (``ConnectionError``/``RuntimeError``/``TimeoutError``), which its error
+        ladder already answers as a 503.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.abort()
 
     async def request_stop(self) -> str:
         """Stop the session this follower is watching — deliberately.

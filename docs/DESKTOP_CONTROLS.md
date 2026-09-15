@@ -182,6 +182,61 @@ the one the desktop client reads): nothing is rolled back, the
   targets are resolved before stopping any. Cold targets report already_stopped
   without starting a process. Live targets call the canonical runtime stop protocol;
   stop_requested is acknowledgement, not an invented completed-exit receipt.
+- `POST /interrupt`: request_id, and deliberately no `confirmed`. It stops the
+  session's CURRENT WORK — the turn that is running and the child sessions it
+  started — and leaves the session, its runtime and its process alone. This is the
+  rung the desktop Stop button and Esc mean; `/v1/desktop/stop` above is the KILL
+  SWITCH (deny gates, dispose, release the writer lease, unpublish, exit) and keeps
+  that meaning, so a control promising "stop this session's current work" must not
+  be wired to it. No confirmation field, because an interrupt destroys nothing and
+  requiring one would make Esc useless.
+
+  The answer is `{status, receipt, children_running, background_jobs, replayed}`.
+  `receipt` is the RUNTIME's own sentence, returned verbatim: it counts what actually
+  settled, names anything that refused to die, and names any card it refused (a
+  press whose only effect was clearing a question that outlived its turn reports
+  `no turn was running; refused 1 waiting prompt`) — all of which only the owner
+  knows.
+  `children_running`/`background_jobs` are read off the follower's published roster
+  AFTER the press so a surface can word its own notice without parsing prose (job
+  type `task` is a subagent the interrupt did reach; `bash` is a backgrounded job it
+  deliberately never touched, and the remaining lever for those is the Jobs
+  surface). An `idle` answer reports what IS running rather than zeros, so a build
+  this rung deliberately spares stays visible beside the status.
+
+  `status` is `interrupted` or `idle`; `idle` is a 200 and a SUCCESS — a
+  cold session is NOT engaged to answer this, and one between turns simply has
+  nothing to stop. "No owner" here means the SOCKET is down, not that the viewer is
+  cold: a session mid-refresh holds a live, serving runtime while its event feed
+  resyncs, and it must be interrupted rather than answered `idle`.
+  `interrupted` is a CLAIM that work was stopped, so the route answers
+  `idle` whenever nothing would be: it reads the follower's published roster first
+  and skips the owner call entirely when there is no live turn, no parked card, no
+  running `task` job and no running goal loop. (A running backgrounded `bash` job is
+  deliberately NOT one of those terms — this rung never touches one, so a session
+  whose only live work is a build has nothing to interrupt.) A parked card with NO
+  live turn is the exception that must still run, because that orphan is what the
+  abort's deny-first ordering exists for; its press reports `interrupted` with a
+  receipt naming the refusal. The receipt is `""` for `idle`, because there is no
+  owner sentence to report and an invented one is the same overstatement the receipt
+  itself is written to avoid.
+
+  The runtime op it maps to is the existing `abort` control frame
+  (`AttachedSession.interrupt` → `AttachedSession.abort` → `ServingSessionHandle
+  .abort`), named `interrupt` end to end because on this surface `stop` already means
+  "end the process" and a route one letter from it is a trap. Receipted
+  `retry_safe=true`, so a retry after a lost response is safe and re-executed rather
+  than left INDETERMINATE; the same request_id with a changed body is a 409. No
+  ladder: a second press is a second interrupt, a no-op because nothing is left, and
+  the control leaves the screen when `busy` goes false. Codes: 401 missing/wrong
+  bearer, 403 disallowed or browser-originated Origin, 404 an unknown OR malformed
+  session id (the id validator raises KeyError; 422 is reserved for the BODY's shape,
+  a non-UUID request_id or an extra field), 503 an unconfigured desktop capability or
+  an unreachable owner. Gated by `features.session_interrupt` — its own key, NOT a
+  bump of `lifecycle`: a backend that can stop a session but cannot interrupt a turn
+  must keep `/stop` working and must not be told it can interrupt, and a renderer
+  that does not see the key hides its Stop control instead of firing a request an
+  older backend answers 404 or, worse, wiring it to `/stop`.
 
 `/loop <count>` uses the standing goal, max 25 iterations; `/loop <goal>` keeps an
 ephemeral goal and uses the shared terminal judge protocol. The shared prompts,
@@ -356,9 +411,13 @@ compatibility is asserted by the credential change.
 `tests/e2e/test_desktop_controls.py` drives actual HTTP + canonical Session,
 ServingSessionHandle/RuntimeServer/AttachClient, command census, secret lifecycle,
 loop count/goal/cancellation, aside/adoption, fork, selected stop and real stdio MCP.
-External model replies alone are scripted. Existing desktop session/spawn tests
-cover real detached subprocess admission, stale gate answers, replay/reconnect,
-watch leases and HTTP restart.
+External model replies alone are scripted. Its interrupt case reproduces the reported
+Stop-button defect (the old `command: "stop"` body answers a `native_action` while
+the turn keeps streaming), then interrupts a real streaming turn, replays the receipt,
+runs a SECOND real turn on the same session to show the session outlived it, answers a
+cold session `idle` without creating a runtime record, and asserts the 401/403/404/422
+shapes. Existing desktop session/spawn tests cover real detached subprocess admission,
+stale gate answers, replay/reconnect, watch leases and HTTP restart.
 
 `test_desktop_mcp_oauth.py` drives a real local HTTP MCP/OAuth issuer, real callback
 listener, auth store and grant cancellation. Consent is simulated by a fixture HTTP

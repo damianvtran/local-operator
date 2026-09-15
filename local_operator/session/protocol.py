@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 120 public members and a POSITIVE
+    than stylistic. This protocol carries 122 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -605,7 +605,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     can fail CLOSED against an owner that would ignore the exclusivity flag, 119
     once it needed the ``set_local_cwd_callback`` seam the move's local
     replacement is published through, 120 once the drain notice's
-    ``set_drain_callback`` joined the viewer contract), so recompute it rather
+    ``set_drain_callback`` joined the viewer contract, 121 once the desktop's
+    interrupt rung needed ``interrupt`` to stop a turn without ending the
+    session, 122 once the same rung needed ``owner_reachable`` so a mid-resync
+    viewer could not be read as an absent owner), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1233,6 +1236,36 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         reply has not reached the runtime yet. Probed as a 3-arg ``getattr``
         defaulting to ``False`` before this declaration, so a rename on the
         facade silently stopped protecting the reply rather than failing.
+        """
+        ...
+
+    async def interrupt(self) -> str:
+        """Stop the owner's CURRENT TURN and return its receipt, verbatim.
+
+        VIEWER-ONLY BY CONSTRUCTION, which is why it is not on
+        :class:`SessionProtocol` beside :meth:`abort`: an owner ``Session`` stops
+        its own turn with a local call and has nobody to ask, while a viewer
+        dials the owner's ``abort`` control frame and is handed a sentence back.
+        The desktop route reads this off a duck-typed bound facade to answer the
+        Stop button, so the name must be declared here — an undeclared read
+        degrades to a silent ``None`` and a rename would answer the press with
+        nothing rather than failing.
+
+        Not the kill switch (:meth:`request_stop` ends the session and its
+        process); this ends one turn and leaves both running.
+        """
+        ...
+
+    @property
+    def owner_reachable(self) -> bool:
+        """Whether a live owner exists to ask — reachability, not sync state.
+
+        Distinct from :attr:`is_cold`, whose third disjunct (``not
+        _ready_for_events``) is a RESYNC state that is true of a connected,
+        serving session mid-refresh; a caller deciding whether to dial must not
+        read a mid-resync viewer as an absent owner. Declared here because the
+        desktop interrupt route reads it off a duck-typed bound facade to choose
+        between an ``idle`` answer and dialling the owner.
         """
         ...
 
