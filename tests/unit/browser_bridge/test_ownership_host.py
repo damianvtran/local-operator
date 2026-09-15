@@ -912,3 +912,67 @@ async def test_adoption_is_refused_while_another_surface_is_held_and_on_cmux(
     assert (
         "needs the desktop app's browser tab or the browser extension" in unavailable.text
     ), unavailable.text
+
+
+def _opens(client: Any) -> list[dict[str, Any]]:
+    """The `open` params a fake host received, in order."""
+    return [params for method, params in client.calls if method == "open"]
+
+
+@pytest.mark.asyncio
+async def test_adoption_routes_by_the_handles_host_not_by_availability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    """Both hosts up: an adoption goes to the host that MINTED the handle.
+
+    Availability order is the right rule for a fresh `open` — no handle names a
+    host there — and the wrong one for an adoption: the handle IS the host, and
+    an adoption resolves with nothing held, so the probe order used to choose.
+    A `bridge:` hand-over while the app was up therefore went to the app, which
+    never issued the capability and can only answer `owner_refused` "not yours"
+    — a refusal that blames the model for the routing (review R10).
+    """
+    _hosts(monkeypatch, ui=True, bridge=True)
+    # A handed-over tab arrives at a session holding nothing, which the fakes
+    # spell as an `unresolved` recovery.
+    ui_client.recover_state = "unresolved"
+    daemon_handle = "bridge:31:aaaaaaaabbbbccccddddeeeeffff0000"
+    app_handle = "ui:31:aaaaaaaabbbbccccddddeeeeffff0000"
+
+    # 1. A `bridge:` hand-over reaches the daemon even with the app up.
+    bridge_context, _ = _context(tmp_path / "bridge")
+    adopted = await builtin.execute_browser(
+        "t", {"action": "open", "tab": daemon_handle}, None, None, bridge_context
+    )
+    assert adopted.is_error is False, adopted.text
+    assert [params.get("tab") for params in _opens(bridge_client)] == [
+        daemon_handle
+    ], "the daemon that minted the handle must receive the adoption"
+    assert _opens(ui_client) == [], (
+        "the app was asked to adopt a capability it never minted, which is the "
+        "`owner_refused` misattribution this routing removes"
+    )
+
+    # 2. A `ui:` hand-over reaches the app's host.
+    ui_context, _ = _context(tmp_path / "ui")
+    adopted = await builtin.execute_browser(
+        "t", {"action": "open", "tab": app_handle}, None, None, ui_context
+    )
+    assert adopted.is_error is False, adopted.text
+    assert [params.get("tab") for params in _opens(ui_client)] == [app_handle]
+    assert [params.get("tab") for params in _opens(bridge_client)] == [
+        daemon_handle
+    ], "the daemon must not hear about an app adoption"
+
+    # 3. With no handle, availability still decides: the app first, then the
+    #    extension. Nothing about the adoption rule may leak into a fresh open.
+    fresh_context, _ = _context(tmp_path / "fresh")
+    fresh = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, fresh_context
+    )
+    assert fresh.is_error is False, fresh.text
+    assert [params.get("tab", "") for params in _opens(ui_client)] == [app_handle, ""]
+    assert [params.get("tab") for params in _opens(bridge_client)] == [daemon_handle]

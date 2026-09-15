@@ -8045,7 +8045,7 @@ def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
             f"'tab' is only valid for 'open' (got it on '{action}'): it names a tab "
             "to ADOPT, and adoption happens once, when the surface is taken"
         )
-    if not NON_CMUX_SURFACE_HANDLE_RE.match(handle):
+    if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(handle):
         return (
             f"refusing 'tab' handle {params.tab!r}: expected the surface handle "
             "'tabs' reported for a tab handed to this session "
@@ -9777,12 +9777,14 @@ def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
 
 
 def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
-    """One listed tab: redacted handle, page, recency — the caller's own marked.
+    """One listed tab: handle, page, recency — the caller's own marked.
 
     The "(yours)" marker matters because the listing shows EVERY session's
     tabs: an agent must close its own when done, and must treat the rest as
-    read-only awareness. The handles are redacted by the extension and are NOT
-    driveable — driving needs the full token 'open' returned to its owner.
+    read-only awareness. A listed handle is a redacted token its reader cannot
+    drive — driving needs the full capability, which the host hands only to its
+    owner — and the one exception is a tab the user HANDED to this session,
+    which is listed in full so `open` can adopt it.
     """
     token = str(entry.get("tab", ""))
     title = str(entry.get("title", "")).strip() or "(untitled)"
@@ -9832,9 +9834,12 @@ async def _bridge_tabs(
         "browser",
         f"{len(entries)} agent-driven tab{'s' if len(entries) != 1 else ''} "
         "(most recently used first; handles are redacted — the listing is "
-        "awareness-only and cannot drive or close a tab. Your own tab is "
-        "marked '(yours)'; drive it with the handle your session already "
-        "holds):\n\n" + "\n".join(lines) + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
+        "awareness-only and cannot drive or close a tab, except a tab the user "
+        "handed to this session, which is listed in full and adopted with "
+        "'open'. Your own tab is marked '(yours)'; drive it with the handle "
+        "your session already holds):\n\n"
+        + "\n".join(lines)
+        + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
         details={"tab_count": len(entries), "surface_id": state.surface_id, "host": host},
     )
 
@@ -10488,6 +10493,24 @@ async def _execute_browser(
                 client=_client_for(pinned),
                 adopt=adopt,
             )
+        adopt_host = _host_of_surface(adopt)
+        if adopt_host:
+            # An explicit adoption is routed by the HANDLE's own host, not by the
+            # availability order below. The handle names the host that minted the
+            # capability, and that is the only host that can decide whether this
+            # session may have it: the other one never issued it, so asking it
+            # gets `owner_refused` "not yours" — a refusal that blames the model
+            # for our routing. Availability still governs a FRESH `open`, where no
+            # handle names a host. `_validate_adoption_handle` has already
+            # enforced the two prefix grammars, so this is never unreachable.
+            return await _bridge_open(
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(adopt_host),
+                adopt=adopt,
+            )
         if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
         if ui_available:
@@ -10771,7 +10794,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "needs it left open for a pending or immediately continuing interaction. "
             "'tabs' lists every agent-driven tab including other sessions' "
             "(handles are redacted: awareness-only, it cannot "
-            "drive or close anything), and 'close' ends only your own tab. "
+            "drive or close anything — except a tab the user handed over, listed in "
+            "full for 'open'), and 'close' ends only your own tab. "
             "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
             "your turn with 'retain' and end that hold with 'release'. "
             "'scroll', 'logs' and "
