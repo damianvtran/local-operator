@@ -3205,8 +3205,10 @@ def sessions_command(args: argparse.Namespace) -> int:
     }
     show_why = any(why.values())
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
-        f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
+        f"{'STATE':<7} {'PID':>7} {'KIND':<7} "
+        f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
+        f"{'MODEL':<{MODEL_COLUMN_WIDTH}} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} "
+        f"{'HB_AGE':>7}"
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
@@ -3215,15 +3217,26 @@ def sessions_command(args: argparse.Namespace) -> int:
     print(header)
     now = time.time()
     for row in rows:
-        name = (row["conversation_name"] or row["session_id"] or "")[:24]
-        model = (row["model_label"] or "")[:24]
-        needs = (row.get("pending") or "")[:8]
+        # CELLS, not characters, for the three columns that carry text this
+        # process did not author (design round 1, D2). A conversation title can
+        # be CJK and a model label carries the provider's own display name, and a
+        # 14-glyph title is 28 cells: a `[:24]` slice returned all of it and the
+        # row ran into its neighbour, leaving the table wider than its header.
+        # Measured here only for DISPLAY — `--json` above still carries the full
+        # values, which is what a script should read.
+        name = _fit_cell(
+            row["conversation_name"] or row["session_id"] or "",
+            CONVERSATION_COLUMN_WIDTH,
+        )
+        model = _fit_cell(row["model_label"] or "", MODEL_COLUMN_WIDTH)
+        needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
         line = (
             f"{row['state']:<7} "
             f"{('—' if stored else str(row['pid'])):>7} "
-            f"{(row['kind'] or '—'):<7} {needs:<8} {name:<24} "
-            f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
+            f"{(row['kind'] or '—'):<7} {_pad_cell(needs, NEEDS_COLUMN_WIDTH)} "
+            f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
+            f"{_pad_cell(model, MODEL_COLUMN_WIDTH)} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
             f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
             f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
@@ -3234,33 +3247,173 @@ def sessions_command(args: argparse.Namespace) -> int:
             line += f" {age:>11}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
-            line += f" {cell:<{WHY_COLUMN_WIDTH}}"
+            # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
+            # fitted wide cell the blanks it never needed; `_pad_cell` is the
+            # same CELLS-not-characters rule the three text columns use above.
+            line += f" {_pad_cell(cell, WHY_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
 def _clamp_reason_cell(summary: str) -> str:
-    """A WHY cell inside :data:`WHY_COLUMN_WIDTH`, marked when it had to cut.
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
-    column's whole purpose is to answer "why did this session die". A slice at
-    exactly the width used to drop the last word (``CUT_OFF_UNKNOWN`` is 58
-    cells, so the row ended ``...the cause could not be `` with ``determined``
-    gone) and read as a finished sentence that happens to stop mid-clause. The
-    previous worst case, the involuntary ``runtime-killed`` reason at 47 cells,
-    filled the column exactly — which is why nothing clipped until this branch
-    added a longer reason, so the marker is what keeps the next longer sentence
-    honest rather than what fixes one string.
+    column's whole purpose is to answer "why did this session die". The column
+    was ALREADY clipping silently before the marker existed: the involuntary
+    ``runtime-killed`` summary is 104 cells, and the old slice cut it at 47
+    CHARACTERS — 47 cells as well, this sentence being ASCII — landing on a word
+    boundary, so the row ended ``...exiting cleanly `` and read as a finished
+    sentence that happened to stop mid-clause — that is what design round 2 saw as
+    the one case that "fitted exactly", and it is why the marker is what keeps
+    the next longer sentence honest rather than what fixes one string.
+
+    CELLS, NOT CHARACTERS (design round 3, D9). The budget is a COLUMN width,
+    and the strings reaching here are not all harness-authored: a FAILED turn's
+    reason is the provider's own error text (``session.py``'s turn-end writer
+    publishes ``outcome.error`` verbatim, ``attention`` replays it into the
+    store, and ``completion_reason`` arrives in this cell). A localised provider
+    error of 29 characters is 58 cells, so a ``len()`` comparison returned it
+    UNCUT and the row rendered 208 cells against a 179-cell header — the reflow
+    this clamp exists to prevent, in its own blind spot.
 
     The ellipsis is INSIDE the budget, so the table's fixed width and every
     other row's columns are unchanged; a summary that already fits is returned
     byte-for-byte, because a fitting cell must not pay for a cut that did not
     happen. The full sentence stays one flag away in ``--json``'s
     ``completion_reason``, which is what this column is a summary OF.
+
+    ONE CELL MAY GO UNUSED, and that is the honest reading of "inside the
+    budget" (review round 1, Q4 / design round 1, D3). The marker's own measured
+    width is subtracted, so the text gets cells 1-47 — and with all-wide glyphs
+    the longest prefix that fits 47 cells is 46, because a two-cell glyph cannot
+    occupy an odd cell. The cell then measures 47 rather than 48. Nobody pads it:
+    the last cell is unused, not missing, and inventing a space to fill it would
+    report width the text does not have. A reason whose glyph mix reaches an odd
+    boundary does land on 48.
+
+    The unit being fitted is the GRAPHEME — not the code point, and not the
+    character count the old rule used. A ZWJ family cluster is one 2-cell glyph,
+    so a reason built from them fills the column instead of a third of it, and a
+    VS16 sequence is 2 cells rather than the 1 its characters add up to (review
+    round 2, M1/M2; see :func:`_cut_to_cells`).
+
+    A summary that FITS is returned untouched, and that includes a joiner of its
+    own at the end: the back-off in :func:`_cut_to_cells` is a property of a CUT,
+    and a value nothing had to cut is not edited at all (review round 2, N2 —
+    recorded as the rule, not changed, because trimming it would be a second,
+    invisible edit on a cell that is already correct).
     """
-    if len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
         return summary
-    return summary[: WHY_COLUMN_WIDTH - 1] + "…"
+    # The marker's OWN measured width, not a hard-coded 1: the budget is
+    # arithmetic, so a future marker must not be able to push the cell over.
+    marker = "…"
+    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+
+
+def _cut_to_cells(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` that fits ``budget`` display cells.
+
+    A cell bound cannot be a slice: one East-Asian character is two cells, so
+    ``text[:n]`` overshoots by however many wide glyphs it happens to contain.
+    Neither can it be a walk over CHARACTERS, which is the defect this function
+    was written with: rich measures a STRING, and two of its rules only fire on a
+    whole sequence — a VS16 (``U+FE0F``) upgrades the glyph before it to two
+    cells, and a ZWJ (``U+200D``) collapses the emoji it joins into one two-cell
+    glyph. Summing ``cell_len(char)`` per character therefore MIS-measures both
+    classes in opposite directions: ``❤️`` is 1 cell per character but 2 as a
+    unit, so twenty of them (40 cells) came back UNCUT against a 24-cell budget
+    — worse than the character rule this replaced, which clipped them at 24 —
+    while a family cluster was charged about three times its width and left most
+    of the column empty (review round 2, M1 and M2).
+
+    So the unit measured is the GRAPHEME, via rich's own
+    :func:`rich.cells.split_graphemes` — the splitter the measurement rules come
+    from, so the unit measured is the unit emitted, and a combining mark or a
+    joined emoji cannot be separated from what it belongs to.
+
+    The returned prefix never ends on a ZERO-WIDTH JOINER. ``U+200D`` means "join
+    with the glyph AFTER me", so a prefix ending on one emits a joiner with
+    nothing to join — a stray control character immediately before the marker,
+    which a terminal renders as a replacement box (review round 1, Q1). The
+    back-off costs no cells, so the budget is unaffected and no other column
+    moves; it is a no-op for well-formed text, because a grapheme absorbs an
+    interior joiner together with the glyph it joins, and it fires only when the
+    input's OWN trailing grapheme ends on one. A value that fits is not touched
+    at all, trailing joiner included — see :func:`_clamp_reason_cell`.
+
+    The prefix is the longest that FITS, not one that FILLS. With all-wide text
+    the final cell can go unused (a two-cell glyph cannot occupy cell 47 of a
+    47-cell budget). The invariant is that the result is bounded by ``budget``;
+    occupying every cell is not a goal, and padding to reach it would report width
+    the text does not have.
+
+    ``split_graphemes`` is imported at the point of use, like every other
+    third-party name here: this module's contract is that ``import
+    local_operator.cli`` stays cheap (see the module docstring).
+    """
+    from rich.cells import split_graphemes
+
+    spans, _total_cells = split_graphemes(text)
+    used = 0
+    for start, _end, width in spans:
+        if used + width > budget:
+            cut = text[:start]
+            while cut.endswith("\u200d"):
+                cut = cut[:-1]
+            return cut
+        used += width
+    return text
+
+
+# The two primitives the table's text columns are built from, kept beside the
+# WHY column's own clamp so there is ONE cell-vs-character rule in this module
+# rather than one per column.
+
+
+def _fit_cell(text: str, width: int) -> str:
+    """``text`` cut to ``width`` display CELLS, silently.
+
+    Silent on purpose: these columns have always cut without a marker
+    (``value[:24]``), a marker would change every ASCII listing that overflows,
+    and none of them is the column whose PURPOSE is to answer a question. What
+    changes here is only the bound — characters to cells.
+
+    A value that already fits is returned byte-for-byte, and ``cell_len`` equals
+    ``len`` for ASCII, so an all-ASCII table renders exactly as it did before.
+    """
+    return _cut_to_cells(text, width) if _cell_len(text) > width else text
+
+
+def _pad_cell(text: str, width: int) -> str:
+    """``text`` left-aligned in ``width`` display CELLS.
+
+    ``f"{text:<{width}}"`` pads by CHARACTERS, so a fitted wide cell — 12 CJK
+    glyphs are 24 cells — is handed ``width`` characters PLUS the blanks it never
+    needed, leaving the row wider than its header in trailing space. Padding by
+    cells is what keeps "every row is header-width" true rather than merely true
+    for narrow text; for ASCII the two are identical.
+    """
+    return text + " " * max(0, width - _cell_len(text))
+
+
+def _cell_len(text: str) -> int:
+    """``len`` in terminal CELLS — what a fixed-width column is measured in.
+
+    Imported at the point of use because this module's contract is that
+    everything third-party stays out of its module-level imports so ``import
+    local_operator.cli`` stays cheap (see the module docstring); ``rich`` is
+    already a hard dependency and ``rich.cells`` is its width primitive.
+
+    This measures a WHOLE string, which is the only way rich applies its
+    sequence rules (VS16 upgrade, ZWJ collapse) — measuring per character is what
+    :func:`_cut_to_cells` did and why it mis-counted both classes. The cut fits
+    the same units this does, one grapheme at a time.
+    """
+    from rich.cells import cell_len
+
+    return cell_len(text)
 
 
 def _wake_create(args: argparse.Namespace) -> int:
@@ -4063,14 +4216,33 @@ def _elide_id(session_id: str, width: int) -> str:
     return session_id[: max(width - 1, 1)] + "…"
 
 
-#: Width of `lop sessions`' trailing WHY column, in characters.
+#: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
 #: exiting cleanly while this turn was running, and nothing recorded a stop``
-#: is 96 cells — and an unbounded column re-flows the whole table on a normal
+#: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
+
+
+#: Widths of `lop sessions`' three TEXT columns, in display CELLS.
+#:
+#: Named rather than left as literals inside the format specs because the row
+#: builder now has to MEASURE them: the header and the row have to agree on a
+#: number that is used twice, and a second literal is how the two drift. These
+#: three are the columns whose content this process does not author — a
+#: conversation title is whatever named the conversation, and a model label is
+#: the provider catalogue's own display name (``openai/gpt-5.2``, or a CJK
+#: display name) — so they are the ones a wide glyph can overrun. The remaining
+#: columns hold enums, pids and formatted byte counts, all ASCII and bounded.
+#:
+#: The values are unchanged from the literals they replace, and for ASCII text
+#: ``cell_len`` equals ``len``, so every existing listing renders byte-for-byte
+#: (design round 1, D2 on the WHY column's PR).
+NEEDS_COLUMN_WIDTH = 8
+CONVERSATION_COLUMN_WIDTH = 24
+MODEL_COLUMN_WIDTH = 24
 
 
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
