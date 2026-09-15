@@ -1,4 +1,4 @@
-"""The click ladder: a running viewer, a stopped app, then a terminal.
+"""The click ladder: a running desktop viewer, a stopped app, a running TUI, then a terminal.
 
 Rung 2 is new and it is the one the design's requirement names: clicking a
 banner for a session when nothing is running used to open a TERMINAL, which is
@@ -358,9 +358,23 @@ def test_the_configured_command_is_read_through_the_settings_registry(monkeypatc
     assert setting.default == resume_click.DESKTOP_LAUNCH_COMMAND_DEFAULT
 
 
-def test_an_empty_setting_means_discover(monkeypatch):
-    """Empty is a real answer ("find it for me"), not a broken command line."""
-    monkeypatch.setattr(resume_click, "_configured_launch_command", lambda: [])
+def test_an_empty_setting_means_discover(monkeypatch, tmp_path):
+    """Empty is a real answer ("find it for me"), not a broken command line.
+
+    Driven through the REAL writer and a real ``config.yml`` like the readers
+    below. The gesture the page performs for an ``empty_unsets`` row is a
+    RESET, so that is what this drives, and the key is then absent from the
+    file — which is also the state a first run is in.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, "my-app")
+    settings_io.reset_setting(manager, setting)
+
     assert resume_click._configured_launch_command() == []
 
 
@@ -370,7 +384,7 @@ def test_the_session_placeholder_is_the_documented_spelling():
     assert resume_click.OPEN_SESSION_FLAG == "--open-session"
 
 
-def test_the_configured_command_splits_the_way_a_shell_would(monkeypatch):
+def test_the_configured_command_splits_the_way_a_shell_would(tmp_path, monkeypatch):
     """Quoted arguments in the setting must survive to argv intact.
 
     The registry stores TEXT rather than a comma-separated LIST precisely so an
@@ -378,21 +392,73 @@ def test_the_configured_command_splits_the_way_a_shell_would(monkeypatch):
     command line rather than an approximation of one. A quoted word containing a
     space is the case that separates the two.
     """
-    parts = _configured_with(monkeypatch, 'my-app --title "two words, one arg"')
+    parts = _configured_with(monkeypatch, tmp_path, 'my-app --title "two words, one arg"')
     assert parts == ["my-app", "--title", "two words, one arg"]
 
 
-def _configured_with(monkeypatch, raw: str) -> list[str]:
-    """Read ``desktop.launch_command`` through the real reader, registry doubled."""
-    from local_operator.tui import settings as tui_settings
+def test_the_click_reader_sees_what_the_settings_page_wrote(tmp_path, monkeypatch):
+    """Q1, pinned where a doubling of the settings layer cannot hide it again.
 
-    monkeypatch.setattr(tui_settings, "settings_get", lambda key, default="": raw)
+    Asserted as the RELATION between the two halves rather than as a constant:
+    whatever the settings page's own reader reports is what the click must
+    parse. On the head QA rejected, this file read ``[]`` while the page read
+    ``'my-app --title "two words" --open={session}'``, because the click was
+    reading the DISPLAY fast path — whose cache is built from
+    ``display_defaults()`` and therefore holds flat-dotted ``display.*`` flags
+    exclusively — against a registry that stores this key NESTED.
+
+    Nothing here is doubled: a real write through ``settings_io``, a real
+    ``config.yml``, then the reader as the click runs it.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    # The structural fact the defect turned on, pinned rather than described: a
+    # nested key is not a display flag, so the display fast path can never hold
+    # it, however the user writes the config.
+    assert "desktop.launch_command" not in settings_io.display_defaults()
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, 'my-app --title "two words" --open={session}')
+
+    assert settings_io.read_setting(manager, setting) == (
+        'my-app --title "two words" --open={session}'
+    )
+    assert resume_click._configured_launch_command() == [
+        "my-app",
+        "--title",
+        "two words",
+        "--open={session}",
+    ]
+
+
+def _configured_with(monkeypatch, tmp_path, raw: str) -> list[str]:
+    """Read ``desktop.launch_command`` through the REAL settings layer.
+
+    Written with ``settings_io.write_setting`` — the one writer ``/settings``,
+    ``PATCH /v1/settings`` and ``lop config edit`` all funnel through — into a
+    real ``config.yml`` under a redirected config dir, then read back by the
+    click's own reader with nothing doubled anywhere.
+
+    The helper this replaces patched ``tui.settings.settings_get`` FIRST, which
+    is how QA round 2's defect shipped (Q1): the double answered a key the
+    production reader could never see, so the wiring between the registry and
+    the click was never exercised by any test in this file.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["desktop.launch_command"], raw)
     return resume_click._configured_launch_command()
 
 
-def test_an_unparseable_command_line_degrades_to_discovery(monkeypatch):
+def test_an_unparseable_command_line_degrades_to_discovery(monkeypatch, tmp_path):
     """An unbalanced quote must not kill the click."""
-    assert _configured_with(monkeypatch, "'unbalanced") == []
+    assert _configured_with(monkeypatch, tmp_path, "'unbalanced") == []
 
 
 def test_the_refusal_stops_the_launch_rung_and_falls_through(monkeypatch, no_viewer):

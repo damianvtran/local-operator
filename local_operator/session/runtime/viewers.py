@@ -92,7 +92,10 @@ KNOWN_VIEWER_PROTOCOLS = frozenset({VIEWER_PROTOCOL})
 #: destination — UI-first, review round 1 R9 — and the surface the ladder asks
 #: about when the launch is refused, review round 2 R13) and the runtime's
 #: rung-3 probe asks for a TUI. Declared here, beside the record that carries
-#: them, so neither half spells the string on its own.
+#: them, so the two halves that ROUTE on them ask through the constant rather
+#: than re-spelling it — which is what ``serving.py::_tui_viewer_running`` did
+#: with the literal ``"tui"`` until review round 3's N5, and what made the
+#: earlier, unqualified version of this sentence false.
 TUI_SURFACE = "tui"
 DESKTOP_SURFACE = "desktop"
 

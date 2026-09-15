@@ -4680,9 +4680,13 @@ def _tui_viewer_running(root: Path) -> bool:
     and the durable unseen mark means nothing is lost, only un-bannered.
     """
     try:
-        from local_operator.session.runtime.viewers import scan_viewers
+        # The surface name comes from the module that defines the record, not
+        # from a literal here: `viewers.py`'s comment promises neither half
+        # spells it on its own, and a literal in this probe is what made that
+        # promise false (review round 3, N5).
+        from local_operator.session.runtime.viewers import TUI_SURFACE, scan_viewers
 
-        return any(record.surface == "tui" for record in scan_viewers(root))
+        return any(record.surface == TUI_SURFACE for record in scan_viewers(root))
     except Exception:  # noqa: BLE001 — a routing read must not block a notify
         logger.debug("could not scan for a running TUI", exc_info=True)
         return False
