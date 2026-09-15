@@ -26,6 +26,7 @@ resolves through jedi's own name analysis.
 
 from __future__ import annotations
 
+import importlib.util
 import keyword
 import re
 from collections.abc import Callable
@@ -54,13 +55,117 @@ from local_operator.tools.builtin import (
     spill_truncate,
 )
 
-try:
-    import jedi
-    from jedi import RefactoringError
-except ImportError:  # pragma: no cover — the absent-extra path is covered by
-    # build_lsp_tool returning None; jedi-dependent code is unreachable then.
-    jedi = None  # type: ignore[assignment]
-    RefactoringError = Exception  # type: ignore[assignment,misc]
+#: Sentinel for "jedi has not been resolved yet", distinct from a resolved
+#: ``None`` (the extra is absent). The two cannot share a spelling: the first
+#: means "still cheap to defer", the second means "answered, do not retry".
+_JEDI_UNRESOLVED = object()
+
+
+class _NeverRaised(Exception):
+    """Stand-in for ``jedi.RefactoringError`` when the extra is absent.
+
+    The rename path catches that class to mean "no name under the cursor, try
+    the next candidate". With jedi absent the rename path is unreachable (the
+    tool is not advertised and ``execute_lsp`` answers with an error first),
+    so the honest stand-in is a class nothing raises.
+    """
+
+
+def _jedi() -> Any:
+    """The ``jedi`` module, imported on FIRST USE; ``None`` when absent.
+
+    WHY THE IMPORT IS DEFERRED, AND WHY HERE. ``import jedi`` executes
+    jedi's whole inference graph — typeshed walking, its compiled-module
+    machinery, its own pydantic-free model layer — measured at **108 ms** on
+    an M-series box against **~600 ms** for the whole of ``create_session``
+    with its imports pre-warmed. The import used to sit at module scope, and
+    ``tools/registry.py`` imports this module eagerly, so EVERY session
+    construction paid it whether or not the model ever asked a symbol
+    question. On the desktop plane "every session construction" is a fresh
+    runtime child process, i.e. every attach — which is exactly where the
+    user-visible pause lives. Resolving on first use moves that cost off the
+    attach path and onto the single call that needs it.
+
+    Cached in this module's ``jedi`` global, so ``lsp.jedi`` keeps resolving
+    for callers and tests that read it as an attribute (see ``__getattr__``),
+    and an explicit ``lsp.jedi = None`` set by a host or a test is honoured
+    rather than silently re-imported.
+    """
+    resolved = globals().get("jedi", _JEDI_UNRESOLVED)
+    if resolved is not _JEDI_UNRESOLVED:
+        return resolved
+    try:
+        import jedi
+    except ImportError:  # pragma: no cover — absent-extra path; see _jedi_installed
+        # Recorded as a resolved answer so the next caller does not re-attempt
+        # (and does not re-walk the import system on every turn).
+        jedi = None
+    globals()["jedi"] = jedi
+    return jedi
+
+
+def _refactoring_error() -> type[Exception]:
+    """``jedi.RefactoringError``, or :class:`_NeverRaised` when jedi is absent.
+
+    Typed ``type[Exception]`` rather than ``type[BaseException]`` because the
+    only thing anyone does with it is ``except`` it: the rename path binds the
+    caught value to ``last_error: Exception | None`` and renders it into an
+    error result, and a ``BaseException`` there is neither bindable nor
+    truthful — jedi's class derives from ``Exception``.
+    """
+    resolved = globals().get("RefactoringError", _JEDI_UNRESOLVED)
+    if resolved is not _JEDI_UNRESOLVED:
+        return resolved  # type: ignore[no-any-return]
+    module = _jedi()
+    error: type[Exception] = _NeverRaised
+    if module is not None:
+        error = module.RefactoringError
+    globals()["RefactoringError"] = error
+    return error
+
+
+def _jedi_installed() -> bool:
+    """Whether the ``lsp`` extra is importable, WITHOUT importing it.
+
+    ``find_spec`` answers the same question ``import jedi`` would — is there a
+    module for this name — for microseconds instead of 108 ms, because it
+    resolves the finder without executing the module.
+
+    A spec can exist for a module that then fails to import (a broken install).
+    That is not silent: the first ``lsp`` call resolves the module, and an
+    ``ImportError`` there answers with the not-installed error — the same
+    message ``build_lsp_tool`` hiding the tool would have produced. Any OTHER
+    exception from a broken module propagates into ``execute_lsp``'s guard and
+    becomes the generic execution-fault result, which is the honest report for
+    a package that exists and is damaged.
+    """
+    resolved = globals().get("jedi", _JEDI_UNRESOLVED)
+    if resolved is not _JEDI_UNRESOLVED:
+        return resolved is not None
+    try:
+        return importlib.util.find_spec("jedi") is not None
+    except (ImportError, ValueError):
+        # ImportError: a parent package is missing. ValueError: the name is
+        # already in ``sys.modules`` as ``None`` (a cached failed import).
+        return False
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``lsp.jedi`` / ``lsp.RefactoringError`` lazily on attribute access.
+
+    PEP 562. Both names were module-level attributes until the import moved
+    behind :func:`_jedi`; keeping them addressable preserves every existing
+    reader — most importantly the suite's ``skipif(lsp.jedi is None)`` guard,
+    which is evaluated when the test module is imported and would otherwise
+    raise ``AttributeError``. Reachable only until the first resolution,
+    because :func:`_jedi` then writes the real global.
+    """
+    if name == "jedi":
+        return _jedi()
+    if name == "RefactoringError":
+        return _refactoring_error()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: Every action the tool accepts. One tuple so the schema text, the dispatch
 #: and the tests cannot drift apart (same convention as BROWSER_ACTIONS).
@@ -443,13 +548,14 @@ def _rename_preview_result(
     diff = ""
     positions = _query_positions(params, script, lines)
     last_error: Exception | None = None
+    refactoring_error = _refactoring_error()
     for line, column in positions:
         # A keyword or blank position raises RefactoringError ("no name under
         # the cursor", measured) — that is the signal to try the next
         # candidate, not a failure of the call.
         try:
             refactoring = script.rename(line, column, new_name=params.new_name)
-        except RefactoringError as exc:
+        except refactoring_error as exc:
             last_error = exc
             continue
         changed = [Path(p) for p in refactoring.get_changed_files() if p is not None]
@@ -550,9 +656,10 @@ async def execute_lsp(
     if not path.is_file():
         return _error(tool_call_id, "lsp", f"Not a file: {path}")
 
-    if jedi is None:
+    module = _jedi()
+    if module is None:
         return _error(tool_call_id, "lsp", "jedi is not installed (install local-operator[lsp])")
-    script = jedi.Script(path=str(path))
+    script = module.Script(path=str(path))
     cache: dict[str, list[str]] = {}
     if params.action == "definitions":
         return _definitions_result(tool_call_id, script, params, path, root, cache)
@@ -569,9 +676,11 @@ def build_lsp_tool() -> AgentTool | None:
     Same createIf convention as ``build_browser_tool``: an optional capability
     returns None — excluded from the inventory — when the host did not opt
     into its dependency. In-process jedi is pure Python, so unlike the browser
-    tool there is no runtime probe beyond the import itself.
+    tool there is no runtime probe beyond the import itself — which is
+    :func:`_jedi_installed`'s ``find_spec``, NOT an import, so advertising the
+    tool costs microseconds and exactly nothing on the attach path.
     """
-    if jedi is None:
+    if not _jedi_installed():
         return None
     return AgentTool(
         name="lsp",

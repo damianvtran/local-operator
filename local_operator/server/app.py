@@ -97,6 +97,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # this only touches the root logger, so the two do not fight.
     configure_console_logging()
 
+    # The tokenizer's first-use cost overlaps the rest of startup. This process
+    # runs sessions of its own — the stateless ``/v1/chat`` path and the
+    # scheduler's agent runs — and each of them would otherwise pay ~120 ms of
+    # BPE-table construction inside its first request, on the event loop this
+    # daemon is also serving HTTP from.
+    #
+    # WARMED IN THE BACKGROUND, AND WRAPPED INCLUDING THE IMPORT. Priming the
+    # cache takes ~1 s of compile; awaiting it here would move that into daemon
+    # STARTUP, which is the thing an attach waits on. And a raise inside a
+    # FastAPI ``lifespan`` fails startup, so the import is inside the guard
+    # too, not just the call.
+    try:
+        from local_operator.compaction.tokens import warm_tokenizer_in_background
+
+        warm_tokenizer_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("tokenizer prewarm unavailable at startup", exc_info=True)
+
+    # THE BYTECODE CACHE WARM, and the reason it belongs to the daemon rather
+    # than to each runtime child. Every child this daemon spawns inherits its
+    # environment, so under an interpreter that refuses bytecode writes (the
+    # desktop app's spawn environment — see ``local_operator.bytecode``) each
+    # child recompiles the whole import graph from source, measured at 749 ms
+    # inside its first turn. Only the WRITE is refused; the READ is not.
+    #
+    # A CHILD SPAWNED IN THE NEXT SECOND MAY STILL COMPILE. This is
+    # fire-and-forget: the population takes ~1 s, and nothing here waits for
+    # it, so the guarantee is "every child that follows the population" rather
+    # than "every child that follows this line". Waiting would trade an attach
+    # for a daemon start, which is the wrong way round — the cache is also
+    # persistent, so second and later sessions in this install's lifetime are
+    # the ones that actually collect.
+    try:
+        from local_operator.bytecode import warm_bytecode_cache_in_background
+
+        warm_bytecode_cache_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("bytecode prewarm unavailable at startup", exc_info=True)
+
     # Initialize on startup by setting up the credential and config managers
     from local_operator.paths import config_dir as resolve_config_dir
 
