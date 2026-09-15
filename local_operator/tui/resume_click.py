@@ -20,13 +20,55 @@ operator reported it, and an orphaned Ghostty from this exact path
 (``ghostty --initial-command=... lop --resume <id>``) was still resident when
 this was rewritten.
 
-So the premise is no longer assumed; it is **checked**. The ladder:
+So the premise is no longer assumed; it is **checked**. The ladder, in the
+order the operator asked for — the UI first, a terminal last:
 
-1. **A live viewer can display it** — tell that process to switch and to bring
-   its window forward. No new process, no second copy of the session.
-2. **Nothing suitable is running** — the original premise genuinely holds, and
-   the spawn below is exactly what it always was. That path is why this module
-   exists and it is deliberately unchanged.
+1. **A running DESKTOP viewer** — tell that process to switch and to bring its
+   window forward. No new process, no second copy of the session, including the
+   macOS case where the app is up with no window: its record says so and
+   `needs_switch` honours it.
+2. **A desktop app is installed but not running** — launch it WITH the session
+   id (`--open-session <id>`), so it opens straight into the conversation
+   rather than into the catalogue. This is the rung that makes a `nothing is
+   running` banner's click land in the app instead of spawning a terminal, which
+   is the surface the user actually wants for a conversation they are being
+   told finished.
+3. **A running TUI viewer** — switch that window in place. It starts no process
+   either, and it is what stops a click from opening a SECOND terminal for a
+   session that is one keystroke away in a terminal the user already has open.
+4. **A terminal** — the original premise genuinely holds, and the spawn below
+   is exactly what it always was. That path is why this module exists and it is
+   deliberately unchanged.
+
+THREE RUNGS BECAME FOUR when the ordering was corrected (review round 1, R9):
+asking "is anything running?" before discovery let a TUI that happened to be
+open swallow every click, so a user who asked for the app got their terminal
+instead. The running TUI became a destination of its own at 3 and the spawn
+moved to 4. This list went on saying three for considerably longer than the
+code did, which is the `docs/DESKTOP_API.md` staleness (R12) happening inside a
+docstring in the same file — so it is stated against the code and not from
+memory of it.
+
+RUNG 2 IS ORDERED AFTER THE VIEWER RUNG and not before it, because a RUNNING
+app is a viewer and is reached by rung 1 — including the macOS case where it
+has no window, which its record reports and `needs_switch` honours. Rung 2 is
+strictly about a process that does not exist yet.
+
+**AND ANY TEST THAT DRIVES ``open_session`` MUST DOUBLE RUNG 2.** It is not a
+hypothetical hazard: rung 2 looks for ``local-operator-ui`` on ``PATH``, which on
+the machine this was written on FOUND IT, so a unit test of the terminal rung
+launched the operator's real desktop app and left it running. Two tests in
+``tests/unit/tui/test_notify.py`` predate the rung and now stub it out
+(``_no_desktop_app``), and the e2e click test doubles both lower rungs before
+the ladder runs. Do the same rather than trusting that nothing is installed.
+
+**DISCOVERY HAS TO BE LOUD, which is why rung 2 does not use
+``spawn_detached``.** ``spawn_detached`` reports only whether a child was
+STARTED, and a launcher that is not installed starts fine and exits 1 — so a
+candidate that cannot work would look like success, no later candidate would be
+tried, and the click would land nowhere. Rung 2 therefore waits (bounded) for
+the exit status, which is the signal that distinguishes "launched" from "not
+here".
 
 The spawn still uses the fork machinery wholesale:
 :func:`local_operator.spawn.registry.active_backend` picks Ghostty / kitty /
@@ -67,9 +109,39 @@ way — `lop --resume <id>` in their own terminal.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 logger = logging.getLogger(__name__)
+
+#: The ``desktop.launch_command`` default: empty means "discover the app".
+#:
+#: Stated as a module constant rather than inline so the settings registry's
+#: restated default can be guarded against THIS value by name
+#: (``tests/unit/test_settings_io.py::_consumer_defaults``) — the registry
+#: cannot import this module without adding an import edge from the CLI's
+#: settings layer into the TUI.
+DESKTOP_LAUNCH_COMMAND_DEFAULT = ""
+
+#: Where the session id is substituted in a configured ``desktop.launch_command``.
+LAUNCH_SESSION_PLACEHOLDER = "{session}"
+
+#: The desktop app's argv contract for "open this conversation". Shared with the
+#: app's own command-line parsing; the two halves are separate repositories, so
+#: the spelling is pinned here and asserted on the wire in the e2e suite.
+OPEN_SESSION_FLAG = "--open-session"
+
+#: The npm channel's bin name, resolved on PATH. The packaged macOS bundle is
+#: not on PATH, so it needs an identifier instead: the ``appId`` the Electron
+#: build is configured with.
+DESKTOP_BIN_NAME = "local-operator-ui"
+DESKTOP_BUNDLE_ID = "com.local-operator"
+
+#: How long rung 2 waits for a launcher's exit status. Generous against every
+#: real launcher (both shipped ones exit in well under a second) and small
+#: enough that a wedged one cannot eat the click: the module's whole budget is
+#: the ~8.5 s the viewer dial may already have spent.
+_LAUNCH_PROBE_TIMEOUT_S = 2.0
 
 
 def _session_cwd(session_id: str) -> str:
@@ -109,27 +181,240 @@ def _session_cwd(session_id: str) -> str:
 def open_session(session_id: str) -> bool:
     """Take the user to ``session_id``. True if anything was achieved.
 
-    Tries the in-place route first (a running viewer switches and comes
-    forward), and falls back to spawning a terminal when nothing suitable is
-    running. The fallback is the behaviour that shipped before viewers existed
-    and is deliberately byte-identical to it.
+    FOUR rungs, and the ORDER is the operator's stated requirement rather than a
+    measurable preference (review round 1, R9): the requested destination is the
+    DESKTOP UI, and the terminal is the fallback.
+
+    1. **A running DESKTOP viewer** — including a windowless one, whose
+       ``resume_session`` recreates the window and then navigates, which is
+       exactly the "app is alive but its window is closed" click.
+    2. **An installed-but-not-running desktop app**, launched into the
+       conversation.
+    3. **A running TUI viewer**, switched in place.
+    4. **A terminal**, byte-identical to the behaviour that shipped before
+       viewers existed.
+
+    RUNGS 2 AND 3 USED TO BE THE OTHER WAY ROUND, and that is the defect: a TUI
+    that happened to be open swallowed every click before discovery ever ran, so
+    a user who asked for the app got their terminal instead — decided by nothing
+    but incidental focus history. The UI is tried first, and only a UI that is
+    unavailable OR fails within its bounded attempt diverts into a terminal.
+
+    The refusal in :data:`DESKTOP_LAUNCH_REFUSED_ENV` takes the app out of the
+    LADDER, not just out of the launch: "never launch the desktop" has to mean
+    the app is not a destination, or the setting would only skip the launch and
+    then have a routing rung pick the same running app up again. So rung 3 is
+    narrowed to the TUI surfaces when the refusal is set (review round 2, R13) —
+    without which a refused ladder still landed in a running desktop, measured
+    as ``open_session -> True`` via the desktop viewer.
     """
-    if _route_to_viewer(session_id):
+    app_available = not _desktop_launch_refused()
+    # Local import, like the viewer stack below it: this module is reached from a
+    # detached click process where startup cost is the user's latency, and the
+    # surface names are the only thing needed from it here. Imported whichever
+    # way the refusal goes, because rung 3 needs a name from it in both.
+    from local_operator.session.runtime.viewers import DESKTOP_SURFACE, TUI_SURFACE
+
+    if app_available and _route_to_viewer(session_id, surface=DESKTOP_SURFACE):
+        return True
+    if app_available and _launch_desktop(session_id):
+        return True
+    # RUNG 3 IS THE ROUTING RUNG, so it is the one that has to honour the
+    # refusal: asking it for "anything at all" let ``choose_viewer``'s own
+    # desktop preference select a running app the user told us not to use. When
+    # the launch is allowed this stays nil, so the fallback rung keeps answering
+    # "is anything left?" exactly as it did.
+    if _route_to_viewer(session_id, surface=None if app_available else TUI_SURFACE):
         return True
     return _spawn_terminal(session_id)
 
 
-def _route_to_viewer(session_id: str) -> bool:
+def _desktop_launch_refused() -> bool:
+    """Whether the user (or the suite) forbade the desktop app entirely.
+
+    Read in ONE place so no rung can disagree about it, and so "refused" can be
+    answered WITHOUT doing any discovery work — the refusal is checked before the
+    scan, not after it. ``_launch_desktop`` keeps its own
+    check for the same reason it always had one: it is the rung that could
+    actually start the app, and it must not depend on a caller having asked
+    first.
+    """
+    return bool(os.environ.get(DESKTOP_LAUNCH_REFUSED_ENV))
+
+
+def _configured_launch_command() -> list[str]:
+    """``desktop.launch_command`` as argv, or ``[]`` when unset.
+
+    Read through the SETTINGS PAGE's own reader at CLICK time, so an edit lands
+    on the next click without a restart, which is the requirement this read
+    exists for.
+
+    THAT READER IS ``settings_io`` AND NOT ``tui.settings.settings_get``, and
+    the difference is a shipped defect rather than a style preference (QA round
+    2, Q1). ``settings_get`` is the DISPLAY fast path: its ``_load`` returns
+    only ``settings_io.display_defaults()`` — the flat-dotted ``display.*``
+    flags — so a NESTED key can never be in its cache and the read came back as
+    its default every time. Measured on the real ladder, the settings page
+    showed the user's launcher while this returned ``""``: discovery then ran a
+    different program than the one configured, and against a machine with
+    nothing discoverable the click fell all the way to rung 4.
+
+    The registry's ``path`` is the half that was right. Flat-dotted keys are
+    reserved for ``display.*`` precisely BECAUSE ``tui.settings`` reads them
+    (see ``AGENTS.md``, "Adding a configuration key"), and
+    ``desktop.launch_command`` is not a display flag — so the fix is here, not
+    in the key: widening the display fast path to serve a nested, non-display
+    key would put a click-time setting on the paint-path cache. The read goes to
+    the module every writer already funnels through instead
+    (``settings_io.write_setting`` serves ``/settings``, ``PATCH /v1/settings``
+    and ``lop config edit``), which is what makes the two halves agree by
+    construction rather than by coincidence.
+
+    Every rung on this path is best-effort, so a settings failure degrades to
+    discovery rather than killing the click.
+    """
+    try:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        setting = settings_io.resolve_key("desktop.launch_command")
+        if setting is None:  # pragma: no cover - the row is registered
+            return []
+        raw = settings_io.read_setting(ConfigManager(config_dir()), setting)
+    except Exception:  # noqa: BLE001 — discovery is the fallback, not a failure
+        logger.debug("could not read desktop.launch_command", exc_info=True)
+        return []
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    import shlex
+
+    try:
+        # `posix=False` on Windows: its command lines are not POSIX-quoted, and
+        # shlex would strip the backslashes out of every path there.
+        parts = shlex.split(raw, posix=sys.platform != "win32")
+    except ValueError:
+        logger.debug("desktop.launch_command is not a valid command line")
+        return []
+    return parts
+
+
+#: A refusal that no rung can override: with this set, a click never launches the
+#: desktop app and falls through to the terminal instead.
+#:
+#: TWO CALLERS, and the second is why it exists. It is a plain user preference —
+#: some people want a banner click to open a terminal, and the setting's default
+#: is discovery, so without this there is no way to say "never" — but it is
+#: ALSO the suite's central gate. Rung 2 looks for `local-operator-ui` on PATH,
+#: which on a developer's machine FINDS IT, so a test that drives `open_session`
+#: and forgets to double this rung starts the operator's real app and leaves it
+#: running. `tests/conftest.py` sets this for every test, exactly as it sets
+#: `LOCAL_OPERATOR_NO_NOTIFICATIONS` for the OS-toast path, and a test that
+#: deliberately exercises the launch ladder clears it (see
+#: `tests/unit/tui/test_resume_click.py`) — the visible, deliberate opt-in.
+DESKTOP_LAUNCH_REFUSED_ENV = "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH"
+
+
+def _launch_desktop(session_id: str) -> bool:
+    """Rung 2: launch the desktop app with the session id.
+
+    DISCOVERY ORDER, and each step is cheaper than the one before it: a
+    configured command (the user's own answer, used verbatim), then the npm bin
+    on PATH (a real existence check via ``which``), then the packaged macOS
+    bundle by id. The ``pnpm dev`` case is deliberately absent — a repository
+    checkout is not reliably discoverable as an installed app, and inventing a
+    third launcher for it would be a second thing to keep in step for a
+    developer-only case. It falls through to the terminal, which is exactly
+    what it did before.
+
+    Every candidate is TRIED in order and abandoned only on a non-zero exit, so
+    an uninstalled bundle costs one failed ``open`` rather than a dead click.
+
+    REFUSED ENTIRELY under :data:`DESKTOP_LAUNCH_REFUSED_ENV`, checked first so
+    the refusal costs nothing and cannot be reached by any candidate.
+    """
+    import os
+    import shutil
+
+    if os.environ.get(DESKTOP_LAUNCH_REFUSED_ENV):
+        return False
+
+    attempts: list[list[str]] = []
+    configured = _configured_launch_command()
+    if configured:
+        attempts.append(
+            [part.replace(LAUNCH_SESSION_PLACEHOLDER, session_id) for part in configured]
+        )
+    else:
+        binary = shutil.which(DESKTOP_BIN_NAME)
+        if binary:
+            attempts.append([binary, OPEN_SESSION_FLAG, session_id])
+        if sys.platform == "darwin":
+            # `--args` because `open` forwards nothing to the app otherwise, and
+            # the bundle id rather than a path because the user may have moved
+            # the app anywhere LaunchServices can find it.
+            attempts.append(
+                ["open", "-b", DESKTOP_BUNDLE_ID, "--args", OPEN_SESSION_FLAG, session_id]
+            )
+    if not attempts:
+        return False
+    env = dict(os.environ)
+    for argv in attempts:
+        if _launch_once(argv, env):
+            logger.debug("click launched the desktop app: %s", argv[0])
+            return True
+    return False
+
+
+def _launch_once(argv: list[str], env: dict[str, str]) -> bool:
+    """Start ``argv`` detached and report whether it really launched.
+
+    A bounded wait for the EXIT STATUS, which is the only thing that separates
+    "the app started" from "this launcher is not installed": ``open -b`` exits
+    1 for an unknown bundle id and the npm bin exits 1 for a missing app
+    directory, and both of those start a process successfully. A TIMEOUT COUNTS
+    AS SUCCESS, because a launcher still alive after two seconds is one that is
+    running — never kill it; that would be the click launching the app and then
+    immediately shutting it down.
+
+    Detached from this process's session, because this process is a notification
+    handler that macOS will reap: a child that shared its process group would
+    take the app down with it on some platforms.
+    """
+    import subprocess
+
+    try:
+        process = subprocess.Popen(  # noqa: S603 — argv is constructed here, never from input
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        logger.debug("launcher %r could not be started", argv[:1], exc_info=True)
+        return False
+    try:
+        return process.wait(timeout=_LAUNCH_PROBE_TIMEOUT_S) == 0
+    except subprocess.TimeoutExpired:
+        return True
+
+
+def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     """Ask an already-running viewer to display the session. True if one did.
 
     Every failure mode — no viewer, a wedged one, a refused socket, a viewer
     that died between the scan and the dial, **and a viewer that took the
     request but could not display the session** — returns False and falls
-    through to the spawn, which is the path that works when nothing is running.
-    That last one is why the viewer's ack resolves against the boot OUTCOME
-    rather than the dispatch: a "yes" for a session that failed to open would
-    suppress this fallback AND cost the user the conversation they were reading,
-    leaving them on an error splash with no window and no way back.
+    through to the next rung. That last one is why the viewer's ack resolves
+    against the boot OUTCOME rather than the dispatch: a "yes" for a session
+    that failed to open would suppress the fallback AND cost the user the
+    conversation they were reading, leaving them on an error splash with no
+    window and no way back.
+
+    ``surface`` narrows the question to one surface (review round 1, R9), which
+    is how :func:`open_session` asks "is the desktop app running?" separately
+    from "is anything at all running?" without inferring either from the other.
 
     The dial is bounded end to end (``viewer_client``), so a wedged viewer costs
     a second or two rather than the click.
@@ -141,7 +426,7 @@ def _route_to_viewer(session_id: str) -> bool:
     try:
         from local_operator.session.runtime.viewer_client import route_click
 
-        outcome = route_click(session_id)
+        outcome = route_click(session_id, surface=surface)
     except Exception:  # noqa: BLE001 — routing must never eat the click
         logger.debug("viewer routing failed; falling back to a spawn", exc_info=True)
         return False

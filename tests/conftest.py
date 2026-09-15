@@ -45,6 +45,15 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The click ladder's launch rung looks for `local-operator-ui` on PATH,
+    # which on a machine that has the app installed FINDS IT. A test that drives
+    # `open_session` without doubling the rung therefore starts the operator's
+    # real desktop app and leaves it running -- measured, not hypothetical: it
+    # happened twice on this branch (a failing e2e click test, and two unit
+    # tests about the terminal rung in tests/unit/tui/test_notify.py). Set in
+    # `isolate_environment` below so the escape is closed for every test at once
+    # rather than by each test remembering.
+    "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     "LOCAL_OPERATOR_HOME",
@@ -252,6 +261,12 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # A test that specifically exercises the notification path unsets or
     # monkeypatches around this, which is the visible, deliberate opt-in.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    # ...and the same gate for the OTHER way a test can reach the real desktop:
+    # `lop resume-click` launches the desktop app when one is installed, and
+    # `local-operator-ui` IS installed on the maintainer's machine. A test that
+    # specifically exercises the launch ladder clears this (the visible,
+    # deliberate opt-in, as with the line above).
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1")
     yield home
 
 

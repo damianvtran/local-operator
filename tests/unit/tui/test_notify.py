@@ -613,6 +613,31 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
     assert notify_mod._ACTION_SUPPORT["/usr/bin/old2"] is False
 
 
+def _no_desktop_app(monkeypatch) -> list[str]:
+    """Take the click ladder's NEW desktop rung out of the way, and record it.
+
+    These tests are about the TERMINAL rung, which is now the second of two
+    fallbacks: rung 2 launches the desktop app when one is installed, and on a
+    developer's machine `shutil.which("local-operator-ui")` finds the real npm
+    bin — so without this the click starts the operator's actual app and the
+    terminal assertion never runs. Measured, not hypothetical: the run of this
+    file that added the rung left a real `local-operator-ui --open-session
+    <fixture id>` in the process list.
+
+    Returning False is the "no app installed" answer, which is exactly the
+    state the terminal rung exists for, and it is doubled at ``_launch_desktop``
+    rather than at the process boundary so the ladder's own ordering is still
+    exercised.
+    """
+    from local_operator.tui import resume_click
+
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: attempts.append(session_id) or False
+    )
+    return attempts
+
+
 def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> None:
     """A notification is only sent when nothing is watching, so the click has
     to OPEN a terminal — there is no emulator around the sender to inherit.
@@ -623,6 +648,7 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
     """
     from local_operator.tui import resume_click
 
+    _no_desktop_app(monkeypatch)
     seen: dict[str, Any] = {}
 
     class _Backend:
@@ -644,6 +670,7 @@ def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
     """An unrecognised emulator must not silently swallow the user's click."""
     from local_operator.tui import resume_click
 
+    _no_desktop_app(monkeypatch)
     launched: list[list[str]] = []
     monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
     monkeypatch.setattr(
