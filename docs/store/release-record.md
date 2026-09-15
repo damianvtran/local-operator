@@ -148,7 +148,7 @@ That defect was fixed on the RUNTIME side (an older extension is driven, not
 refused), and the advisory only reads the version the extension reports — so the
 live 0.1.10 build benefits without any upload at all.
 
-## v0.1.12 — submitted 2026-09-13, pending review as of 2026-09-13
+## v0.1.12 — submitted 2026-09-13, published 2026-09-14
 
 | Field | Value |
 | --- | --- |
@@ -161,10 +161,10 @@ live 0.1.10 build benefits without any upload at all.
 | Artifact size | 13 files, no source maps (size as reported by the store listing once published) |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
 | Submission route | **Automated** — `chrome-web-store.yml`, [run 34731860480](https://github.com/damianvtran/local-operator/actions/runs/34731860480), dispatched with `ref=7c78b6eda` `version=0.1.12` |
-| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.12` once the store reports the revision `STAGED` |
-| Store state | `PENDING_REVIEW` (submitted with `STAGED_PUBLISH`); nothing on the listing has changed yet |
-| State last checked | 2026-09-13 |
-| Approval timestamp | *pending — append when the review completes and the promoted revision is live* |
+| Promotion route | **Unresolved — see the note below.** No `chrome-web-store-promote.yml` dispatch for 0.1.12 ever ran successfully after submission |
+| Store state | **`PUBLISHED` at 100%** — the store reports `publishedItemRevisionStatus.state = PUBLISHED`, `distributionChannels = [crxVersion 0.1.12, deployPercentage 100]` |
+| State last checked | 2026-09-15 (store `fetchStatus`, read through the diagnostics added in PR #1160) |
+| Approval timestamp | *not recorded by any workflow* — see the promotion note below |
 | Previously published | v0.1.10, live during this review |
 
 **First submitted revision carrying both halves of the stale-worker defect.** The
@@ -190,6 +190,29 @@ extension using `debugger` with `<all_urls>` routinely draws extended manual
 review: 0.1.8 took ~4.5 days, 0.1.10 cleared the next day. Do not cancel the
 pending review to force a resubmission — cancelling forfeits the accrued queue
 position with no visibility into how close it was.
+
+**Promotion route — unresolved, recorded rather than guessed.** The revision went
+live, but nothing on the forge says how it got there. `chrome-web-store-promote.yml`
+ran for 0.1.12 only as failures: the last gate-1 refusal (state not yet `STAGED`)
+at 2026-09-14T17:36Z, and from 2026-09-15T05:31Z a sequence of gate-2 refusals
+that PR #1160's diagnostics later explained as a version mismatch, not a fault.
+No successful promote dispatch exists in the window, and no other store or release
+workflow ran between 2026-09-14T15:00Z and 2026-09-15T06:00Z. The listing reads
+`Version 0.1.12, Updated September 14, 2026` and the store reports `PUBLISHED` at
+100%. The revision was therefore published either through the publisher
+dashboard's manual publish or automatically on approval — and **the documented
+process does not say which**. That is worth resolving: if `STAGED_PUBLISH`
+auto-publishes on approval, the promote workflow's role needs restating, because
+"wait for `STAGED`, then promote" describes a step that may already have happened.
+
+**The queue as of 2026-09-15T22:4xZ.** The *submitted* revision is a later
+**0.1.15** (submitted 2026-09-14T19:23:41Z with `STAGED_PUBLISH`;
+`fetchStatus` now reports it `STAGED` at 100%). So 0.1.15 — not 0.1.12 — is what a
+promote dispatch would act on, and five subsequent stage attempts for 0.1.17 were
+refused while it occupies the single queue slot. A promote dispatch must name the
+version that is actually staged: naming an already-published version fails safely
+(the gate refuses on the version mismatch) but, before PR #1160, said nothing
+about why.
 
 **Until this publishes**, the live store build stays `0.1.10`, where a stale
 worker still leaves the popup's Allow/Deny permanently disabled. Anyone
