@@ -1352,8 +1352,56 @@ async def warm(session_id: str, body: Warm, request: Request):
         return reply({"state": await bridge.warm()})
 
 
-def _running_work_counts(remote: Any) -> tuple[int, int]:
-    """Live subagents and live backgrounded ``bash`` jobs, from the roster.
+def _work_is_running(state: Any, pending_gate: Any) -> bool:
+    """Whether there is anything the interrupt rung would actually STOP.
+
+    WHY THIS EXISTS AT ALL, and it is not an optimisation. Everything this route
+    can stop is decided by the OWNER, but the answer the caller needs is a word —
+    ``interrupted`` or ``idle`` — and the only structured read of the owner's
+    state a follower has is its published roster. Without this, a press on a warm
+    session that was merely sitting between turns ran an abort that stopped
+    nothing and then reported ``interrupted``; that is exactly the class of
+    overstatement the abort receipt itself was rewritten to remove, and it would
+    stay invisible until something reads the field.
+
+    The terms are the RUNG's own effects, one per thing ``abort`` does:
+
+    * a live TURN (``streaming``) — the main case;
+    * a PARKED GATE — the orphan card that outlived its turn, which this rung
+      settles (``_deny_pending_gates``). This term is why the predicate is not
+      "is the follower streaming": that card is precisely the case the abort's
+      deny-first ordering was added for, so a press that clears it DID do
+      something and must not be answered ``idle``;
+    * a running ``task`` JOB — a subagent, which the abort cancels;
+    * a running GOAL LOOP — which the abort cancels.
+
+    A running ``bash`` job is deliberately NOT a term. Backgrounded jobs exist to
+    outlive the turn that started them (``background=true``) and this rung never
+    touches them, so a session whose only live work is one has nothing for an
+    interrupt to stop — the receipt names those jobs as untouched, and a caller
+    that wanted them gone has the Jobs surface.
+
+    RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
+    delta. Both directions are benign here. A stale ``False`` cannot swallow a
+    press the user could make, because the desktop offers the control (and the
+    Esc accelerator) on the SAME ``frontend.streaming`` flag read here, so the
+    press only exists while this predicate is already true. A stale ``True`` at
+    worst reaches the abort a moment after the turn settled, which is the
+    pre-existing behaviour of a press racing a turn's end.
+    """
+    if getattr(state, "streaming", False):
+        return True
+    if pending_gate is not None:
+        return True
+    jobs = getattr(state, "jobs", None) or []
+    if any(getattr(row, "type", "") == "task" and row.status == "running" for row in jobs):
+        return True
+    loop = getattr(state, "loop", None) or {}
+    return loop.get("status") in {"running", "judging"}
+
+
+def _running_work_counts(state: Any) -> tuple[int, int]:
+    """(live subagents, live backgrounded ``bash`` jobs) from a published roster.
 
     Split by job TYPE because the two surviving kinds have different remaining
     levers and the notice a surface writes names one of them: a ``task`` row is
@@ -1362,15 +1410,13 @@ def _running_work_counts(remote: Any) -> tuple[int, int]:
     needs the Jobs surface. Collapsing them into one number would force the
     copy to say "3 things" about two situations with two different answers.
 
-    Read through ``frontend_state`` rather than a clone-free predicate because
-    the counts are needed, not a boolean, and this runs once per user press.
-    It RAISES when the follower has no canonical state yet, exactly as that
-    property does — the alternative, answering zero, is the fabricated-zero
-    failure this repo has already paid for once (see ``AttachedSession
-    .subagent_comms``): "nothing else is running" is a claim about the user's
-    own work and must not be invented.
+    Takes an already-read roster rather than the facade so one press reads the
+    follower's canonical state once per question — before the press for "was
+    there work", after it for "what survived" — instead of cloning it twice for
+    one of them.
     """
-    running = [row for row in remote.frontend_state.jobs if getattr(row, "status", "") == "running"]
+    jobs = getattr(state, "jobs", None) or []
+    running = [row for row in jobs if getattr(row, "status", "") == "running"]
     children = sum(1 for row in running if getattr(row, "type", "") == "task")
     background = sum(1 for row in running if getattr(row, "type", "") == "bash")
     return children, background
@@ -1412,11 +1458,17 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     ``bash`` jobs are never touched — ``background=true`` exists so a build
     outlives the turn that started it — and the receipt names them.
 
-    ``idle`` IS A SUCCESS. A cold session is NOT engaged to answer this (an
-    interrupt is not a reason to spend a process, which is what ``warm`` is
-    for), and neither is one sitting between turns; both answer 200 with
-    status ``idle``. A client putting an error in front of a press that had
-    nothing to do would be reporting the user's own success as a failure.
+    ``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO
+    STOP. A cold session is NOT engaged to answer this (an interrupt is not a
+    reason to spend a process, which is what ``warm`` is for), and a warm one
+    that is merely sitting between turns is answered without dialling its owner
+    at all — see ``_work_is_running`` for the terms, and note that a parked gate
+    WITHOUT a live turn (the orphan card this release also taught ``abort`` to
+    settle) counts as work, because that press really does clear the screen. A
+    client putting an error in front of a press that had nothing to do would be
+    reporting the user's own success as a failure, and a client told
+    ``interrupted`` for a press that stopped nothing would be shown a success
+    that did not happen.
 
     RECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,
     because a retry after a lost response must not fire a second interrupt at a
@@ -1451,8 +1503,28 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
                     "children_running": 0,
                     "background_jobs": 0,
                 }
+            # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no runtime to
+            # stop it with: ``idle``, on a 200, without dialling the owner. The
+            # roster is sampled BEFORE the press for that question and again
+            # after it for the counts, because those are different questions —
+            # "was there work" is about the moment of the press and "what
+            # survived" is about the moment after it.
+            state = bridge.remote.frontend_state
+            if not _work_is_running(state, bridge.remote.pending_gate):
+                # Nothing was stopped, so "what survived" is simply what is
+                # running. ``children_running`` is zero by construction (a
+                # running ``task`` job is a term above), while backgrounded
+                # ``bash`` jobs are reported TRUTHFULLY rather than zeroed: the
+                # press did not touch them, and a field that said "no jobs"
+                # beside a build still going would be a lie told on a success.
+                return {
+                    "status": "idle",
+                    "receipt": "",
+                    "children_running": 0,
+                    "background_jobs": _running_work_counts(state)[1],
+                }
             receipt = await bridge.remote.interrupt()
-            children_running, background_jobs = _running_work_counts(bridge.remote)
+            children_running, background_jobs = _running_work_counts(bridge.remote.frontend_state)
             return {
                 "status": "interrupted",
                 "receipt": receipt,

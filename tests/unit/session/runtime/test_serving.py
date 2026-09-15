@@ -1902,8 +1902,8 @@ async def test_an_abort_clears_a_card_that_outlived_its_turn() -> None:
     await asyncio.sleep(0)
     assert handle._fold.projection.pending is not None
 
-    await handle.abort()
-
+    receipt = await handle.abort()
+    assert "refused 1 waiting prompt" in receipt, receipt
     assert await asyncio.wait_for(parked, 2) is None, "the orphan card was never answered"
     assert handle._fold.projection.pending is None, "the question is still on screen"
     assert handle._pending_futures == {}
@@ -2009,6 +2009,11 @@ async def test_the_abort_receipt_names_a_turn_only_when_one_was_running() -> Non
     idle = await handle.abort()
     assert "stopping this turn" not in idle, idle
     assert idle.startswith("no turn was running"), idle
+    # Nothing was denied either, and a receipt that named a refused prompt on a
+    # press that settled no gate would be the same overstatement in the other
+    # direction (the route answers `idle` for this state rather than reporting
+    # an interrupt, precisely because there is nothing here to report).
+    assert "refused" not in idle, idle
 
     session.is_streaming = True
     live = await handle.abort()

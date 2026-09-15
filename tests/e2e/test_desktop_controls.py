@@ -601,6 +601,18 @@ async def test_desktop_interrupt_stops_the_turn_and_keeps_the_session(
                 "interrupt stopped the work and not the session"
             )
 
+            # A WARM session with nothing to stop: the same `idle` answer as a
+            # cold one, because `interrupted` is a claim that work was stopped.
+            quiet = await client.post(target + "/interrupt", json={"request_id": request_id()})
+            assert quiet.status_code == 200, quiet.text
+            quiet_result = quiet.json()["result"]
+            assert quiet_result["status"] == "idle", quiet_result
+            assert quiet_result["receipt"] == "", "an idle answer must not invent a receipt"
+            print(
+                "IDLE (warm): a settled session answered HTTP200 status=idle with an empty "
+                "receipt and nothing stopped"
+            )
+
             # A COLD session: idle, and nothing spawned to answer it.
             cold = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}

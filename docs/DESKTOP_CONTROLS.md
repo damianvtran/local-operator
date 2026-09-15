@@ -193,16 +193,30 @@ the one the desktop client reads): nothing is rolled back, the
 
   The answer is `{status, receipt, children_running, background_jobs, replayed}`.
   `receipt` is the RUNTIME's own sentence, returned verbatim: it counts what actually
-  settled and names anything that refused to die, which only the owner knows.
+  settled, names anything that refused to die, and names any card it refused (a
+  press whose only effect was clearing a question that outlived its turn reports
+  `no turn was running; refused 1 waiting prompt`) — all of which only the owner
+  knows.
   `children_running`/`background_jobs` are read off the follower's published roster
   AFTER the press so a surface can word its own notice without parsing prose (job
   type `task` is a subagent the interrupt did reach; `bash` is a backgrounded job it
   deliberately never touched, and the remaining lever for those is the Jobs
-  surface). `status` is `interrupted` or `idle`; `idle` is a 200 and a SUCCESS — a
+  surface). An `idle` answer reports what IS running rather than zeros, so a build
+  this rung deliberately spares stays visible beside the status.
+
+  `status` is `interrupted` or `idle`; `idle` is a 200 and a SUCCESS — a
   cold session is NOT engaged to answer this, and one between turns simply has
-  nothing to stop. The receipt is `""` for `idle`, because there is no owner sentence
-  to report and an invented one is the same overstatement the receipt itself is
-  written to avoid.
+  nothing to stop. `interrupted` is a CLAIM that work was stopped, so the route answers
+  `idle` whenever nothing would be: it reads the follower's published roster first
+  and skips the owner call entirely when there is no live turn, no parked card, no
+  running `task` job and no running goal loop. (A running backgrounded `bash` job is
+  deliberately NOT one of those terms — this rung never touches one, so a session
+  whose only live work is a build has nothing to interrupt.) A parked card with NO
+  live turn is the exception that must still run, because that orphan is what the
+  abort's deny-first ordering exists for; its press reports `interrupted` with a
+  receipt naming the refusal. The receipt is `""` for `idle`, because there is no
+  owner sentence to report and an invented one is the same overstatement the receipt
+  itself is written to avoid.
 
   The runtime op it maps to is the existing `abort` control frame
   (`AttachedSession.interrupt` → `AttachedSession.abort` → `ServingSessionHandle
