@@ -43,6 +43,7 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import load_catalog
 from local_operator.session.cold_model import resolve_birth_effort
+from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
@@ -333,8 +334,68 @@ def write_desktop_marker(
     payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
     if model is not None:
         payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
-    marker.write_text(json.dumps(payload))
-    marker.chmod(0o600)
+    # ATOMIC, and the mode is applied BEFORE publication (review R2). The old
+    # ``write_text`` then ``chmod`` truncated the authoritative file in place,
+    # so a failure between the two left a world-readable marker and a crash
+    # mid-write left it torn; and because the truncate happens first, a reader
+    # racing the write sees an empty document rather than either answer.
+    _stage_and_replace(marker, json.dumps(payload).encode())
+
+
+def write_desktop_marker_bytes(marker: Path, data: bytes) -> None:
+    """Atomically replace ``marker`` with already-rendered bytes, mode 0600.
+
+    The ROLLBACK half of the marker contract, and a function rather than two
+    lines inline because the ordering it enforces is the same one
+    :func:`write_desktop_marker` needs (they share
+    :func:`_stage_and_replace`): stage in the SAME directory, apply 0600 BEFORE
+    publication, then ``os.replace``. A rollback that truncated the live marker
+    and then chmodded it would leave a window where the authoritative file is
+    empty or world-readable — and the rollback is exactly the moment nothing
+    else is watching (review R2 / QA Q2).
+    """
+    _stage_and_replace(marker, data)
+
+
+def _stage_and_replace(marker: Path, data: bytes) -> None:
+    """Publish ``data`` at ``marker`` atomically, 0600, temp in the SAME dir.
+
+    The one writer both halves of the marker contract go through, so the
+    ordering is stated once: write the whole document to a unique staging file
+    in the marker's own directory (``os.replace`` is only atomic within a
+    filesystem), ``flush`` and ``fsync`` it so the rename cannot be ordered
+    ahead of the bytes on a crash, apply 0600 BEFORE the file is reachable
+    under the authoritative name, replace, then fsync the directory itself so
+    the rename survives a power loss — the discipline ``config.py`` states for
+    its own file. The directory fsync is best-effort: it is a durability
+    upgrade attempted after the replacement ALREADY succeeded, so a filesystem
+    that refuses ``O_RDONLY`` on a directory must not turn a good write into a
+    failure.
+
+    A stage that fails is removed rather than left behind: it is ours and
+    unreferenced, it would otherwise accumulate in the session directory, and
+    the marker name it is prefixed with is one a reader globs for.
+    """
+    staged = marker.parent / f".{marker.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(staged, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        staged.chmod(0o600)
+        os.replace(staged, marker)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staged.unlink(missing_ok=True)
+        raise
+    try:
+        directory_fd = os.open(str(marker.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
 
 
 def _same_directory(left: str, right: str) -> bool:
@@ -366,12 +427,65 @@ def _same_directory(left: str, right: str) -> bool:
         return False
 
 
+async def _settle_unconfirmed_move(
+    bridge: DesktopSessionBridge, read_marker: Callable[[], bytes | None]
+) -> None:
+    """Settle which directory is in force after an UNKNOWN owner outcome.
+
+    Contract §A: an outcome whose answer never came back is NEITHER a refusal
+    nor a success, so the next operation must finish that reconciliation under
+    the move lock instead of acting on an optimistic ``_cwd``. The
+    reconciliation is an OBSERVATION, not a second protocol — the durable marker
+    is the value a successor is spawned from and the only copy of the accepted
+    target that outlives this bridge, so:
+
+    * when it AGREES with the directory this bridge believes, the doubt is
+      settled: the durable target governs the successor and both copies give the
+      same base for a relative new target, so the move proceeds;
+    * when it DISAGREES, the two copies genuinely differ about where the session
+      works and neither may resolve a new target. That is reported for the
+      caller to reconcile — deliberately not resolved by preferring one, which
+      is how the previous behaviour overwrote a committed move with a stale one.
+
+    Read through the caller's STRICT reader, so a marker that cannot be read
+    refuses with its real cause rather than being treated as a directory nothing
+    named.
+    """
+    if not bridge.cwd_unconfirmed:
+        return
+    raw = await asyncio.to_thread(read_marker)
+    durable = ""
+    if raw is not None:
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            durable = str(payload.get("cwd", ""))
+    if durable == bridge.cwd:
+        bridge.cwd_unconfirmed = False
+        return
+    raise HTTPException(
+        409,
+        "The session's stored working directory could not be confirmed after an "
+        "interrupted move. Reconcile it before moving again.",
+    )
+
+
 async def move_session(bridge: DesktopSessionBridge, requested: str) -> MoveReceipt:
     # The facade's bind lock does not cover the marker write or its rollback.
     # Serialize the whole transaction so a refused request cannot restore its
     # old marker over a different request's successful move.
     async with bridge.move_lock:
-        return await _move_session(bridge, requested)
+        # THE FENCE'S LIFETIME IS THE TRANSACTION'S (contract §C): set before the
+        # first mutation and cleared only after the publication below, so a
+        # legacy viewer can neither mount across the replacement frame nor be
+        # admitted behind the precondition check that refused the move.
+        bridge.move_in_progress = True
+        try:
+            return await _move_session(bridge, requested)
+        finally:
+            bridge.move_in_progress = False
 
 
 async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveReceipt:
@@ -388,12 +502,63 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     retire makes either reachable.
 
     The three copies are kept AGREEING, and the previous bytes are what makes
-    that possible: a refused retire (a turn that arrived during it, a runtime
-    too old to move, a lost socket) restores the marker and the bridge field, so
-    a failure leaves the session working where it did rather than half moved.
+    that possible: a DEFINITE refusal (a turn that arrived during the retire, a
+    runtime too old to move, a missing capability) restores the marker and the
+    bridge field, so a failure leaves the session working where it did rather
+    than half moved. An UNKNOWN owner outcome is deliberately the other case —
+    the owner may already have accepted, so nothing is restored and the bridge
+    is marked unconfirmed for the next operation to reconcile (contract §A).
     """
     remote = bridge.remote
     assert remote is not None, "a move runs against an acquired bridge"
+    # DURABILITY FIRST, the marker before the bridge field, and both before the
+    # retire. `locate()` prefers the marker over the canonical checkpoint when
+    # this bridge has been evicted or the HTTP server restarted; the bridge field
+    # is what a re-``acquire()`` on THIS bridge passes to ``cold(cwd=…)``.
+    # Defined ABOVE the resolution base below because an unconfirmed previous
+    # move has to be settled before anything reads the optimistic cwd.
+    marker_dir = bridge.root / "sessions" / bridge.session_id
+    marker_path = marker_dir / DESKTOP_MARKER_NAME
+
+    def read_marker() -> bytes | None:
+        """The existing marker bytes, or ``None`` ONLY when it is not there.
+
+        ``FileNotFoundError`` is the sole "absent" answer (contract §A). Every
+        other read failure is raised with its real cause: the previous
+        ``except OSError`` treated an unreadable or permission-denied marker as
+        absence, so the rollback below would then DELETE the authoritative
+        record of where the session works (review R2 / QA Q2).
+        """
+        try:
+            return marker_path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise HTTPException(
+                409, f"cannot read the session's working-directory marker: {error}"
+            ) from None
+
+    def restore_marker(previous_bytes: bytes | None) -> None:
+        """Put the marker back atomically, and REPORT a failure to do so.
+
+        A rollback that cannot run is not a log line beside an ordinary refusal:
+        the durable copy would then name a directory the session is not in, so
+        the caller turns this into an explicit indeterminate-state error rather
+        than a warning followed by a confident-looking refusal (contract §A).
+        ``MoveIndeterminate`` is the honest class: the filesystem and the owner
+        now disagree and only a reconciliation settles which one is in force.
+        """
+        try:
+            if previous_bytes is None:
+                marker_path.unlink(missing_ok=True)
+                return
+            write_desktop_marker_bytes(marker_path, previous_bytes)
+        except OSError as error:
+            raise MoveIndeterminate(
+                f"could not restore the working-directory marker for {bridge.session_id}: {error}"
+            ) from error
+
+    await _settle_unconfirmed_move(bridge, lambda: read_marker())
     # The VIEWER's live value, not ``bridge.cwd``: the bridge field is written by
     # THIS function and read at `acquire()`, so after a first move it is the
     # older of the two and a relative path resolved from it would name the wrong
@@ -440,42 +605,18 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     # move having gone somewhere else.
     label = format_label(directory)
 
-    # DURABILITY FIRST, the marker before the bridge field, and both before the
-    # retire. `locate()` prefers the marker over the canonical checkpoint when
-    # this bridge has been evicted or the HTTP server restarted; the bridge field
-    # is what a re-``acquire()`` on THIS bridge passes to ``cold(cwd=…)``.
-    marker_dir = bridge.root / "sessions" / bridge.session_id
-
-    def read_marker() -> bytes | None:
-        try:
-            return (marker_dir / DESKTOP_MARKER_NAME).read_bytes()
-        except OSError:
-            # A session old enough to predate the marker, or an unreadable
-            # directory. `None` is the honest "there was nothing there", and the
-            # rollback below then removes what this call created.
-            return None
-
-    def restore_marker(previous_bytes: bytes | None) -> None:
-        marker = marker_dir / DESKTOP_MARKER_NAME
-        try:
-            if previous_bytes is None:
-                marker.unlink(missing_ok=True)
-                return
-            marker.write_bytes(previous_bytes)
-            marker.chmod(0o600)
-        except OSError:
-            # A rollback that cannot run is worth a line in the log and NOT a
-            # second exception: the refusal that caused it is what the user has
-            # to see, and raising here would replace that sentence with a
-            # filesystem error. The consequence is named because it is real —
-            # the durable copy now says where the session is NOT, and only a
-            # successful move will fix it.
-            logger.warning(
-                "could not restore the desktop marker for %s; a later acquire may "
-                "resume in the refused directory",
-                bridge.session_id,
-                exc_info=True,
-            )
+    # PRECONDITIONS, BEFORE ANY MUTATION (contract §A). Both refuse while the
+    # durable copy and the owner are still untouched, so a refusal costs the user
+    # a sentence and never a half-applied move:
+    #
+    # * the OWNER must advertise the exclusivity fence, or it would ignore the
+    #   flag and retire unguarded while a sibling facade is attached (review R3);
+    # * no MOUNTED desktop viewer may predate ``frontend.replace``, because that
+    #   frame is the only thing that repaints an already-mounted widget (review
+    #   R4).
+    if not remote.supports_exclusive_move:
+        raise RuntimeError("this session's runtime is too old to be moved; /reload first")
+    bridge.refuse_if_incompatible_subscribers()
 
     # The draft's stored model is CARRIED ACROSS, never re-derived: a move
     # changes ``cwd`` and nothing else, and the model key is the window's choice
@@ -486,7 +627,22 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         lambda: stored_draft_model(read_desktop_marker(marker_dir))
     )
     previous_marker = await asyncio.to_thread(read_marker)
-    await asyncio.to_thread(write_desktop_marker, marker_dir, directory, model=previous_model)
+    try:
+        await asyncio.to_thread(write_desktop_marker, marker_dir, directory, model=previous_model)
+    except OSError as error:
+        # THE FIRST MUTATION REFUSES WITH ITS REAL CAUSE, and there is nothing
+        # to roll back (review R2). ``_stage_and_replace`` writes the whole
+        # document to a staging file and only then replaces the marker, so the
+        # authoritative bytes are never partially written and a failed write
+        # cannot have changed them; the stage is removed on the way out. That
+        # is exactly why this is a 409 refusal carrying the filesystem's own
+        # message rather than a 500: the user's session is intact and the
+        # actionable fact is that the marker could not be written. It is
+        # deliberately NOT ``MoveIndeterminate`` either — nothing reached an
+        # owner and no state is in doubt.
+        raise HTTPException(
+            409, f"cannot write the session's working-directory marker: {error}"
+        ) from None
     bridge.cwd = resolved
     try:
         # The receipt's ``outcome`` IS this call's return vocabulary: the facade
@@ -496,14 +652,44 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
         # express (``RemoteSession.set_working_directory -> str``) to the Literal
         # the wire model owns, rather than the model being widened to ``str`` and
         # losing the fact a renderer switches on.
-        outcome = cast(Literal["cold", "rebound"], await remote.set_working_directory(resolved))
+        #
+        # ``exclusive=True`` is the desktop's endorsement of the owner fence
+        # checked above: this call is what makes the move REFUSE while another
+        # actual attach is registered rather than racing it.
+        outcome = cast(
+            Literal["cold", "rebound"],
+            await remote.set_working_directory(resolved, exclusive=True),
+        )
+    except MoveIndeterminate:
+        # NO ROLLBACK, and that is the whole point of the class: the owner may
+        # already have accepted the move, so restoring the previous bytes would
+        # overwrite a committed move with a stale one and the successor could
+        # then spawn in the old path while the receipt said otherwise. The
+        # marker deliberately stays at the accepted target and the route answers
+        # "reconcile" (contract §A).
+        #
+        # The bridge is marked UNCONFIRMED rather than being trusted: the next
+        # operation reconciles the durable copy against this belief under the
+        # move lock before it resolves anything against it.
+        bridge.cwd_unconfirmed = True
+        raise
     except BaseException:
         # BaseException, not Exception: a CANCELLED move is the same hazard as a
         # refused one — the retire may already be in flight while this call's
         # caller went away — and `set_working_directory` rolls its own field back
         # on the same terms (review MINOR-2 there). Restoring the OTHER two copies
-        # is this function's half of that invariant.
-        await asyncio.to_thread(restore_marker, previous_marker)
+        # is this function's half of that invariant. A cancelled HTTP waiter no
+        # longer reaches here at all (the route owns and joins this operation),
+        # so this is the shutdown path.
+        try:
+            await asyncio.to_thread(restore_marker, previous_marker)
+        except MoveIndeterminate:
+            # The rollback could not run, so the durable copy and this bridge
+            # now disagree about where the session works. That is the same
+            # reconcile-before-acting state the unknown owner outcome produces,
+            # and the next move settles it the same way.
+            bridge.cwd_unconfirmed = True
+            raise
         bridge.cwd = previous
         raise
 
@@ -512,7 +698,21 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     # sharing the file, not the point of writing it here.
     await asyncio.to_thread(remember_recent, bridge.root, directory)
 
+    # A DEFINITE accepted move is itself the reconciliation: both the durable
+    # copy and this bridge now name one directory, so any earlier doubt is
+    # settled.
+    bridge.cwd_unconfirmed = False
     return MoveReceipt(cwd=resolved, label=label, outcome=outcome, will_wait=will_wait)
+
+
+class LegacySubscriberDuringMove(Exception):
+    """A legacy viewer tried to mount during a move; see ``subscribe``.
+
+    Its own class rather than a ``ValueError`` because the events route must
+    answer it differently: a full subscriber table is a 404-shaped "no room",
+    while this is "your build cannot follow a move in flight" — a 409 the
+    renderer can act on by updating rather than by retrying blindly.
+    """
 
 
 @dataclass(eq=False)
@@ -524,6 +724,10 @@ class DesktopSubscription:
     queued_bytes: int = 0
     visible: bool = False
     can_notify: bool = False
+    #: Whether this subscriber's renderer can consume ``frontend.replace``.
+    #: False for every existing caller, which is what makes the move path
+    #: refuse rather than silently leave a mounted viewer stale.
+    frontend_replace: bool = False
     expires: float = 0.0
     overflow: bool = False
 
@@ -580,6 +784,60 @@ class DesktopSessionBridge:
         self.attention_task: asyncio.Task[None] | None = None
         self.attention: dict[str, Any] = {}
         self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
+        #: Set for the duration of ``_move_session`` (contract §C). Read by
+        #: :meth:`subscribe` so a legacy viewer can neither be left stale by an
+        #: in-flight move nor admitted behind its precondition check.
+        self.move_in_progress = False
+        #: Set when a move ended with an UNKNOWN owner outcome (contract §A), so
+        #: the next operation settles which directory is in force before it
+        #: resolves anything against this bridge: see
+        #: :func:`_settle_unconfirmed_move`. Never a retry token — the receipt
+        #: journal is what makes the request at-most-once.
+        self.cwd_unconfirmed = False
+
+    def has_legacy_subscriber(self) -> bool:
+        """Whether any LIVE subscriber cannot consume ``frontend.replace``."""
+        return any(not sub.frontend_replace for sub in self.subscribers.values())
+
+    def refuse_if_incompatible_subscribers(self) -> None:
+        """Refuse a move, before it mutates, if a mounted viewer cannot repaint.
+
+        The replacement frame is the ONLY thing that carries the accepted
+        directory to an already-mounted desktop viewer in the COLD case — there
+        is no successor runtime to publish it — so moving with such a subscriber
+        attached would leave it showing the old directory while the receipt
+        claimed success (review R4). Refusing is the honest answer, and the
+        sentence names the action.
+        """
+        if self.has_legacy_subscriber():
+            raise RuntimeError(
+                "This session is open in an older desktop window. Update the desktop "
+                "app, then move again."
+            )
+
+    def publish_frontend_replace(self) -> None:
+        """Publish this bridge's CURRENT frontend projection as a replacement.
+
+        Desktop-only, and NOT an ordinary ``frontend.update`` — that is the whole
+        point (review R4). A local move installs state without touching the
+        owner's clock, so a delta would carry the owner's UNCHANGED epoch and
+        sequence, and the shipped renderer rejects a same-sequence update as
+        stale (measured against the real reducer, which drops it and leaves a
+        cold viewer on the old directory forever). This frame is ordered by the
+        BRIDGE's own outer cursor instead, and the renderer consumes it as the
+        authoritative projection. It carries no history field, so it neither
+        creates a gap nor invalidates a history cursor.
+        """
+        if self.remote is None:
+            return
+        self.publish(
+            # The whole bounded ``FrontendSync`` from ``state()``, not just its
+            # ``snapshot``: the consumer needs the owner's epoch alongside the
+            # state, and sending the sync payload keeps this frame's ``frontend``
+            # field the same shape as the bootstrap snapshot's.
+            "frontend.replace",
+            {"frontend": self.state(), "cold": self.remote.is_cold},
+        )
 
     async def acquire(self) -> AttachedSession:
         async with self.lock:
@@ -642,6 +900,13 @@ class DesktopSessionBridge:
                     # race. It fires from `_on_disconnected` inside the client's pump, i.e.
                     # on the event loop, so `_schedule_warm` may create its task directly.
                     remote.set_refresh_callback(self._on_runtime_retired)
+                    # THE LOCAL REPLACEMENT SEAM (contract §C). A move installs an
+                    # accepted directory on the facade WITHOUT the owner's
+                    # epoch/sequence moving, so telling desktop subscribers as an
+                    # ordinary ``frontend.update`` would present a same-sequence
+                    # delta the renderer discards — the frame is published here
+                    # instead, through the bridge's own outer cursor.
+                    remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
                     self.unsubscribers = [
                         remote.subscribe(self._event),
                         remote.subscribe_frontend(self._frontend).unsubscribe,
@@ -1667,10 +1932,28 @@ class DesktopSessionBridge:
             with contextlib.suppress(ConnectionError, RuntimeError):
                 await self.refresh_watch()
 
-    def subscribe(self) -> DesktopSubscription:
+    def subscribe(self, *, frontend_replace: bool = False) -> DesktopSubscription:
+        """Register one event subscriber.
+
+        ``frontend_replace`` records whether this subscriber's renderer
+        understands the desktop-only ``frontend.replace`` frame. It defaults to
+        False, so a caller that does not know the flag negotiates nothing and
+        the move path treats it as a viewer that must not be left stale.
+        """
         if len(self.subscribers) >= SUBSCRIBER_COUNT:
             raise ValueError("Too many event subscribers")
-        sub = DesktopSubscription()
+        if self.move_in_progress and not frontend_replace:
+            # FENCE DURING A MOVE (contract §C). A legacy subscriber arriving
+            # while the move is between its preconditions and its publication
+            # would be mounted across the one frame that tells a viewer the
+            # accepted directory, and would then be silently stale for the rest
+            # of its life. Refused rather than admitted: after publication the
+            # move is over and a fresh subscription gets the normal snapshot.
+            raise LegacySubscriberDuringMove(
+                "A working-directory move is in progress; this viewer cannot follow it. "
+                "Update the desktop app, then reconnect."
+            )
+        sub = DesktopSubscription(frontend_replace=frontend_replace)
         self.subscribers[sub.id] = sub
         return sub
 

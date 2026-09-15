@@ -84,6 +84,7 @@ from local_operator.session.cold_model import (
     resolve_context_metadata,
     synthesise_cold_state,
 )
+from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -836,6 +837,8 @@ class AttachedSession:
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
         self._frontend_store: FrontendStateStore | None = None
+        #: Set by the desktop bridge; see :meth:`set_local_cwd_callback`.
+        self._local_cwd_callback: Callable[[str], Any] | None = None
         #: Store for media that the owner externalized on the live wire, built
         #: on first use (:meth:`_attachment_store`). ``None`` until a frame
         #: actually references an attachment, so a viewer that never sees one
@@ -2190,7 +2193,7 @@ class AttachedSession:
         """
         return self.engage_in_flight
 
-    async def set_working_directory(self, cwd: str) -> str:
+    async def set_working_directory(self, cwd: str, *, exclusive: bool = False) -> str:
         """Point this session at ``cwd``; returns what happened, for the receipt.
 
         TRUSTS ITS CALLER on the target. ``cwd`` is not checked for existence
@@ -2319,7 +2322,18 @@ class AttachedSession:
             # (120.03 s, review round 2 MAJOR-2). Publishing here closes the
             # race by construction rather than narrowing the window.
             async with self._bind_lock_for(foreground=True):
-                outcome = await self._apply_working_directory(cwd, previous=previous)
+                outcome = await self._apply_working_directory(
+                    cwd, previous=previous, exclusive=exclusive
+                )
+        except MoveIndeterminate:
+            # THE CLAUSE ORDER IS LOAD-BEARING: this must precede
+            # ``except BaseException`` below, which would otherwise swallow it
+            # and roll the field back. See the raise site — an unknown owner
+            # outcome may already be an ACCEPTED move, so restoring the old
+            # directory would hand the next engage a path the owner has left.
+            # The field stays at the new value and the caller reconciles before
+            # trusting either one.
+            raise
         except BaseException:
             # ONE rollback for every non-return exit, here rather than at each
             # raise: the optimistic assignment above must not outlive a move
@@ -2352,10 +2366,24 @@ class AttachedSession:
         its own cwd rather than the previous runtime's checkpoint value.
         """
         store = self._frontend_store
-        if store is not None:
+        if store is None:
+            return
+        callback = self._local_cwd_callback
+        if callback is None:
             store.replace_and_notify(store.state.model_copy(update={"cwd": cwd}))
+            return
+        # SILENT locally, then one explicit publication through the caller's own
+        # frame. See :meth:`set_local_cwd_callback` for why a notify here would
+        # be dropped by the renderer rather than rendered.
+        store.replace(store.state.model_copy(update={"cwd": cwd}))
+        try:
+            callback(cwd)
+        except Exception:  # noqa: BLE001 — a viewer notice must not break a move
+            logger.debug("local cwd publication failed", exc_info=True)
 
-    async def _apply_working_directory(self, cwd: str, *, previous: str) -> str:
+    async def _apply_working_directory(
+        self, cwd: str, *, previous: str, exclusive: bool = False
+    ) -> str:
         """The move itself, with ``_bind_lock`` already held by the caller.
 
         ``previous`` is the directory to restore on a refusal. It is passed in
@@ -2391,10 +2419,21 @@ class AttachedSession:
         ask = getattr(client, "retire_now", None)
         if not callable(ask):
             raise RuntimeError("this session's runtime is too old to be moved; /reload first")
+        if exclusive and not getattr(client, "supports_exclusive_move", False):
+            # FAIL CLOSED, before anything is retired or published. An owner
+            # that does not advertise the fence would ignore the ``exclusive``
+            # field and retire unguarded, so the sibling-viewer guarantee the
+            # desktop move promises would be silently absent. The refusal names
+            # the action rather than the routing id behind it.
+            raise RuntimeError("this session's runtime is too old to be moved; /reload first")
         self._cwd = cwd
+        # ``exclusive`` is a keyword the owner honours only when it advertised
+        # the capability checked above; the legacy call shape is byte-identical
+        # when it was not asked for.
+        retire = cast(Callable[..., Awaitable[str]], ask)
         try:
-            detail = str(await cast(Callable[[], Awaitable[str]], ask)())
-        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            detail = str(await (retire(exclusive=True) if exclusive else retire()))
+        except RuntimeError as error:
             self._cwd = previous
             # A runtime older than this build answers the wire's own
             # ``unknown op`` error. The vetted sentence above cannot fire for
@@ -2406,6 +2445,22 @@ class AttachedSession:
                 raise RuntimeError(
                     "this session's runtime is too old to be moved; /reload first"
                 ) from error
+            raise RuntimeError(f"could not move: {error}") from error
+        except (ConnectionError, TimeoutError) as error:
+            # UNKNOWN OUTCOME, and deliberately NOT a rollback (contract §A):
+            # the request left this process and no answer came back, so the
+            # owner may ALREADY have retired and accepted the new directory.
+            # Restoring ``previous`` would overwrite a committed move with a
+            # stale one, and the successor could then spawn in the old path
+            # while the receipt said otherwise. ``OwnerAckTimeout`` derives from
+            # both bases, so an ack timeout and a dropped socket land here
+            # together — rightly: neither can tell us what the owner did.
+            # ``_cwd`` is LEFT at the new value so the next engage cannot spawn
+            # at a directory the owner may already have left; the caller
+            # reconciles instead of claiming either answer.
+            raise MoveIndeterminate(str(error)) from error
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            self._cwd = previous
             raise RuntimeError(f"could not move: {error}") from error
         if detail != "retiring":
             # The runtime kept itself — work arrived between this viewer's idle
@@ -5179,6 +5234,44 @@ class AttachedSession:
             callback()
         except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
             logger.debug("%s callback failed", "refresh" if refresh else "went-cold", exc_info=True)
+
+    def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Told when a move installs a locally accepted directory.
+
+        Installed by the DESKTOP bridge, and the reason it exists rather than
+        the facade publishing for itself: a local replacement carries the
+        owner's UNCHANGED epoch/sequence, so emitting it as an ordinary
+        ``frontend.update`` delta is discarded by the renderer's own stale-delta
+        check (review R4 — reproduced against the shipped reducer). The desktop
+        therefore negotiates an explicit ``frontend.replace`` frame and the
+        bridge publishes it through its own outer cursor, while this facade
+        installs the state silently. With no callback set (a TUI viewer, a
+        headless host) the in-process subscribers get the notification they
+        always got.
+        """
+        self._local_cwd_callback = callback
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether the bound owner can retire under the exclusivity fence.
+
+        Asked BEFORE a move mutates anything (``_move_session``), because an
+        owner too old to know the ``exclusive`` field would ignore it and retire
+        unguarded — leaving a sibling facade to engage a successor from its own
+        stale cwd. False means refuse with update guidance; it never means "fall
+        back to a plain retire".
+
+        TRUE WHEN COLD, and that is not a loophole: a cold viewer has no owner to
+        retire, so there is no sibling engage to race and nothing for the fence
+        to protect. Answering False here would refuse the feature's PRIMARY case
+        ("change directory at the start of a session") on every backend; the
+        bound branch of ``_apply_working_directory`` is where the capability is
+        actually required.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            return True
+        return bool(getattr(client, "supports_exclusive_move", False))
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime retired itself for a newer build.

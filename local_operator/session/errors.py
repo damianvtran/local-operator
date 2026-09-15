@@ -49,6 +49,39 @@ class ProfileRegistryUnavailable(ValueError):
         )
 
 
+class MoveIndeterminate(Exception):
+    """A move whose owner outcome is UNKNOWN, so nothing may be rolled back.
+
+    WHY THIS IS NOT A ``RuntimeError``. The move route maps ``RuntimeError`` to
+    an ordinary 409 refusal and, on that path, the durable marker and the
+    viewer's fields are restored — the correct story for a refusal, and the
+    WRONG one here. This class is raised when the retire REQUEST reached the
+    owner and the answer did not come back definately (a dropped socket, an ack
+    timeout): the owner may already have retired and accepted the new
+    directory, so restoring the old marker would overwrite a committed move
+    with a stale one, and the successor could then spawn in the old path while
+    the receipt says the session is there.
+
+    The honest answer is "reconcile before claiming either directory", which is
+    what the route turns into a 503 carrying :data:`code`. A subsequent move
+    must first finish that reconciliation under the per-session move lock
+    rather than act on an optimistic ``_cwd``.
+    """
+
+    code = "move_outcome_unknown"
+
+    def __init__(self, detail: str = "") -> None:
+        # ``detail`` is the underlying transport cause, kept for the log and
+        # NEVER echoed to the renderer: an attach transport error names sockets
+        # and control ports (the reason ``ConnectionError`` is re-worded in the
+        # route rather than echoed there).
+        self.detail = detail
+        super().__init__(
+            "The move's outcome could not be confirmed. The session may have "
+            "moved; reconcile its working directory before trying again."
+        )
+
+
 def admission_error(code: str, count: int | None = None) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 

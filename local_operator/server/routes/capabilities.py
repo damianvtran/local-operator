@@ -118,7 +118,7 @@ async def capabilities():
                 # Moving a live session's working directory
                 # (POST /v1/desktop/sessions/{id}/working-directory).
                 #
-                # Its OWN key rather than a bump, and the rule is the one
+                # ITS OWN KEY rather than a bump, and the rule is the one
                 # `session_search` and `draft_preview` state above: an EXISTING
                 # surface must keep working against a backend that lacks the new
                 # route. Here the existing surface is the read-only
@@ -128,7 +128,25 @@ async def capabilities():
                 # command palette perfectly well without this route, and
                 # `/move`'s presentation already exists on older backends (it
                 # answers its native_action today).
-                "session_move": 1,
+                #
+                # BUMPED TO 2 for the exclusivity fence: a move now refuses
+                # while another actual attach is registered (review R3), so a
+                # renderer must not promise the old unconditional behaviour. The
+                # bump is of THIS FEATURE CONTRACT, never the package version,
+                # and `1` remains readable by a renderer that gates on presence.
+                "session_move": 2,
+                # An explicit desktop-only `frontend.replace` frame on the event
+                # stream, plus the additive `frontend_replace=1` subscription
+                # flag that negotiates it (review R4).
+                #
+                # Its own key because the two are independently useful and must
+                # gate independently: a renderer that cannot consume the
+                # replacement must keep its move controls DISABLED even against
+                # this backend (`session_move >= 2` AND `frontend_replace >= 1`),
+                # because a move whose accepted directory no mounted viewer can
+                # render is exactly the stale-paint defect the frame exists to
+                # fix.
+                "frontend_replace": 1,
                 # ``/info``'s host read and ``/session``'s one-snapshot ledger
                 # report. A NEW key rather than a bump of `catalogues`, and the
                 # rule is the one `session_search` states above: a renderer

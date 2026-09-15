@@ -53,6 +53,7 @@ from local_operator.session.runtime.registry import scan
 from local_operator.session.runtime.types import (
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
+    EXCLUSIVE_MOVE_CAPABILITY,
 )
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
@@ -837,6 +838,7 @@ class AttachClient:
         self._session_id = ""
         self._attention_supported = False
         self._event_mute_supported = False
+        self._exclusive_move_supported = False
         self._connected = False
 
     @property
@@ -859,6 +861,19 @@ class AttachClient:
         so the caller must gate the send on this and never send blind.
         """
         return self.connected and self._event_mute_supported
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether this owner advertised ``EXCLUSIVE_MOVE_CAPABILITY``.
+
+        Read from the RECORD at dial, like ``supports_event_mute``: the owner's
+        build cannot change while it lives. An owner without the string is one
+        that would IGNORE the ``exclusive`` field on ``retire_now`` and retire
+        unguarded — so the caller must gate the send on this and refuse instead,
+        which is what makes the desktop move fail CLOSED against old owners
+        rather than silently running without the sibling-viewer guarantee.
+        """
+        return self.connected and self._exclusive_move_supported
 
     async def set_event_muted(self, muted: bool) -> bool:
         """Ask the owner to stop (``True``) or resume delta-grade event frames.
@@ -890,6 +905,7 @@ class AttachClient:
         self._session_id = session_id
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -1400,7 +1416,7 @@ class AttachClient:
         """
         return await self._request("refresh_if_idle")
 
-    async def retire_now(self) -> str:
+    async def retire_now(self, *, exclusive: bool = False) -> str:
         """Ask an IDLE owner to retire so a successor can start elsewhere.
 
         ``/move``'s transport. The session's working directory is fixed when
@@ -1417,7 +1433,16 @@ class AttachClient:
         and refuses if work arrived. An owner too old to know the op answers the
         standard unknown-op error, which the caller surfaces as a refusal to
         move rather than moving anyway.
+
+        ``exclusive`` (default OFF, so every existing caller keeps the exact
+        legacy byte shape) asks the owner to honour the move only while no other
+        ACTUAL attach is registered, under its own admission fence. The caller
+        MUST gate this on :attr:`supports_exclusive_move` first: an old owner
+        ignores the unknown field and retires anyway, so sending it blind would
+        buy the sibling-viewer guarantee without the owner enforcing it.
         """
+        if exclusive:
+            return await self._request("retire_now", exclusive=True)
         return await self._request("retire_now")
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:

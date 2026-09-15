@@ -54,12 +54,14 @@ from local_operator.server.utils.desktop_sessions import (
     CHILD_PAGE_LIMIT,
     DesktopSessionBridge,
     DesktopSessions,
+    LegacySubscriberDuringMove,
     SubagentChildUnavailable,
     move_session,
     resolve_working_directory,
 )
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
+from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     SlashResult,
@@ -429,6 +431,36 @@ def reply(result: Any) -> CRUDResponse[Any]:
     return CRUDResponse(status=200, message="Desktop session result.", result=result)
 
 
+async def _join_owned(operation: "asyncio.Task[dict[str, Any]]") -> dict[str, Any]:
+    """Await an owned operation, joining it even when THIS waiter is cancelled.
+
+    The repeated shield-and-check loop is the point, and a bare
+    ``await asyncio.shield(task)`` is NOT equivalent: shielding protects the TASK
+    from cancellation, but the ``await`` itself is still interruptible, so a
+    cancelled waiter returns while the transaction keeps running — and a second
+    cancellation (a shutdown arriving twice, a client that goes away and the
+    route task being torn down afterwards) would leave it unobserved with its
+    filesystem work in flight. Here the waiter drains the task first and only
+    then propagates the cancellation, and the operation's own exception is
+    re-raised (``task.result()``) rather than swallowed — a failed move must be
+    reported, not hidden behind a cancellation.
+    """
+    cancelled = False
+    result: dict[str, Any]
+    while True:
+        try:
+            result = await asyncio.shield(operation)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if operation.done():
+                result = operation.result()
+                break
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 @asynccontextmanager
 async def errors() -> AsyncIterator[None]:
     try:
@@ -450,6 +482,16 @@ async def errors() -> AsyncIterator[None]:
         raise HTTPException(
             404, "Requested session, profile, team or subscription not found"
         ) from None
+    except MoveIndeterminate as error:
+        # 503, NOT the 409 refusal below, and the distinction is the whole point
+        # of the class: nothing was refused and NOTHING MAY BE ROLLED BACK — the
+        # retire request reached the owner and no definitive answer came back, so
+        # the session may already have moved. A 409 would tell the user the move
+        # failed, and they would act on a directory the owner has left. 503 is
+        # the ladder's own "reconcile before retrying" shape. The underlying
+        # transport detail is deliberately NOT echoed: it names sockets and
+        # control ports (the reason ``ConnectionError`` is re-worded just below).
+        raise HTTPException(503, str(error)) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
             AttachmentUnavailable,
@@ -1266,6 +1308,12 @@ async def move(session_id: str, body: MoveSession, request: Request):
     own rather than a bump: a renderer that does not see it keeps its read-only
     working-directory chip and reports the degradation, exactly as it does
     today, instead of firing a request an older backend answers with a 404.
+    That key is ``2`` from the exclusivity fence on, and a renderer additionally
+    needs ``features.frontend_replace`` before it may offer the control: a move
+    now refuses while another actual attach is registered (review R3) and while
+    a mounted viewer cannot render the ``frontend.replace`` frame (review R4), so
+    a renderer built for the unconditional ``1`` must not promise the old
+    behaviour. Both refusals are 409s carrying the sentence to act on.
 
     WHAT THIS RESPONSE DOES NOT CLAIM: that the successor is up. The runtime
     leaves by the ``retiring`` route, and the successor is engaged by the retire
@@ -1275,12 +1323,17 @@ async def move(session_id: str, body: MoveSession, request: Request):
     binds and publishes its frontend state.
 
     RECEIPTED, unlike ``/warm`` beside it, because this DOES mutate: it writes
-    the durable marker, may retire a runtime and may spend a spawn. A re-run is a
-    no-op (``move_session`` returns ``unchanged`` for a directory the session is
-    already in), which is what makes ``retry_safe=True`` correct rather than
-    merely tolerable — a lost response can be retried instead of answering
-    "outcome is indeterminate" for a mutation whose re-run is provably safe and
-    cannot retire a second time.
+    the durable marker, may retire a runtime and may spend a spawn. The journal is
+    AT MOST ONCE (``retry_safe=False``, review R1), and the reason is that a
+    re-run is NOT provably a no-op: ``move_session`` answers ``unchanged`` only
+    while the session is still in the directory the first attempt started from,
+    and a relative target resolved after that attempt is resolved against the NEW
+    directory (``child`` becomes ``child/child``) while an absolute one can undo a
+    move that landed after it. A pending row is therefore INDETERMINATE — it
+    answers the journal's own reconcile-before-retrying refusal, and a client
+    that still wants the move issues a NEW request id. A row that finished
+    replays its stored receipt verbatim, so a lost response is still recoverable;
+    what no longer happens is raw re-execution.
 
     ``RuntimeError`` IS MAPPED TO 409 HERE, and that is the load-bearing line of
     this route. It is the SESSION's own refusal — "working right now", "too old
@@ -1295,6 +1348,14 @@ async def move(session_id: str, body: MoveSession, request: Request):
     unenterable) is deliberately NOT caught here: the ladder already answers it
     with a 409 carrying the vetter's text, and catching it would be a second copy
     of that mapping to keep in step.
+
+    ``MoveIndeterminate`` IS NOT A ``RuntimeError`` AND MUST NOT BECOME ONE. It
+    is the other half of the split above (contract §A): the retire REQUEST
+    reached the owner and no definitive answer came back, so the owner may
+    already have accepted the new directory. ``errors()`` answers it with 503,
+    which is the ladder's own "reconcile before retrying" answer, and nothing is
+    rolled back — restoring the old marker there would overwrite a committed move
+    with a stale one.
     """
     async with errors(), host(request).session(session_id) as bridge:
 
@@ -1304,14 +1365,34 @@ async def move(session_id: str, body: MoveSession, request: Request):
             except RuntimeError as error:
                 raise HTTPException(409, str(error)) from None
 
-        return reply(
-            await receipts(request).run(
+        # ONE OWNED TASK covering receipt claim → serialized move → receipt
+        # finish, awaited under a shield-and-JOIN loop (review R2 / QA Q2).
+        #
+        # WHY NOT A DIRECT AWAIT. Cancelling this coroutine — the HTTP waiter
+        # going away, a server shutdown — must not cancel the transaction: the
+        # marker writer and the retire are already in flight, and a task
+        # cancelled out of that releases ``move_lock`` while its filesystem work
+        # is still running, so a later writer can overwrite a committed marker
+        # with the cancelled request's directory. ``asyncio.shield`` alone is
+        # not enough either, because its own await is still cancellable — hence
+        # the loop in :meth:`_join_owned`, which rejoins after repeated
+        # cancellation and re-raises the operation's real exception.
+        operation = asyncio.create_task(
+            receipts(request).run(
                 session_id + ":" + body.request_id,
                 body.model_dump(),
                 execute,
-                retry_safe=True,
+                # AT MOST ONCE (review R1). A PENDING row is INDETERMINATE, not
+                # retryable: re-executing it would resolve a relative target
+                # against the directory the first attempt may already have moved
+                # to (`child/child`), and an absolute one could undo a later
+                # accepted move. A finished row still replays its stored receipt
+                # exactly, and reusing the id with different input still
+                # conflicts — only the raw re-execution goes away.
+                retry_safe=False,
             )
         )
+        return reply(await _join_owned(operation))
 
 
 @router.get("/v1/desktop/sessions/{session_id}/events")
@@ -1320,6 +1401,7 @@ async def events(
     request: Request,
     epoch: str | None = Query(default=None, max_length=128),
     after_seq: int = Query(default=0, ge=0),
+    frontend_replace: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -1327,7 +1409,16 @@ async def events(
     async with errors():
         bridge: DesktopSessionBridge = await context.__aenter__()
         try:
-            sub = bridge.subscribe()
+            # ADDITIVE NEGOTIATION (contract §C). ``frontend_replace=1`` says
+            # this renderer can consume the desktop-only ``frontend.replace``
+            # frame; an older client sends nothing, the parameter defaults to 0,
+            # and the move path then refuses rather than leaving that mounted
+            # viewer stale. The flag is retained on the subscription so the
+            # fence in ``subscribe`` can refuse a LEGACY mount during a move.
+            sub = bridge.subscribe(frontend_replace=bool(frontend_replace))
+        except LegacySubscriberDuringMove as error:
+            await context.__aexit__(None, None, None)
+            raise HTTPException(409, str(error)) from None
         except BaseException:
             await context.__aexit__(None, None, None)
             raise

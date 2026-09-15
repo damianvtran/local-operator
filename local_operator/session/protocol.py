@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 117 public members and a POSITIVE
+    than stylistic. This protocol carries 119 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -600,8 +600,12 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     session code memory joined the session contract with ``variables_op``, 115
     once the retention predicate's clone-free ``has_running_job`` joined the
     per-frame reads, 116 once ``mcp_credentials_op`` joined
-    ``ViewerSessionProtocol``, 117 once a move needed the viewer's own ``cwd``),
-    so recompute it rather than adjusting it by the size of your own change.
+    ``ViewerSessionProtocol``, 117 once a move needed the viewer's own ``cwd``,
+    118 once the same move needed ``supports_exclusive_move`` so a desktop host
+    can fail CLOSED against an owner that would ignore the exclusivity flag, 119
+    once it needed the ``set_local_cwd_callback`` seam the move's local
+    replacement is published through), so
+    recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -831,6 +835,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         paint path that cannot tolerate a raise probes defensively instead —
         several in ``app.py`` deliberately do, and ``_session_subject`` records
         what a raise there costs.
+        """
+        ...
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether the bound owner can retire under the move exclusivity fence.
+
+        Asked by the desktop move path BEFORE it mutates anything, because an
+        owner without ``exclusive-move-v1`` ignores the ``exclusive`` field and
+        retires unguarded — leaving a sibling facade to engage a successor from
+        its own stale cwd. False means refuse with update guidance; it never
+        means "fall back to a plain retire".
         """
         ...
 
@@ -1234,6 +1250,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Called when the runtime retired itself for a newer build."""
+        ...
+
+    def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Called when a move installs an accepted directory locally.
+
+        Viewer-only by construction: the callback exists so a DESKTOP bridge can
+        publish its own ``frontend.replace`` frame instead of the facade
+        emitting a same-sequence delta the renderer discards. An owner
+        ``Session`` has no host above it to repaint, so it must not grow one.
+        """
         ...
 
     def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
