@@ -718,3 +718,30 @@ def test_restoring_projection_is_never_muted() -> None:
     controller.restore_live_projection(_State(), set(), set())
 
     assert any(isinstance(m, AssistantDelta) for m in app.posted)
+
+
+def test_a_turn_aggregate_leaves_at_ms_to_its_components() -> None:
+    """The folded total has no moment of its own and must not invent one.
+
+    A turn can straddle an 04:00/06:00 boundary, so stamping the aggregate would
+    pick ONE window for calls that ran in two. The per-call stamps live on the
+    components, which is what the pricing path reads — and ``usd_cost`` is ``None``
+    on the aggregate for exactly the same reason (the components own provenance).
+    """
+    from local_operator.harness.types import Usage
+
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    first = Message.assistant("")
+    first.usage = Usage(input_tokens=10, output_tokens=0, at_ms=1_700_000_000_000)
+    second = Message.assistant("")
+    second.usage = Usage(input_tokens=20, output_tokens=0, at_ms=1_700_000_060_000)
+    session.emit(AgentEndEvent(messages=[first, second]))
+
+    ended = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert ended
+    assert ended[-1].usage.at_ms is None
+    assert [component.at_ms for component in ended[-1].usage.cost_components] == [
+        1_700_000_000_000,
+        1_700_000_060_000,
+    ]

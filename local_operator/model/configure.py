@@ -29,6 +29,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -40,6 +41,7 @@ from local_operator.harness.types import (
     StreamEvent,
     Usage,
 )
+from local_operator.model import tariff
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import (
@@ -5649,6 +5651,8 @@ def calculate_cost(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    moment: datetime | None = None,
 ) -> float:
     """Cost of a request from per-million token pricing.
 
@@ -5663,10 +5667,28 @@ def calculate_cost(
     they were read, so they were billed at something, and free is the one answer
     that is certainly wrong.
 
+    A time-of-use row (``ModelInfo.time_of_use``) is stored at its PEAK list
+    rates, so the four rates are multiplied by the schedule's scale for
+    ``moment`` — ALL FOUR, after the ``None`` cache fallbacks above, so a token
+    charged at the fallback input rate is scaled exactly as the input rate it
+    borrowed. A row with no schedule is unaffected at every moment, which is
+    every row but DeepSeek's two live ids today.
+
+    ``moment`` defaults to the wall clock, i.e. **the window in force when this
+    is called**. That default is a deliberate one: every caller in-tree that
+    omits it is a LIVE caller (the status band, subagent rows, the evaluation
+    runner) where "now" is exactly right, and a wrong-by-one-window answer is at
+    most 2x in either direction. Defaulting to PEAK instead would be
+    systematically wrong for the ~79% of the week that is off-peak — the very
+    complaint this models. The durable ledger does NOT rely on this default: it
+    passes the call's own recorded timestamp (see
+    :func:`tariff.moment_for`).
+
     Raises:
         ValueError: on any arithmetic failure (keeps the legacy contract).
     """
     try:
+        scale = tariff.scale_for(model_info, moment)
         cache_read_price = model_info.cache_reads_price
         if not cache_read_price:
             cache_read_price = model_info.input_price
@@ -5679,7 +5701,7 @@ def calculate_cost(
             + float(cache_read_tokens) * cache_read_price
             + float(cache_write_tokens) * cache_write_price
         ) / 1_000_000.0
-        return total_cost
+        return total_cost * scale
     except Exception as e:
         raise ValueError(f"Error calculating cost: {e}") from e
 
@@ -5712,7 +5734,13 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     return not (definition is not None and definition.wire == "anthropic")
 
 
-def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
+def cost_for_usage(
+    provider: str,
+    model_info: ModelInfo,
+    usage: Any,
+    *,
+    moment: datetime | None = None,
+) -> float:
     """What one turn's ``Usage`` cost on ``model_info``, in dollars.
 
     THE money computation. Everything that renders a cost — the parent's status
@@ -5728,7 +5756,14 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
     and the token arithmetic is skipped entirely. The provider already applied
     per-route pricing, reasoning-token splits, cache discounts and any overrides
     that a single flat table price cannot express, so a reconstruction here can
-    only be wronger than the number the provider printed on the bill.
+    only be wronger than the number the provider printed on the bill — and it is
+    NEVER scaled by a schedule: the receipt is the provider's own final figure,
+    not a published peak rate waiting for a peak/off-peak multiplier.
+
+    ``moment`` is the instant the rates are evaluated at, resolved by
+    :func:`tariff.moment_for`: explicit argument, else the usage's own stamp
+    (``Usage.at_ms``, or ``CallSnapshot.ts_ms`` in the analytics ledger), else the
+    wall clock. It only matters for a row that carries a schedule.
 
     The caller is responsible for deciding whether ``model_info`` is priced at
     all; this returns 0.0 for a zero-priced model, which is arithmetically true
@@ -5751,6 +5786,7 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
         _usage_field(usage, "output_tokens"),
         read,
         written,
+        moment=tariff.moment_for(model_info, usage, moment),
     )
 
 

@@ -10,12 +10,14 @@ own listing quotes none — so there are two separate guards here.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from local_operator.harness.types import Usage
+from local_operator.model import tariff
 from local_operator.model.configure import (
     _from_aggregator_catalogue,
     _from_price_catalogue,
@@ -25,7 +27,14 @@ from local_operator.model.configure import (
     resolve_model_info,
 )
 from local_operator.model.discovery import DiscoveredModel
-from local_operator.model.registry import ModelInfo, anthropic_models, static_models
+from local_operator.model.registry import (
+    _STATIC_MODEL_MAPS,
+    ModelInfo,
+    anthropic_models,
+    deepseek_models,
+    static_models,
+)
+from local_operator.model.tariff import DEEPSEEK_TOU
 
 #: Registry rows that are legitimately unpriced, with the reason. Every one was
 #: checked against the provider's own pricing page on 2026-08-10 and found to
@@ -642,3 +651,221 @@ def test_cost_for_usage_reported_zero_is_a_fact_not_an_absence() -> None:
     same as "not reported" — it must return 0.0, not fall through to the estimate."""
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, usd_cost=0.0)
     assert cost_for_usage("openrouter", _priced(), usage) == 0.0
+
+
+# --- Time-of-use tariffs (model/tariff.py) ------------------------------------
+#
+# The defect these cover: DeepSeek bills peak/off-peak and the registry stores
+# the PEAK rates, so every DeepSeek figure the app produced was 2x the real one
+# for the ~79% of the week that is off-peak.
+
+#: 2026-09-14 is a Monday. 07:00 UTC is inside the 06:00-10:00 window; 12:00 UTC
+#: is outside every window. Both are passed EXPLICITLY — a test that reads the
+#: wall clock passes on a Wednesday and fails on a Saturday.
+PEAK = datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc)
+OFF_PEAK = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def _flash() -> ModelInfo:
+    return deepseek_models["deepseek-flash"]
+
+
+def test_a_tariffed_row_scales_all_four_rates() -> None:
+    """Every bucket moves with the window, not just input and output.
+
+    Cache reads and writes are separate rates that the schedule has to reach
+    too — this is the easiest thing to get half-right, and getting it wrong
+    leaves a cache-heavy turn billed at the peak cache rate while its input is
+    discounted, which is a number nothing else in the app can explain.
+    """
+    args = (1_000_000, 1_000_000, 1_000_000, 1_000_000)
+    peak = calculate_cost(_flash(), *args, moment=PEAK)
+    off = calculate_cost(_flash(), *args, moment=OFF_PEAK)
+    assert peak == pytest.approx(0.30 + 1.20 + 0.30 + 0.006)
+    assert off == pytest.approx(peak / 2)
+    # And each bucket on its own, so a dropped multiply cannot be masked by
+    # another bucket being scaled twice.
+    for index, rate in enumerate((0.30, 1.20, 0.006, 0.30)):
+        counts = [0, 0, 0, 0]
+        counts[index] = 1_000_000
+        assert calculate_cost(_flash(), *counts, moment=OFF_PEAK) == pytest.approx(rate / 2), index
+
+
+def test_the_cache_fallbacks_are_scaled_as_the_input_rate_they_borrow() -> None:
+    """A missing cache rate falls back to the input price, and that borrowed
+    price is scaled AFTER the fallback — otherwise a row with no published cache
+    rate would charge its cache tokens at the raw peak input price."""
+    row = _flash().model_copy(update={"cache_reads_price": None, "cache_writes_price": None})
+    args = (0, 0, 1_000_000, 1_000_000)
+    peak = calculate_cost(row, *args, moment=PEAK)
+    off = calculate_cost(row, *args, moment=OFF_PEAK)
+    assert peak == pytest.approx(0.30 + 0.30)
+    assert off == pytest.approx(peak / 2)
+
+
+def test_a_row_without_a_schedule_is_identical_at_every_moment() -> None:
+    """The overwhelmingly common case: nothing changes, at any moment.
+
+    ``deepseek-chat`` is deliberately flat (its era's window and discount are not
+    the published ones), and so is every non-DeepSeek row.
+    """
+    args = (1_000_000, 1_000_000, 1_000_000, 1_000_000)
+    for label, row in (
+        ("deepseek-chat", deepseek_models["deepseek-chat"]),
+        ("anthropic", anthropic_models["claude-opus-5"]),
+    ):
+        assert row.time_of_use is None, label
+        at_peak = calculate_cost(row, *args, moment=PEAK)
+        assert at_peak == calculate_cost(row, *args, moment=OFF_PEAK) == calculate_cost(row, *args)
+
+
+def test_an_unknown_schedule_name_prices_at_the_base_rate() -> None:
+    """A name this build does not ship must neither discount nor raise."""
+    row = _flash().model_copy(update={"time_of_use": "some-future-schedule"})
+    args = (1_000_000, 1_000_000)
+    assert calculate_cost(row, *args, moment=OFF_PEAK) == calculate_cost(row, *args, moment=PEAK)
+
+
+def test_cost_for_usage_never_scales_a_provider_reported_receipt() -> None:
+    """The regression guard for the receipt path, with a tariffed row.
+
+    OpenRouter's ``usage.cost`` is the provider's own final figure — a receipt,
+    not a published peak rate awaiting a multiplier. Scaling it by 0.5 off-peak
+    would invent a discount the provider never gave.
+    """
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000, usd_cost=0.0075)
+    assert cost_for_usage("deepseek", _flash(), usage, moment=OFF_PEAK) == pytest.approx(0.0075)
+    assert cost_for_usage("deepseek", _flash(), usage, moment=PEAK) == pytest.approx(0.0075)
+    # A reported ZERO survives too, and is not confused with "not reported".
+    assert cost_for_usage("deepseek", _flash(), Usage(usd_cost=0.0), moment=OFF_PEAK) == 0.0
+
+
+def test_cost_for_usage_resolves_the_moment_from_the_usages_own_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit argument, then ``at_ms``, then the clock — in that order.
+
+    The middle rung is what makes a RESTORED call price at the call's own window
+    instead of at view time, which is the 2x error ``Usage.at_ms`` exists for.
+    """
+    monkeypatch.setattr(tariff, "now_utc", lambda: OFF_PEAK)
+    peak_ms = int(PEAK.timestamp() * 1000)
+    off_ms = int(OFF_PEAK.timestamp() * 1000)
+    flash = _flash()
+
+    # No stamp: the clock rules.
+    assert cost_for_usage("deepseek", flash, {"input_tokens": 1_000_000}) == pytest.approx(0.15)
+    # A stamp beats the clock, in both directions.
+    assert cost_for_usage(
+        "deepseek", flash, {"input_tokens": 1_000_000, "at_ms": peak_ms}
+    ) == pytest.approx(0.30)
+    monkeypatch.setattr(tariff, "now_utc", lambda: PEAK)
+    assert cost_for_usage(
+        "deepseek", flash, {"input_tokens": 1_000_000, "at_ms": off_ms}
+    ) == pytest.approx(0.15)
+    # An explicit argument beats the stamp.
+    assert cost_for_usage(
+        "deepseek", flash, {"input_tokens": 1_000_000, "at_ms": peak_ms}, moment=OFF_PEAK
+    ) == pytest.approx(0.15)
+
+
+def test_a_mapping_usage_prices_identically_to_a_usage_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cost_for_usage`` promises to duck-type its usage; the tariff must not
+    break that promise, because a rehydrated child event arrives as a mapping and
+    the two paths must not disagree about money.
+
+    The expected figure also pins the ORDER of the two transforms: DeepSeek's
+    cache tokens are reported INSIDE ``input_tokens``, so the 900 splits into 400
+    fresh + 400 read + 100 written, and the schedule is then applied to the
+    normalized buckets (700 priced tokens, not 1000). Scaling before the
+    subtraction would bill the cache reads at the fresh-input rate.
+    """
+    monkeypatch.setattr(tariff, "now_utc", lambda: OFF_PEAK)
+    at = int(PEAK.timestamp() * 1000)
+    fields: dict[str, Any] = {
+        "input_tokens": 900,
+        "output_tokens": 300,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 100,
+        "at_ms": at,
+    }
+    expected = (400 * 0.30 + 300 * 1.20 + 400 * 0.006 + 100 * 0.30) / 1e6
+    as_model = cost_for_usage("deepseek", _flash(), Usage(**fields))
+    as_mapping = cost_for_usage("deepseek", _flash(), dict(fields))
+    assert as_model == as_mapping == pytest.approx(expected)
+
+
+def test_a_garbage_stamp_degrades_to_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed timestamp must never reach the arithmetic as an exception."""
+    monkeypatch.setattr(tariff, "now_utc", lambda: OFF_PEAK)
+    for bad in (None, -1, "x", True, float("nan"), 10**400):
+        got = cost_for_usage("deepseek", _flash(), {"input_tokens": 1_000_000, "at_ms": bad})
+        assert got == pytest.approx(0.15), bad
+
+
+#: DeepSeek rows that deliberately carry NO schedule, id -> the reason. Each is
+#: absent from the live pricing page, so no window ratio for it is published;
+#: attaching today's uniform half-off rule to a row from an earlier pricing era
+#: (a different window, and a non-uniform discount) would be inventing a number
+#: rather than correcting one. The stored price stays a conservative PEAK
+#: estimate. Same shape as UNPRICED_BY_DESIGN above, and for the same reason:
+#: a new priced deepseek row cannot quietly ship without this decision being
+#: made explicitly.
+FLAT_BY_DESIGN: dict[str, str] = {
+    "deepseek-chat": "no longer on the pricing page; its era's window/discount differ from today's",
+    "deepseek-reasoner": "no longer on the pricing page; era discount was non-uniform",
+    "deepseek-v4-flash-0731": "pinned snapshot id, not priced by the current page",
+}
+
+
+def test_every_priced_deepseek_row_declares_its_time_structure() -> None:
+    """Every priced DeepSeek row either names a schedule or is flat by design."""
+    undeclared = sorted(
+        model_id
+        for model_id, info in deepseek_models.items()
+        if (info.input_price or info.output_price)
+        and info.time_of_use is None
+        and model_id not in FLAT_BY_DESIGN
+    )
+    assert not undeclared, (
+        "priced deepseek rows with no time-of-use decision: "
+        f"{undeclared}. Set `time_of_use=DEEPSEEK_TOU` with the published off-peak "
+        "ratio, or add the id to FLAT_BY_DESIGN with the reason it has none."
+    )
+    for model_id, reason in FLAT_BY_DESIGN.items():
+        assert model_id in deepseek_models, f"{model_id} is not a shipped row"
+        assert reason.strip(), f"{model_id} needs a reason, not just an exemption"
+        assert deepseek_models[model_id].time_of_use is None, (
+            f"{model_id} declares a schedule and is also listed flat — delete the "
+            "stale FLAT_BY_DESIGN entry"
+        )
+
+
+def test_every_named_schedule_in_the_registry_resolves() -> None:
+    """A row may only name a schedule this build actually ships.
+
+    Checked across the WHOLE shipped registry rather than DeepSeek alone: the
+    field is generic, and a typo anywhere would otherwise price at the base rate
+    forever without a symptom.
+    """
+    checked = 0
+    for hosting, rows in _STATIC_MODEL_MAPS.items():
+        for model_id, info in rows.items():
+            if info.time_of_use is None:
+                continue
+            checked += 1
+            assert tariff.get_tariff(info.time_of_use) is not None, f"{hosting}/{model_id}"
+    assert checked >= 2, "the tariffed rows went missing"
+
+
+def test_the_two_published_rows_share_one_schedule_and_its_aliases_inherit_it() -> None:
+    assert deepseek_models["deepseek-flash"].time_of_use == DEEPSEEK_TOU
+    assert deepseek_models["deepseek-v4-pro"].time_of_use == DEEPSEEK_TOU
+    # The aliases are `deepseek-flash` copies, so they inherit it by
+    # construction — and the live page's footnote bills them at the Flash price,
+    # which is why they must not drift apart from it.
+    for alias in ("deepseek-v4-flash", "deepseek-v4-flash-vision-exp"):
+        assert deepseek_models[alias].time_of_use == DEEPSEEK_TOU, alias
+        assert deepseek_models[alias].input_price == deepseek_models["deepseek-flash"].input_price
