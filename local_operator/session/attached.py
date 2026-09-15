@@ -6999,6 +6999,39 @@ class AttachedSession:
         task = asyncio.create_task(client.abort())
         task.add_done_callback(_log_abort_failure)
 
+    async def interrupt(self) -> str:
+        """Stop this session's CURRENT WORK and return the owner's receipt.
+
+        THE AWAITING TWIN OF :meth:`abort`, and the reason it exists is the
+        receipt. The control frame is the same one — the runtime's ``abort`` op
+        (``ServingSessionHandle.abort``), which stops this turn, cancels the
+        children it started and spares backgrounded ``bash`` jobs. What
+        :meth:`abort` throws away is the runtime's own sentence describing what
+        actually settled; a caller that has a user waiting on the press (the
+        desktop's Stop button and Esc) must be able to show it instead of
+        guessing. ``abort`` keeps its fire-and-forget shape for its existing
+        callers, which have no request left to answer into.
+
+        NOT the kill switch. ``request_stop`` ends the session and its process;
+        this ends one turn and leaves both running, which is what a button
+        labelled "stop this session's current work" promises. There is no
+        escalation ladder here and deliberately so: a ladder only works where
+        the second rung is offered on screen, and this surface has none — a
+        second press is simply a second interrupt, a no-op because nothing is
+        left.
+
+        RAISES when there is no attached client rather than resolving a
+        no-op, so the caller can tell "nothing to interrupt" from "the owner
+        went away". The desktop route maps a cold session to an ``idle`` answer
+        before it reaches here, so this raise is the genuine transport failure
+        (``ConnectionError``/``RuntimeError``/``TimeoutError``), which its error
+        ladder already answers as a 503.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.abort()
+
     async def request_stop(self) -> str:
         """Stop the session this follower is watching — deliberately.
 

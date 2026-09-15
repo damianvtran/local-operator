@@ -1870,6 +1870,152 @@ async def test_the_abort_receipt_does_not_claim_more_than_it_did() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_abort_clears_a_card_that_outlived_its_turn() -> None:
+    """C2, and the case that FAILED before this change: the ORPHAN card.
+
+    A card parked in a LIVE turn was already cleared by the cancellation that
+    follows ``_session.abort`` — the batch's abort watcher unwinds the parked
+    await through the gate closure's ``finally`` — which is why the hole went
+    unnoticed. A card that OUTLIVED its turn is parked on a future nothing will
+    resolve: the drain gave up on a tool whose cleanup outran
+    ``ABORT_DRAIN_TIMEOUT_S``, or the turn ended while the question was still on
+    screen. The user's own stop then left the question up while the receipt
+    said a turn had been stopped.
+
+    No turn is live here on purpose — that IS the orphan — so the assertion is
+    that the press settles the question anyway. Driven through the ask gate
+    (the harder shape: an approval would resolve ``False`` either way) and
+    asserted on the folded card the surface paints.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(
+        handle._ask_gate(
+            [
+                AskQuestion(
+                    id="env",
+                    question="Which environment?",
+                    options=[AskOption(label="prod"), AskOption(label="staging")],
+                )
+            ]
+        )
+    )
+    await asyncio.sleep(0)
+    assert handle._fold.projection.pending is not None
+
+    await handle.abort()
+
+    assert await asyncio.wait_for(parked, 2) is None, "the orphan card was never answered"
+    assert handle._fold.projection.pending is None, "the question is still on screen"
+    assert handle._pending_futures == {}
+
+
+@pytest.mark.asyncio
+async def test_an_abort_leaves_an_aborted_call_not_a_denial(tmp_path) -> None:
+    """C1: settling the card first must not turn a STOP into a user refusal.
+
+    The gate is denied BEFORE the turn is cut (that order is what closes the
+    window where a fresh answer could start a tool mid-teardown), which puts a
+    resolved deny on the awaiting gate one loop pass before the AbortSignal. If
+    the loop acted on that value the tool would be recorded as ``User denied
+    approval`` — blaming the user for a stop they did make, the same
+    misattribution class as the crashed-gate bug this repo fixed once already.
+
+    Driven against a REAL session, a REAL turn and a real parked card, and
+    asserted on the TRANSCRIPT: that entry is what the user reads and what the
+    next turn is shown, and a stub's return value cannot stand in for it.
+    """
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import ENTRY_MESSAGE, Transcript
+
+    def stream(request, signal):  # noqa: ANN001, ANN202
+        async def gen():
+            yield StreamTextDelta(delta="working")
+            yield StreamToolCallDelta(index=0, id="c1", name="gated", argument_delta="{}")
+            yield StreamEndEvent(stop_reason="toolUse")
+            yield StreamTextDelta(delta="after the batch")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    executed: list[str] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):  # noqa: ANN001, ANN202
+        executed.append(tool_call_id)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="gated", content=[TextContent(text="it ran")]
+        )
+
+    transcript = Transcript(tmp_path / "sess")
+    session = Session(
+        model=ModelSpec(provider="test", model_id="T", context_window=100_000),
+        stream_fn=stream,
+        # The default tier is ``exec``, which is what parks a card.
+        tools=[AgentTool(name="gated", execute=execute)],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    turn = asyncio.ensure_future(session.prompt("run the gated tool"))
+    try:
+        for _ in range(500):
+            if handle._pending_futures:
+                break
+            await asyncio.sleep(0.01)
+        assert handle._pending_futures, "no card ever parked, so nothing was interrupted"
+
+        receipt = await handle.abort()
+        await asyncio.wait_for(turn, 10)
+
+        assert handle._pending_futures == {}, "the card must not survive the stop"
+        assert receipt.startswith("stopping this turn"), receipt
+        assert executed == [], "a denied call must not have run"
+        tool_rows = [
+            entry.payload
+            for entry in transcript.entries()
+            if entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "tool"
+        ]
+        assert tool_rows, "the tool came back with no result row at all"
+        text = json.dumps(tool_rows)
+        assert "aborted" in text, text
+        assert "User denied approval" not in text, (
+            "a stop was recorded as the user's own refusal: " + text
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_abort_receipt_names_a_turn_only_when_one_was_running() -> None:
+    """C3: the receipt must not claim a turn on a press that found none.
+
+    The counterpart to ``_abort_receipt``'s existing rule that survivors are
+    named only when there ARE any. The orphan case above is exactly where the
+    old opening clause lied: the user pressed stop with nothing running, saw a
+    card still on screen, and was told a turn had been stopped. Both halves are
+    asserted together because the contrast IS the rule.
+    """
+    handle, session = make_handle()
+    session.cancel_subagents = lambda reason="interrupted": 0  # type: ignore[attr-defined]
+
+    idle = await handle.abort()
+    assert "stopping this turn" not in idle, idle
+    assert idle.startswith("no turn was running"), idle
+
+    session.is_streaming = True
+    live = await handle.abort()
+    assert live.startswith("stopping this turn"), live
+
+
+@pytest.mark.asyncio
 async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
     """MAJOR-1: the count must be what DIED, not what was asked to die.
 
@@ -1954,6 +2100,10 @@ async def test_the_abort_op_survives_a_session_that_cannot_stop_children() -> No
     """
     handle, session = make_handle()
     assert not hasattr(session, "cancel_subagents")
+    # A stop arrives with a turn running — the normal case — and the receipt's
+    # opening clause says which state it found (see
+    # ``test_the_abort_receipt_names_a_turn_only_when_one_was_running``).
+    session.is_streaming = True
 
     receipt = await handle.abort()
 

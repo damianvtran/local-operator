@@ -440,3 +440,218 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             await handle.dispose()
         if manager is not None:
             await manager.disconnect_all()
+
+
+@pytest.mark.asyncio
+async def test_desktop_interrupt_stops_the_turn_and_keeps_the_session(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """The Stop button's rung, against the assembled app.
+
+    REPORTED DEFECT (2026-09-15): "When I pressed stop/interrupt, it didn't seem
+    to work in local-operator-ui." The composer posted
+    ``sessions.command`` with ``command: "stop"``, which is not an
+    ``OWNER_COMMAND``, so this API answered a ``native_action`` PRESENTATION for
+    ``POST /v1/desktop/stop`` and stopped no turn at all — the transport was
+    fine and the button called the wrong op. That half is reproduced below and
+    must stay reproduced: it is the reason the fix is a new route rather than a
+    change to the command catalogue.
+
+    THE FIX IS THE OTHER RUNG. ``/interrupt`` stops the turn that is running and
+    leaves the session, its runtime and its process alive — the phone relay's
+    ``abort``, reachable from HTTP. Pointing the button at ``/stop`` instead
+    would have ended the user's session under a control promising it would not,
+    so the kill switch keeps its meaning and this test proves the two differ by
+    driving a SECOND real turn after the interrupt.
+
+    Every failure shape the route declares is exercised here rather than only
+    the happy path: a cold session answers ``idle`` without spawning a runtime,
+    a bad body shape is a 422, an unknown or malformed session id is a 404, and
+    the unauthenticated/browser-originated answers are asserted before the rest.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    runtime = handle = None
+    try:
+        await until(lambda: server.started)
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            # The door first, on the real route: no bearer, a wrong bearer, and
+            # a browser origin that is not allowed.
+            no_auth = await client.post("/v1/desktop/sessions/x/interrupt", json={})
+            assert no_auth.status_code == 401, no_auth.text
+            wrong = await client.post(
+                "/v1/desktop/sessions/x/interrupt",
+                json={},
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert wrong.status_code == 401, wrong.text
+            browser = await client.post(
+                "/v1/desktop/sessions/x/interrupt",
+                json={},
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Origin": "https://evil.example",
+                },
+            )
+            assert browser.status_code == 403, browser.text
+            client.headers["Authorization"] = "Bearer " + token
+
+            created = await client.post(
+                "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
+            )
+            assert created.status_code == 200, created.text
+            sid = created.json()["result"]["session_id"]
+            target = "/v1/desktop/sessions/" + sid
+            stream = ControlledStream(
+                # Repeated because the headless naming worker makes a model call of
+                # its own through this same stream: pinning the second turn to an
+                # exact index made the script's own bookkeeping, not the fix,
+                # decide whether this test passed.
+                [text_turn("Seed answer")]
+                + [text_turn("Second answer")] * 4
+            )
+            session = build_session(root / "sessions" / sid, stream, cwd=workspace)
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            runtime = RuntimeServer(handle, kind="daemon")
+            await runtime.start_in_process()
+            (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
+
+            # A real turn, parked mid-stream by a scripted model that blocks until
+            # the abort signal fires.
+            stream.block = True
+            admitted = await client.post(
+                target + "/messages",
+                json={"request_id": request_id(), "text": "start a long turn"},
+            )
+            assert admitted.status_code == 200, admitted.text
+            await asyncio.wait_for(stream.started.wait(), 15)
+            assert session.is_streaming
+
+            # THE BUG, reproduced exactly as the composer posted it.
+            legacy = await client.post(
+                target + "/commands",
+                json={"request_id": request_id(), "command": "stop"},
+            )
+            assert legacy.status_code == 200, legacy.text
+            legacy_result = legacy.json()["result"]["result"]
+            assert legacy_result["kind"] == "native_action", legacy_result
+            assert legacy_result["destination"] == "sessions.stop", legacy_result
+            assert session.is_streaming, "the old op stopped a turn; this is not the defect"
+            print(
+                "REPRO (the reported bug): POST /commands {command: 'stop'} answered "
+                "HTTP200 native_action -> destinations.sessions.stop and the turn was "
+                "STILL streaming; nothing was interrupted"
+            )
+
+            # THE FIX: the same press, aimed at the rung that stops a turn.
+            press = request_id()
+            answer = await client.post(target + "/interrupt", json={"request_id": press})
+            assert answer.status_code == 200, answer.text
+            result = answer.json()["result"]
+            assert result["status"] == "interrupted", result
+            # The owner's own sentence, not one this layer composed.
+            assert result["receipt"].startswith("stopping this turn"), result
+            assert (result["children_running"], result["background_jobs"]) == (0, 0)
+            assert result["replayed"] is False
+            await until(lambda: not session.is_streaming and not handle._prompt_queue)
+            snapshot = (await client.get(target)).json()["result"]["payload"]["frontend"][
+                "snapshot"
+            ]
+            assert snapshot["streaming"] is False
+            # NOT the kill switch: the runtime is alive, undisposed and serving.
+            assert not handle._disposing
+            print(
+                f"FIX: POST {target}/interrupt HTTP200 status=interrupted "
+                f"receipt={result['receipt']!r}; session still streaming=False and the "
+                "runtime was not disposed"
+            )
+
+            # The journal replays rather than firing a second interrupt.
+            again = await client.post(target + "/interrupt", json={"request_id": press})
+            assert again.status_code == 200, again.text
+            assert again.json()["result"]["replayed"] is True
+            print("IDEMPOTENT: the same request_id replayed the stored receipt")
+
+            # ...and the session is genuinely still usable: a SECOND real turn.
+            calls_before = len(stream.requests)
+            stream.block = False
+            second = await client.post(
+                target + "/messages",
+                json={"request_id": request_id(), "text": "and now a second turn"},
+            )
+            assert second.status_code == 200, second.text
+            await until(lambda: not session.is_streaming)
+            history = (await client.get(target + "/history")).json()["result"]
+            assert "Second answer" in json.dumps(history)
+            assert len(stream.requests) > calls_before, "the follow-up turn never reached the model"
+            print(
+                f"AFTER: a second real turn completed on the SAME session "
+                f"({len(stream.requests) - calls_before} more model call(s)), so the "
+                "interrupt stopped the work and not the session"
+            )
+
+            # A COLD session: idle, and nothing spawned to answer it.
+            cold = await client.post(
+                "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
+            )
+            assert cold.status_code == 200, cold.text
+            cold_id = cold.json()["result"]["session_id"]
+            from local_operator.mobile.attach_client import find_runtime_record
+
+            assert (await asyncio.to_thread(find_runtime_record, root, cold_id))[
+                0
+            ] is None, "the cold fixture session already had a runtime"
+            cold_answer = await client.post(
+                f"/v1/desktop/sessions/{cold_id}/interrupt", json={"request_id": request_id()}
+            )
+            assert cold_answer.status_code == 200, cold_answer.text
+            cold_result = cold_answer.json()["result"]
+            assert cold_result["status"] == "idle", cold_result
+            assert cold_result["receipt"] == "", "an idle answer must not invent a receipt"
+            assert (await asyncio.to_thread(find_runtime_record, root, cold_id))[
+                0
+            ] is None, "the interrupt spawned a runtime for a cold session"
+            print(
+                "IDLE: a cold session answered HTTP200 status=idle with an empty receipt "
+                "and no runtime record was created"
+            )
+
+            # The body's own shape, and the two ids that name nothing.
+            bad_uuid = await client.post(target + "/interrupt", json={"request_id": "not-a-uuid"})
+            assert bad_uuid.status_code == 422, bad_uuid.text
+            extra = await client.post(
+                target + "/interrupt",
+                json={"request_id": request_id(), "confirmed": True},
+            )
+            assert extra.status_code == 422, extra.text
+            unknown = await client.post(
+                "/v1/desktop/sessions/000000000000/interrupt", json={"request_id": request_id()}
+            )
+            assert unknown.status_code == 404, unknown.text
+            malformed = await client.post(
+                "/v1/desktop/sessions/not-a-session/interrupt", json={"request_id": request_id()}
+            )
+            assert malformed.status_code == 404, malformed.text
+            print(
+                "SHAPES: non-uuid request_id 422, an extra field 422, an unknown session "
+                "404 and a malformed id 404"
+            )
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, 30)
+        listener.close()
+        if runtime is not None:
+            await runtime.aclose()
+        if handle is not None:
+            await handle.dispose()

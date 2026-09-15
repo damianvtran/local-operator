@@ -231,6 +231,47 @@ class WarmReceipt(BaseModel):
     state: Literal["warm", "warming", "cold"]
 
 
+class InterruptReceipt(BaseModel):
+    """What an interrupt did, and what the owner said about it.
+
+    THE RUNG BETWEEN "keep going" AND THE KILL SWITCH. ``interrupted`` means
+    the owner stopped the turn that was under way and left the session, its
+    runtime and its process alive; ``idle`` means there was no turn to stop —
+    a COLD session (never engaged, deliberately not spawned to answer this)
+    or one sitting between turns. ``idle`` rides a 200 like every other honest
+    answer here: a user pressing Stop on a session that has already settled
+    has not made a mistake, and answering them with an error would put a
+    failure in front of a press that succeeded.
+
+    ``receipt`` is the RUNTIME's own sentence, verbatim and never composed
+    here. It counts what actually settled and names anything that refused to
+    die, which is knowledge only the owner has: a follower that re-worded it
+    would be guessing at the number it is refusing to parse. It is ``""`` for
+    ``idle`` because there is no owner sentence to report — an invented one
+    would be the same class of overstatement the receipt itself is written to
+    avoid.
+
+    ``children_running`` and ``background_jobs`` are read off the follower's
+    published roster AFTER the interrupt, so the surface can word its own
+    notice ("2 subagents are still running") without parsing prose. They are
+    the follower's view at answer time and can lag the owner by a delta, so
+    they are copy inputs and never authority — the receipt is. Split by job
+    type because the two have different remaining levers: subagents die with
+    the turn, a backgrounded ``bash`` job was deliberately never touched.
+    """
+
+    status: Literal["interrupted", "idle"]
+    receipt: str
+    children_running: int
+    background_jobs: int
+    #: Set by the receipt journal when this answer was replayed rather than
+    #: re-run (``DesktopReceipts.run``), and declared for the same reason
+    #: ``MoveReceipt`` declares it: FastAPI validates the reply against this
+    #: model as the route's ``response_model``, so an undeclared ``replayed``
+    #: is silently dropped on the way out.
+    replayed: bool = False
+
+
 class MoveReceipt(BaseModel):
     """What a working-directory change did, and where it left the session.
 

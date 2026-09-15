@@ -34,6 +34,7 @@ from local_operator.server.models.desktop_sessions import (
     CreatedSession,
     DraftPreviewPayload,
     HistoryPage,
+    InterruptReceipt,
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
@@ -454,6 +455,26 @@ class Warm(Input):
     applies: a client that invents an option gets a 422 naming it, instead of
     having it silently ignored and believing it took effect.
     """
+
+
+class Interrupt(Input):
+    """One field, and deliberately no ``confirmed``.
+
+    An interrupt destroys nothing: it stops the turn that is running and
+    leaves the session, its runtime, its child sessions and its process alone,
+    so it needs no confirmation to be safe. Requiring one would also make Esc
+    unusable, which is the whole point of the keystroke — the stop this route
+    replaces (``POST /v1/desktop/stop``) is confirmed precisely because it
+    ends the session.
+
+    ``request_id`` is the at-most-once key the receipt journal claims on, so a
+    retry after a lost response cannot fire a second interrupt at a turn that
+    has moved on. Declared as ``RequestID`` (the canonical UUID shape) rather
+    than ``str`` because the journal keys are session-scoped and a caller-
+    chosen free string would let two different presses collide on one row.
+    """
+
+    request_id: RequestID
 
 
 def host(request: Request) -> DesktopSessions:
@@ -1329,6 +1350,124 @@ async def warm(session_id: str, body: Warm, request: Request):
     async with errors(), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
+
+
+def _running_work_counts(remote: Any) -> tuple[int, int]:
+    """Live subagents and live backgrounded ``bash`` jobs, from the roster.
+
+    Split by job TYPE because the two surviving kinds have different remaining
+    levers and the notice a surface writes names one of them: a ``task`` row is
+    a subagent, which the interrupt DID reach (so any row still running here
+    refused to die), while a ``bash`` row was deliberately never touched and
+    needs the Jobs surface. Collapsing them into one number would force the
+    copy to say "3 things" about two situations with two different answers.
+
+    Read through ``frontend_state`` rather than a clone-free predicate because
+    the counts are needed, not a boolean, and this runs once per user press.
+    It RAISES when the follower has no canonical state yet, exactly as that
+    property does — the alternative, answering zero, is the fabricated-zero
+    failure this repo has already paid for once (see ``AttachedSession
+    .subagent_comms``): "nothing else is running" is a claim about the user's
+    own work and must not be invented.
+    """
+    running = [row for row in remote.frontend_state.jobs if getattr(row, "status", "") == "running"]
+    children = sum(1 for row in running if getattr(row, "type", "") == "task")
+    background = sum(1 for row in running if getattr(row, "type", "") == "bash")
+    return children, background
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/interrupt",
+    response_model=CRUDResponse[InterruptReceipt],
+)
+async def interrupt(session_id: str, body: Interrupt, request: Request):
+    """Stop this session's CURRENT WORK, and leave the session running.
+
+    THE OP THE DESKTOP'S STOP BUTTON AND ESC MEAN, and the bug it fixes is
+    that they meant nothing. The renderer posted ``sessions.command`` with
+    ``command: "stop"``, which is not an ``OWNER_COMMAND``, so this API
+    answered an ``native_action`` PRESENTATION for ``POST /v1/desktop/stop``
+    and stopped no turn at all: the transport was fine and the button called
+    the wrong op. Pointing it at ``/stop`` instead would have been worse than
+    the bug — that route is the KILL SWITCH (deny gates, dispose, release the
+    writer lease, unpublish, exit the runtime), and a control that promises
+    "stop this session's current work" must not end the session.
+
+    THE RUNG IT REUSES IS THE PHONE RELAY'S. ``abort`` already means exactly
+    this on the control socket — stop the turn, cancel the children it
+    started, leave the session and its process alive, and report honestly on
+    what settled — so this route adds a way to REACH it from HTTP, not a
+    second implementation of it. The mapping is one line in
+    ``AttachedSession.interrupt`` (this route) to ``abort`` (the runtime op),
+    and the name deliberately avoids ``/abort``: on this surface ``stop``
+    already means "end the process", and a route one letter from it is a trap
+    for the next reader.
+
+    NO LADDER. A first press stops the turn and its children; a second press
+    is simply a second interrupt, a no-op because nothing is left running. The
+    keyboard's Esc ladder can afford a narrow first press because a second one
+    is offered on screen (``DOUBLE_STOP_WINDOW_S``); this surface has no such
+    offer and nothing rendering "press again", so a ladder here would be a
+    press that does nothing once and explains itself nowhere. Backgrounded
+    ``bash`` jobs are never touched — ``background=true`` exists so a build
+    outlives the turn that started it — and the receipt names them.
+
+    ``idle`` IS A SUCCESS. A cold session is NOT engaged to answer this (an
+    interrupt is not a reason to spend a process, which is what ``warm`` is
+    for), and neither is one sitting between turns; both answer 200 with
+    status ``idle``. A client putting an error in front of a press that had
+    nothing to do would be reporting the user's own success as a failure.
+
+    RECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,
+    because a retry after a lost response must not fire a second interrupt at a
+    turn that has since moved on — the journal replays the stored answer
+    verbatim, and the same ``request_id`` with a different body is a 409.
+    Retry-safe, because unlike ``/stop`` and ``/move`` the operation is
+    idempotent: "make the current turn stop" creates and destroys nothing, and
+    a pending row that never ran is re-executed to the same end. That is also
+    why this route does NOT need ``/stop``'s ``assert_admitting`` call before
+    the claim (``desktop_lifecycle.stop``): its receipt is ``retry_safe=False``,
+    so a claimed-but-unrun row is INDETERMINATE for the client, whereas here a
+    retry is the remedy rather than a hazard.
+
+    STATUS CODES are the shared ladder's, with one shape to state because it
+    looks like a bug: an UNKNOWN session id and a MALFORMED one are both 404.
+    The id validator raises ``KeyError`` for a bad shape, and ``errors()``
+    answers that as "no such session" — deliberately not a 422, which is
+    reserved for the BODY's shape (a non-UUID ``request_id``, or any extra
+    field). 401 missing or wrong bearer, 403 a disallowed or browser-originated
+    Origin, 503 a desktop capability that is not configured or an owner that
+    cannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).
+    """
+    async with errors(), host(request).session(session_id) as bridge:
+
+        async def execute():
+            assert bridge.remote is not None
+            # A cold session is a no-op, NOT a runtime spawn.
+            if bridge.remote.is_cold:
+                return {
+                    "status": "idle",
+                    "receipt": "",
+                    "children_running": 0,
+                    "background_jobs": 0,
+                }
+            receipt = await bridge.remote.interrupt()
+            children_running, background_jobs = _running_work_counts(bridge.remote)
+            return {
+                "status": "interrupted",
+                "receipt": receipt,
+                "children_running": children_running,
+                "background_jobs": background_jobs,
+            }
+
+        return reply(
+            await receipts(request).run(
+                session_id + ":interrupt:" + body.request_id,
+                body.model_dump(),
+                execute,
+                retry_safe=True,
+            )
+        )
 
 
 @router.post(

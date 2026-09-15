@@ -455,6 +455,7 @@ def test_route_response_models_publish_the_real_canonical_contract():
         ("/v1/desktop/sessions/{session_id}/answers", "post"): "AnswerReceipt",
         ("/v1/desktop/sessions/{session_id}/watch", "post"): "WatchReceipt",
         ("/v1/desktop/sessions/{session_id}/warm", "post"): "WarmReceipt",
+        ("/v1/desktop/sessions/{session_id}/interrupt", "post"): "InterruptReceipt",
     }
     for (path, method), name in expected.items():
         response = schema["paths"][path][method]["responses"]["200"]
@@ -1069,6 +1070,256 @@ async def test_detaching_a_bridge_cancels_the_warm_it_started(tmp_path):
     # it rather than leaving it parked on the loop.
     assert task.cancelled() or task.done()
     assert bridge.warm_task is None
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_on_a_cold_session_is_idle_and_spawns_nothing(tmp_path, monkeypatch):
+    """A press on a session with no runtime must not cost a process.
+
+    The whole reason ``/interrupt`` is not a variant of ``warm``: a warm exists
+    to start work, so a cold session is exactly what it is for; an interrupt
+    exists to stop work, and there is none to stop. Engaging here would make
+    the Stop button spawn the thing it is meant to stop — and the caller is
+    told ``idle`` on a 200, because pressing stop on a settled session is not a
+    mistake and must not put an error in front of the user.
+
+    The never-bind half is asserted with an ``_ensure_bound`` that raises: if
+    anything on this path tries to engage, the answer stops being a 200.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async def exploding_bind(*, foreground: bool = True) -> None:
+        raise AssertionError("an interrupt must never engage a cold session")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            assert bridge.remote.is_cold, "the fixture session was already warm"
+            monkeypatch.setattr(bridge.remote, "_ensure_bound", exploding_bind)
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "idle"
+            # No owner sentence exists for a turn nobody stopped, so the route
+            # must not invent one.
+            assert result["receipt"] == ""
+            assert (result["children_running"], result["background_jobs"]) == (0, 0)
+            assert bridge.remote.is_cold, "the interrupt left a runtime behind"
+    await pool.close()
+
+
+class InterruptClient:
+    """A bound owner that answers the ``abort`` control op.
+
+    A plain class rather than a ``SimpleNamespace`` for the reason the warm
+    tests record: ``dispose()`` tests the client for set membership, and a
+    ``SimpleNamespace`` defines ``__eq__`` and so is unhashable. Only the ops
+    this route reaches are implemented, so anything else it grows fails loudly
+    here rather than being absorbed.
+    """
+
+    def __init__(self, receipt: str = "stopping this turn") -> None:
+        self.receipt = receipt
+        self.ops: list[str] = []
+        # ``is_cold`` reads this, together with ``_ready_for_events``.
+        self.connected = True
+        #: Raised from ``abort`` instead of answering, for the unreachable-owner
+        #: case. Deliberately the ATTACH LAYER's own message, internal port and
+        #: all, because the route must not echo it.
+        self.raises: BaseException | None = None
+
+    async def abort(self) -> str:
+        self.ops.append("abort")
+        if self.raises is not None:
+            raise self.raises
+        return self.receipt
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_returns_the_receipt_and_the_roster_counts(tmp_path, monkeypatch):
+    """The live half: the owner's own sentence, plus the numbers the UI words
+    its notice with, read AFTER the interrupt.
+
+    ``receipt`` is asserted BYTE-EQUAL to what the owner said. A follower that
+    re-worded it would be guessing at the count it is refusing to parse, and
+    the whole point of returning it is that the user is shown what actually
+    settled rather than a sentence this layer made up.
+
+    The roster is read after the press, not before: the counts exist to answer
+    "what is STILL running", and a pre-press read would answer the question the
+    receipt already answers. A ``task`` row is a subagent the interrupt did
+    reach; a ``bash`` row is a backgrounded job it deliberately never touched,
+    which is why they ride as two numbers.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        JobState,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+    request_id = str(uuid.uuid4())
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            remote = bridge.remote
+            owner = InterruptClient(receipt="stopped 1 subagent; 2 background bash jobs untouched")
+            remote._client = owner  # type: ignore[assignment]
+            remote._ready_for_events = True
+            remote._frontend_store = FrontendStateStore(
+                FrontendSessionState(
+                    session_id=sid,
+                    epoch="e1",
+                    jobs=[
+                        JobState(id="j1", type="task", status="running"),
+                        JobState(id="j2", type="task", status="completed"),
+                        JobState(id="j3", type="bash", status="running"),
+                        JobState(id="j4", type="bash", status="running"),
+                    ],
+                )
+            )
+            body = {"request_id": request_id}
+            response = await client.post(f"/v1/desktop/sessions/{sid}/interrupt", json=body)
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "interrupted"
+            assert result["receipt"] == "stopped 1 subagent; 2 background bash jobs untouched"
+            # Only RUNNING rows count, and only the two kinds this splits.
+            assert result["children_running"] == 1
+            assert result["background_jobs"] == 2
+            assert result["replayed"] is False
+            assert owner.ops == ["abort"]
+
+            # The journal replays the stored answer instead of aiming a second
+            # interrupt at a turn that has since moved on.
+            replay = await client.post(f"/v1/desktop/sessions/{sid}/interrupt", json=body)
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["result"]["replayed"] is True
+            assert owner.ops == ["abort"], "the replayed call was re-executed"
+
+            # Same id, a body the model refuses. The route's body has exactly
+            # one field, so this is the ONLY way a repeated id can carry a
+            # different body — the journal's own "different body" 409 arm is
+            # structural rather than reachable here (its test is beside the
+            # other receipt-journal cases above). What matters is that the extra
+            # field is refused instead of ignored: a client inventing an option
+            # must not be told its request took effect.
+            refused = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt",
+                json={"request_id": request_id, "extra": 1},
+            )
+            assert refused.status_code == 422, refused.text
+            # A NEW id is a NEW request, and it really does run.
+            other = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert other.status_code == 200
+            assert owner.ops == ["abort", "abort"]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_owner_is_a_503_and_not_a_leak(tmp_path, monkeypatch):
+    """The genuine-failure case the composer's alert path needs.
+
+    A stop whose owner went away mid-press is NOT the same event as a stop with
+    nothing to do: the first is a failure the user must be told about, the second
+    is a success. The route therefore lets the transport error reach ``errors()``
+    rather than swallowing it into an ``interrupted`` receipt.
+
+    The sentence is the LADDER's, not the attach layer's. A ``ConnectionError``
+    from ``attach_client`` carries an internal control port and possibly another
+    conversation's id, and echoing it painted those into the renderer once
+    already (see ``test_only_a_typed_actionable_error_reaches_the_user``); this
+    pins the same rule for the new route, because a route that composed its own
+    failure text would bypass it.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient()
+            owner.raises = ConnectionError(
+                "owner socket unreachable: [Errno 61] Connect call failed ('127.0.0.1', 54321)"
+            )
+            bridge.remote._client = owner  # type: ignore[assignment]
+            bridge.remote._ready_for_events = True
+            rid = str(uuid.uuid4())
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": rid}
+            )
+            assert response.status_code == 503, response.text
+            detail = str(response.json()["detail"])
+            assert detail == (
+                "Session owner is unavailable. Reconnect and reconcile before retrying."
+            ), detail
+            for leaked in ("54321", "127.0.0.1"):
+                assert leaked not in detail, detail
+            assert owner.ops == ["abort"], "the route never actually asked the owner"
+            # The claim was left PENDING rather than recorded, so the SAME id can
+            # be retried — which is the remedy the sentence above promises
+            # (``retry_safe=True``). A recorded failure would answer the journal's
+            # indeterminate refusal here instead.
+            owner.raises = None
+            retry = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": rid}
+            )
+            assert retry.status_code == 200, retry.text
+            assert retry.json()["result"]["status"] == "interrupted"
+            assert retry.json()["result"]["replayed"] is False, "the failure was replayed"
+            assert owner.ops == ["abort", "abort"]
     await pool.close()
 
 
