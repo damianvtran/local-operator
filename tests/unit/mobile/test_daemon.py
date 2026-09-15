@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -1528,7 +1529,7 @@ def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
     """
     from local_operator.session.runtime.types import LEAVING_ON_SIGNAL, SessionRecord
 
-    def record(session_id: str = "s-drain", pid: int = 4321, **extra: object) -> SessionRecord:
+    def record(session_id: str = "s-drain", pid: int = 4321, **extra: Any) -> SessionRecord:
         return SessionRecord(
             pid=pid,
             kind="tui",
