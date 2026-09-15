@@ -1090,27 +1090,87 @@ def _quiet_owner_sessions() -> SessionsInfo:
     )
 
 
-def test_the_quiet_owner_caveat_names_the_age_the_pid_and_the_forced_stop() -> None:
-    """D2, as an assertion: the advertised command has to be one that WORKS.
+def test_the_quiet_owner_caveat_names_the_ladders_first_rung_and_prices_force() -> None:
+    """D3, as an assertion: the rung that ACTS leads, and force is priced.
 
-    The remedy used to be a plain ``lop stop --pid N`` described as ending the
-    session. That rung asks the owner's socket first and then needs an identity
-    proof a fresh heartbeat forbids, so on an owner that is still beating it
-    refuses — an advertised recovery that may never become available. The
-    forced rung is the one that reaches a silent socket, and the sentence says
-    what it does (it SIGNALS the process) rather than implying a graceful exit.
-    The measurement travels with it, because "not answering" without the age
-    is a bare verdict and a stale beat does not establish what caused it.
+    The remedy used to be the forced stop alone, and on this state that is the
+    wrong default twice over. ``control._identity_by_record`` re-reads a
+    record only while its beat is inside ``HEARTBEAT_TIMEOUT_S``, so on a
+    record ``classify`` has already called ``wedged`` the flag can turn no
+    refusal into a stop; the rung that acts here is the PLAIN one, whose
+    start-time proof ``_identity_by_start_time`` admits precisely because the
+    beat has lapsed. Measured on this head's own ladder: a wedged shape (beat
+    56 s stale, socket silent) -> ``lop stop --pid N`` -> ``method=sigkill``,
+    while a still-beating silent owner -> plain refused, ``--force`` ->
+    ``method=sigkill``; and ``_identity_by_record`` on a 120 s-stale record
+    refuses on its own age gate.
+
+    So the sentence names the in-app path that reaches the same ladder, and it
+    says what forcing costs — the process is signal-stopped and its in-flight
+    turn goes with it — leaving that a deliberate choice rather than the
+    default advice. The measurement travels with it, because "not answering"
+    without the age is a bare verdict and a stale beat does not establish what
+    caused it.
     """
     body = _unwrapped(_text(_snapshot(sessions=_quiet_owner_sessions()), width=120))
     assert "1 session is not answering" in body
     assert "last runtime heartbeat 4m ago" in body
     assert "(pid 4242)" in body
-    assert "'lop stop --pid 4242 --force'" in body
-    assert "force-signals the process" in body
+    assert "'lop stop --pid 4242' asks it to stop" in body
+    assert "'/stop 4242' from this screen does the same" in body
+    assert "'lop stop --pid 4242 --force' signal-stops the process" in body
+    assert "discarding its in-flight turn" in body
     # The old promise, gone in both directions: no claim that the graceful stop
     # is available and no claim that the owner will recover.
     assert "ends it" not in body
+
+
+def _two_quiet_owners() -> SessionsInfo:
+    """Two not-answering rows, so the multi-row remedy branch is reachable."""
+    one = _quiet_owner_sessions()
+    return SessionsInfo(
+        lines=one.lines
+        + (
+            SessionLine(
+                pid=4244,
+                state="wedged",
+                kind="daemon",
+                conversation_name="Second quiet owner",
+                uptime_s=800.0,
+                heartbeat_age_s=200.0,
+                rss_bytes=1_000,
+            ),
+        ),
+        total=3,
+        live=1,
+        wedged=2,
+        busy=2,
+    )
+
+
+def test_a_multi_row_clause_hands_over_a_remedy_that_fits_every_pid_it_lists() -> None:
+    """N2 — up to three pids listed, one command named for an arbitrary one.
+
+    The count is the HEADER's number and the pids are the ROWS': a snapshot
+    whose two disagree must not have the caveat contradict the line it sits
+    under, so the lead count follows ``sessions.wedged`` while the age and the
+    pids follow the rows.
+    """
+    body = _unwrapped(_text(_snapshot(sessions=_two_quiet_owners()), width=140))
+    assert "2 sessions are not answering" in body
+    assert "(pid 4242, 4244)" in body
+    assert "'lop stop --pid N', once per pid above" in body
+    # No arbitrary single pid: the old sentence handed the reader 4242 while
+    # three pids stood on the screen.
+    assert "'lop stop --pid 4242'" not in body
+
+    mismatched = SessionsInfo(lines=_two_quiet_owners().lines, total=4, live=1, wedged=3, busy=2)
+    text = _unwrapped(_text(_snapshot(sessions=mismatched), width=140))
+    # The header says 3, so the caveat says 3 and accounts for the pid it has
+    # no row for — rather than reading as a second, smaller problem.
+    assert "3 not answering" in text
+    assert "3 sessions are not answering" in text
+    assert "and 1 more" in text
 
 
 def test_the_export_prints_the_measured_age_beside_the_state_token() -> None:
@@ -1126,6 +1186,64 @@ def test_the_export_prints_the_measured_age_beside_the_state_token() -> None:
     row = next(line for line in export.split("\n") if "Quiet owner" in line)
     assert "[wedged]" in row, row
     assert "last heartbeat 4m ago" in row, row
+
+
+def _usage_visible_sessions() -> SessionsInfo:
+    """A wedged row beside a live one with usage available.
+
+    The wedged row's figure is production's ``—``: ``collect_sessions`` samples
+    usage for LIVE pids only, so a row that stopped reporting has no memory
+    measurement behind it at all.
+    """
+    return SessionsInfo(
+        lines=(
+            SessionLine(
+                pid=4242,
+                state="wedged",
+                kind="daemon",
+                conversation_name="Quiet owner",
+                uptime_s=900.0,
+                heartbeat_age_s=243.0,
+                busy=True,
+            ),
+            SessionLine(
+                pid=4243,
+                state="live",
+                kind="tui",
+                conversation_name="Working session",
+                uptime_s=120.0,
+                heartbeat_age_s=3.0,
+                busy=True,
+                rss_bytes=190_000_000,
+            ),
+        ),
+        total=2,
+        live=1,
+        wedged=1,
+        busy=2,
+    )
+
+
+def test_the_degraded_row_ends_on_the_facts_it_exists_for() -> None:
+    """D4, as an assertion: the meta run sheds the pre-silence flag and an
+    unmeasured figure rather than ending on them.
+
+    ``busy`` is the record's activity flag from BEFORE the beat stopped, so a
+    row whose whole purpose is to remove unqualified progress must not end by
+    asserting activity; and ``—`` is a memory figure usage sampling never took
+    for a pid that stopped reporting. Both leave the candidate list entirely,
+    which is what makes the run end on the state and the measured age.
+    """
+    lines = _lines(_snapshot(sessions=_usage_visible_sessions()), width=110)
+    quiet = next(line for line in lines if "Quiet owner" in line)
+    working = next(line for line in lines if "Working session" in line)
+    assert "busy" not in quiet, quiet
+    assert UNKNOWN not in quiet, quiet
+    assert quiet.rstrip().endswith("not answering · last heartbeat 4m ago · 15m"), quiet
+    # The live row keeps both: this is a shed on the one row that cannot
+    # support them, not a change to the run every row prints.
+    assert "busy" in working, working
+    assert "181 MB" in working, working
 
 
 @pytest.mark.parametrize("width", [60, 70])

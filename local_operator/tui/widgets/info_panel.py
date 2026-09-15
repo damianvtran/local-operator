@@ -769,11 +769,18 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         if line.state == "wedged":
             bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
         bits.append(format_duration(line.uptime_s))
-        if sessions.usage_available:
+        # BOTH of these are shed on a row that is not answering, not merely
+        # ordered after the facts (design round 2, D4): usage is sampled for
+        # LIVE pids only, so the figure here would be a measurement that was
+        # never taken for this pid, and ``busy`` is the record's PRE-silence
+        # flag — a row whose whole purpose is to remove unqualified progress
+        # must not end by asserting activity. The run therefore ends on
+        # ``not answering · last heartbeat Nm ago``.
+        if sessions.usage_available and line.state != "wedged":
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
             bits.append(f"needs {line.pending}")
-        elif line.busy:
+        elif line.busy and line.state != "wedged":
             bits.append("busy")
         metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
         name = line.conversation_name or line.session_id or f"pid {line.pid}"

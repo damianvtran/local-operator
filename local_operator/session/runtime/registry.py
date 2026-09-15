@@ -348,8 +348,8 @@ def classify(
     ``check_zombie=None`` derives the probe policy rather than making every
     caller restate it (a ``ps`` fork on macOS, so it is spent only where the
     answer changes what a user is told): probe when the heartbeat has already
-    gone quiet, which is either a stopped reporter or a process that died
-    without being reaped. Pass a bool to force it.
+    gone quiet, which is either an owner that stopped reporting or a process
+    that died without being reaped. Pass a bool to force it.
     """
     moment = time.time() if now is None else now
     # Clamped: a stamp dated in the future is clock skew, never evidence
@@ -418,12 +418,13 @@ def scan(
         # The zombie probe is the CLASSIFIER's policy now, not this
         # function's: it costs a `ps` fork on macOS, so it is spent only on
         # records whose heartbeat has already gone quiet — a healthy runtime
-        # beats every 15 s, so a quiet stamp means either a stopped reporter or
-        # a process that died without being reaped. That is exactly the case
-        # that used to report `live` with 0B RSS for 45 s (round 3, U10), and
-        # it keeps the common path (every session, every `lop` invocation)
-        # fork-free. The reaping stays HERE, because it is this function's
-        # contract with its callers rather than a fact about the record.
+        # beats every 15 s, so a quiet stamp means either an owner that stopped
+        # reporting or a process that died without being reaped. That is exactly
+        # the case that used to report `live` with 0B RSS for 45 s (round 3,
+        # U10), and it keeps the common path (every session, every `lop`
+        # invocation) fork-free. The reaping stays HERE, because it is this
+        # function's contract with its callers rather than a fact about the
+        # record.
         verdict = classify(record, now=now)
         if not verdict.pid_alive:
             _reap_dead_record(directory, path, record.pid)
