@@ -451,6 +451,18 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # Epoch milliseconds in UTC when the PROVIDER reported this usage. The window
+    # a time-of-use tariff is evaluated in is a property of the CALL, not of when
+    # somebody later read the ledger: a restored session or an attached receipt
+    # priced at view time is wrong by up to 2x in either direction, and this
+    # stamp is the call's own answer. Set where a provider response is parsed
+    # (``providers/clients.py``), never on an aggregate -- a turn's folded total
+    # and a child's lifetime total leave it None exactly as they already leave
+    # ``usd_cost`` unset, because their ``cost_components`` own the provenance.
+    # ``None`` means "unknown moment" and the pricing path then uses the wall
+    # clock, which is what every transcript written before this field existed
+    # degrades to.
+    at_ms: int | None = None
     # A record-time table estimate is durable money, but NOT a provider receipt.
     # Keeping the provenance separate lets offline viewers/resumes retain known
     # spend without pretending the provider reported a bill or repricing history.

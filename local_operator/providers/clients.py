@@ -58,6 +58,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+from local_operator.model import tariff
 from local_operator.model.speed import (
     DIALECT_ANTHROPIC_SPEED,
     DIALECT_SERVICE_TIER,
@@ -2812,6 +2813,11 @@ class OpenAICompatClient:
                         # already baked in, and none of them are recoverable from
                         # the flat per-model table price.
                         usd_cost=_usd_cost(raw),
+                        # WHEN the provider reported this usage, so a tariff row's
+                        # rates are evaluated in the window the CALL ran in rather
+                        # than in whichever window somebody reads the session back
+                        # in (see ``model/tariff.moment_for``).
+                        at_ms=tariff.now_ms(),
                     )
                     yield StreamUsageEvent(usage=usage)
                 choices = chunk.get("choices") or []
@@ -3154,6 +3160,9 @@ class OpenAICompatClient:
                                 else 0
                             ),
                             context_tokens=int(raw.get("input_tokens", 0)) or None,
+                            # The window a time-of-use row is priced in is the
+                            # call's own (see ``model/tariff.moment_for``).
+                            at_ms=tariff.now_ms(),
                         )
                         yield StreamUsageEvent(usage=usage)
                     if event_type == "response.completed":
@@ -3794,7 +3803,11 @@ class AnthropicClient:
     ) -> AsyncIterator[StreamEvent]:
         url = f"{self._base_url}/v1/messages"
         stop_reason = "stop"
-        usage = Usage()
+        # Stamped at construction, before the request goes out: the ``Usage`` is
+        # filled in as the stream arrives, and a call's time-of-use window is a
+        # property of the call (seconds of skew across a stream boundary cannot
+        # change a window that is hours wide).
+        usage = Usage(at_ms=tariff.now_ms())
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
 
@@ -4235,6 +4248,9 @@ class GoogleClient:
                         cache_read_tokens=_usage_token(raw_usage, "cachedContentTokenCount"),
                         context_tokens=input_tokens or None,
                         reasoning_tokens=thought_tokens,
+                        # The moment the provider reported this usage; the window
+                        # a time-of-use row is priced in (``model/tariff``).
+                        at_ms=tariff.now_ms(),
                     )
 
         if usage is not None:

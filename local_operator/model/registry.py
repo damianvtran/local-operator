@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from local_operator.model.tariff import DEEPSEEK_TOU
 from local_operator.providers.local import LOCAL_PRESETS, LOCAL_PROVIDER_IDS
 
 
@@ -223,6 +224,10 @@ class ModelInfo(BaseModel):
             Responses API.
         cache_writes_price (Optional[float]): Cost per million tokens for cache writes.
         cache_reads_price (Optional[float]): Cost per million tokens for cache reads.
+        time_of_use (Optional[str]): Name of the time-of-use tariff schedule whose
+            peak/off-peak ratio this row's prices are quoted at; the price fields
+            hold the PEAK rates and the schedule supplies the off-peak scale. None
+            means the row does not vary by time of day.
         description (Optional[str]): Description of the model.
         limits_from_listing (bool): The window and max_tokens on this row were
         transcribed from the provider's own live listing on a date, so a live
@@ -245,6 +250,15 @@ class ModelInfo(BaseModel):
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
+    time_of_use: str | None = Field(
+        default=None,
+        description=(
+            "Name of the time-of-use tariff schedule (see model/tariff.py) whose "
+            "peak/off-peak ratio this row's prices are quoted at. None means the "
+            "row's prices do not vary by time of day. Peak rates are stored in the "
+            "price fields; the schedule supplies the off-peak scale."
+        ),
+    )
     description: str = Field(..., description="Description of the model")
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
@@ -1465,9 +1479,10 @@ deepseek_models: Dict[str, ModelInfo] = {
     # pricing and create-chat-completion docs (2026-09-12), not an aggregator:
     # https://api-docs.deepseek.com/quick_start/pricing
     # https://api-docs.deepseek.com/api/create-chat-completion
-    # 384K is 393216 OUTPUT tokens, not a default request budget. Prices below
-    # are conservative PEAK estimates; off-peak is half (weekdays 01-04/06-10
-    # UTC are peak). Usage accounting has no time-of-use tariff model.
+    # 384K is 393216 OUTPUT tokens, not a default request budget. The prices below
+    # are DeepSeek's PEAK list rates; `time_of_use` names the schedule
+    # (model/tariff.py) that supplies the off-peak half, and only the ids the live
+    # pricing page still prices carry it. The legacy ids below deliberately do not.
     "deepseek-flash": ModelInfo(
         id="deepseek-flash",
         name="DeepSeek Flash",
@@ -1481,6 +1496,11 @@ deepseek_models: Dict[str, ModelInfo] = {
         output_price=1.20,
         cache_writes_price=0.30,
         cache_reads_price=0.006,
+        # Peak list price plus the published off-peak half. Every surface that
+        # prices this row -- the status band, subagent rows, the analytics ledger
+        # -- reads it through `calculate_cost`, which applies the schedule at the
+        # call's own moment.
+        time_of_use=DEEPSEEK_TOU,
         description="DeepSeek V4.1 Flash with vision; peak price estimate (off-peak half)",
         recommended=True,
     ),
@@ -1496,6 +1516,14 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.09,
         cache_reads_price=0.009,
         description="Pinned July 2026 V4 Flash snapshot",
+        # No `time_of_use`: the current pricing page no longer lists this id, so
+        # neither its price nor a window ratio for it is published, and the stored
+        # price stays a conservative PEAK estimate. Attaching today's uniform
+        # half-off schedule to a row from an earlier pricing era would pair today's
+        # windows with an era whose discount (and window) we cannot verify, i.e.
+        # invent a number -- see the registry guard in
+        # tests/unit/model/test_pricing.py, which forces this decision to be
+        # explicit for every priced deepseek row.
         # The ROW stays so a user who already pinned this model keeps correct
         # pricing and a 1M context window (dropping it would resolve them to the
         # 128k unknown default and silently mis-set compaction). Only the
@@ -1516,6 +1544,7 @@ deepseek_models: Dict[str, ModelInfo] = {
         output_price=3.96,
         cache_writes_price=1.32,
         cache_reads_price=0.044,
+        time_of_use=DEEPSEEK_TOU,
         description="DeepSeek V4 Pro (0813); peak price estimate (off-peak half)",
         recommended=False,
     ),
@@ -1531,6 +1560,12 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.14,
         cache_reads_price=0.014,
         description="General purpose chat model",
+        # No `time_of_use`: not on the current pricing page, so no window ratio is
+        # published for it. Third-party write-ups of its era describe a DIFFERENT
+        # window (16:30-00:30 UTC) and a non-uniform discount, which is exactly why
+        # today's schedule must not be attached to it. Stored price stays a
+        # conservative PEAK estimate. See the registry guard in
+        # tests/unit/model/test_pricing.py.
         recommended=True,
     ),
     "deepseek-reasoner": ModelInfo(
@@ -1545,6 +1580,10 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.55,
         cache_reads_price=0.14,
         description="Specialized for complex reasoning tasks",
+        # No `time_of_use`, for the same reason as `deepseek-chat` above and
+        # `deepseek-v4-flash-0731`: unpublished on the current page, and its era's
+        # advertised discount was neither uniform nor aligned to today's window.
+        # See the registry guard in tests/unit/model/test_pricing.py.
         recommended=False,
     ),
 }
