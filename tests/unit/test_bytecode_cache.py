@@ -126,9 +126,15 @@ def test_warming_spawns_the_child_only_when_cold(
 
 
 def test_the_compiler_subprocess_never_raises_on_a_bad_interpreter(
-    monkeypatch: pytest.MonkeyPatch,
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed warm is a lost optimisation, never a failed process."""
+    """A failed warm is a lost optimisation, never a failed process.
+
+    The ``prefix`` fixture is load-bearing here rather than decorative: without
+    a redirect ``_run_child`` declines before it ever reaches ``subprocess.run``,
+    so the test would assert nothing about the ``except`` it exists to cover
+    (review round 2).
+    """
     monkeypatch.setattr(bytecode.subprocess, "run", _raise)
     bytecode._run_child()  # must not raise
 
@@ -241,7 +247,16 @@ def test_a_cache_is_rejected_when_its_header_disagrees(
     assert bytecode._pyc_matches_source(probe, cached) is True
 
     head = bytearray(cached.read_bytes()[:16])
-    head[12] = (head[12] + 1) % 256  # a source mtime the source no longer has
+    # head[8:12] is the stored source MTIME and head[12:16] the stored source
+    # size — mutating the wrong one still fails this assertion, but through the
+    # other branch, which would leave the mtime shape (the `cp -p` case this
+    # test is named for) unproven. Both are exercised.
+    head[8] = (head[8] + 1) % 256
+    cached.write_bytes(bytes(head) + cached.read_bytes()[16:])
+    assert bytecode._pyc_matches_source(probe, cached) is False
+
+    head[8] = (head[8] - 1) % 256  # restore the mtime...
+    head[12] = (head[12] + 1) % 256  # ...and move the stored size instead
     cached.write_bytes(bytes(head) + cached.read_bytes()[16:])
     assert bytecode._pyc_matches_source(probe, cached) is False
 

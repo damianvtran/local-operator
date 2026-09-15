@@ -166,10 +166,19 @@ def _pyc_matches_source(source: Path, cache: Path) -> bool:
     calling the cache current, and nothing repairs it until some unrelated
     edit moves a source mtime forward.
 
-    Returns True for a hash-based ``.pyc`` (invalidated by a source hash this
-    function would have to read the whole file to check, and which no tool in
-    this repo writes), and for the ``check_source`` flag, which means the
-    header asks not to be validated at all.
+    Returns True for a hash-based ``.pyc`` (bit 0: invalidated by a source hash
+    this function would have to read the whole file to check, and which no tool
+    in this repo writes) and for one carrying the bare ``check_source`` bit
+    (bit 1), which is the documented "do not validate this" marker.
+
+    The two bits are NOT the same question, and testing them together is a
+    deliberate approximation with a known divergence: a header with bit 1 set
+    and bit 0 clear is called current here while CPython would still validate
+    its timestamp. No stdlib writer produces that shape — ``py_compile`` writes
+    0 for timestamp, 1 for unchecked hash, 3 for checked hash — and the
+    alternative (declining a checked-hash ``.pyc``) would put a host that
+    legitimately has one into a permanent cold state, which is the failure this
+    module exists to end. Recorded rather than narrowed for that reason.
     """
     try:
         with cache.open("rb") as handle:
@@ -294,6 +303,11 @@ def warm_bytecode_cache_in_background() -> threading.Thread | None:
     load-bearing at the call sites — the daemon runs it inside its FastAPI
     ``lifespan``, where a raise fails startup, and one of the two TUI callers
     reaches it from a function documented as never raising.
+
+    ``Exception``, deliberately: ``BaseException`` would also swallow
+    KeyboardInterrupt and SystemExit, and a process that cannot be interrupted
+    during a background warm is a worse failure than a warm that does not
+    happen.
 
     Returns the thread so a caller (or a test) can join it; ``None`` means
     there was nothing to do and no process was started.
