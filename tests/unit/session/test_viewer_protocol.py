@@ -1177,9 +1177,18 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # reads ``set_drain_callback`` off a duck-typed binding. Viewer-only for the
     # same reason as the rest of this block — an owner session has no wire to
     # hear that frame on, and the frame is the only honest source for the fact.
-    assert len(viewer_only) == 57, (
+    #
+    # 57 → 58 is the desktop Stop button's rung. ``interrupt`` stops the current
+    # turn and returns the owner's receipt, which only exists on the viewer side:
+    # an owner ``Session`` stops its own turn with a local call and has nobody to
+    # dial, so the member is viewer-only by construction rather than by choice.
+    # Its declared home is ``ViewerSessionProtocol`` (the same commit), which is
+    # why the undeclared-member check above does not fire for it — the two
+    # figures answer different questions and this one counts the facade's extra
+    # surface either way.
+    assert len(viewer_only) == 58, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 57, and the aggregate floor is set at 40 against that number. A "
+        "says 58, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

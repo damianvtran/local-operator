@@ -2247,6 +2247,19 @@ class ServingSessionHandle(SessionHandle):
         named as still running. Backgrounded ``bash`` jobs deliberately outlive
         a stop (``background=true`` exists so a build survives the turn that
         started it), so they are named too rather than implied stopped.
+
+        AND THE CARD ON SCREEN IS DENIED HERE, not left to the cancellation
+        below. A gate parked in a LIVE turn is already cleared by it —
+        ``_session.abort`` fires the turn's AbortSignal, the batch's abort
+        watcher unwinds the parked await through the gate closure's ``finally``
+        — which is why this went unnoticed. What cancellation cannot reach is
+        the ORPHAN: a card that outlived its turn (the drain gave up on a tool
+        whose cleanup outran ``ABORT_DRAIN_TIMEOUT_S``, or no turn was live at
+        all) is parked on a future nothing will ever resolve, so the user's own
+        stop left the question on screen while the receipt said a turn had been
+        stopped. Denying FIRST and cutting second is the order that closes the
+        window between the two: with the gate already settled, no answer can
+        start a tool on a fresh verdict while the turn is being torn down.
         """
         self._check_loop_thread()
         # The phone's stop button is the user's own act, so the verdict is
@@ -2254,6 +2267,10 @@ class ServingSessionHandle(SessionHandle):
         # turn ends aborted either way, and what this decides is whether that
         # abort reads as the user's stop or as a failure.
         self._note_deliberate_stop()
+        # Sampled BEFORE the turn is cut, because that is the only moment the
+        # question has an answer.
+        turn_live = self._turn_is_live()
+        self._deny_pending_gates()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
@@ -2264,7 +2281,9 @@ class ServingSessionHandle(SessionHandle):
         before = self._running_children()
         self._cancel_children("stopped from mobile")
         remaining = await self._settled_children(before)
-        return self._abort_receipt(stopped=max(before - remaining, 0), still_running=remaining)
+        return self._abort_receipt(
+            stopped=max(before - remaining, 0), still_running=remaining, turn_live=turn_live
+        )
 
     def _cancel_children(self, reason: str) -> int:
         """Cancel this session's subagents, tolerating a host that has none.
@@ -2330,13 +2349,39 @@ class ServingSessionHandle(SessionHandle):
             remaining = self._running_children()
         return remaining
 
-    def _abort_receipt(self, *, stopped: int, still_running: int) -> str:
+    def _turn_is_live(self) -> bool:
+        """Whether a TURN is live right now, for the abort receipt's first clause.
+
+        Deliberately narrower than :meth:`is_busy`, and the difference is the
+        whole point: a parked gate or a live background job makes a session busy
+        without a turn being under way, and those are exactly the states this
+        receipt must not describe as a stopped turn — the orphan card that
+        outlived its turn, and the spared ``bash`` job the receipt already names
+        separately. Reads the same private turn flag :meth:`is_busy` does, plus
+        the goal loop, which drives turns of its own and is cancelled by this
+        same rung.
+        """
+        if getattr(self._session, "is_streaming", False):
+            return True
+        turn_lock = getattr(self._session, "_turn_lock", None)
+        if turn_lock is not None and turn_lock.locked():
+            return True
+        return self._goal_loop is not None and self._goal_loop.running
+
+    def _abort_receipt(self, *, stopped: int, still_running: int, turn_live: bool) -> str:
         """What the abort actually did, including what it deliberately left.
 
         Survivors are named only when there ARE any: unconditional, it is noise
         on the overwhelmingly common stop that had nothing else running.
+
+        ``turn_live`` is the same rule one clause up: a receipt that opens
+        "stopping this turn" on a press where no turn was running is the kind of
+        overstatement this method's docstring exists to forbid — and it is the
+        sentence a user reads when their stop landed on a screen showing only an
+        orphaned card. The children and job clauses are reported identically
+        either way, because those facts do not depend on it.
         """
-        parts = ["stopping this turn"]
+        parts = ["stopping this turn" if turn_live else "no turn was running"]
         if stopped:
             parts.append(f"stopped {stopped} subagent{'s' if stopped != 1 else ''}")
         if still_running:

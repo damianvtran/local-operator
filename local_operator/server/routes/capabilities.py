@@ -180,6 +180,24 @@ async def capabilities():
                 # types keeps working.
                 "desktop_feed": 1,
                 "desktop_presence": 1,
+                # Stopping a session's CURRENT WORK without ending the session:
+                # POST /v1/desktop/sessions/{id}/interrupt.
+                #
+                # ITS OWN KEY, not a bump of `lifecycle`, and the reason is the
+                # one this whole map is written to: a backend that can stop a
+                # session but cannot interrupt a turn must keep `/stop` working
+                # and must NOT be told it can interrupt. The two are different
+                # promises: `lifecycle` is the kill switch (deny gates, dispose,
+                # release the writer lease, unpublish, exit the runtime), and a
+                # renderer that read a bumped `lifecycle` as "I may interrupt"
+                # would send a press that a pre-interrupt backend answers with a
+                # 404 — or worse, wire it to `/stop` and end the user's session
+                # under a button promising it would not. Absent ⇒ the renderer
+                # HIDES its Stop control and fires nothing; falling back to the
+                # old silent no-op would keep exactly the lie this route exists
+                # to remove. Nothing else in the renderer is gated on it, so
+                # gating anything else here would hide a working surface.
+                "session_interrupt": 1,
             },
         },
     )
