@@ -185,23 +185,31 @@ def open_session(session_id: str) -> bool:
     but incidental focus history. The UI is tried first, and only a UI that is
     unavailable OR fails within its bounded attempt diverts into a terminal.
 
-    The refusal in :data:`DESKTOP_LAUNCH_REFUSED_ENV` still short-circuits rungs
-    1 and 2 together: "never launch the desktop" has to mean the app is not a
-    destination, or the setting would only skip the launch and then have the
-    routing rung pick the same app up again.
+    The refusal in :data:`DESKTOP_LAUNCH_REFUSED_ENV` takes the app out of the
+    LADDER, not just out of the launch: "never launch the desktop" has to mean
+    the app is not a destination, or the setting would only skip the launch and
+    then have a routing rung pick the same running app up again. So rung 3 is
+    narrowed to the TUI surfaces when the refusal is set (review round 2, R13) —
+    without which a refused ladder still landed in a running desktop, measured
+    as ``open_session -> True`` via the desktop viewer.
     """
     app_available = not _desktop_launch_refused()
-    if app_available:
-        # Local import, like the viewer stack below it: this module is reached
-        # from a detached click process where startup cost is the user's
-        # latency, and the surface name is the only thing needed from it here.
-        from local_operator.session.runtime.viewers import DESKTOP_SURFACE
+    # Local import, like the viewer stack below it: this module is reached from a
+    # detached click process where startup cost is the user's latency, and the
+    # surface names are the only thing needed from it here. Imported whichever
+    # way the refusal goes, because rung 3 needs a name from it in both.
+    from local_operator.session.runtime.viewers import DESKTOP_SURFACE, TUI_SURFACE
 
-        if _route_to_viewer(session_id, surface=DESKTOP_SURFACE):
-            return True
+    if app_available and _route_to_viewer(session_id, surface=DESKTOP_SURFACE):
+        return True
     if app_available and _launch_desktop(session_id):
         return True
-    if _route_to_viewer(session_id):
+    # RUNG 3 IS THE ROUTING RUNG, so it is the one that has to honour the
+    # refusal: asking it for "anything at all" let ``choose_viewer``'s own
+    # desktop preference select a running app the user told us not to use. When
+    # the launch is allowed this stays nil, so the fallback rung keeps answering
+    # "is anything left?" exactly as it did.
+    if _route_to_viewer(session_id, surface=None if app_available else TUI_SURFACE):
         return True
     return _spawn_terminal(session_id)
 
@@ -209,9 +217,9 @@ def open_session(session_id: str) -> bool:
 def _desktop_launch_refused() -> bool:
     """Whether the user (or the suite) forbade the desktop app entirely.
 
-    Read in ONE place so the two UI rungs cannot disagree about it, and so
-    "refused" can be answered WITHOUT doing any discovery work — the refusal is
-    checked before the scan, not after it. ``_launch_desktop`` keeps its own
+    Read in ONE place so no rung can disagree about it, and so "refused" can be
+    answered WITHOUT doing any discovery work — the refusal is checked before the
+    scan, not after it. ``_launch_desktop`` keeps its own
     check for the same reason it always had one: it is the rung that could
     actually start the app, and it must not depend on a caller having asked
     first.

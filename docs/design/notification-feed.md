@@ -29,9 +29,13 @@ nobody.
   catalogue into spawning one.
 - `local_operator/server/utils/desktop_presence.py` +
   `local_operator/session/runtime/presence.py` — the machine-wide delivery
-  lease: a route the app beats, an aggregate at `run/desktop/delivery.json`
-  (0700/0600, staged) that every sibling process reads, reaped on a dead pid or a
-  stale heartbeat (the same two rules as `scan_viewers`).
+  lease: a route the app beats, ONE RECORD PER SERVE PROCESS under
+  `run/desktop/delivery/` (0700 directory, 0600 staged write) that every sibling
+  process reads and UNIONS, reaped on a dead pid or a stale heartbeat (the same
+  two rules as `scan_viewers`) and swept from disk by a live publisher once a
+  sibling's record is provably dead. The single-file `run/desktop/delivery.json`
+  this replaced is still READ while an older sibling writes it, and is written by
+  nobody.
 - `notifications.compose.notification_payload` — the payload builder the bridge
   and the feed now share, so `dedupe_key` is byte-identical and one completion
   cannot become two banners.

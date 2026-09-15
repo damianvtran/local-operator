@@ -65,7 +65,7 @@ from local_operator.server.utils.desktop_sessions import (
     WATCH_TTL,
 )
 from local_operator.session.attention import AttentionStore
-from local_operator.session.runtime.presence import desktop_presence
+from local_operator.session.runtime.presence import DesktopPresence, desktop_presence
 
 logger = logging.getLogger(__name__)
 
@@ -217,11 +217,10 @@ class DesktopFeed:
     ``DesktopSessions`` pool. Not a bridge user: nothing here acquires a
     session, and the only ``DesktopSessions`` contact is the read-only
     ``bridged`` callback, which asks which sessions already have a stream and
-    so must be left to their own composer. ITS KEYS ARE ``session/<id>``, the
-    same domain as the rows it is compared against (review round 1, R10) — the
-    route used to pass bare session ids here, which made the whole exclusion
-    dead code rather than merely wrong.
-    therefore must not be duplicated.
+    therefore must not be duplicated. ITS KEYS ARE ``session/<id>``, the same
+    domain as the rows it is compared against (review round 1, R10) — the route
+    used to pass bare session ids here, which made the whole exclusion dead
+    code rather than merely wrong.
     """
 
     def __init__(
@@ -592,6 +591,8 @@ class DesktopFeed:
         """
         bridged = set(self._bridged())
         candidates: list[tuple[str, str, str, str, int]] = []
+        # See below: filled on first use, then reused for every remaining row.
+        presence: DesktopPresence | None = None
         for row in fresh:
             identity = str(row["conversation"])
             if identity in bridged:
@@ -602,7 +603,15 @@ class DesktopFeed:
             state = states.get(identity)
             if state is None or not state.get("unseen"):
                 continue
-            policy = self._focus_policy_for(self._session_id(identity))
+            # ONE presence read per candidate SET (review round 2, R14), taken
+            # lazily so a tick whose rows are all bridged still pays none: the
+            # answer is identical for every row in this tick, and the read is a
+            # mkdir + chmod + readdir + one read per record on disk, so doing it
+            # per candidate made a fleet burst — the scenario this channel
+            # exists for — pay N of them inside one tick against 1 before.
+            if presence is None:
+                presence = desktop_presence(self.root, cached=False)
+            policy = self._focus_policy_for(self._session_id(identity), presence)
             if policy is None:
                 continue
             candidates.append(
@@ -712,7 +721,7 @@ class DesktopFeed:
             ],
         }
 
-    def _focus_policy_for(self, session_id: str) -> str | None:
+    def _focus_policy_for(self, session_id: str, presence: DesktopPresence) -> str | None:
         """``focus_policy`` for this completion, or ``None`` for "raise nothing".
 
         WHY THIS IS DERIVED AND NOT COPIED. ``focus_policy`` is a ROUTING field,
@@ -738,8 +747,14 @@ class DesktopFeed:
         cache here suppressed a completion that landed just after the user switched
         away from the window, and the runtime's own rung 4 defers whenever a desktop is
         reachable, so no surface raised it at all.
+
+        THE READ IS THE CALLER'S, and it arrives as ``presence`` (review round
+        2, R14). It used to be taken here, which made it one uncached read per
+        CANDIDATE; the ticks that decide more than one banner therefore paid
+        N filesystem reads where one serves the set. The terminal-decision
+        argument is untouched by the move: the caller still reads on the tick
+        that decides, so the answer is never the cache's.
         """
-        presence = desktop_presence(self.root, cached=False)
         if presence.attended and presence.session_id == session_id:
             return None
         return "always"

@@ -18,7 +18,7 @@ Against the pinned commit as it stands the module does not even COLLECT:
 fails. That is the strongest form of the R1 statement and the weakest form of
 evidence — restore the helper before measuring anything.
 
-The seventh, ``test_commit_after_connect_touch_invalidates_retained_wal``,
+The seventh, ``test_a_closing_writer_checkpoints_the_retained_wal_into_the_main_file``,
 PASSES on the inert head: the reviewer's R1 report (a poll landing between a
 writer's ``_connect`` touch and its commit caching the new main-file fingerprint
 against the old database contents) did NOT reproduce through THAT test, because
@@ -153,7 +153,15 @@ def test_transient_state_read_failure_does_not_consume_publication(tmp_path, mon
     assert any(f["type"] == "notification" for f in drain(sub))
 
 
-def test_commit_after_connect_touch_invalidates_retained_wal(tmp_path, monkeypatch):
+def test_a_closing_writer_checkpoints_the_retained_wal_into_the_main_file(tmp_path, monkeypatch):
+    """A PIN on the boundary, NOT an R1 reproduction (see the module docstring).
+
+    Named for what it actually pins (review round 2, N4). The old name —
+    ``test_commit_after_connect_touch_invalidates_retained_wal`` — read as an R1
+    repro, which is the reading the module docstring spends a paragraph warning
+    against, and a later edit could have lost the honest labelling while the
+    name kept asserting the opposite.
+    """
     publish(tmp_path, "aaaaaaaaaaaa")
     held = sqlite3.connect(tmp_path / "attention.db")
     held.execute("PRAGMA journal_mode=WAL")

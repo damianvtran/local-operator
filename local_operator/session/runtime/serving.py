@@ -2746,9 +2746,19 @@ class ServingSessionHandle(SessionHandle):
             try:
                 delivered = self._raise_completion_banner(str(kind), session_id)
             except BaseException:
-                # THE CLAIM MUST NOT SURVIVE A RAISE (R7). Release before the
-                # exception leaves, so a failing banner cannot leave the
-                # watermark asserting a toast nobody received.
+                # THE CLAIM MUST NOT SURVIVE A RAISE (R7). Release on the way
+                # out, so a failing banner cannot leave the watermark asserting
+                # a toast nobody received — the worst of both outcomes, since
+                # the completion would then be neither announced nor claimable.
+                #
+                # WHICH EXCEPTIONS ACTUALLY LEAVE, and why the breadth is right
+                # anyway: an ordinary `Exception` is caught by the enclosing
+                # handler below and handed back as `_ANNOUNCE_FAILED` (so the
+                # release still precedes the value the caller reads), while a
+                # non-`Exception` `BaseException` — a `CancelledError` from
+                # `dispose` during the spawn, a `KeyboardInterrupt` — really
+                # propagates out of this arm. The release is needed in BOTH, so
+                # it sits ahead of a bare `raise` rather than in either branch.
                 with contextlib.suppress(Exception):
                     store.release_delivery(identity, token)
                 raise

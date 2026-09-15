@@ -335,6 +335,125 @@ def test_two_live_publishers_neither_clobber_nor_revoke_each_other(tmp_path):
     assert desktop_delivery_present(tmp_path, "complete") is False
 
 
+def _sibling_record(root: Path, instance_id: str, *, pid: int, heartbeat_at: float) -> Path:
+    """A SIBLING publisher's record, written by hand so its death is controlled.
+
+    A real serve process cannot be made to die with its record left behind from
+    inside a test — which is exactly the state R15 is about — so this stands in
+    for the process that was killed before it reached ``close()``. It is written
+    through ``delivery_record_path``, the same path a publisher owns, so the
+    layout under test is production's.
+    """
+    path = delivery_record_path(instance_id, root)
+    path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "instance_id": instance_id,
+                "can_notify": True,
+                "can_notify_kinds": ["complete"],
+                "subscribers": 1,
+                "window": {
+                    "exists": True,
+                    "focused": True,
+                    "visible": True,
+                    "minimized": False,
+                },
+                "session_id": "d" * 12,
+                "heartbeat_at": heartbeat_at,
+            }
+        )
+    )
+    return path
+
+
+def test_a_publisher_prunes_a_dead_siblings_record(tmp_path):
+    """R15: a record nobody reaps on disk grows for the life of the machine.
+
+    The READER reaps a dead record in its answer and never unlinks it, which is
+    right — it must not delete a lease a restarting process may own — so every
+    process that died without running its exit path left a file behind for good,
+    and every reader paid a read for it on the announce path and on every banner
+    decision. A PUBLISHER may sweep, because it can prove death with the same two
+    rules the reader uses plus an age. Both proofs are exercised here: a dead pid
+    and a live pid that has been silent for more than two TTLs.
+    """
+    live = DesktopDeliveryPublisher(tmp_path)
+    dead = _sibling_record(tmp_path, "dead0000", pid=999_999_999, heartbeat_at=time.time())
+    stale = _sibling_record(
+        tmp_path,
+        "stale111",
+        pid=os.getpid(),
+        heartbeat_at=time.time() - 3 * PRESENCE_TTL_S,
+    )
+
+    _beat(live)
+
+    assert not dead.exists(), "a dead publisher's record was left on disk"
+    assert not stale.exists(), "a silent-but-alive publisher's record was left on disk"
+    # The sweep is not a purge: this publisher's own record is here, and the
+    # directory is still a directory a reader can aggregate.
+    assert _record(live, tmp_path).exists()
+    assert desktop_delivery_present(tmp_path, "complete") is True
+    live.close()
+
+
+def test_a_publisher_never_prunes_a_live_siblings_record(tmp_path):
+    """The ownership rule the sweep must not break (R6).
+
+    A record belongs to the process that wrote it, and a publisher that is alive
+    and beating is a live lease: unlinking it would silence every runtime on the
+    machine for a banner somebody can raise — the revocation the per-instance
+    layout exists to prevent, arrived at through the cleanup path instead.
+    """
+    live = DesktopDeliveryPublisher(tmp_path)
+    sibling = _sibling_record(tmp_path, "live0000", pid=os.getpid(), heartbeat_at=time.time())
+
+    _beat(live)
+
+    assert sibling.exists(), "a live sibling's lease was pruned"
+    assert os.getpid() == json.loads(sibling.read_text())["pid"]
+    live.close()
+
+
+def test_the_sweep_leaves_a_record_replaced_while_it_was_deciding(tmp_path, monkeypatch):
+    """The race the sweep has to lose deliberately (R15).
+
+    A publisher decides on a record, and a live sibling can REPLACE it between
+    that decision and the unlink — the staged write ends in ``os.replace``, so a
+    fresh lease can appear on the same path. Unlinking then would delete a live
+    lease on the strength of the dead one that preceded it, so the sweep
+    re-identifies the entry (inode and mtime) and abandons the unlink when it
+    moved.
+
+    Driven through ``pid_alive`` because that is the seam the decision actually
+    turns on: the double replaces the file the instant the sweep is told the pid
+    is gone, which is the window the guard exists for. This one cannot fail on
+    the pre-sweep code (there was no unlink to get wrong) — it fails if the
+    re-identification is removed, which is the property it pins.
+    """
+    from local_operator.server.utils import desktop_presence as module
+
+    live = DesktopDeliveryPublisher(tmp_path)
+    victim = _sibling_record(tmp_path, "victim00", pid=999_999_999, heartbeat_at=time.time())
+
+    def replaced_pid_alive(pid: int) -> bool:
+        replacement = tmp_path / "incoming.json"
+        replacement.write_text(
+            json.dumps({"pid": os.getpid(), "heartbeat_at": time.time(), "instance_id": "victim00"})
+        )
+        os.replace(replacement, victim)
+        return False
+
+    monkeypatch.setattr(module, "pid_alive", replaced_pid_alive)
+    _beat(live)
+    monkeypatch.undo()
+
+    assert victim.exists(), "a record replaced mid-sweep was unlinked anyway"
+    assert json.loads(victim.read_text())["pid"] == os.getpid()
+    live.close()
+
+
 def test_the_claim_dataclass_defaults_to_the_quiet_answer():
     """A default-constructed claim asserts nothing."""
     claim = PresenceClaim()
