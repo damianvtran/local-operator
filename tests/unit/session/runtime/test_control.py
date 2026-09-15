@@ -353,7 +353,9 @@ async def test_old_runtime_unknown_op_is_a_miss_not_a_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_signals) -> None:
+async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A heartbeating runtime whose socket never answers (a TUI burning
     100% CPU, its socket loop queued behind the runaway) is refused without
     --force and signalled with it.
@@ -396,13 +398,17 @@ async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_sign
             # product: the process behind this record is the test runner
             # itself, which never exits, so the production grace (minutes by
             # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
-            # What this cell pins is WHICH rung fires.
+            # What this cell pins is WHICH rung fires. The CONSTANT is patched
+            # rather than a parameter passed (NIT, PR #1141): a knob on the one
+            # value whose purpose is that it cannot be shortened is one
+            # production caller away from landing SIGKILL inside the receiver's
+            # drain.
+            monkeypatch.setattr(control, "SIGTERM_GRACE_S", 0.5)
             stopped = await control.stop_session(
                 target,
                 timeout_s=0.5,
                 force=True,
                 _root=config_dir(),
-                _sigterm_grace_s=0.5,
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -580,7 +586,9 @@ class _AckingHandle(FakeHandle):
 
 
 @pytest.mark.asyncio
-async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals) -> None:
+async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The rung that ACTS leaves exactly one marker, naming itself.
 
     The other half of the invariant below: a rung that escalates must attest,
@@ -611,13 +619,17 @@ async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals
             # product: the process behind this record is the test runner
             # itself, which never exits, so the production grace (minutes by
             # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
-            # What this cell pins is WHICH rung fires.
+            # What this cell pins is WHICH rung fires. The CONSTANT is patched
+            # rather than a parameter passed (NIT, PR #1141): a knob on the one
+            # value whose purpose is that it cannot be shortened is one
+            # production caller away from landing SIGKILL inside the receiver's
+            # drain.
+            monkeypatch.setattr(control, "SIGTERM_GRACE_S", 0.5)
             stopped = await control.stop_session(
                 target,
                 timeout_s=0.5,
                 force=True,
                 _root=config_dir(),
-                _sigterm_grace_s=0.5,
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -825,6 +837,80 @@ async def test_a_healthy_busy_session_is_still_stopped_promptly_by_the_socket_ru
 
 
 @pytest.mark.asyncio
+async def test_a_runtime_that_is_already_leaving_is_asked_before_it_is_stopped(
+    no_signals,
+) -> None:
+    """U1: the drain is real work, so the ladder must not quietly cut it.
+
+    A signalled runtime keeps working for up to ``SIGNAL_DRAIN_S`` and publishes
+    ``leaving`` while it does (``SessionRecord.leaving``). Every OTHER rung
+    reaches it — it is cooperative, its socket answers, and rung 1 ends it in
+    milliseconds — which is the harm rather than the safeguard: the operator's
+    own stop cuts the very turn the signal asked the runtime to finish, and
+    nothing they could read said so (`lop sessions` reported ``live``, and no
+    surface mentioned the signal at all). So this refusal runs BEFORE rung 1.
+
+    Two properties are pinned together, because the fix is only correct with
+    both: the plain stop declines and says what insisting would cost, and
+    ``--force`` still ends it PROMPTLY through the socket — a confirmation, never
+    a postponement. A deliberate stop that got slower or was deferred would be a
+    regression on the property this ladder was built to protect.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_ON_SIGNAL)
+    try:
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert "was signalled" in outcome.line, outcome.line
+        assert "cuts the turn" in outcome.line, outcome.line
+        assert "--force" in outcome.line, outcome.line
+        # The refusal is a PARTIAL result (the target is still running) and is
+        # in the shared set the front ends read, not a method nobody classified.
+        assert outcome.method not in control.ENDED_METHODS
+        assert outcome.method in control.LEFT_ALONE_METHODS
+        # Rung 1 never ran, and nothing was signalled.
+        assert handle.stops == [], "the socket rung must not run for a draining target"
+        assert no_signals[0] == []
+
+        forced = await control.stop_session(target, timeout_s=3.0, force=True, _root=config_dir())
+        assert forced.method == "socket", forced.line
+        assert handle.stops == [True], "--force stops it now, by the socket rung"
+        assert no_signals[0] == [], "and still without a signal"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dead_pid_behind_a_leaving_record_is_reported_as_gone(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is liveness-gated: a stale record cannot refuse a stop.
+
+    A drain always ends in an exit, and a record outlives its process by a
+    moment. The honest report for a target that has already gone is the ladder's
+    own "already exited" — a CLEAN resolution, exit 0 — rather than a refusal
+    about a drain that is over. So the check needs an alive pid, and this cell is
+    the other half of that condition.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    server, record = await _serve()
+    server.close()
+    target = _record_for(record, leaving=LEAVING_ON_SIGNAL)
+    monkeypatch.setattr(control.registry, "pid_alive", lambda *_a, **_k: False)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.2, _root=config_dir())
+        assert outcome.method == "gone", outcome.line
+        assert outcome.method in control.ENDED_METHODS
+    finally:
+        registry.unpublish(target.pid)
+
+
+@pytest.mark.asyncio
 async def test_refresh_moves_a_stale_idle_runtime_over_the_real_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -842,7 +928,53 @@ async def test_refresh_moves_a_stale_idle_runtime_over_the_real_socket(
         outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
         assert outcome.method == "moved", outcome
         assert "retiring now" in outcome.line
+        # And it NAMES the build it is leaving for (NIT, PR #1141): "which of
+        # these is still on the old build" is the question this command exists
+        # to answer, and a version-only label cannot answer it on a host whose
+        # common handover is a same-version rebuild. The label comes from the
+        # runtime's own committed decision, not a second disk read.
+        assert "for the build on disk (0.49.9)" in outcome.line, outcome.line
         assert handle.stops == [True], "the runtime really was asked to leave"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unsettled_install_is_reported_as_unsettled_not_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1/M2 at the front end: the runtime's hedge survives into the METHOD.
+
+    The runtime answers two different sentences now — "build on disk matches"
+    and "the install on disk has not settled yet" — and this is the half that
+    matters to a script: only the first is a settled outcome (exit 0). Collapsing
+    the second into ``current`` is exactly the defect, because `lop refresh`'s
+    own documentation says its first run is `lop-update`, so it lands inside
+    ``BUILD_SETTLE_S`` for a whole fleet.
+    """
+    server, record = await _serve()
+    try:
+
+        async def _answer(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"op": "ack", "detail": "kept: the install on disk has not settled yet"}
+
+        monkeypatch.setattr(control, "_exchange", _answer)
+        outcome = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        assert outcome.method == "unsettled", outcome
+        assert (
+            outcome.method not in control.REFRESH_SETTLED_METHODS
+        ), "an unsettled install is NOT a completed rotation"
+        assert "ask again" in outcome.line, outcome.line
+
+        # The sibling answer keeps its own, settled meaning: the two are one
+        # line of code apart and must not be merged by a later reader.
+        async def _matches(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"op": "ack", "detail": "kept: build on disk matches"}
+
+        monkeypatch.setattr(control, "_exchange", _matches)
+        matched = await control.refresh_session(_record_for(record), timeout_s=1.0)
+        assert matched.method == "current", matched
+        assert matched.method in control.REFRESH_SETTLED_METHODS
     finally:
         server.close()
 
@@ -967,7 +1099,7 @@ async def test_refresh_all_asks_only_live_sessions_and_reports_each(
         assert by_method["unreachable"].session_id == ghost.session_id
         assert no_signals[0] == [], "the rotation path signals nobody, ever"
         summary = control.summarize_refresh(outcomes)
-        assert "1 will move when their turn ends" in summary
+        assert "1 will move when its turn ends" in summary
         assert "1 unreachable" in summary
     finally:
         server.close()

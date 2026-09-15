@@ -166,7 +166,7 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
         return target, [], ""
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         # The front end is RECORDED, not merely accepted: this token is what the
         # durable stop marker names the killer by, and the TUI is a real front
@@ -229,9 +229,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     def fake_targets(root, own_pid=None):  # noqa: ANN001, ANN202
         return targets
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         commands.append(_command)
         # The execution is restricted to what the listing showed (R1-6).
@@ -292,9 +292,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
 async def test_stop_all_repeat_outside_the_window_re_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
@@ -348,9 +348,9 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
     its own warning line so the user can act on it."""
     monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         return [
             control.StopOutcome(9, "sid-9", "z", "refused", 'refused "z" (pid 9) — identity'),
         ]
@@ -372,6 +372,62 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
         assert notices[-1] == "2 sessions: 1 stopped, 1 refused"
         listing = [n for n in notices if "will stop" in n]
         assert listing and listing[0].endswith("stopped 1 of 2")
+
+
+@pytest.mark.asyncio
+async def test_a_target_left_alone_is_named_at_warning_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3: "stopped 1 of 2" cannot say WHICH session was left running.
+
+    ``busy`` (a turn in flight) became a non-clean outcome with the work-aware
+    ladder, and ``draining`` (a signal already has it leaving) joins it here:
+    the session is still running in both, and its NAME is the one thing the user
+    can act on — which is the rule the refusal cell above states for ``refused``.
+    Neither took a line, so ``/stop all`` painted a count and never said which
+    session survived it.
+
+    Severity is asserted through the notice's own token rather than by eye: a
+    receipt that did not stop anything is a WARNING on this surface, exactly
+    like the refusal beside it.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
+    busy_line = 'skipped "z" (pid 9) — a turn is in flight'
+    draining_line = 'skipped "y" (pid 7) — it was signalled and is leaving'
+
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
+        return [
+            control.StopOutcome(9, "sid-9", "z", "busy", busy_line),
+            control.StopOutcome(7, "sid-7", "y", "draining", draining_line),
+        ]
+
+    monkeypatch.setattr(control, "stop_all", fake_all)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        await pilot.pause()
+        app._run_slash_command("/stop all")
+        for _ in range(30):
+            await pilot.pause()
+            if app._session is None:
+                break
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        painted = {block._text: block for block in blocks}
+        assert busy_line in painted, [block._text for block in blocks]
+        assert draining_line in painted
+        warning_token = NoticeBlock("reference", "warning")._token
+        assert painted[busy_line]._token == warning_token
+        assert painted[draining_line]._token == warning_token
 
 
 @pytest.mark.asyncio
@@ -543,9 +599,9 @@ async def test_stop_all_re_arms_when_the_listing_changed(monkeypatch: pytest.Mon
     targets = [_record(101, "alpha")]
     calls: list[str] = []
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         return []
 
@@ -976,7 +1032,7 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
         return target, [], ""
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
@@ -1127,7 +1183,7 @@ async def test_the_unbound_stop_never_reaches_a_look_alike_session(
     stopped: list[str] = []
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(

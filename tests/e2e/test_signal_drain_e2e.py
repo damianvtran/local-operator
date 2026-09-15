@@ -559,6 +559,61 @@ def _install_marker(prefix: Path, ref: str, version: str) -> None:
     (prefix / ".lop-source").write_text(f"{ref} {version}\n", encoding="utf-8")
 
 
+#: A child that lowers ``SIGNAL_DRAIN_S`` before running the production entry
+#: point, for the ONE arm the real constant cannot reach on this harness.
+#:
+#: ``SIGNAL_DRAIN_S`` is read by the runtime when the drain starts, so patching
+#: the module attribute before ``main()`` is enough — and it keeps the knob in
+#: the TEST, where it belongs, rather than adding an env override to shipped
+#: code for the convenience of one cell.
+#:
+#: WHY IT IS NEEDED: the mock provider caps a turn at 60 s (``_mock_bash_sleep``)
+#: and the shipped bound is 120 s, so "work too long to save is cut by the
+#: bound" — half of the cost this design states — could only be established by
+#: READING the deadline (``deadline = loop.time() + SIGNAL_DRAIN_S``, an absolute
+#: deadline, and an unconditional ``stop.set()``) rather than by running it (Q2,
+#: PR #1141). A 3 s bound against a 60 s turn exercises the same path: same
+#: absolute deadline, same unconditional exit, same label.
+_DRAIN_BOUND_DRIVER = """
+import sys
+
+from local_operator.session.runtime import process
+
+process.SIGNAL_DRAIN_S = float(sys.argv[1])
+raise SystemExit(process.main())
+"""
+
+
+def _spawn_with_drain_bound(
+    config_dir: Path, session_id: str, bound_s: float
+) -> subprocess.Popen[bytes]:
+    """``_spawn``'s environment, a driver instead of ``-m``, and a short bound."""
+    return subprocess.Popen(
+        [sys.executable, "-c", _DRAIN_BOUND_DRIVER, str(bound_s)],
+        env=_child_env(config_dir, session_id),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _leaving_of(config_dir: Path, session_id: str) -> str:
+    """What the operator's OWN listing says this session is doing.
+
+    Through ``info.collect.session_rows`` — the builder behind both
+    ``lop sessions --json`` and the human table — rather than through the record
+    directly: the record is the source, and the claim under test is that the
+    fact REACHES the surface a person reads (U2, PR #1141).
+    """
+    from local_operator.info.collect import session_rows
+
+    for row in session_rows(config_dir):
+        if row["session_id"] == session_id:
+            return str(row.get("leaving") or "")
+    return ""
+
+
 @pytest.mark.asyncio
 async def test_refresh_moves_the_idle_stale_runtime_and_queues_the_busy_one(
     headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -613,7 +668,9 @@ async def test_refresh_moves_the_idle_stale_runtime_and_queues_the_busy_one(
                 outcome.method in control.REFRESH_SETTLED_METHODS for outcome in outcomes
             ), report
             summary = control.summarize_refresh(outcomes)
-            assert "1 retiring now" in summary and "1 will move when their turn ends" in summary
+            # Singular count, singular possessive (D3, PR #1141): this line read
+            # "1 will move when their turn ends" before this round.
+            assert "1 retiring now" in summary and "1 will move when its turn ends" in summary
 
             # The idle one really left, at its own boundary, without a signal.
             idle = rig.children["drainrotidle"]
@@ -647,5 +704,179 @@ async def test_refresh_moves_the_idle_stale_runtime_and_queues_the_busy_one(
                 await asyncio.sleep(0.25)
             assert busy.poll() is not None, "a queued move never landed"
             assert busy.returncode == 0
+    finally:
+        await rig.aclose()
+
+
+# ---------------------------------------------------------------------------
+# The drain is visible, and the operator's stop respects it (U1 + U2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn(
+    headless_tui_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U1 and U2 on the real surface: the drain is readable, and a stop honour
+    it.
+
+    THE GAP THIS CLOSES, end to end. Between the signal and the exit a runtime
+    works on for up to ``SIGNAL_DRAIN_S``, and before this change nothing said
+    so: the listing called it ``live``, ``lop refresh`` called it "a turn in
+    flight", and the only witness was ``runtime.log``. An operator who then
+    reached for the deliberate stop cut the very turn the signal had asked the
+    runtime to finish — a destructive remedy that looked safe precisely because
+    the state was invisible (U1/U2, PR #1141).
+
+    Asserted in order, on one real runtime: signing it publishes its pending
+    exit on the RECORD and in the operator's ROW within a second; a plain
+    ``stop_session`` against it REFUSES (and is the reason the turn survives);
+    the turn then completes on its own and the runtime leaves at its boundary
+    with nothing cut off.
+    """
+    from local_operator.info.collect import session_rows
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(300, "signal drain: the pending exit is visible and a stop respects it"):
+            rig.seed_and_spawn("drainvis01")
+            directory = rig.directories["drainvis01"]
+            await rig.park("drainvis01")
+            record = await _wait_record(config, "drainvis01", busy=True)
+            # BEFORE the signal the field says nothing: it is about the pending
+            # exit, not about work — an ordinary busy runtime must not be
+            # relabelled.
+            assert record.leaving == "", record.leaving
+            assert _leaving_of(config, "drainvis01") == ""
+            assert all(row["leaving"] == "" for row in session_rows(config)), session_rows(config)
+            log_before = len(_runtime_log(config))
+
+            started = time.monotonic()
+            os.kill(rig.children["drainvis01"].pid, signal.SIGTERM)
+
+            # THE VISIBILITY: the record the fleet row is built from, and the
+            # row itself, carry it while the turn is still running.
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and _leaving_of(config, "drainvis01") == "":
+                await asyncio.sleep(0.1)
+            published = _leaving_of(config, "drainvis01")
+            assert published == LEAVING_ON_SIGNAL, published
+            assert rig.children["drainvis01"].poll() is None, "the drain is a wait, not a death"
+
+            # THE OPERATOR'S NEXT MOVE: a plain stop must refuse and say what
+            # insisting would cost, rather than cut the turn.
+            target = _record_for(config, "drainvis01")
+            assert target is not None
+            assert target.leaving == LEAVING_ON_SIGNAL, "the record carries it too"
+            outcome = await control.stop_session(target, timeout_s=3.0, _root=config)
+            with capsys.disabled():
+                print(
+                    f"\n=== stop against a draining runtime ===\n{outcome.method}: {outcome.line}"
+                )
+            assert outcome.method == "draining", outcome.line
+            assert "was signalled" in outcome.line and "--force" in outcome.line
+            assert outcome.method in control.LEFT_ALONE_METHODS
+            assert rig.children["drainvis01"].poll() is None, "a refusal signals nothing"
+
+            # THE TURN SURVIVES the whole thing and the runtime leaves by its
+            # own boundary: this is the property the refusal exists to protect,
+            # and it is the exact opposite of the U1 repro (which recorded
+            # ``interrupted``/``user-stop`` and no completion).
+            code = rig.children["drainvis01"].wait(timeout=PARK_S + 90)
+            elapsed = time.monotonic() - started
+            appended = _runtime_log(config)[log_before:]
+            with capsys.disabled():
+                print(
+                    f"exit={code} after {elapsed:.1f}s (parked {PARK_S}s)\n"
+                    f"completed={TURN_COMPLETED in _transcript(directory)} "
+                    f"cut_offs={_cut_off_causes(directory)}"
+                )
+            assert code == 0
+            assert TURN_COMPLETED in _transcript(directory), "the turn did not survive"
+            assert _cut_off_causes(directory) == []
+            # ONE signal and no second one: the ladder under test signalled
+            # nobody (the refusal is what happened), so the drain's own line
+            # appears exactly once. A repeat signal logs its own line.
+            assert appended.count("arrived with work in flight") == 1, appended[-3000:]
+            assert "drain bound" not in appended, "the turn had to be waited out, not cut"
+    finally:
+        await rig.aclose()
+
+
+# ---------------------------------------------------------------------------
+# The bound EXPIRES: a turn too long to save is cut, and labelled honestly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
+    headless_tui_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of the stated cost, BY EXECUTION: the bound cuts.
+
+    The design says work admitted inside the drain is not refused, so work that
+    outlives ``SIGNAL_DRAIN_S`` is cut by the bound and classified
+    honestly. On the real constant that arm was unreachable here — the mock
+    caps a turn at 60 s against a 120 s bound — so it was verified by reading
+    the deadline and the unconditional ``stop.set()``, not by running them (Q2,
+    PR #1141). This cell runs it: a 3 s bound, a real 60 s turn parked in the
+    real tool, one signal.
+
+    Asserted: the runtime leaves at the BOUND (not at the end of the turn) with
+    the expiry line naming that bound; the turn never completes; and the durable
+    outcome a successor reads is the honest ``runtime-shutdown`` rather than a
+    silent disappearance.
+    """
+    config = headless_tui_env
+    bound_s = 3.0
+    rig = _Rig(config)
+    try:
+        with bounded(240, "signal drain: the bound cuts a turn too long to save"):
+            session_id = "drainbound01"
+            rig.directories[session_id] = _seed(config, session_id)
+            rig.children[session_id] = _spawn_with_drain_bound(config, session_id, bound_s)
+            directory = rig.directories[session_id]
+            await rig.park(session_id)
+            record = await _wait_record(config, session_id, busy=True)
+            assert record.busy is True
+            log_before = len(_runtime_log(config))
+
+            started = time.monotonic()
+            os.kill(rig.children[session_id].pid, signal.SIGTERM)
+            code = rig.children[session_id].wait(timeout=PARK_S + 60)
+            elapsed = time.monotonic() - started
+            appended = _runtime_log(config)[log_before:]
+
+            with capsys.disabled():
+                print(
+                    "\n=== the drain bound, injected ===\n"
+                    f"bound={bound_s}s park={PARK_S}s exit={code} elapsed={elapsed:.1f}s\n"
+                    f"completed={TURN_COMPLETED in _transcript(directory)} "
+                    f"cut_offs={_cut_off_causes(directory)}\n"
+                    f"{appended[-1200:]}"
+                )
+            # THE BOUND decided, and it was the INJECTED one: the line names it.
+            assert f"drain bound ({bound_s:.0f}s) expired" in appended, appended[-3000:]
+            # ...and it really cut a turn that had a minute to run: the runtime
+            # was gone long before the work ended.
+            assert elapsed < PARK_S * 0.5, f"the turn ended on its own after {elapsed:.1f}s"
+            assert code == 0, appended[-2000:]
+            # The turn did NOT finish, and the durable record says why — the
+            # same classification the pre-fix immediate kill produced, which is
+            # the honest label for an aborted turn either way.
+            assert TURN_COMPLETED not in _transcript(directory)
+            session = await _successor_boot(directory)
+            try:
+                from local_operator.session.attention import (
+                    AttentionStore,
+                    conversation_identity,
+                )
+
+                state = AttentionStore().state(conversation_identity(directory))
+                assert state.get("cause") == "runtime-shutdown", state
+            finally:
+                await session.dispose()
     finally:
         await rig.aclose()
