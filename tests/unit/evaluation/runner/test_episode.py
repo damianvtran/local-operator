@@ -1346,6 +1346,275 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
     assert "cleanup" in adapter.calls
 
 
+#: The reasoning ladder the canary's route publishes, and the rung it ran at.
+_CANARY_LADDER = ("none", "low", "high", "max")
+
+
+class _TruncatingModel(ScriptedModel):
+    """Plays the canary's output-limit truncations, silent or not.
+
+    The two tokens differ ONLY in whether the reply carried anything: both stop
+    at ``length``, both are billed, both report ``tool_call_count=0``. That is
+    the pair the retreat's boundary has to separate -- ``empty-length`` is the
+    reasoning model that spent its whole budget thinking (``task_002``, the
+    third consecutive one sealing the episode), ``truncated-length`` is the
+    same call whose reply was cut mid-object and has something to correct.
+
+    ``retreat_effort`` is implemented the way the provider client does it:
+    one rung down the model's own ladder, refusing at the bottom. ``retreats``
+    records the rungs, so an assertion can tell "the episode recovered" from
+    "the episode recovered BY retreating".
+    """
+
+    def __init__(self, script: Any, *, effort: str = "max") -> None:
+        super().__init__(script)
+        self.effort = effort
+        self.retreats: list[str] = []
+
+    def retreat_effort(self) -> str | None:
+        index = _CANARY_LADDER.index(self.effort)
+        if index == 0:
+            return None
+        self.effort = _CANARY_LADDER[index - 1]
+        self.retreats.append(self.effort)
+        return self.effort
+
+    async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+        from local_operator.evaluation.runner.model import DecisionRejected
+
+        kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
+        if kind in ("empty-length", "truncated-length"):
+            silent = kind == "empty-length"
+            self.histories.append(tuple(history))
+            self.calls += 1
+            raise DecisionRejected(
+                "Your previous reply was rejected: "
+                + (
+                    "reply carried no tool call and no text: the model ended its turn as "
+                    "'length' without emitting a decision on either channel."
+                    if silent
+                    else "the reply was not one complete JSON object: the object itself was "
+                    "incomplete (cut off or double-escaped)."
+                ),
+                class_key="empty-reply" if silent else "incomplete-json",
+                # The reply the model produced, which is what the bundereader sees.
+                reply="" if silent else '{"actions": [{"kind": "click", "frame_id": "1"}]}',
+                stop_reason="length",
+                # The client's own classification, computed from the stream it
+                # saw. The runner reads this and nothing else.
+                empty_length_truncation=silent,
+                reasoning_effort=self.effort,
+                route=self.route,
+                usage=ModelUsage(
+                    input_tokens=36_221, output_tokens=16_384, reasoning_tokens=16_384
+                ),
+                cost_micros=self._bill(),
+                provider_request_id=f"attempt-{self.calls}",
+            )
+        decision = await super().decide(observation, history, **kwargs)
+        return decision.model_copy(update={"reasoning_effort": self.effort})
+
+
+@pytest.mark.asyncio
+async def test_empty_output_limit_truncations_retreat_the_effort_instead_of_sealing_the_episode(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The canary's zero-scoring failure shape must be recoverable.
+
+    Ground truth, from ``batch-deepseek-flash-canary8``: three episodes each
+    ended on three consecutive replies of ``output_tokens=16384
+    reasoning_tokens=16384 stop_reason=length tool_call_count=0`` -- the model's
+    ENTIRE output budget spent thinking, nothing emitted -- and were sealed
+    ``model_failure`` after 94/82/55 steps. The ordinary harness has a recovery
+    for exactly this (``harness/loop.py``: retry one effort rung lower, bounded
+    by ``MAX_EMPTY_TRUNCATION_RETRIES``); this arm re-prompted at the SAME
+    effort until the corrective bound ran out, which is why the same route
+    failed here and recovered in a session.
+
+    Three silent truncations and then a finish: the first two are retreated
+    (the third is where the retreat allowance is spent, so it counts as an
+    ordinary rejection and the corrective bound still has room), and the
+    episode completes SCORED. Every attempt keeps its own triple, its stop
+    reason and the rung it was asked at.
+    """
+
+    from local_operator.evaluation.evidence.models import ModelRequestPayload
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["empty-length", "empty-length", "empty-length", "finish"])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert outcome.reportability_label == "reportable"
+    # Two retreats, then the allowance is spent -- not three, and not none.
+    assert model.retreats == ["high", "low"]
+    assert model.calls == 4
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # Four billed attempts, four triples: the retries are not hidden, and the
+    # episode's spend is the sum of what it actually cost.
+    assert report.counters is not None
+    assert report.counters.model_request_count == 4
+    assert report.counters.model_response_count == 4
+    # Every attempt is legible as what it was, in the evidence an analyst reads.
+    requests = payloads(root, ModelRequestPayload)
+    assert [request.reasoning_effort for request in requests] == ["max", "high", "low", "low"]
+    responses = payloads(root, ModelResponsePayload)
+    assert [response.stop_reason for response in responses] == ["length"] * 3 + ["stop"]
+    # Silent on BOTH channels: the marker alone does not say that, and it is the
+    # property the retreat is keyed on.
+    assert [response.tool_call_count for response in responses[:3]] == [0, 0, 0]
+    assert [response.reasoning_tokens for response in responses[:3]] == [16_384] * 3
+    errors = payloads(root, ErrorPayload)
+    assert [(e.category, e.diagnostic_code, e.retryable) for e in errors] == [
+        ("model", "decision-rejected", True)
+    ] * 3
+
+
+@pytest.mark.asyncio
+async def test_the_retreat_allowance_is_spent_before_the_corrective_bound_sees_it(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A model that never answers is still bounded, and by the same bound as before.
+
+    The retreat must not become a way to buy unbounded retries. Every attempt
+    here is a silent output-limit truncation, so the two retreats are spent
+    first -- ``max``, then ``high``, then ``low`` -- and from there the empty
+    truncations are ORDINARY rejections, retried at the ceiling effort until
+    ``max_decision_retries`` (2, plus the first attempt) seals the episode as
+    ``model_failure``. So the worst case grows by exactly the retreat
+    allowance: 5 billed attempts where it used to be 3, on an episode that was
+    always going to fail -- and the verdict says so, because ``attempts`` counts
+    the billed calls rather than only the corrective ones that exhausted the
+    bound.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["empty-length"] * 8)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.retreats == ["high", "low"]
+    assert model.calls == 5
+    assert outcome.status == "failed"
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.reason == "model_failure"
+    assert outcome.diagnostic is not None and "5 attempt(s)" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.model_request_count == 5
+
+
+@pytest.mark.asyncio
+async def test_a_truncation_that_carried_text_keeps_the_ordinary_rejection_path(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The NEGATIVE CONTROL, and the line the retreat may not cross.
+
+    Same stop reason, same billing, same zero tool calls -- the reply simply
+    carried text (a JSON batch cut mid-object, which is what ``task_002`` did
+    two calls before it died). That reply is TRUNCATED, not silent: there is
+    something to correct, so it takes the corrective re-prompt at the same
+    effort, and after ``max_decision_retries`` the episode seals
+    ``model_failure`` exactly as it did before this change. Retreating here
+    would spend the effort allowance on a defect the correction can fix, and
+    would make a truncation indistinguishable from a model that cannot answer.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["truncated-length"] * 3 + ["finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.retreats == []
+    assert model.calls == 3
+    assert outcome.status == "failed"
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.reason == "model_failure"
+    assert outcome.diagnostic is not None and "3 attempt(s)" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.model_request_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_cannot_retreat_degrades_to_the_corrective_path(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The retreat is an OPTIONAL client capability, like ``model_reply_metadata``.
+
+    A scripted or historic client has no effort to lower, and the episode must
+    then behave exactly as it did before: the silent truncations are ordinary
+    rejections, bounded by ``max_decision_retries``. The capability check is
+    what keeps the runner usable against a client that models no effort at all,
+    and this is the case that proves the runner does not assume it.
+    """
+
+    class _SilentScriptedModel(ScriptedModel):
+        """``ScriptedModel`` plus the flag, with NO ``retreat_effort``."""
+
+        async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+            from local_operator.evaluation.runner.model import DecisionRejected
+
+            if self.calls < len(self.script) and self.script[self.calls] == "empty-length":
+                self.histories.append(tuple(history))
+                self.calls += 1
+                raise DecisionRejected(
+                    "reply carried no tool call and no text",
+                    reply="",
+                    class_key="empty-reply",
+                    stop_reason="length",
+                    empty_length_truncation=True,
+                    route=self.route,
+                    usage=ModelUsage(input_tokens=36_221, output_tokens=16_384),
+                    cost_micros=self._bill(),
+                )
+            return await super().decide(observation, history, **kwargs)
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _SilentScriptedModel(["empty-length"] * 3 + ["finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.calls == 3
+    assert outcome.score is not None and outcome.score.reason == "model_failure"
+
+
 @pytest.mark.asyncio
 async def test_decision_exhaustion_after_a_step_scores_the_reached_state(
     tmp_path: Path, episode_id: str
