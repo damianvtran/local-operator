@@ -152,21 +152,6 @@ UNCHANGED_FRAMES_NOTE = (
 # from a model reply.
 PROTOCOL_VERSION = "1.0"
 
-#: The output ceiling THIS BENCHMARK declares for one of its own decisions.
-#:
-#: 16,384 is the ceiling the OSWorld reference agent runs at, so it belongs here,
-#: on the arm it describes, rather than as a default the whole harness inherits:
-#: the same ceiling applied to every interface truncated ordinary sessions, of
-#: which 300 calls across 127 sessions had already emitted more than that (agent
-#: review round 1, B1). The arm's own measured defect is what justifies it -- one
-#: decision returned ``output_tokens=97189`` with ``reasoning_tokens=95098`` and
-#: ``stop=stop``, 35 of 410 calls exceeded 16K and the mean call took ~52 s -- and
-#: a decision here is a bounded action envelope plus a rationale, never prose a
-#: user reads. The harness's own bound (``DEFAULT_TURN_OUTPUT_TOKENS``) is far
-#: above this, deliberately: it exists to stop a capability-shaped ask, not to
-#: shape a benchmark's decisions.
-DECISION_MAX_OUTPUT_TOKENS = 16_384
-
 #: Function keys are collapsed to a range in the prompt rather than listed:
 #: F1-F24 is 24 of the vocabulary's 43 entries and the pattern is obvious.
 _FUNCTION_KEY = re.compile(r"F\d+")
@@ -1964,6 +1949,27 @@ class _StreamOutcome:
     stripped_reply_markers: int = 0
 
 
+def _one_rung_lower(ladder: Sequence[str], current: str | None) -> str | None:
+    """The rung directly below ``current`` on ``ladder``, or ``None``.
+
+    The evaluation-side spelling of ``harness/loop.py``'s ``_lower_effort``,
+    which cannot be imported here: the runner may not reach into
+    ``local_operator.harness``'s LOOP (it imports the wire vocabulary and the
+    provider stack behind it), while ``harness.types`` is the shared contract
+    both sides read. ``None`` when there is no ladder, when the current level is
+    unset or is not a level this model lists (a host that set an effort the
+    route rejects -- the wire clients drop it, so stepping from it would be
+    guesswork), or when the current level is already the bottom rung. A retry
+    at the SAME effort reproduces the same silent truncation, so refusing is
+    the honest answer rather than a second identical call.
+    """
+
+    if not ladder or current is None or current not in ladder:
+        return None
+    index = list(ladder).index(current)
+    return ladder[index - 1] if index > 0 else None
+
+
 class ProviderModelClient:
     """Drives a real provider through the session stream function.
 
@@ -2010,6 +2016,61 @@ class ProviderModelClient:
         )
         self._last_provider_context_tokens: int | None = None
         self._last_request_ms = _now_ms()
+        # The effort ceiling an empty-truncation retreat imposed, episode-scoped
+        # and never raised: it is the same piece of state ``AgentLoop`` keeps
+        # across a run (``harness/loop.py``, ``effort_ceiling``) for the same
+        # reason -- the host's resolver hands back ITS OWN spec, so a retreat
+        # recorded only on the run's snapshot would be undone on the next
+        # request. Applied to the RESOLVED spec at build time (``decide``) and
+        # carried on the ``ChatRequest`` as well, which is what stops a frozen
+        # auto-effort override downstream from raising the retry back to the
+        # rung that produced nothing.
+        self._effort_ceiling: str | None = None
+
+    def retreat_effort(self) -> str | None:
+        """Step this episode's decision effort down one rung; ``None`` if it cannot.
+
+        THE SAME MECHANISM THE ORDINARY HARNESS HAS, spelled for one episode.
+        ``harness/loop.py`` retries a reply that spent its whole output budget
+        thinking one effort rung lower (``_lower_effort`` +
+        ``MAX_EMPTY_TRUNCATION_RETRIES``), because the rung that produced
+        silence will produce silence again; the benchmark's decision path had
+        no equivalent, so the same reply was re-prompted at the same effort
+        until ``max_decision_retries`` sealed the episode as a model failure.
+        That is exactly how ``task_002``/``task_010``/``task_012`` scored zero
+        on the 2026-09-15 canary while the ordinary session path recovered.
+
+        Returns the rung now in force, or ``None`` when there is nothing to
+        retreat to -- no ladder, an unset/unlisted current effort, or already
+        at the bottom rung. ``None`` is the caller's signal to leave the
+        ordinary rejection path alone rather than retry at the same effort,
+        which would reproduce the same silent truncation (the same refusal
+        ``_lower_effort`` makes).
+
+        Reads the rung off the model's OWN ladder rather than assuming level
+        names, so a model that spells its ladder differently is not silently
+        stepped to a rung its route rejects -- and an unlisted level is dropped
+        by the wire clients (``providers.clients._reasoning_effort``), which
+        would turn the retry into a no-op.
+
+        A step down the ladder is NOT always a smaller ask: where a route maps
+        several middle rungs to one budget (DeepSeek's ``low`` and ``high`` both
+        ask 65,536), a second retreat is budget-neutral and only the
+        ``reasoning_effort`` parameter moves. Read a second retreat as a second
+        rung, not as a second budget cut -- ``max -> high`` is the step that
+        changes both.
+        """
+
+        ladder = tuple(getattr(self._model_spec, "reasoning_efforts", ()) or ())
+        # The ceiling, not the spec, is the current rung once a retreat is in
+        # force: a second retreat steps below the FIRST one, not below the
+        # effort the host asked for.
+        current = self._effort_ceiling or getattr(self._model_spec, "reasoning_effort", None)
+        lower = _one_rung_lower(ladder, current)
+        if lower is None:
+            return None
+        self._effort_ceiling = lower
+        return lower
 
     @property
     def model_reply_metadata(self) -> dict[str, Any]:
@@ -2033,8 +2094,34 @@ class ProviderModelClient:
         # so the provider can place a cache breakpoint after this stable block;
         # every episode step repeats it verbatim.
         messages = self._context.messages
+        # The spec this request is BUILT from, captured before the stream
+        # starts. The same honour ``harness/loop.py`` pays in ``_model_turn``:
+        # this is what the episode records as the effort APPLIED, and a retreat
+        # in force must be visible in it -- a reader who cannot see which rung
+        # produced which reply cannot tell a recovery from a coincidence. It is
+        # deliberately not read again after the stream: a served-model event
+        # reports who ANSWERED, which is not what we asked.
+        request_model = self._model_spec
+        if self._effort_ceiling is not None:
+            # A retreat is in force. Clamp the spec the request is built from,
+            # because the host's builder hands back its OWN effort (the same
+            # reason ``_effort_ceiling`` exists on the shared loop): without
+            # this the retry goes back out at the rung that just produced
+            # nothing. Lowering only -- and only through the model's own
+            # ladder -- so a spec already at or below the ceiling is untouched.
+            ladder = tuple(getattr(request_model, "reasoning_efforts", ()) or ())
+            current = getattr(request_model, "reasoning_effort", None)
+            if (
+                current is not None
+                and self._effort_ceiling in ladder
+                and current in ladder
+                and list(ladder).index(current) > list(ladder).index(self._effort_ceiling)
+            ):
+                request_model = request_model.model_copy(
+                    update={"reasoning_effort": self._effort_ceiling}
+                )
         request = ChatRequest(
-            model=self._model_spec,
+            model=request_model,
             system_blocks=[
                 (
                     build_system_prompt(action_surface)
@@ -2088,10 +2175,62 @@ class ProviderModelClient:
             # rebuild path clears this scalar (``_last_provider_context_tokens =
             # None``), so by the time the next decision is built there is nothing
             # stale to carry (agent review round 1, n1).
+            effort_ceiling=self._effort_ceiling,
             context_tokens_hint=self._last_provider_context_tokens,
-            # This benchmark's own ceiling, declared here rather than inherited:
-            # see ``DECISION_MAX_OUTPUT_TOKENS``.
-            max_tokens=DECISION_MAX_OUTPUT_TOKENS,
+            # ``max_tokens`` is deliberately NOT named here, and the number this
+            # replaces is why. The arm used to declare its own ceiling of 16,384
+            # (the OSWorld reference agent's), and because a NAMED bound wins
+            # outright over the provider's ladder, that one number overrode it at
+            # every rung: DeepSeek publishes 8K/64K/64K/128K for
+            # none/low/high/max, and this arm asked 16,384 for all four -- above
+            # ``none``'s 8,192 and below the 65,536/65,536/131,072 the other
+            # three rungs ask, the ``max`` rung this canary ran on included. So
+            # the defect is not a number that sat low on the ladder; it is a
+            # hardcoded bound that replaced the ladder, pinning the ask to one
+            # wrong figure instead of tracking the rung the caller requested.
+            # Measured, on the
+            # canary of 2026-09-15: three of five episodes (``task_002``,
+            # ``task_010``, ``task_012``) each ended after three consecutive
+            # replies of ``output_tokens=16384``, ``reasoning_tokens=16384``,
+            # ``stop_reason=length``, ``tool_call_count=0`` -- the model spent
+            # the entire ask thinking and never emitted a decision, and each
+            # episode was sealed ``model_failure`` after 94/82/55 steps.
+            #
+            # Naming nothing is the fix, and it is the shared contract rather
+            # than a second policy: ``ChatRequest``'s own validator fills the
+            # bound from ``harness.types.turn_output_budget`` and marks it
+            # policy-filled, which is exactly what lets
+            # ``providers.clients._effective_max_tokens`` prefer the PROVIDER's
+            # published default for the requested effort. So a decision here
+            # now asks for the same budget an ordinary session on the same
+            # route and effort would ask for, which is the whole point: a
+            # benchmark arm that declares a different ask is measuring a
+            # different product.
+            #
+            # Deriving a number here instead (``turn_output_budget(spec)``, say)
+            # would NOT reach that, and what disqualifies it is rung-INVARIANCE
+            # rather than size: on this route it returns 131,072 --
+            # ``min(DEFAULT_TURN_OUTPUT_TOKENS, advertised)``, i.e. the policy
+            # ceiling itself, never the model's advertised 393,216, which that
+            # function does not return -- and it returns that ONE figure at every
+            # rung. So it is asked at ``none`` too, 16x the 8,192 the provider's
+            # own default asks there, and the ask stops tracking the requested
+            # rung: the same defect as the 16,384 it would replace, at a
+            # different number. (It is asked rather than clamped because a
+            # caller-named bound wins outright over the ladder.)
+            #
+            # What the ladder buys is a bound PER RUNG against the model's
+            # advertised CAPABILITY (393,216 here; the 943,718 shadowed by the
+            # muse-spark spec above), NOT against a long call as such: at
+            # ``max`` this asks 131,072, which is ABOVE the
+            # ``output_tokens=97189`` agent review round 1 (B1) added a cap for.
+            # A single long call at the top rung is affordable by design -- what
+            # was unbounded there was the CAPABILITY being asked for, and what
+            # the retreat bounds is REPEATED spend at a rung that answers with
+            # silence, not one call. The runner cannot import
+            # ``local_operator.providers`` to read the ladder itself (see
+            # ``tests/unit/evaluation/runner/test_isolation.py``), so naming
+            # nothing is also the only reachable spelling of it.
         )
         # Named rather than positional: the outcome carries a shape record
         # beside nine fields, and a tuple unpack would put two same-typed
@@ -2164,6 +2303,14 @@ class ProviderModelClient:
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
             )
+        # The shape the EFFORT RETREAT is keyed on, computed once and read by
+        # the rejection below: a reply cut off at the output limit that said
+        # nothing on EITHER channel is the one failure with a designed recovery
+        # (retry one rung lower), and it is the only shape that gets it. A
+        # truncation that DID emit text or a call is truncated, not silent, and
+        # keeps the ordinary corrective re-prompt -- see ``harness/loop.py``,
+        # which draws the same line on the same two fields.
+        silent_reply = tool_call_count == 0 and not text.strip()
         try:
             # A reply that produced NO tool call and NO text said nothing at
             # all, whatever terminal marker it carried. Left alone it reaches
@@ -2202,7 +2349,7 @@ class ProviderModelClient:
             # where escalating ``tool_choice`` to ``required`` recovered 7/10
             # and a named tool choice only 2/10 -- so the corrective turn is the
             # remedy, not a stronger ``tool_choice``.
-            if tool_call_count == 0 and not text.strip():
+            if silent_reply:
                 raise DecisionParseError(
                     "reply carried no tool call and no text: the model ended its "
                     f"turn as '{stop_reason}' without emitting a decision on "
@@ -2233,15 +2380,25 @@ class ProviderModelClient:
                 # describe a request the wire never carried.
                 offered_tool_count=len(request.tools or ()),
             )
+            # The effort the request was BUILT with, attached to the accepted
+            # decision for the same reason it rides on the rejection below: the
+            # bundle's request payload is the only place a reader can see which
+            # rung produced this reply, and after a retreat that is the
+            # difference between measuring a recovery and assuming one. Set
+            # unconditionally (a spec with no effort records ``None``), because
+            # a field written only after a retreat is absent in exactly the
+            # bundles that have nothing to explain.
+            updates: dict[str, Any] = {
+                "reasoning_effort": getattr(request_model, "reasoning_effort", None)
+            }
             if stripped_reply_markers:
                 # Attached here rather than passed in: the strip is provenance
                 # about how the reply was ASSEMBLED, not a fact about its shape,
                 # so ``parse_decision`` keeps its one question (is this one
                 # valid batch for this observation?) and stays free of the
                 # provider vocabulary the declaration lives in.
-                decision = decision.model_copy(
-                    update={"stripped_reply_markers": stripped_reply_markers}
-                )
+                updates["stripped_reply_markers"] = stripped_reply_markers
+            decision = decision.model_copy(update=updates)
             return decision
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.
@@ -2286,6 +2443,19 @@ class ProviderModelClient:
                 # runaway reply must not be able to inflate the bundle either.
                 reply=shown[:MAX_REJECTED_REPLY_CHARS],
                 class_key=evidence.class_key,
+                # The ONE failure shape the runner is allowed to answer with a
+                # lower effort instead of a corrective re-prompt, classified
+                # HERE because this is the only layer that saw the stream: a
+                # ``length`` stop with nothing on either channel means the
+                # reply's whole budget went to thinking, and the provider's
+                # own ladder is the lever -- there is no reply for a
+                # correction to correct. A truncation that DID carry text or a
+                # call keeps this False and the ordinary re-prompt.
+                empty_length_truncation=silent_reply and stop_reason == "length",
+                # Which rung produced this refusal. After a retreat it is the
+                # retry's rung, so the bundle can show the step-down happening
+                # rather than merely counting three identical failures.
+                reasoning_effort=getattr(request_model, "reasoning_effort", None),
                 # The reply the harness judged has the provider's boundary token
                 # already gone, so this count is the only record in the artifact
                 # that the reply arrived with one -- see ``_rejection_detail``.

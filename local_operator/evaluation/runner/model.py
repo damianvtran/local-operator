@@ -101,6 +101,17 @@ class ModelDecision(ProtocolModel):
     #: count still refers to the channel the token arrived on -- it is a record
     #: of what the assembly did, not a claim about the reply that won.
     stripped_reply_markers: SafeCount = 0
+    #: The reasoning effort this attempt's request was BUILT with -- the rung the
+    #: provider was actually asked for, not the one the run was configured with.
+    #: ``None`` when the route publishes no effort ladder or the client could not
+    #: report one, which is an absent measurement rather than a claim of "no
+    #: effort". It exists because the campaign's one real recovery lever is a
+    #: step DOWN the ladder (an empty output-limit truncation is retried one rung
+    #: lower): without the rung on the request, a bundle reads as three identical
+    #: silent attempts and cannot show that the retry actually changed anything --
+    #: and a score is not comparable across effort levels, so which rung produced
+    #: which reply is a measurement, not diagnostics.
+    reasoning_effort: StrictIdentifier | None = None
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
     compaction: CompactionRecord | None = None
@@ -201,6 +212,8 @@ class DecisionRejected(Exception):
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
         stripped_reply_markers: int = 0,
+        reasoning_effort: str | None = None,
+        empty_length_truncation: bool = False,
     ) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
@@ -245,6 +258,20 @@ class DecisionRejected(Exception):
         # can tell the two apart after the fact -- the recorded reply is the
         # version the harness judged, i.e. with the marker already gone.
         self.stripped_reply_markers = stripped_reply_markers
+        # Which rung produced this refusal, for the reason ``ModelDecision``
+        # records it: it is the only record that a retry changed the question
+        # that was asked.
+        self.reasoning_effort = reasoning_effort
+        # The ONE failure shape the runner may answer with a LOWER EFFORT rather
+        # than a corrective re-prompt: a reply cut off at the output limit with
+        # nothing on either channel (no text, no tool calls), i.e. the whole
+        # budget went to thinking. Classified by the client, which is the only
+        # layer that saw the stream, and carried as a fact so the runner does
+        # not have to re-derive a class from prose -- or, worse, retreat on a
+        # reply that merely looked empty. False for every other refusal,
+        # including a truncation that carried text or a call: that one is
+        # truncated, not silent, and keeps the ordinary re-prompt.
+        self.empty_length_truncation = empty_length_truncation
         # The served route matters even for a rejected reply: a fallback that
         # answered badly still moved the run off its pinned route.
         self.route = route

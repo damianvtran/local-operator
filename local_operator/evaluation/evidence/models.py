@@ -291,6 +291,16 @@ class ModelRequestPayload(ProtocolModel):
     # records them so cache behaviour is auditable offline.
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
+    #: The reasoning effort the request was BUILT with, when the client can
+    #: report one. Defaulted, like the two fields above and for the same reason:
+    #: a bundle written before this field existed still validates, and a client
+    #: with no effort ladder (the scripted and historic clients, most routes)
+    #: records nothing rather than inventing a rung. Present so an attempt that
+    #: was retried one rung LOWER after an empty output-limit truncation is
+    #: legible in the evidence: the step-down is otherwise invisible, and the
+    #: campaign reads these bundles to decide whether the retry recovered the
+    #: episode or merely delayed the failure.
+    reasoning_effort: StrictIdentifier | None = None
 
 
 class ModelResponsePayload(ProtocolModel):

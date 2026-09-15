@@ -57,6 +57,7 @@ from local_operator.harness.types import (
     TextContent,
     Usage,
 )
+from local_operator.providers.clients import _effective_max_tokens
 
 ROUTE = RouteIdentity(provider_id="provider", route_id="route", model_id="model")
 
@@ -1715,23 +1716,32 @@ async def test_the_provider_count_rides_the_next_decision_as_a_context_hint(
 
 
 @pytest.mark.asyncio
-async def test_every_decision_request_is_bounded_before_it_is_sent(tmp_path: Path) -> None:
-    """The benchmark's decision call declares its OWN ceiling, and it is small.
+async def test_every_decision_request_is_bounded_without_naming_a_cap_of_its_own(
+    tmp_path: Path,
+) -> None:
+    """The decision call is BOUNDED, and takes that bound from the contract.
 
-    It never set ``max_tokens``, so the wire carried the model's advertised
-    capability and one measured decision returned ``output_tokens=97189`` with
+    Two defects have lived here and the assertions cover both. The original: the
+    request named nothing, so the wire carried the model's advertised capability
+    -- one measured decision returned ``output_tokens=97189`` with
     ``reasoning_tokens=95098`` (35 of 410 calls above 16K, mean ~52 s). The
-    number is declared HERE rather than inherited from the contract, because
-    16,384 is the reference agent's ceiling and a statement about this arm's
-    requests: applied harness-wide it truncated ordinary turns, 300 calls
-    across 127 sessions having already emitted more than that (agent review
-    round 1, B1).
-    """
-    from local_operator.evaluation.runner.provider_client import (
-        DECISION_MAX_OUTPUT_TOKENS,
-    )
+    fix for that (agent review round 1, B1) was to declare a flat 16,384 HERE,
+    which turned out to be a second defect: a NAMED bound wins outright over the
+    provider's ladder, so that one number was asked at every rung -- above
+    ``none``'s 8,192, below the 65,536/65,536/131,072 the other three rungs ask,
+    and so below the ask of the ``max`` rung this arm actually ran on. Three of
+    five episodes on the 2026-09-15 canary spent the whole ask thinking and scored
+    zero.
 
-    # The arm's own shape: a 1M window advertising 943,718 output tokens.
+    So what is asserted now is the shape that satisfies both: the arm names
+    nothing (``max_tokens_from_policy``), which lets ``_effective_max_tokens``
+    prefer the provider's published default for the requested effort, and the
+    wire still carries the contract's bound rather than the 943,718 the model
+    advertises.
+    """
+
+    # The shape agent review round 1 measured: a 1M window advertising 943,718
+    # output tokens, which went out verbatim as ``max_tokens``.
     spec = ModelSpec(
         provider="openrouter",
         model_id="meta/muse-spark-1.3",
@@ -1743,8 +1753,10 @@ async def test_every_decision_request_is_bounded_before_it_is_sent(tmp_path: Pat
 
     await _drive(client, tmp_path, 2)
 
-    assert [r.max_tokens for r in stream.requests] == [DECISION_MAX_OUTPUT_TOKENS] * 2
-    assert DECISION_MAX_OUTPUT_TOKENS < DEFAULT_TURN_OUTPUT_TOKENS
+    assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
+    assert [r.max_tokens_from_policy for r in stream.requests] == [True, True]
+    assert _effective_max_tokens(stream.requests[0]) == DEFAULT_TURN_OUTPUT_TOKENS
+    assert _effective_max_tokens(stream.requests[0]) < spec.max_output_tokens
 
 
 @pytest.mark.asyncio
@@ -3741,3 +3753,149 @@ async def test_a_tool_use_stop_that_carried_text_is_still_parsed_normally() -> N
     decision = await _client(stream).decide(current, _turns(current))
 
     assert [action.kind for action in decision.action_batch.actions] == ["wait"]
+
+
+# ---------------------------------------------------------------------------
+# The output budget this arm asks for, and the empty-truncation effort retreat
+# ---------------------------------------------------------------------------
+
+#: The route the 2026-09-15 canary ran (``deepseek/deepseek-flash`` at effort
+#: ``max``), as the provider's own listing published it: the 8K/64K/64K/128K
+#: effort ladder and a 393,216 completion ceiling inside a 1M window. PINNED
+#: rather than read from ``build_model_spec``, which resolves the operator's
+#: cached listing and would make this test's numbers depend on the machine it
+#: runs on -- the failure mode of a benchmark test that reads live config.
+_DEEPSEEK_LADDER = ("none", "low", "high", "max")
+_DEEPSEEK_MAX_OUTPUT = 393_216
+_DEEPSEEK_WINDOW = 1_000_000
+
+
+def _thinking_spec(effort: str = "max") -> ModelSpec:
+    return ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        reasoning_efforts=_DEEPSEEK_LADDER,
+        reasoning_effort=effort,
+        max_output_tokens=_DEEPSEEK_MAX_OUTPUT,
+        context_window=_DEEPSEEK_WINDOW,
+    )
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"), [("max", 131_072), ("high", 65_536), ("none", 8_192)]
+)
+@pytest.mark.asyncio
+async def test_a_decision_request_asks_the_providers_own_budget_for_its_effort(
+    effort: str, expected: int
+) -> None:
+    """The arm must not pin the rung with a ceiling of its own.
+
+    Three of five episodes on the 2026-09-15 canary scored ZERO on
+    ``output_tokens=16384 reasoning_tokens=16384 stop_reason=length
+    tool_call_count=0``: the arm named a flat 16,384, and a named bound overrides
+    the ladder outright, so that number went out at every rung -- 2x ``none``'s
+    8,192, below the 65,536/65,536/131,072 of ``low``/``high``/``max``, and so
+    below the ask of the ``max`` rung the canary ran on. The model spent all of
+    it thinking.
+
+    What is asserted is the number that reaches the WIRE, through the same
+    ``_effective_max_tokens`` every provider client calls -- not merely the
+    field the request was built with, because the ladder is applied there.
+    ``max_tokens_from_policy`` is asserted too: it is what tells the wire the
+    bound was nobody's ask, and a request that named a value of its own would
+    silently opt out of the ladder while looking identical on this side.
+    """
+
+    current = observation()
+    stream = ScriptedStream(finish_payload(current))
+    client = _client(stream, model_spec=_thinking_spec(effort))
+
+    await client.decide(current, _turns(current))
+
+    request = stream.requests[0]
+    assert request.max_tokens_from_policy is True
+    assert request.max_tokens != 16_384
+    assert _effective_max_tokens(request) == expected
+
+
+@pytest.mark.asyncio
+async def test_retreat_effort_steps_down_the_models_own_ladder_and_holds_a_ceiling() -> None:
+    """The retreat is one rung of the MODEL's ladder, and it sticks.
+
+    ``None`` at the bottom rung is the refusal the loop makes too: retrying the
+    same effort would reproduce the same silent truncation. The spec the host
+    built is deliberately NOT mutated -- the client keeps its own ceiling -- so
+    a caller that re-reads its spec still sees what it asked for, while every
+    request this episode builds is clamped. That is the property that makes the
+    retry a retreat rather than a replay.
+    """
+
+    spec = _thinking_spec("max")
+    current = observation()
+    stream = ScriptedStream(finish_payload(current))
+    client = _client(stream, model_spec=spec)
+
+    assert client.retreat_effort() == "high"
+    assert client.retreat_effort() == "low"
+    assert client.retreat_effort() == "none"
+    # Bottom rung: no cheaper setting, so the caller keeps the ordinary path.
+    assert client.retreat_effort() is None
+    assert spec.reasoning_effort == "max"
+
+    await client.decide(current, _turns(current))
+
+    request = stream.requests[0]
+    assert request.model.reasoning_effort == "none"
+    assert request.effort_ceiling == "none"
+    assert _effective_max_tokens(request) == 8_192
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_no_effort_ladder_has_nothing_to_retreat_to() -> None:
+    """No ladder, no retreat -- and the caller must be able to tell.
+
+    Most routes publish no ladder at all, and a client that invented a rung
+    would send one the provider rejects (which the wire clients then DROP,
+    turning the retry into a second identical call)."""
+
+    current = observation()
+    client = _client(
+        ScriptedStream(finish_payload(current)),
+        model_spec=ModelSpec(provider="provider", model_id="model"),
+    )
+
+    assert client.retreat_effort() is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_length_truncation_is_flagged_and_a_truncated_reply_is_not() -> None:
+    """Only the SILENT output-limit truncation is marked for an effort retreat.
+
+    Both cases here are ``stop_reason="length"`` and both are billed, which is
+    the point: the line is drawn on the reply's CONTENT, not on the marker. A
+    truncation that streamed text (a JSON batch cut mid-object -- the shape the
+    canary's ``task_002`` hit two calls before it died) has something to correct
+    and keeps the ordinary corrective re-prompt; so does a silence under a
+    ``stop``, which is a provider sending nothing rather than a budget spent on
+    thinking. Marking either one would spend the retreat on a defect the
+    correction can actually fix.
+    """
+
+    current = observation()
+    turns = _turns(current)
+
+    silent = ScriptedStream("", stop_reason="length", reasoning=("thinking" * 512,))
+    with pytest.raises(DecisionRejected) as empty:
+        await _client(silent).decide(current, turns)
+    assert empty.value.empty_length_truncation is True
+    assert empty.value.reasoning_effort is None
+
+    truncated = ScriptedStream('{"actions": [{"kind": "wait"', stop_reason="length")
+    with pytest.raises(DecisionRejected) as cut:
+        await _client(truncated).decide(current, turns)
+    assert cut.value.empty_length_truncation is False
+
+    quiet = ScriptedStream("", stop_reason="stop")
+    with pytest.raises(DecisionRejected) as stopped:
+        await _client(quiet).decide(current, turns)
+    assert stopped.value.empty_length_truncation is False
