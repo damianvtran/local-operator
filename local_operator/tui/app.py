@@ -31868,6 +31868,7 @@ class OperatorApp(App[None]):
                 connected=entry.connected,
                 aggregated=entry.aggregated,
                 routed=entry.routed,
+                time_of_use=entry.time_of_use,
             )
         ]
 

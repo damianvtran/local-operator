@@ -157,6 +157,13 @@ class CatalogueEntry:
     #: and the prices stay honestly unknown underneath it. Nothing but the
     #: display reads it.
     routed: bool = False
+    #: The time-of-use schedule NAME the two prices above are quoted at, if any
+    #: (``ModelInfo.time_of_use`` -> ``DiscoveredModel.time_of_use``). Carried so
+    #: the picker can render the rate IN FORCE rather than the stored PEAK rate —
+    #: a DeepSeek figure shown off-peak at the peak number is 2x the truth for
+    #: ~79% of the week. ``None`` is every provider with no time-of-day structure,
+    #: and it is what keeps such a row rendering byte-identically to before.
+    time_of_use: str | None = None
 
     @property
     def selector(self) -> str:
@@ -1510,6 +1517,7 @@ class ProviderController:
                         output_price=_price(info.output_price, definition),
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                        time_of_use=info.time_of_use,
                     )
                 )
         return entries
@@ -1549,6 +1557,7 @@ class ProviderController:
                             connected=connected,
                             aggregated=definition.id in AGGREGATOR_PROVIDERS,
                             routed=model.routed,
+                            time_of_use=model.time_of_use,
                         )
                     )
             else:
@@ -1566,6 +1575,7 @@ class ProviderController:
                             output_price=_price(info.output_price, definition),
                             connected=connected,
                             aggregated=False,
+                            time_of_use=info.time_of_use,
                         )
                     )
         return entries
@@ -1645,6 +1655,11 @@ class ProviderController:
             # blank the label on exactly the surface that reported the bug.
             # Provider-scoped: `ollama/auto` reaches this same branch (R1).
             routed=is_meta_route_id(model_id, definition.id),
+            # ``info`` is None on the spec-only branch above, and a ``ModelSpec``
+            # carries no price table: a spec-derived row has no schedule to
+            # state, which is why this reads the registry row rather than any
+            # price the row ended up carrying.
+            time_of_use=info.time_of_use if info is not None else None,
         )
 
     async def live_catalogue(
@@ -1794,6 +1809,7 @@ class ProviderController:
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
                         routed=model.routed,
+                        time_of_use=model.time_of_use,
                     )
                 )
         return entries, statuses
