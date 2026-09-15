@@ -126,6 +126,88 @@ def test_runner_core_does_not_import_the_application(module: str) -> None:
     assert not leaked, f"{module} leaked application imports: {leaked}"
 
 
+def _runner_core_modules() -> list[str]:
+    """Every module of the runner package, read from the tree.
+
+    Read from disk rather than by importing: the candidate set has to cover a
+    module no test has imported yet, which is the only way the rule outlives
+    the module somebody adds next. ``__init__`` is left out because every
+    submodule import executes it first, so an import it gained would land in
+    that submodule's own closure anyway -- and
+    ``test_runner_package_import_is_inert`` imports the package on its own.
+    Private modules are kept: the package directory, not a leading underscore,
+    is what bounds the runner core (``from . import _probe`` is a legal import
+    inside it), and a probe that trusts a naming convention is one rename away
+    from silence.
+    """
+    package = REPO / "local_operator" / "evaluation" / "runner"
+    return [
+        f"local_operator.evaluation.runner.{path.stem}"
+        for path in sorted(package.glob("*.py"))
+        if path.name != "__init__.py"
+    ]
+
+
+def test_the_runner_core_reaches_no_application_machinery() -> None:
+    """The rule over the whole runner core, not over a list somebody wrote.
+
+    Every candidate ``test_runner_core_does_not_import_the_application`` probes
+    is a hand-written entry, and the rule it enforces is about the runner core,
+    which is a DIRECTORY: the pin cannot see a file. Measured at 75aa8bc45,
+    adding ``local_operator/evaluation/runner/budget_window.py`` whose module
+    level was one ``import local_operator.config`` left all 19 tests in this
+    file green -- the #1145 shape, judged by nobody. This is the other half of
+    that list: the candidates come from the package directory, so a module
+    nobody remembered to name is judged anyway, and the probe itself is already
+    transitive when it runs. (The transitivity is worth stating because it is
+    what an allowed name is dangerous FOR: ``harness.comms``, ``harness.loop``
+    and ``harness.subagent`` are not themselves denied, and a module ON the list
+    above that imports one of them fails that assertion today -- through the
+    ``local_operator.session``, ``ansi``/``incidents`` and ``paths``/``resume``
+    those closures drag in. So a leaky ALLOWED module is not what this adds:
+    what no assertion covered was a candidate nobody listed, which is what the
+    derivation below is for, and the transitivity is stated so that no reader
+    takes this test for the fix to a hole that was already closed.)
+
+    The verdict is the CLOSURE each candidate drags in, because the transitive
+    half is the whole of what an episode inherits: ``harness.comms`` reaches
+    ``session.transcript`` through its own eager import, so a check limited to
+    direct imports would call an episode that imports it clean while it holds
+    the operator's session package.
+
+    Two stricter forms were considered and are not taken, each for a measured
+    reason:
+
+    * A default-deny allowlist over the closure -- the plainest reading of "an
+      episode may reach the evaluation stack and nothing else" -- fails on
+      today's legitimate tree: ``action_tool`` alone reaches ``harness.types``,
+      ``harness.approval``, ``harness.reply_channel`` and ``harness.wake``.
+      The runner sharing the harness's vocabulary is what the hoists in #1145
+      and #1150 were FOR, so that rule would have to carry an allowlist of
+      every module the two halves share -- and a second, larger list that every
+      new evaluation module then has to be added to, which is the list this
+      file already keeps, read from the other end.
+    * A static walk over the runner's import statements, which would also see
+      what is deferred today, fails on ``provider_client``: its three
+      ``from local_operator.model.configure import ...`` calls inside functions
+      are the deliberate exception that
+      ``test_provider_client_defers_its_configure_import`` pins, and that
+      module eager-imports six denied names. A rule that cannot tell a deferred
+      seam from an eager one has to be relaxed at exactly the sites it must
+      keep watching.
+    """
+    modules = _runner_core_modules()
+    # A candidate set that has collapsed is a check that cannot fail, which is
+    # how the widening this file replaced went unnoticed.
+    assert modules, "the runner package has no module to probe"
+    offenders: dict[str, list[str]] = {}
+    for module in modules:
+        leaked = _leaked(_fresh_import_modules(module))
+        if leaked:
+            offenders[module] = leaked
+    assert not offenders, f"runner-core modules reach application machinery: {offenders}"
+
+
 def test_shared_renderer_is_importable_from_an_episode() -> None:
     """The one renderer an episode calls must not drag the application in.
 
