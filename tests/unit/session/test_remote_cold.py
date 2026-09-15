@@ -843,14 +843,21 @@ async def test_a_cold_viewer_prefers_the_live_wake_index_over_the_checkpoint(
 async def test_a_restored_context_reading_keeps_the_window_it_was_measured_against(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The band must never paint a percentage over 100%.
+    """The cold frame must divide the restored tokens by a REAL window.
 
     The cold spec is built from ``config.yml``, which names a provider and a
-    model but carries no metadata — so ``ModelSpec``'s 128k DEFAULT window
-    applied, while the restored token count had been measured against the 1M
-    window the runtime really had. ``_context_window`` reads the effective
-    spec, so a resumed session painted ``268.2%/128k`` (design round 1, D1) on
-    the one surface whose job is to say how much room is left.
+    model but carries no metadata. Before the cold pair was resolved at all,
+    ``ModelSpec``'s 128k DEFAULT window applied while the restored token count
+    had been measured against the 1M window the runtime really had — and
+    ``_context_window`` reads the effective spec, so a resumed session painted
+    ``268.2%/128k`` (design round 1, D1) on the one surface whose job is to say
+    how much room is left.
+
+    The divisor is asserted, and NOT a ceiling on the percentage. ``32.3%`` here
+    is a property of this fixture: the band paints over-budget readings on
+    purpose (``context_spelling(900_000, 872_000)`` is ``103.2%``), because the
+    percentage is what says the NEXT request overflows — which a stale
+    denominator would hide (review round 2, minor 2).
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
@@ -893,9 +900,10 @@ async def test_a_restored_context_reading_keeps_the_window_it_was_measured_again
         window = int(spec.context_window or 0)
         assert window == 1_000_000, "the window the tokens were measured against must survive"
         assert state.context_tokens is not None
-        assert state.context_tokens / window <= 1.0, (
-            f"the band would paint {state.context_tokens / window:.1%} — a context "
-            "percentage over 100% is not a real reading"
+        assert state.context_window == 1_000_000, (
+            "the restored reading's denominator is the checkpoint's where this process "
+            "resolved no budget of its own (``anthropic`` here: the fresh spec states "
+            "neither ``default_context_window`` nor ``max_context_window``)"
         )
     finally:
         await viewer.dispose()
@@ -975,9 +983,21 @@ def test_the_restore_adopts_a_local_window_with_the_tokens_measured_against_it()
     a denominator from the endpoint: 20,000 tokens from a 32,768 checkpoint read as
     ``488.2%`` of the endpoint's current 4,096 (review round 1, minor 1).
 
-    The gate is now ``_restored_pair`` — the same one the NUMERATOR is taken on —
-    so the two halves cannot disagree, and the assertion below checks both of them
-    rather than only the spec.
+    The numerator and its denominator come from ONE source, and on this
+    population that source is the checkpoint: the 4,096 is
+    ``DEFAULT_LOCAL_CONTEXT``, the route default for a tag no listing row
+    describes, so the fresh spec states no budget of its own and the checkpoint's
+    window is the only real number in the process
+    (``_fresh_spec_states_a_budget``). The account-scoped population is the one
+    that refuses — see
+    ``test_the_restore_refuses_a_stale_window_the_account_has_answered_for`` — and
+    the assertions below check both readers rather than only the spec, which is
+    the part that makes a paint order unable to mix them.
+
+    NOT distinguished here, and not distinguishable from a cold frame: whether a
+    4,096 the endpoint genuinely ANSWERED can be told from this route default.
+    Both write the same fields (``providers/local.py``), so the discrimination
+    belongs to the model layer (design round 2, D2 — deferred on the PR).
     """
     from local_operator.session.frontend_state import (
         FrontendModelSpec,
@@ -1027,9 +1047,16 @@ def test_the_restore_adopts_a_local_window_with_the_tokens_measured_against_it()
     assert (
         context["context_tokens"] == 20_000 and context["context_window"] == window
     ), "the state-level reading is the same pair, so no paint order can mix them"
-    assert (
-        context["context_tokens"] / window < 1.0
-    ), "the frame must not paint a context percentage over 100%"
+    fresh = state.selected_model
+    assert fresh is not None
+    assert fresh.default_context_window is None and fresh.max_context_window is None, (
+        "precondition: an uncovered local tag's route default is not a BUDGET, so this "
+        "process resolved none and the checkpoint's window is the only real denominator "
+        "in it. That is the half of the rule that ADOPTS; the account-scoped half "
+        "refuses, and "
+        "test_the_restore_refuses_a_stale_window_the_account_has_answered_for pins it "
+        "(review round 2, blocker 1)."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1571,9 +1598,14 @@ async def test_a_seeded_reading_carries_the_denominator_the_band_divides_by(
             "later paint, or the numerator and its window arrive a paint apart"
         )
         assert state.context_tokens == 322_546, "the numerator is still a fact"
-        assert (
-            state.context_tokens / state.context_window <= 1.0
-        ), "the first frame must not paint a context percentage over 100%"
+        # NOT asserted here, deliberately: that 322_546/1_000_000 is under 1.0.
+        # Over-budget readings are something the band paints ON PURPOSE —
+        # ``context_spelling(900_000, 872_000)`` starts ``103.2%`` and is asserted
+        # as correct in ``tests/unit/model/test_openai_context.py`` — because the
+        # percentage is what says the NEXT request overflows, which is precisely
+        # the reading a stale denominator hides. The property this frame owes is
+        # the one asserted above: ONE denominator, carried with its numerator
+        # (review round 2, minor 2).
     finally:
         await viewer.dispose()
 
@@ -1853,6 +1885,107 @@ async def test_a_checkpoint_window_is_not_replaced_under_its_own_tokens(
         )
         assert state.cumulative_parent_cost == 12.5
         assert state.cost_knowledge == CostKnowledge.EXACT
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Blocker 1 end to end: the account's CURRENT window governs the first frame.
+
+    A checkpoint written under a 272k budget whose account now answers 872k — and
+    the opt-out direction, a checkpoint under 872k whose account now answers 272k
+    — is the shape where adopting the checkpoint's window splits the first frame
+    from the frame the runtime paints moments later. Measured through both
+    streams' own paths while the gate was absent: ``cold 110.3%/272k`` against
+    ``live 34.4%/872k`` when the account grew, and ``cold 45.9%/872k`` against
+    ``live 147.1%/272k`` when it shrank. The shrank direction is what makes it a
+    blocker rather than an imprecision: 45.9% is calm, and it HIDES an over-budget
+    conversation on the one surface that exists to warn about exactly that
+    (review round 2, blocker 1; design round 2, D1).
+
+    The discrimination is ``_fresh_spec_states_a_budget``: the fresh spec carries
+    ``default_context_window``/``max_context_window``, so the model layer ANSWERED
+    for this pair and the checkpoint's window is the stale one. Only the WINDOW
+    moves — the numerator is the conversation's own reading and stays, which is
+    the pairing the runtime publishes on attach
+    (``frontend_state.refresh_from_session``: ``receipt_context or
+    current.context_tokens`` beside the effective spec's own window).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=tmp_path).update_config(
+        {"hosting": "openai", "model_name": "gpt-5.6-sol"}
+    )
+
+    # The account's own answer, on BOTH fields: that is what says the model layer
+    # resolved this pair, and it is the signal the gate reads.
+    async def _account_answered(config_dir, model, *, stickiness_key):
+        return model.model_copy(
+            update={
+                "context_window": 872_000,
+                "default_context_window": 272_000,
+                "max_context_window": 872_000,
+                "context_metadata_resolved": True,
+            }
+        )
+
+    monkeypatch.setattr(
+        "local_operator.session.attached.resolve_context_metadata", _account_answered
+    )
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("how far along are we?"))
+    await transcript.append_message(
+        Message.assistant(
+            "deep in it", usage=_stamped(250_000, provider="openai", model_id="gpt-5.6-sol")
+        )
+    )
+    # A self-consistent pair, as a real turn-end checkpoint writes: the tokens are
+    # 91.9% of the window they were measured against.
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=250_000,
+        context_window=272_000,
+        selected_model=FrontendModelSpec(
+            provider="openai", model_id="gpt-5.6-sol", context_window=272_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        spec = state.effective_model or state.selected_model
+        assert state.context_tokens == 250_000, "the restored numerator is the conversation's own"
+        assert spec is not None and spec.context_window == 872_000, (
+            "the account's current maximum is what this spec resolved, so the checkpoint's stale "
+            "272k must not replace it — that replacement is the first-frame reading the live "
+            "frame contradicts"
+        )
+        assert state.context_window == 872_000, (
+            "and the state-level field follows it, because that is the window the seed's "
+            "denominator rule vouches (``usage_seed.denominator_window``) — one band, one "
+            "denominator, whichever paint lands last"
+        )
     finally:
         await viewer.dispose()
 
