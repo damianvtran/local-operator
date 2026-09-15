@@ -135,6 +135,54 @@ def test_refused_identity_exits_2(capsys) -> None:
     assert rc == 2
 
 
+def test_a_skipped_busy_target_is_partial_not_clean(capsys) -> None:
+    """A target left alone because a turn is in flight is a PARTIAL result.
+
+    The user asked for these sessions to be stopped and one of them is still
+    running, so a script must not read exit 0 and conclude the machine is
+    quiet. Which is also why the skip gets its own method token (``busy``)
+    rather than reusing the refusal's: the receipt says something different to
+    a human ("stop it again once the turn ends") and the front end derives
+    partial-vs-clean from the token, never from the prose.
+    """
+
+    async def busy(record, *, timeout_s, _root, force=False, _command=None):  # noqa: ANN001, ANN202
+        return _outcome(
+            "busy",
+            line='skipped "the agent" (pid 4242) — a turn is in flight; '
+            "stop it again once the turn ends, or --force to signal it now",
+        )
+
+    with (
+        patch("local_operator.cli._resolve_stop_target", return_value=(_Record(), [], "")),
+        patch("local_operator.session.runtime.control.stop_session", busy),
+    ):
+        rc = stop_command(_args(target="the agent"))
+    assert rc == 2
+    assert "turn is in flight" in capsys.readouterr().out
+
+
+def test_the_all_summary_counts_a_skipped_target_separately(capsys) -> None:
+    """The grouped receipt the ``--all`` path paints names the skip as its own group.
+
+    A kill switch that reported a skipped session under "stopped" would be
+    claiming work it did not do — the one thing the summary exists to prevent.
+    """
+    from local_operator.session.runtime.control import summarize
+
+    outcomes = [
+        _outcome("socket", pid=1, line='stopped "one"'),
+        _outcome("busy", pid=2, line='skipped "two" (pid 2) — a turn is in flight'),
+        _outcome("refused", pid=3, line='refused "three" (pid 3) — identity'),
+    ]
+    line = summarize(outcomes)
+    assert "stopped" in line
+    assert "1 left alone (a turn is in flight)" in line
+    assert "1 refused" in line
+    assert "3 sessions" in line
+    capsys.readouterr()
+
+
 def test_already_exited_is_clean(capsys) -> None:
     """The dead-pid resolution is its own method (``gone``): nothing is
     left for a human to do, so it exits 0 — decided from the method, never

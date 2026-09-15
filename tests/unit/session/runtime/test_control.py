@@ -392,8 +392,17 @@ async def test_force_escalates_past_a_fresh_heartbeat_on_record_identity(no_sign
             assert f"lop stop --pid {target.pid} --force" in refused.line
             assert "must lapse" not in refused.line
             assert no_signals[0] == []
+            # A short rung-2 wait, INJECTED rather than shortened in the
+            # product: the process behind this record is the test runner
+            # itself, which never exits, so the production grace (minutes by
+            # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
+            # What this cell pins is WHICH rung fires.
             stopped = await control.stop_session(
-                target, timeout_s=0.5, force=True, _root=config_dir()
+                target,
+                timeout_s=0.5,
+                force=True,
+                _root=config_dir(),
+                _sigterm_grace_s=0.5,
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -598,8 +607,17 @@ async def test_the_rung_that_fires_stages_the_marker_naming_that_rung(no_signals
             return False, control._SOCKET_SILENT
 
         with mock.patch.object(control, "_confirmed_session_id", _never):
+            # A short rung-2 wait, INJECTED rather than shortened in the
+            # product: the process behind this record is the test runner
+            # itself, which never exits, so the production grace (minutes by
+            # construction — see ``SIGTERM_GRACE_S``) would be spent in full.
+            # What this cell pins is WHICH rung fires.
             stopped = await control.stop_session(
-                target, timeout_s=0.5, force=True, _root=config_dir()
+                target,
+                timeout_s=0.5,
+                force=True,
+                _root=config_dir(),
+                _sigterm_grace_s=0.5,
             )
         assert stopped.method in ("sigterm", "sigkill")
         assert no_signals[0] != []  # the force gate opened
@@ -683,5 +701,124 @@ async def test_a_refused_stop_leaves_no_marker_and_the_death_stays_unattributed(
         assert result is not None
         assert (result[0], result[1]) == ("error", "runtime-killed"), result
         assert f"pid {dead_pid}" in result[2], result[2]
+    finally:
+        server.close()
+
+
+# ---------------------------------------------------------------------------
+# Rotation (`lop refresh`) and the ladder's duty not to cut work in flight
+# ---------------------------------------------------------------------------
+
+
+class _RefreshableHandle(_StoppingHandle):
+    """A handle that can judge itself idle and answer a retirement request."""
+
+    def __init__(self, *, reason: str = "") -> None:
+        super().__init__()
+        self.reason = reason
+        self.probes = 0
+
+    def may_refresh(self) -> str:
+        self.probes += 1
+        return self.reason
+
+
+def test_the_sigkill_rung_outlasts_the_receivers_drain_bound() -> None:
+    """THE INVARIANT between the two halves of the work-aware signal fix.
+
+    A runtime that receives SIGTERM with a turn in flight defers its own
+    disposal by up to ``SIGNAL_DRAIN_S`` (``process._drain_for_signal``). This
+    ladder escalates to SIGKILL after ``SIGTERM_GRACE_S``. If the second number
+    were ever the smaller, the escalation would kill a runtime that was
+    deliberately and correctly finishing a turn — with the one signal nothing
+    can catch — and the receiver-side fix would be worse than useless.
+    """
+
+    from local_operator.session.runtime.types import SIGNAL_DRAIN_S
+
+    assert (
+        control.SIGTERM_GRACE_S > SIGNAL_DRAIN_S
+    ), "the ladder's SIGTERM→SIGKILL grace must outlast the runtime's drain bound"
+    assert (
+        control.SIGTERM_GRACE_S - SIGNAL_DRAIN_S >= 5.0
+    ), "the margin must leave the receiver real time to dispose after its drain"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_target_is_skipped_and_nobody_signals_it(no_signals) -> None:
+    """Our own kill switch must not cut a turn in flight.
+
+    Rung 1 (the socket op) is tried first and would stop a cooperative runtime
+    promptly even mid-turn — a stop the user asked for is one they want. What
+    this pins is the case the sweep needs: the socket did NOT answer, and the
+    record says a turn is in flight, so the ladder declines to signal and says
+    so, naming both ways forward.
+    """
+    from local_operator.paths import config_dir as ambient_config_dir
+
+    server, record = await _serve()
+    server.close()  # nothing listening: rung 1 is a scheduled miss
+    target = _record_for(record, busy=True)
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.5, _root=config_dir())
+        assert outcome.method == "busy"
+        assert "turn is in flight" in outcome.line
+        assert "--force" in outcome.line
+        assert no_signals[0] == [], "a busy target is never signalled"
+    finally:
+        registry.unpublish(target.pid)
+    assert ambient_config_dir  # the ambient root is never used by these tests
+
+
+@pytest.mark.asyncio
+async def test_force_signals_the_busy_target_the_plain_stop_left_alone(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` is the escape hatch, and it escalates the whole ladder.
+
+    The flag already means "signal this runtime I cannot reach"; someone who
+    types it has accepted that the turn goes with it.
+    """
+    import signal as signal_mod
+
+    server, record = await _serve()
+    server.close()
+    target = _record_for(record, busy=True)
+    monkeypatch.setattr(control, "_identity_by_record", lambda _r: (True, ""))
+    # The target dies the moment it is signalled. This test is about WHICH rung
+    # runs with --force (the skip is bypassed), not about the escalation order
+    # or the grace budgets, which the constant tests own; without this the
+    # ladder would spend its real SIGTERM grace waiting for a process that the
+    # fixture keeps alive on purpose.
+    monkeypatch.setattr(control.registry, "pid_alive", lambda _pid, **_: not no_signals[0])
+    try:
+        outcome = await control.stop_session(target, timeout_s=0.5, force=True, _root=config_dir())
+        assert [sig for _pid, sig in no_signals[0]] == [signal_mod.SIGTERM]
+        assert outcome.method == "sigterm"
+    finally:
+        registry.unpublish(target.pid)
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_busy_session_is_still_stopped_promptly_by_the_socket_rung(
+    no_signals,
+) -> None:
+    """The skip never applies to a target that ANSWERS: a deliberate stop wins.
+
+    This is the behaviour the whole ladder exists for — ``lop stop <busy
+    session>`` must end it, mid-turn, without waiting for the receiver's drain
+    bound. The skip is scoped to targets whose own socket is silent, which is
+    why it sits after rung 1.
+    """
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        outcome = await control.stop_session(
+            _record_for(record, busy=True), timeout_s=3.0, _root=config_dir()
+        )
+        assert outcome.method == "socket"
+        assert handle.stops == [True]
+        assert no_signals[0] == []
     finally:
         server.close()

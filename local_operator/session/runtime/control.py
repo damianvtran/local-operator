@@ -13,11 +13,17 @@ import. asyncio is imported inside the functions that dial a socket, exactly
 as :func:`local_operator.session.runtime.serving.spawn_owned_session` defers
 its heavy imports. ``tests/unit/test_import_graph.py`` is the guard.
 
-**The escalation ladder** (see :data:`SIGTERM_GRACE_S` for each rung's
-budget): a graceful ``stop`` control op the runtime serves itself → SIGTERM
-(the runtime's existing signal handler runs the same clean exit) → SIGKILL
-(state orphaned; the existing stale-record/lease machinery recovers, and the
-outcome is reported as ``killed``).
+**The escalation ladder** (see :data:`SIGTERM_GRACE_S` and
+:data:`SIGKILL_CONFIRM_S` for the two rungs' budgets, which differ on purpose):
+a graceful ``stop`` control op the runtime serves itself → a SKIP for
+a target whose record reports a turn in flight → SIGTERM (the runtime's signal
+handler defers its own disposal to the end of that turn, bounded by
+``SIGNAL_DRAIN_S``; ``SIGTERM_GRACE_S`` outlasts the bound so this rung cannot
+escalate inside it) → SIGKILL (state orphaned; the existing stale-record/lease
+machinery recovers, and the outcome is reported as ``killed``). The skip and
+the drain are the two halves of one rule — this ladder is one of the senders
+that must not cut work in flight, and the receiver is the one that can tell
+whether it is mid-turn.
 
 **Pid-reuse safety.** Before ANY signal is sent, the target's identity is
 confirmed. A pid is not proof of identity — a SIGKILLed runtime leaves its
@@ -81,6 +87,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import (
     HEARTBEAT_TIMEOUT_S,
     RUN_DIRNAME,
+    SIGNAL_DRAIN_S,
     SessionRecord,
     session_dir,
 )
@@ -99,13 +106,15 @@ DEFAULT_BACKGROUND_ON_RESUME = True
 
 #: Which stop method produced an outcome, in escalation order. The runtime's
 #: own control socket (``socket``) is the graceful rung; the two signals are
-#: the escalation; the remaining two name the non-signalled resolutions.
+#: the escalation; the remaining three name the non-signalled resolutions.
 #: ``gone`` is a process that left the table before the ladder reached it
 #: (already exited — nothing to do, not a failure); ``refused`` is the
-#: ladder declining to signal because identity could not be confirmed. Kept
-#: distinct so a front end can decide "partial" from the method alone
-#: rather than by parsing the receipt line.
-Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused"
+#: ladder declining to signal because identity could not be confirmed;
+#: ``busy`` is the ladder declining to signal because the target reports a
+#: turn in flight (see :func:`stop_session`). Kept distinct so a front end can
+#: decide "partial" from the method alone rather than by parsing the receipt
+#: line.
+Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused" | "busy"
 
 #: How long to wait, after the graceful ``stop`` op is acked, for the process
 #: to actually exit before escalating to SIGTERM. The op acks before its clean
@@ -115,12 +124,37 @@ Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused"
 #: trade patience for promptness.
 DEFAULT_TIMEOUT_S = 10.0
 
-#: The SIGTERM rung's budget: the runtime's existing handler runs the same
-#: deny → dispose → unpublish ordering the socket op does, and 3 s is the
-#: process drain budget the mobile child already uses elsewhere
-#: (``process.DEFAULT_GRACE_S``). After this, the runtime is not listening to
-#: anyone and SIGKILL is the only remaining answer.
-SIGTERM_GRACE_S = 3.0
+#: The SIGTERM rung's budget: how long the ladder waits for a signalled
+#: runtime to exit before escalating to SIGKILL.
+#:
+#: THE INVARIANT: this MUST be longer than ``types.SIGNAL_DRAIN_S``, the bound
+#: on how long a runtime with a turn in flight defers its own disposal after a
+#: signal (``process._drain_for_signal``). A ladder that escalated inside that
+#: window would SIGKILL a runtime that was deliberately, correctly finishing a
+#: turn — the escalation would destroy the very work the receiver's drain exists
+#: to save, and do it with the one signal nothing can catch. Derived rather than
+#: written as a second number so the two cannot drift apart, plus a margin: the
+#: receiver still has to deny parked gates, dispose, flush the transcript and
+#: unpublish its record after the drain closes before its pid goes away.
+#:
+#: The cost is honest and bounded: a target that is silent on its socket AND
+#: reports work in flight takes this long to resolve, because the ladder cannot
+#: tell "draining politely" from "wedged" while the socket is silent. That is
+#: the correct trade — see the drain's own docstring — and ``stop_session``
+#: skips a target whose record still says it is busy, so the wait is only paid
+#: for a runtime whose published state has gone stale.
+SIGTERM_GRACE_S = SIGNAL_DRAIN_S + 30.0
+
+#: How long to wait for a SIGKILLed process to actually disappear.
+#:
+#: NOT the same budget as ``SIGTERM_GRACE_S``, deliberately, and the difference
+#: is what the two rungs mean. SIGTERM asks, so its grace has to outlast the
+#: receiver's own drain (see above); SIGKILL cannot be refused at all, so there
+#: is nothing to wait FOR — this covers only a process wedged in an
+#: uninterruptible syscall, and it is the 3 s the mobile child already used as
+#: its process drain budget. Spending the SIGTERM grace here too would add two
+#: and a half minutes to every escalated kill and buy no information.
+SIGKILL_CONFIRM_S = 3.0
 
 #: Budget for one identity-confirming socket round trip. Identity
 #: confirmation is a ping-class exchange, not a turn: if the runtime cannot
@@ -896,8 +930,13 @@ async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grac
 
     Called only AFTER identity confirmation — this is the rung that can hit
     a process, which is exactly why nothing reaches it unconfirmed. SIGTERM
-    rides the runtime's existing handler (the same clean exit as the socket
-    op); SIGKILL has no handler by definition — state is orphaned and
+    rides the runtime's existing handler, which is NO LONGER the same shape as
+    the socket op: the socket op is a deliberate stop and cuts a live turn,
+    while the handler defers its own disposal to the end of any turn in flight
+    and is bounded by ``types.SIGNAL_DRAIN_S`` (see ``process._drain_for_signal``).
+    That is why ``SIGTERM_GRACE_S`` is derived from that bound rather than
+    chosen: a grace shorter than the drain would escalate to the next line
+    mid-drain. SIGKILL has no handler by definition — state is orphaned and
     recovered by the stale-record reap plus the lease's dead-owner recovery,
     which is exactly what those mechanisms exist for.
     """
@@ -935,20 +974,39 @@ async def stop_session(
     force: bool = False,
     _root: Path | None = None,
     _command: str = "control.stop_session",
+    _sigterm_grace_s: float | None = None,
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
 
-    The escalation ladder in order: graceful socket op → identity-confirmed
-    SIGTERM → identity-confirmed SIGKILL, with a refuse when identity cannot
-    be confirmed ahead of a signal. See the module docstring for the rules;
+    The escalation ladder in order: graceful socket op → a skip when the
+    record says a turn is in flight → identity-confirmed SIGTERM →
+    identity-confirmed SIGKILL, with a refuse when identity cannot be
+    confirmed ahead of a signal. See the module docstring for the rules;
     this function is where they are enforced in order.
+
+    The skip sits BETWEEN the socket rung and the identity gate on purpose.
+    A cooperative runtime is stopped deliberately and promptly by the socket
+    op even mid-turn — a stop the user asked for IS a stop they want — and the
+    skip only applies once that rung has failed, i.e. to a target whose own
+    socket will not answer.
 
     ``force`` admits the record-field identity proof when the socket cannot
     answer — the explicit opt-in for a heartbeating-but-starved process the
-    refusal rule would otherwise hold forever (see ``_identity_by_record``).
+    refusal rule would otherwise hold forever (see ``_identity_by_record``) —
+    and, for the same reason, it is what signals a target that reports a turn
+    in flight instead of skipping it.
 
     ``_root`` is the config root (tests inject one); production callers use
     the ambient ``config_dir()``.
+
+    ``_sigterm_grace_s`` is rung 2's wait and exists ONLY for tests: several
+    unit cells keep a target alive on purpose to force the escalation, and the
+    production grace (``SIGNAL_DRAIN_S`` plus a margin — see the constant) is
+    minutes long by construction, which turned two of them into 153-second
+    tests the moment the receiver learned to drain. Production callers must not
+    pass it: the real value is the one the invariant protects, and a knob here
+    would let a caller shorten the wait until SIGKILL lands mid-drain, which is
+    the failure that constant exists to prevent.
 
     ``_command`` is the front end the stop came from, carried verbatim into
     every rung's stop marker so the artifact can name its author — the tokens
@@ -1000,6 +1058,44 @@ async def stop_session(
             method=method,
             line=f'"{name}" already exited',
             wakes_dormant=wakes,
+        )
+
+    # A SIGNAL MUST NOT CUT WORK IN FLIGHT — and this ladder is one of the
+    # senders that owes that. With the receiver's drain in place a SIGTERM is no
+    # longer fatal to a mid-turn runtime, so the real cost of signalling here is
+    # not data loss but a wait: the receiver drains to the end of its turn, while
+    # this caller sits in ``_await_pid_exit`` for up to ``SIGTERM_GRACE_S``. The
+    # record already publishes the one fact needed to avoid both, so the ladder
+    # asks it FIRST and skips a target that reports a turn in flight.
+    #
+    # WHY THE RECORD'S BIT AND NOT THE SOCKET'S: a cooperative runtime never
+    # reaches this branch — rung 1 above stopped it, deliberately and promptly —
+    # so by construction this is the case where the socket did NOT answer the
+    # request, and for a silent target the record is the only evidence available.
+    # It is derived state, stale by up to one heartbeat (15 s), and both
+    # directions of that staleness are already covered: stale-true skips a
+    # target that has since gone idle (reported, and one command away),
+    # stale-false signals one that is in fact busy and is then drained by the
+    # receiver under the invariant on ``SIGTERM_GRACE_S``. Neither can cut a
+    # turn.
+    #
+    # ``--force`` ESCALATES PAST IT, and that is deliberate: the flag already
+    # means "use the weaker identity proof and signal this process I cannot reach"
+    # — the operator explicitly asking for signals against a runtime that will
+    # not answer. Someone who types it has accepted that the turn goes too. A
+    # plain stop refuses rather than surprising them, and the refusal names both
+    # ways forward.
+    if record.busy and not force:
+        method = "busy"
+        return StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name=name,
+            method=method,
+            line=(
+                f'skipped "{name}" (pid {record.pid}) — a turn is in flight; '
+                "stop it again once the turn ends, or --force to signal it now"
+            ),
         )
 
     # Identity gate before ANY signal — the pid-reuse rule. Confirmed here,
@@ -1068,7 +1164,14 @@ async def stop_session(
     # indistinguishable afterwards from a crash, UNLESS the sender said so
     # before sending.
     _write_stop_marker(record, root, "sigterm", command=_command)
-    if await _signal_and_confirm(record, signal.SIGTERM, SIGTERM_GRACE_S):
+    # Rung 2 is a REQUEST, so its wait must outlast the receiver's own drain
+    # (``SIGTERM_GRACE_S``). Rung 3's budget is deliberately not this one: see
+    # ``SIGKILL_CONFIRM_S``.
+    if await _signal_and_confirm(
+        record,
+        signal.SIGTERM,
+        SIGTERM_GRACE_S if _sigterm_grace_s is None else _sigterm_grace_s,
+    ):
         wakes = await _park_wakes(record, root)
         _recover_record(record, root)
         method = "sigterm"
@@ -1092,7 +1195,7 @@ async def stop_session(
     # and names sigkill, so the next reader learns which rung killed it, that
     # it was deliberate, and who did it.
     _write_stop_marker(record, root, "sigkill", command=_command)
-    await _signal_and_confirm(record, signal.SIGKILL, SIGTERM_GRACE_S)
+    await _signal_and_confirm(record, signal.SIGKILL, SIGKILL_CONFIRM_S)
     wakes = await _park_wakes(record, root)
     _recover_record(record, root)
     method = "sigkill"
@@ -1204,7 +1307,10 @@ async def stop_all(
 
 
 #: Outcomes that count as "the session is no longer running", i.e. the stop
-#: did its job. Everything else (``refused``) is the partial case.
+#: did its job. Everything else (``refused``, ``busy``) is the partial case —
+#: and both are partial for the same reason: the target is still running. Read
+#: by the front ends' exit codes and by :func:`summarize`, so `lop stop --all`
+#: reports the same partial-vs-clean verdict whichever rung declined.
 ENDED_METHODS = frozenset({"socket", "sigterm", "sigkill", "gone"})
 
 
@@ -1214,10 +1320,11 @@ def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) ->
     Reconciles with the promise the listing made: leads with the total the
     user was told would be stopped, then the rung grouping — the honest
     summary of an escalation is how many stopped cleanly, how many needed a
-    signal, how many were already gone and how many were refused, not twelve
-    identical lines. ``own`` is the caller's in-process outcome (the TUI's
-    own session), folded into the total and the ``stopped`` count so the
-    numbers add up on one line instead of across three.
+    signal, how many were already gone, how many were left alone because a
+    turn was in flight and how many were refused, not twelve identical lines.
+    ``own`` is the caller's in-process outcome (the TUI's own session), folded
+    into the total and the ``stopped`` count so the numbers add up on one line
+    instead of across three.
     """
     everything = list(outcomes) + ([own] if own is not None else [])
     if not everything:
@@ -1227,6 +1334,7 @@ def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) ->
         ("sigterm", "stopped via sigterm"),
         ("sigkill", "killed"),
         ("gone", "already exited"),
+        ("busy", "left alone (a turn is in flight)"),
         ("refused", "refused"),
     ]
     parts: list[str] = []
