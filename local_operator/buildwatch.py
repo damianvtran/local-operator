@@ -83,6 +83,42 @@ BUILD_SETTLE_S = 10.0
 BUILD_STAGGER_S = 20.0
 
 
+#: THE ROTATION ANSWERS, one definition each.
+#:
+#: A runtime answers ``lop refresh`` with the sentence it decided from
+#: (``Server._refresh_if_idle``) and the caller routes on that sentence rather
+#: than re-deriving the decision (``session/runtime/control.refresh_session``),
+#: so the two ends are a WIRE CONTRACT and a reword at either end fails
+#: SILENTLY: the matcher misses and falls through to its generic ``kept``
+#: branch, turning a diagnosis into "was not moved: …" (review round 2, NIT-1).
+#: They live HERE, beside the settle question they describe, for the reason
+#: ``types.LEAVING_ON_SIGNAL`` gives for living in ``types``: one module both
+#: ends import, so a reword is a loud failure at one call site instead of a
+#: silent drift across three literals.
+KEPT_MATCHES = "kept: build on disk matches"
+
+#: The install on disk has moved and has not settled yet. Distinct from
+#: ``KEPT_MATCHES`` on purpose: a caller must never read one as the other, and
+#: collapsing them into "already current" with a zero exit status IS the D1/M2
+#: defect this answer exists to fix (PR #1141).
+KEPT_UNSETTLED = "kept: the install on disk has not settled yet"
+
+#: THE RETIRED HEDGE, honoured FOR EVER rather than only during a rollout.
+#:
+#: Before the two answers above existed, one runtime sentence covered both: a
+#: runtime that had not judged a freshly moved marker said this, and so did one
+#: whose install genuinely matched. It is still spoken by every runtime started
+#: before this change — a running process keeps its own code until build skew
+#: retires it, and that skew window is precisely the window ``lop refresh`` is
+#: aimed at (its own docstring says its first run is ``lop-update``) — so a
+#: caller that matched only ``KEPT_MATCHES`` would miss the whole fleet that
+#: exists at update time and answer "already current" about an install that has
+#: moved. ``KEPT_MATCHES`` is therefore matched as a PREFIX, which covers this
+#: sentence too: honouring the retired string is a cross-version contract, not
+#: an implementation detail to be tidied away later.
+KEPT_MATCHES_OR_UNSETTLED = "kept: build on disk matches (or has not settled)"
+
+
 def positive_seconds(raw: str, default: float) -> float:
     """``raw`` as a positive float, else ``default``.
 
@@ -343,6 +379,45 @@ def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
     if newer is None or _settle_elapsed():
         return None
     return newer
+
+
+def moved_and_unsettled(version: str, source_ref: str) -> bool:
+    """The settle question about a stamp somebody ELSE published.
+
+    :func:`pending_build` asks it about the stamp THIS process booted from. A
+    caller holding a DISCOVERY RECORD — the build a runtime published about
+    itself — needs the same answer about a build it never loaded, and that
+    caller is ``lop refresh``: the answer it reads comes from the runtime's own
+    code, so inside the settle window after ``lop-update`` the whole live fleet
+    is still running the PREVIOUS build and can only answer what that build
+    knew. Reading the marker here is what makes the caller honest about those
+    runtimes without asking anything of them (design round 2 D1 / UX round 2
+    U6 / QA round 2 O1, PR #1141); ``control.refresh_session`` carries the full
+    argument.
+
+    ``False`` when the record published no stamp at all: with nothing to
+    compare, the marker cannot be said to have moved PAST it, so the runtime's
+    own "matches" stands rather than being second-guessed.
+
+    An UNREADABLE OR ABSENT MARKER AGE counts as NOT SETTLED, which is
+    ``_settle_elapsed``'s documented direction rather than a new rule — the
+    install may still be mid-write, and the cost of the doubt is one more ask.
+    A read that RAISES is the other fallback (``False``: no evidence of a
+    move), because this is called while composing a receipt for a person and a
+    failed probe there must not become a traceback.
+    """
+    if not version and not source_ref:
+        return False
+    try:
+        from local_operator.update import BuildStamp
+
+        # ``pending_build`` is the ONE definition of this question; asking it
+        # again here in terms of a raw marker read is how the two ends would
+        # come to disagree about the same file.
+        return pending_build(BuildStamp(version=version, source_ref=source_ref)) is not None
+    except Exception:  # noqa: BLE001 — a failed probe is "no evidence", not a crash
+        logger.debug("settle question unanswerable for a published stamp", exc_info=True)
+        return False
 
 
 def build_pair(boot: "BuildStamp | None", newer: "BuildStamp") -> str:

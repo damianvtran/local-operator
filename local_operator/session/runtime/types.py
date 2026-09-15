@@ -320,6 +320,34 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #: that the ladder's escalation cannot land inside this window.
 SIGNAL_DRAIN_S = 120.0
 
+
+def bound_text(seconds: float) -> str:
+    """One bound, as a person reads it: ``2 min``, ``2.5 min``, ``30s``.
+
+    ONE FORMATTER, BECAUSE TWO NEARBY BOUNDS IN TWO UNITS READ AS TWO DIFFERENT
+    KINDS OF NUMBER. The receiver's drain bound and the sender's grace are
+    120 s and 150 s — genuinely different waits, deliberately 30 s apart — and
+    they used to print as ``(up to 2 min)`` and ``waiting up to 150s``, which
+    invites the reader to compare a rounded figure against an exact one and
+    wonder whether they are the same bound (design round 2, D4, PR #1141).
+
+    Minutes, because both bounds are minutes-scale and both lines are prose
+    about a wait a person is sitting in front of; ``:g`` trims the trailing
+    zero so the common case stays ``2 min`` rather than ``2.0 min``, while a
+    sub-minute bound falls back to whole seconds rather than printing
+    ``0.5 min``. Every call site derives its number from the constant, never
+    types it: a bound that moves must move in the words too, or the receipt
+    lies about the wait it is describing.
+
+    HERE, beside the numbers, for the same reason those are: the runtime's
+    record phrase and the ladder's receipts are two front ends' prose about
+    ONE constant, and the formatter is how they agree on how to say it.
+    """
+    if seconds < 60.0:
+        return f"{seconds:.0f}s"
+    return f"{seconds / 60.0:g} min"
+
+
 #: What a runtime publishes on its record (``SessionRecord.leaving``) the moment
 #: a termination signal arrives and it starts draining, and what it answers a
 #: rotation with while that drain runs.
@@ -336,7 +364,18 @@ SIGNAL_DRAIN_S = 120.0
 #: HERE, in the module the child and the ladder both already import, for the
 #: reason ``SIGNAL_DRAIN_S`` is: the runtime writes it and two front ends read
 #: it, and a copy of the sentence in each would be three places to drift.
-LEAVING_ON_SIGNAL = "signalled; leaving when its turn ends"
+#:
+#: WHY THE BOUND IS IN THE SENTENCE. The row that carries this is the one the
+#: operator reads most (``lop sessions``' trailing column), and on its own the
+#: sentence promises a boundary the 120 s bound can take away: a turn longer
+#: than ``SIGNAL_DRAIN_S`` does not reach its boundary, it is cut, and after
+#: that the row simply disappears — the honest cause is only visible by
+#: reopening the session. ``lop refresh``'s receipt already carried
+#: ``(up to 2 min)``; every other surface that shows the drain now says it too,
+#: because they all read this one phrase (UX round 2, U9). The bound is
+#: rendered from the constant beside it (``bound_text``), never typed, so it
+#: cannot drift from the wait it describes.
+LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(SIGNAL_DRAIN_S)})"
 
 #: What a runtime publishes when the departure was forced by THE BUILD ON DISK
 #: rather than by a signal: it has committed to leaving and is finishing the

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
+from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
 from local_operator.tui.widgets.info_panel import (
     INFO_COPY_KEY,
     InfoScreen,
@@ -126,6 +128,55 @@ def _lines(snapshot: InfoSnapshot | None, live: LiveState | None = None, width: 
 
 def _text(snapshot: InfoSnapshot | None, live: LiveState | None = None, width: int = 83) -> str:
     return "\n".join(_lines(snapshot, live, width))
+
+
+def test_a_draining_session_says_so_instead_of_busy() -> None:
+    """UX round 2, U8: the drain must reach the surface the operator is typing in.
+
+    ``SessionLine.leaving`` was populated by this PR and rendered nowhere, so
+    ``/info`` printed an ordinary ``busy`` beside a session that had already
+    been signalled — while ``lop sessions`` and the refresh receipt said
+    otherwise about the same runtime. That is the invisibility U1/U2 removed,
+    surviving on the one fleet surface a user reads WITHOUT leaving the app.
+
+    Asserted on the rendered strings, and asserted as a REPLACEMENT rather than
+    an addition: the phrase already says the runtime is working, so printing
+    ``busy`` beside it would be two facts where there is one.
+
+    The phrase is placed before the facts this section sheds, so it is the
+    SECOND-TO-LAST item to go on a narrow frame — pinned here at a width where
+    the memory figure and the uptime are already gone.
+    """
+    line = SessionLine(
+        pid=4244,
+        kind="daemon",
+        state="live",
+        session_id="b1f2c3d4e5f6",
+        conversation_name="uxtuidrain",
+        model_label="test/mock",
+        uptime_s=10.0,
+        rss_bytes=125_000_000,
+        # A draining runtime IS busy. Both fields set is the real shape, not a
+        # contrived one — the record publishes exactly this pair.
+        busy=True,
+        leaving=LEAVING_ON_SIGNAL,
+    )
+    snapshot = _snapshot(sessions=SessionsInfo(lines=(line,), total=1, live=1))
+
+    wide = _text(snapshot)
+    assert LEAVING_ON_SIGNAL in wide, wide
+    assert "busy" not in wide, wide
+
+    narrow = _text(snapshot, width=70)
+    assert LEAVING_ON_SIGNAL in narrow, narrow
+
+    # And an ordinary busy session is untouched: no phrase, and the word it has
+    # always carried.
+    ordinary = _text(
+        _snapshot(sessions=SessionsInfo(lines=(replace(line, leaving=""),), total=1, live=1))
+    )
+    assert "busy" in ordinary, ordinary
+    assert "signalled" not in ordinary, ordinary
 
 
 # -- the loading frame --------------------------------------------------------

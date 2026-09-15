@@ -467,7 +467,12 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     )
     out = capsys.readouterr().out
     assert "LEAVING" in out
-    assert "signalled; leaving when its turn ends" in out
+    assert LEAVING_ON_SIGNAL in out, out
+    # ...AND THE BOUND IS INSIDE IT. The row is where an operator decides whether
+    # to touch a draining runtime, and the phrase alone promises a boundary the
+    # 120 s bound can take away (U9): the qualified sentence is the shipped one,
+    # and the column has to be wide enough to print it whole.
+    assert "(up to 2 min)" in out, out
     # The drain does NOT reclassify the row: STATE is liveness (the process IS
     # alive and heartbeating), and the drain is what it is doing — the same
     # division the NEEDS column makes for a parked gate.
@@ -478,6 +483,27 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     # change that has nothing to do with the LEAVING column.
     row = next(line for line in out.splitlines() if line.startswith("live"))
     assert re.match(r"live\s+4243\b", row), row
+
+
+def test_the_leaving_column_fits_the_shipped_phrase() -> None:
+    """The column width IS the phrase's width, so a reword cannot silently cut it.
+
+    ``cli`` deliberately keeps session internals out of its module scope, so the
+    two cannot be tied together by an import; the pin lives here instead, at the
+    seam that would actually break. ``_fit_cell`` cuts an over-wide cell with a
+    marker rather than wrapping it, which is right for an unforeseeable value and
+    wrong for this one — the phrase is a constant this project authors, so any
+    excess means the two drifted and the new clause is being sliced off the row
+    an operator reads (UX round 2, U9).
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    assert cli.LEAVING_COLUMN_WIDTH == cell_len(LEAVING_ON_SIGNAL), (
+        f"LEAVING_COLUMN_WIDTH={cli.LEAVING_COLUMN_WIDTH} but the phrase is "
+        f"{cell_len(LEAVING_ON_SIGNAL)} cells: {LEAVING_ON_SIGNAL!r}"
+    )
 
 
 def test_the_leaving_column_is_absent_when_nobody_is_leaving(monkeypatch: Any, capsys: Any) -> None:

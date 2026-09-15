@@ -82,6 +82,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.buildwatch import KEPT_MATCHES, KEPT_UNSETTLED, moved_and_unsettled
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import (
@@ -89,6 +90,7 @@ from local_operator.session.runtime.types import (
     RUN_DIRNAME,
     SIGNAL_DRAIN_S,
     SessionRecord,
+    bound_text,
     session_dir,
 )
 
@@ -115,6 +117,58 @@ DEFAULT_BACKGROUND_ON_RESUME = True
 #: decide "partial" from the method alone rather than by parsing the receipt
 #: line.
 Method = str  # "socket" | "sigterm" | "sigkill" | "gone" | "refused" | "busy"
+
+
+def _from_a_shell(command: str) -> bool:
+    """Did this stop come from the CLI rather than the TUI?
+
+    Read off ``_command``, the front end's own name for the request, which both
+    callers already set verbatim for the stop marker (``lop stop`` / ``lop stop
+    --all`` from the CLI, ``/stop`` / ``/stop --all`` from the TUI). Deriving it
+    from the value they already pass keeps ONE convention alive rather than
+    adding a second parameter that would have to be kept in step with it.
+    """
+    return not command.startswith("/")
+
+
+def _force_remedy(pid: int, from_a_shell: bool) -> str:
+    """The one next step a refusal may name, in words the CALLER can act on.
+
+    A SURFACE MUST NEVER OFFER AN ACTION IT CANNOT ACCEPT (UX round 2, U7).
+    The refusal below is composed here, in the module both front ends share,
+    and it used to name ``--force`` unconditionally — which the TUI paints
+    verbatim and cannot parse: ``/stop --force <id>`` answers "no live session
+    matches '--force <id>'" about a session that is live and listed one
+    keystroke away. The flag is real and worth naming, so the fix is to name it
+    in the vocabulary of the surface that will read the line: ``lop stop``
+    takes it directly, and the TUI's route to it is a shell (the pattern the
+    app already uses elsewhere for a remedy it does not own).
+    """
+    if from_a_shell:
+        return "--force to stop it anyway"
+    return f"to force it, run lop stop --force {pid} in a shell"
+
+
+def _wait_line(name: str, pid: int, *, from_a_shell: bool) -> str:
+    """The bound-bearing line a rung announces before it spends it.
+
+    Both forms name the bound for the reason ``on_wait`` exists (U5): the pause
+    is minutes long and a front end that says nothing for its whole length
+    reads as a hang. Only the vocabulary differs, and ``SIGKILL``/"drain" are
+    the CLI's: the TUI paints this line verbatim and promised "waiting for it
+    to answer" in its own copy, so entering the kill vocabulary there for the
+    first time is a sentence the app has never used (design round 2, D2).
+    """
+    if from_a_shell:
+        return (
+            f'waiting up to {bound_text(SIGTERM_GRACE_S)} for "{name}" (pid {pid}) '
+            "to drain before SIGKILL"
+        )
+    return (
+        f'waiting up to {bound_text(SIGTERM_GRACE_S)} for "{name}" (pid {pid}) '
+        "to answer; it is killed at the bound if it never does"
+    )
+
 
 #: How long to wait, after the graceful ``stop`` op is acked, for the process
 #: to actually exit before escalating to SIGTERM. The op acks before its clean
@@ -1065,15 +1119,25 @@ async def stop_session(
     # one written by a runtime that predates the field) may simply lack it.
     leaving = getattr(record, "leaving", "") or ""
     if leaving and not force and registry.pid_alive(record.pid):
+        # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
+        # asked: ``--force`` is a flag of ``lop stop`` and the TUI's ``/stop``
+        # takes no flags at all (U7). Named in the reader's own vocabulary —
+        # see ``_force_remedy`` — because a surface that offers an action it
+        # cannot accept is the defect, not the wording.
+        #
+        # AND THE FIRST REMEDY IS NOTHING. The exit is already scheduled by the
+        # runtime itself, so "skipped … (--force …)" alone reads as "this did
+        # not work — retry if you meant it", when the answer for almost every
+        # operator is to let it finish (UX round 2, NIT-2).
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
             name=name,
             method="draining",
             line=(
-                f'skipped "{name}" (pid {record.pid}) — it was signalled and is leaving '
-                "at its next boundary; stopping it now cuts the turn it is finishing "
-                "(--force to stop it anyway)"
+                f'skipped "{name}" (pid {record.pid}) — {_drain_phrase(record)}; stopping '
+                "it now cuts the turn it is finishing — it leaves by itself, nothing "
+                f"to do ({_force_remedy(record.pid, _from_a_shell(_command))})"
             ),
         )
 
@@ -1257,10 +1321,7 @@ async def stop_session(
     # callback rather than a print because this module is shared by the CLI and
     # the TUI, which paint in different places.
     if on_wait is not None:
-        on_wait(
-            f'waiting up to {SIGTERM_GRACE_S:.0f}s for "{name}" (pid {record.pid}) '
-            "to drain before SIGKILL"
-        )
+        on_wait(_wait_line(name, record.pid, from_a_shell=_from_a_shell(_command)))
     if await _signal_and_confirm(
         record,
         signal.SIGTERM,
@@ -1558,6 +1619,76 @@ def _build_label(record: SessionRecord) -> str:
     return version or ref[:7] or "an unrecorded build"
 
 
+def _settle_question(record: SessionRecord) -> tuple[str, str]:
+    """``("unsettled", "")`` or ``("current", "")`` for a "matches" answer.
+
+    THE DECIDING HALF OF THE ANSWER LIVES IN THE OTHER PROCESS, AND THAT
+    PROCESS IS THE OLD CODE. ``Server._refresh_if_idle`` learned to separate
+    "the install on disk has moved and has not settled" from "matches" — but a
+    runtime keeps the code it booted with until build skew retires it, so the
+    fleet alive when ``lop-update`` replaces the install answers the ONE
+    hedged sentence its own build knows: ``kept: build on disk matches (or has
+    not settled)``. Folding that into ``current`` (exit 0) tells a rotating
+    script the fleet is done in exactly the window ``lop refresh``'s own
+    docstring says it is for — its first run IS ``lop-update`` — while every
+    member of that fleet is about to retire. The design, UX and QA rounds
+    reproduced that independently on this head (design D1, UX U6, QA O1).
+
+    SO THE QUESTION IS ASKED HERE, CLI-SIDE, and it can be: the record carries
+    the runtime's own boot stamp (``version``/``source_ref``, published since
+    long before this change) and the marker read is stdlib-only
+    (``buildwatch.moved_and_unsettled``). Two facts meet — the stamp the record
+    says it is running, and the marker on disk now — and only their combination
+    can distinguish "it is on the build on disk" from "the disk has moved past
+    it and nobody has judged it yet". ``build_changed`` deliberately refuses to
+    make that distinction (it answers "may I act"), which is why this asks
+    ``pending_build``'s question instead of reusing its result.
+
+    Read against the marker THIS process can see, which in production is the
+    same install the runtime published — the record's stamp came from that
+    install, and both ends resolve the same prefix (``LOP_BUILD_PREFIX`` or
+    ``sys.prefix``). A caller run from a DIFFERENT install than the fleet (a
+    worktree CLI against the tool-install runtimes, a test harness) is the one
+    shape where the two reads can disagree, and there the doubt resolves to
+    ``unsettled`` — "ask again", which is the honest instruction when the two
+    builds in play are not the same one.
+
+    WHAT IS LEFT AS ``current``: a runtime that answers "matches" while the
+    marker has moved AND settled. Its own read of the same file says otherwise,
+    so it is either a race of microseconds against a settling marker or a
+    disagreement about which install is on disk; either way the runtime answers
+    ``retiring`` on the next ask, seconds later, and there is no ladder method
+    for "its stamp is not the disk's but it has not committed". Reported as
+    ``current`` rather than dressed up as an ``unsettled`` whose sentence ("the
+    install changed a moment ago") would be false.
+
+    Never raises: ``moved_and_unsettled`` folds every probe failure into
+    ``False``, and this is read while composing a receipt for a person.
+    """
+    if moved_and_unsettled(record.version or "", record.source_ref or ""):
+        return "unsettled", ""
+    return "current", ""
+
+
+def _drain_phrase(record: SessionRecord) -> str:
+    """What to say about a drain whose TRIGGER this front end cannot see.
+
+    Two things now commit a runtime to leaving, and only the runtime knows which
+    it was: a termination signal, and a build replaced on disk while a turn was
+    in flight. A hard-coded "it was signalled" is therefore false for every
+    build-driven drain — and the refusal below fires for those too, because the
+    record carries the commit whichever trigger made it. So the phrase is
+    quoted from the record, where the trigger wrote it, and this one vocabulary
+    then serves ``lop sessions``, ``/info``, this ladder and the rotation
+    receipt (UX round 2, U8/U9; the reconciliation of PR #1108).
+
+    The fallback is for a peer running a build that predates the field: it
+    answers ``kept: already leaving`` without publishing a phrase, and the
+    sentence it gets is the one that was true before the field existed.
+    """
+    return record.leaving or "it was signalled and is leaving at its next boundary"
+
+
 def _refresh_line(record: SessionRecord, running: str, method: str, detail: str) -> str:
     """The one human receipt line for one rotation, per resolution.
 
@@ -1588,11 +1719,24 @@ def _refresh_line(record: SessionRecord, running: str, method: str, detail: str)
     if method == "busy":
         return f"{where} has a turn in flight — it moves when that turn ends"
     if method == "draining":
-        # The bound is named because its EXISTENCE is the operator's problem, not
-        # its value: without it two minutes of waiting reads as a hang (U2).
+        # THE RUNTIME'S OWN WORDS, quoted rather than paraphrased. Two triggers
+        # commit a runtime to a drain — a termination signal, and a build
+        # replaced on disk while a turn was in flight — and this receipt cannot
+        # tell them apart, so a sentence that hard-codes "was signalled" states
+        # the wrong one for half its readers. The phrase comes from the trigger,
+        # carries its own bound where it has one, and is the same string
+        # ``lop sessions`` prints and the TUI's ``/info`` row shows: one
+        # vocabulary for one state, written by the one call that also sends the
+        # drain to the app (UX round 2, U8/U9).
+        #
+        # A runtime that committed to a drain without publishing a phrase (a
+        # peer running an older build of this same branch) still gets an
+        # honest receipt: the answer it gave IS its own sentence.
+        if record.leaving:
+            return f"{where} {record.leaving}"
         return (
-            f"{where} was signalled and is finishing the turn in flight — "
-            f"it leaves at its next boundary (up to {SIGNAL_DRAIN_S / 60:.0f} min)"
+            f"{where} is already leaving — the exit is scheduled, not queued "
+            f"(up to {bound_text(SIGNAL_DRAIN_S)})"
         )
     if method == "unsettled":
         return (
@@ -1653,20 +1797,29 @@ async def refresh_session(
         # ``kept: <reason>`` refusals (see ``Server._retire_for``).
         #
         # THE NEW ``kept:`` ANSWERS ARE COMPARED AS WHOLE SENTENCES, and both sit
-        # ahead of the generic ``kept`` fallback because each is a state the
-        # caller must not read as its neighbour does: ``already leaving`` is not
-        # busy-with-a-queued-move (the exit is already scheduled), and "the
-        # install on disk has not settled yet" is not "matches" — collapsing
-        # those two into "already current" with a zero exit status IS the D1/M2
-        # defect. A runtime older than these answers never sends them.
+        # ahead of the generic ``kept`` fallback and of the ``matches`` prefix
+        # below, because each is a state the caller must not read as its
+        # neighbour does: ``already leaving`` is not busy-with-a-queued-move (the
+        # exit is already scheduled), and "the install on disk has not settled
+        # yet" is not "matches" — collapsing those two into "already current"
+        # with a zero exit status IS the D1/M2 defect. Both sentences are
+        # module constants so a reword cannot silently stop matching.
         if answer.startswith("retiring"):
             method, detail = "moved", answer.removeprefix("retiring").removeprefix(" to ").strip()
         elif answer == "kept: already leaving":
             method, detail = "draining", ""
-        elif answer == "kept: the install on disk has not settled yet":
+        elif answer == KEPT_UNSETTLED:
             method, detail = "unsettled", ""
-        elif answer.startswith("kept: build on disk matches"):
-            method, detail = "current", ""
+        elif answer.startswith(KEPT_MATCHES):
+            # A PREFIX MATCH, deliberately, and it covers TWO sentences: this
+            # head's ``KEPT_MATCHES`` and the RETIRED hedge
+            # ``KEPT_MATCHES_OR_UNSETTLED`` that every runtime started before
+            # this change still answers. That is a cross-version contract — see
+            # the constant — so the retired string must keep routing here
+            # rather than being tidied out of the matcher.
+            #
+            # AND IT DOES NOT MEAN "current" ON ITS OWN. See ``_settle_question``.
+            method, detail = _settle_question(record)
         elif answer == "kept: busy":
             method, detail = "busy", ""
         else:

@@ -748,7 +748,9 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             glyph, ink = WEDGED_MARKER, "danger"
         elif line.is_self:
             glyph, ink = ATTACHED_MARKER, "muted"
-        elif line.busy:
+        elif line.busy or line.leaving:
+            # A draining session IS working (``busy`` is true of it), so it keeps
+            # the working ink; what changes is the words beside it, above.
             glyph, ink = IDLE_MARKER, "accent"
         else:
             glyph, ink = IDLE_MARKER, "muted"
@@ -768,6 +770,21 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
             bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+        # THE DRAIN, BEFORE the facts this row sheds. It is placed high in the
+        # list on purpose: the shed drops whole items from the RIGHT, so a fact
+        # appended after the memory figure is the first to go on a narrow frame
+        # — and "this runtime has been signalled and is finishing its turn" is
+        # the opposite of a disposable fact, it is the one that changes what the
+        # reader may safely do next. Without this branch a draining session
+        # rendered as an ordinary `busy` one on the very surface the operator is
+        # typing into, while every other row said otherwise (UX round 2, U8).
+        # The words are the record's own phrase, so this surface, `lop sessions`
+        # and the catalogue cannot drift into three vocabularies for one state —
+        # and the phrase is written by the same call that carries the drain to
+        # the APP (``RuntimeServer.announce_retiring``), so the two cannot
+        # disagree about whether this row is draining at all.
+        if line.leaving:
+            bits.append(line.leaving)
         bits.append(format_duration(line.uptime_s))
         # BOTH of these are shed on a row that is not answering, not merely
         # ordered after the facts (design round 2, D4): usage is sampled for
@@ -786,7 +803,10 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
             bits.append(f"needs {line.pending}")
-        elif line.busy and line.state != "wedged":
+        elif line.busy and line.state != "wedged" and not line.leaving:
+            # `busy` is what the phrase above already says in full, and printing
+            # both reads as two facts where there is one. The wedged guard makes
+            # the same argument for the other state whose words already cover it.
             bits.append("busy")
         metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
         name = line.conversation_name or line.session_id or f"pid {line.pid}"
