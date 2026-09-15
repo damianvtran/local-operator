@@ -6,7 +6,9 @@ set -euo pipefail
 #
 #   chrome-web-store.sh stage ZIP VERSION
 #       Uploads the validated zip, then requests review with deferred release
-#       (STAGED_PUBLISH). Run by .github/workflows/chrome-web-store.yml.
+#       (STAGED_PUBLISH). Run by .github/workflows/chrome-web-store.yml. Its three
+#       refusals echo store-supplied scalars, so those go through store_value()
+#       (redacted, then bounded) like everything else this script prints.
 #
 #   chrome-web-store.sh promote VERSION
 #       Reads fetchStatus, requires the SUBMITTED revision to be STAGED with
@@ -102,6 +104,35 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # deliver (a single 400 was measured at 3,000,626 bytes of step output). The
 # sibling verify-release-environment.sh bounds its body the same way.
 BODY_PRINT_LIMIT=4000
+
+# A store-supplied SCALAR that lands in a refusal message, redacted and bounded in
+# that order -- which is report_api_error's order above, and the order is the
+# whole point rather than a detail. Both halves have been wrong here before: the
+# values went into the message verbatim, so an API that echoed the request context
+# could put the bearer token in the run log in full (measured: a synthetic
+# 200-character token, emitted whole on all three refusals), and a single oversized
+# field produced a 200,066-byte line. Substitute FIRST: a cut applied to the token
+# leaves a prefix that the substitution can no longer match, which is exactly how
+# summarize_status used to leak (see its redact()).
+#
+# Control characters are escaped for the same reason the summary escapes them: a
+# value carrying newlines would otherwise turn one refusal into many lines, and a
+# multi-line refusal is one nobody greps.
+VALUE_PRINT_LIMIT=200
+
+store_value() {
+  local text=${1-}
+  local truncated=""
+  text=${text//"$CWS_ACCESS_TOKEN"/<redacted CWS_ACCESS_TOKEN>}
+  text=${text//$'\n'/\\n}
+  text=${text//$'\r'/\\r}
+  text=${text//$'\t'/\\t}
+  if [[ ${#text} -gt $VALUE_PRINT_LIMIT ]]; then
+    truncated="..."
+    text=${text:0:$VALUE_PRINT_LIMIT}
+  fi
+  printf '%s%s' "$text" "$truncated"
+}
 
 report_api_error() {
   local label=$1
@@ -237,11 +268,20 @@ summarize_status() {
         if $token == "" then $text
         else ($text | split($token) | join("<redacted CWS_ACCESS_TOKEN>"))
         end;
+      # A store-supplied value may carry newlines, and a value that does turns one
+      # refusal into as many lines as it likes: 3 million newlines in `state`
+      # rendered 161 lines (measured), which is a refusal nobody greps. Escaped
+      # AFTER the redaction, so the escape cannot split a credential in half and
+      # leave a prefix the substitution has already looked past.
+      def escape($text):
+        $text | split("\n") | join("\\n")
+              | split("\r") | join("\\r")
+              | split("\t") | join("\\t");
       # `tostring` is total in jq (it renders any value, objects and arrays
       # included) but `length` is not, so the cut is taken on the string form and
       # anything that still fails is replaced rather than allowed to propagate.
       def scalar($value):
-        try bounded(redact($value | tostring); $value_limit) catch "<unrenderable>";
+        try bounded(escape(redact($value | tostring)); $value_limit) catch "<unrenderable>";
       # A field of a status object, with the three answers that used to collapse
       # into one: absent, present-and-null, or a type the field cannot hold. The
       # offending type and its (redacted, bounded) value are named so the marker
@@ -283,19 +323,24 @@ summarize_status() {
           then "<not an array: \($status.distributionChannels | type) value=\(scalar($status.distributionChannels | tojson))>"
         else channels($status.distributionChannels)
         end;
-      def revision($label; $status):
-        if $status == null then $label + " <absent>"
-        elif ($status | type) != "object"
-          then $label + " <not an object: \($status | type) value=\(scalar($status | tojson))>"
-        else $label + " state=" + field($status; "state"; "string")
-          + " distributionChannels=" + channels_field($status)
+      # Takes the root and the key rather than the bare value, because the whole
+      # point of the vocabulary above is that a key the store never sent and one it
+      # sent as null are different answers -- including for the revision object
+      # itself, which used to collapse them into one `<absent>`.
+      def revision($label; $root; $key):
+        if ($root | has($key) | not) then $label + " <absent>"
+        elif $root[$key] == null then $label + " <null>"
+        elif ($root[$key] | type) != "object"
+          then $label + " <not an object: \($root[$key] | type) value=\(scalar($root[$key] | tojson))>"
+        else $label + " state=" + field($root[$key]; "state"; "string")
+          + " distributionChannels=" + channels_field($root[$key])
         end;
       . as $root
       | if ($root | type) != "object"
         then "<unreadable status response: not an object: \($root | type) value=\(scalar($root | tojson))>"
         else (try
-            ([ revision("submitted"; $root.submittedItemRevisionStatus),
-               revision("published"; $root.publishedItemRevisionStatus),
+            ([ revision("submitted"; $root; "submittedItemRevisionStatus"),
+               revision("published"; $root; "publishedItemRevisionStatus"),
                # Optional field: omitted when the store never sent the key, but
                # `<null>` when it sent one that is null, since those differ too.
                (if ($root | has("lastAsyncUploadState"))
@@ -310,11 +355,16 @@ summarize_status() {
   # INSIDE the payload is handled per field above, because falling back to one
   # sentence here would discard the readable fields along with the bad one.
   [[ -n "$summary" ]] || summary="<status response carried no readable fields>"
-  # The substitution above is the load-bearing one; this is the outer net, kept
-  # for the text that never passed through scalar() -- the markers this script
-  # composes itself -- and for a jq too old to expose `env`, where the inner
-  # redaction silently does nothing and this is all there is. It cannot see a
-  # token the bound has already shortened, which is why it cannot be the only one.
+  # The substitution inside the renderer is the load-bearing one: every
+  # store-supplied value reaches the summary through scalar(), so by the time this
+  # line runs there is nothing left for it to catch that the inner pass has not
+  # already handled. It stays as the outer net for text this script composes around
+  # those values -- which carries no response text today, so it is defence in depth
+  # rather than coverage -- and it cannot be the only one, because it cannot see a
+  # token the bound has already shortened. Nor does it stand in for the inner pass
+  # on an unsupported jq: without `env` the program fails to compile (measured:
+  # rc 3, no output), the fallback below prints instead of a summary, and there is
+  # no leak to catch because there is no rendered response text at all.
   printf '%s' "${summary//"$CWS_ACCESS_TOKEN"/<redacted CWS_ACCESS_TOKEN>}"
 }
 
@@ -353,7 +403,7 @@ if [[ "$MODE" == "stage" ]]; then
   if [[ "$upload_state" == "SUCCEEDED" ]]; then
     uploaded_version=$(jq -r '.crxVersion // empty' "$tmp_dir/upload.json")
     [[ "$uploaded_version" == "$EXPECTED_VERSION" ]] \
-      || fail "store accepted version $uploaded_version, expected $EXPECTED_VERSION"
+      || fail "store accepted version $(store_value "$uploaded_version"), expected $EXPECTED_VERSION"
   elif [[ "$upload_state" == "IN_PROGRESS" || "$upload_state" == "UPLOAD_IN_PROGRESS" ]]; then
     # fetchStatus exposes only a global lastAsyncUploadState and no operation ID
     # or draft version. It cannot prove that a later SUCCEEDED belongs to this
@@ -361,13 +411,13 @@ if [[ "$MODE" == "stage" ]]; then
     # upload. Leave the validated draft unsubmitted for a deliberate retry.
     fail "asynchronous upload cannot be bound to version $EXPECTED_VERSION; retry after processing finishes"
   else
-    fail "upload ended in unexpected state ${upload_state:-<missing>}"
+    fail "upload ended in unexpected state $(store_value "${upload_state:-<missing>}")"
   fi
 
   publish_staged "$tmp_dir/publish.json"
   publish_state=$(jq -r '.state // empty' "$tmp_dir/publish.json")
   [[ "$publish_state" == "PENDING_REVIEW" || "$publish_state" == "STAGED" ]] \
-    || fail "staged submission returned unexpected state ${publish_state:-<missing>}"
+    || fail "staged submission returned unexpected state $(store_value "${publish_state:-<missing>}")"
   printf 'submitted Chrome Web Store extension %s v%s with STAGED_PUBLISH (%s)\n' \
     "$CWS_EXTENSION_ID" "$EXPECTED_VERSION" "$publish_state"
 elif [[ "$MODE" == "promote" ]]; then

@@ -203,9 +203,21 @@ test("a transport failure is named as one, not reported as an HTTP status", asyn
 // cannot discover from the outside.
 const BODY_PRINT_LIMIT = 4000;
 
-// Mirrors STATUS_VALUE_LIMIT in chrome-web-store.sh, for the same reason: the
-// token fixtures have to put a credential either side of the cut.
-const STATUS_VALUE_LIMIT = 160;
+// The renderer's and the refusal helper's bounds, read OUT of the script rather
+// than mirrored by hand. A hand-written mirror drifts silently, and these fixtures
+// stop measuring the moment it does: with the bound raised to 400, the two token
+// fixtures below passed while 400 characters of the credential reached the log,
+// because their own sensitivity guards were comparing the fixture against the
+// stale mirror. Reading the script keeps them inside the band they probe.
+const SCRIPT = await readFile(new URL("../scripts/chrome-web-store.sh", import.meta.url), "utf8");
+function scriptConstant(name) {
+  const match = new RegExp(`^${name}=(\\d+)$`, "m").exec(SCRIPT);
+  assert.ok(match, `${name} must be a plain integer assignment in chrome-web-store.sh`);
+  return Number(match[1]);
+}
+const STATUS_VALUE_LIMIT = scriptConstant("STATUS_VALUE_LIMIT");
+const STATUS_CHANNEL_LIMIT = scriptConstant("STATUS_CHANNEL_LIMIT");
+const VALUE_PRINT_LIMIT = scriptConstant("VALUE_PRINT_LIMIT");
 
 test("an oversized error body is bounded and its truncation is disclosed", async () => {
   // An unbounded echo floods the run log -- a single 400 was measured at
@@ -555,9 +567,9 @@ test("status names the fields the store sent, including shapes the gates do not 
 });
 
 test("status bounds the channel list instead of dumping it", async () => {
-  // Mirrors STATUS_CHANNEL_LIMIT in chrome-web-store.sh: the summary is one line
-  // by design, so it must not grow with the response.
-  const channels = Array.from({ length: 6 }, (_, index) => ({
+  // Sized from the script's own limit: the summary is one line by design, so it
+  // must not grow with the response.
+  const channels = Array.from({ length: STATUS_CHANNEL_LIMIT + 2 }, (_, index) => ({
     crxVersion: `0.1.${index}`,
     deployPercentage: index,
   }));
@@ -640,7 +652,8 @@ test("an absent key, a null, an empty list and a wrong type are four answers", a
   // shape change (or a field the store never filled in) stayed invisible. `state`
   // in particular is what the first gate reads.
   const cases = [
-    { name: "absent revision", status: undefined, expect: ["submitted <absent>"], absent: true },
+    { name: "absent revision key", status: undefined, expect: ["submitted <absent>"] },
+    { name: "null revision", status: null, expect: ["submitted <null>"] },
     { name: "absent channels key", status: { state: "STAGED" }, expect: ["submitted state=STAGED distributionChannels=<absent>"] },
     { name: "null channels", status: { state: "STAGED", distributionChannels: null }, expect: ["distributionChannels=<null>"] },
     { name: "empty channels", status: { state: "STAGED", distributionChannels: [] }, expect: ["distributionChannels=[]"] },
@@ -704,7 +717,7 @@ test("a token longer than the value bound is redacted before the cut", async () 
   // the cut and the surviving 160-character prefix no longer matched the
   // substitution -- it went into a public run log. 185 characters, offset 0. The
   // short-token test above cannot see that ordering: it is redacted either way.
-  const token = "ya29." + "STRADDLE-PREFIX-LONG-" + "Z".repeat(160);
+  const token = "ya29." + "STRADDLE-PREFIX-LONG-" + "Z".repeat(STATUS_VALUE_LIMIT + 25);
   assert.ok(
     token.length > STATUS_VALUE_LIMIT,
     `the token must exceed the bound to measure anything (${token.length} vs ${STATUS_VALUE_LIMIT})`,
@@ -755,6 +768,84 @@ test("status refuses arguments it cannot act on", async () => {
     runRelease(["status", VERSION], []),
     /status takes no arguments/,
   );
+});
+
+test("a value carrying newlines still renders one line", async () => {
+  // Third-party text can carry newlines, and an unescaped one turns a single
+  // refusal into as many lines as the value likes -- 3 million newlines in `state`
+  // rendered 161 lines -- which is a refusal nobody greps for.
+  const state = "STAGED\nREJECTED\r\nTA BBBED";
+  const result = await runRelease(["status"], [
+    () => ({
+      itemId: extensionId,
+      submittedItemRevisionStatus: { state, distributionChannels: [] },
+    }),
+  ]);
+  assert.equal(result.stdout.trimEnd().split("\n").length, 1, `expected one line:\n${result.stdout}`);
+  assert.ok(result.stdout.includes("state=STAGED\\nREJECTED\\r\\nTA BBBED"), result.stdout);
+});
+
+// The three stage refusals echo a store-supplied scalar, and they used to echo it
+// verbatim: a synthetic 200-character token came out whole on every one of them,
+// and a single oversized value produced a 200,066-byte line. Same class as the
+// summary's redaction, in the same file, fixed the same way -- substitute first,
+// then bound, which is what report_api_error has always done for the error body.
+test("the stage refusals redact the store's values", async () => {
+  // The token is LONGER than the refusal helper's bound on purpose: with a token
+  // the bound cannot touch, this test passes whichever order the helper uses, so
+  // it would not see the ordering bug at all. Sized from the script's own
+  // VALUE_PRINT_LIMIT for the same reason the fixtures above read the renderer's.
+  const token = "ya29." + "STAGE-ECHO-TOKEN-" + "E".repeat(VALUE_PRINT_LIMIT + 5);
+  assert.ok(token.length > VALUE_PRINT_LIMIT, "the fixture must exceed the bound to measure the order");
+  const straddling = "P".repeat(VALUE_PRINT_LIMIT - Math.floor(token.length / 3)) + token;
+  const cases = [
+    {
+      name: "upload ended in unexpected state",
+      handlers: [() => ({ itemId: extensionId, uploadState: token })],
+      expect: "upload ended in unexpected state",
+    },
+    {
+      // Straddling the refusal helper's cut, one character either side of it.
+      name: "upload ended in unexpected state, token straddling the cut",
+      handlers: [() => ({ itemId: extensionId, uploadState: straddling })],
+      expect: "upload ended in unexpected state",
+    },
+    {
+      name: "store accepted version",
+      handlers: [() => ({ itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: token })],
+      expect: "store accepted version",
+    },
+    {
+      name: "staged submission returned unexpected state",
+      handlers: [
+        () => ({ itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: VERSION }),
+        () => ({ itemId: extensionId, state: token }),
+      ],
+      expect: "staged submission returned unexpected state",
+    },
+  ];
+  for (const { name, handlers, expect } of cases) {
+    const error = await runRelease(["stage", "local-operator-extension.zip", VERSION], handlers, {
+      token,
+      expectFailure: true,
+    });
+    const output = error.stdout + error.stderr;
+    assert.ok(output.includes(expect), `${name}: ${output}`);
+    assert.ok(!output.includes(token.slice(0, 8)), `${name}: the token reached the log:\n${output}`);
+    assert.ok(output.includes("<redacted CWS_ACCESS_TOKEN>"), `${name}: ${output}`);
+  }
+});
+
+test("an oversized store value in a stage refusal is bounded", async () => {
+  const filler = "X".repeat(200_000);
+  const error = await runRelease(["stage", "local-operator-extension.zip", VERSION], [
+    () => ({ itemId: extensionId, uploadState: filler }),
+  ], { expectFailure: true });
+  const output = error.stdout + error.stderr;
+  assert.ok(output.includes("upload ended in unexpected state"), output);
+  assert.ok(output.length < 4_000, `expected a bounded refusal, got ${output.length} characters`);
+  assert.ok(output.includes("X".repeat(VALUE_PRINT_LIMIT)), `expected the value cut at ${VALUE_PRINT_LIMIT}`);
+  assert.ok(!output.includes("X".repeat(VALUE_PRINT_LIMIT + 1)), "the value was not cut at the limit");
 });
 
 // The required-reviewers check was removed by operator decision on 2026-09-03
