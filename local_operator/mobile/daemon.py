@@ -442,6 +442,14 @@ class SessionTable:
                         p.model_label if p else (entry.record.model_label if entry else "")
                     ),
                     "streaming": bool(p and p.streaming),
+                    # A SIGNALLED RUNTIME STREAMS TOO, so this list's own spinner
+                    # said "working" about a session somebody had already asked
+                    # to leave. The record's phrase is carried here so the
+                    # phone's row ladder CAN say what it is instead of inferring
+                    # it from ``streaming``; the field is additive, so a client
+                    # that does not know it renders exactly as before (UX
+                    # round 2, U8).
+                    "leaving": (str(getattr(entry.record, "leaving", "") or "") if entry else ""),
                     "needs_attention": bool(p and p.pending),
                     "pending_kind": p.pending.kind if p and p.pending else "",
                     "subagents_running": sum(

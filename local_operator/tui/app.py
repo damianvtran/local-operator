@@ -143,6 +143,7 @@ from local_operator.session.goal_loop import (
     _parse_loop_verdict,
 )
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -656,10 +657,52 @@ RESTORE_SEAM = "\n\n"
 #: ``note``, not ``warning``: this is the answer to "why is my session behaving
 #: differently", and the matching build-skew notice one seam over uses the same
 #: ink for the same reason. The refusal itself is the row that has to be read.
+#:
+#: THIS SENTENCE IS ABOUT ONE TRIGGER, so it is only ever painted for that one
+#: (design round 3, D6). Both triggers commit through one seam
+#: (``process._commit_to_leaving``) and both announce with ``draining`` true, so
+#: a runtime SIGTERMed mid-turn — the incident this PR exists for — used to be
+#: told it was switching to a newer build, when the install had not moved and no
+#: successor was coming. See :data:`SIGNAL_DRAIN_NOTICE` and the ``leaving``
+#: phrase the frame now carries.
 DRAIN_NOTICE = (
     "this session is switching to a newer build; it is finishing in-flight work "
     "first, so a new message will not start a turn until the new build is up"
 )
+
+#: The same notice for a runtime that was TERMINATED while it had work in flight
+#: (``LEAVING_ON_SIGNAL``), which is a different departure in every clause: the
+#: install has not moved, no successor is owed, and this session was ended rather
+#: than handed over. What it shares with the build notice is why the row exists —
+#: the composer accepts text that will be refused until the turn in flight ends.
+#: It deliberately promises NOTHING about afterwards: whether the session comes
+#: back on a fresh runtime is the host's decision, not the runtime's, so the one
+#: sentence that is true wherever this frame is read stops at the drain.
+SIGNAL_DRAIN_NOTICE = (
+    "this session was signalled to stop; it is finishing in-flight work first, "
+    "so a new message will not start a turn"
+)
+
+#: The notice for a draining frame whose trigger this build cannot name — a
+#: phrase written by a NEWER runtime than the app reading it. Kept separate from
+#: :data:`DRAIN_NOTICE` on purpose, and it is the whole point of the split: a
+#: sentence about a build must never be painted for a departure nobody has
+#: established was a build, which is the falsehood D6 filed. The fallback says
+#: only what ``draining`` itself establishes.
+DRAIN_NOTICE_OTHER = (
+    "this session is finishing in-flight work first, so a new message will not " "start a turn"
+)
+
+#: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
+#: ``leaving`` phrase the runtime publishes on its record and now sends in the
+#: frame, so the app and the fleet surfaces quote one vocabulary instead of two
+#: readings of the same state. The constants are imported rather than retyped:
+#: a reworded phrase fails loudly at this table instead of silently falling
+#: through to :data:`DRAIN_NOTICE_OTHER`.
+_DRAIN_NOTICES: dict[str, str] = {
+    LEAVING_FOR_BUILD: DRAIN_NOTICE,
+    LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
+}
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -17569,7 +17612,7 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self) -> None:
+    def _on_runtime_draining(self, leaving: str = "") -> None:
         """A runtime has committed to leaving while it still has work: say so.
 
         Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
@@ -17581,11 +17624,26 @@ class OperatorApp(App[None]):
         own state could be consulted it is cold, and cold is true of both
         hands (QA round 3, Q-1).
 
+        ``leaving`` is the frame's phrase — the TRIGGER's own words — and the
+        sentence is chosen from it rather than from ``draining`` alone, because
+        one flag cannot tell a build handover from a termination and the two do
+        not describe the same thing (design round 3, D6). A phrase this build
+        does not know gets the neutral sentence rather than another trigger's,
+        and so does an EMPTY one: it is a runtime that published no trigger at
+        all, which — since ``AttachedSession._on_retiring_frame`` reads the
+        frame's own ``reason``/``to`` before it gives up (design round 4, D9) —
+        means nothing on the frame named one. An absent phrase used to mean
+        "the build handover" here, which was true of a released runtime and
+        false of this branch's own intermediate builds, so a signalled runtime
+        was painted the build sentence while its record said the opposite
+        (agent review round 4, MAJOR-1; UX round 4, U13).
+
         One row, while the composer still accepts text that will be refused.
         """
         if self._interaction is None:
             return
-        self._notice_for(self._interaction, DRAIN_NOTICE, "note")
+        notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        self._notice_for(self._interaction, notice, "note")
 
     def _announce_refresh_completed(self) -> None:
         """One line naming the version change a self-refresh just made.
@@ -28592,11 +28650,39 @@ class OperatorApp(App[None]):
         executes. Confirmation-by-listing rather than a modal, the Esc
         ladder's idiom, because a kill switch that can be dismissed by the
         same key that armed it is one that cannot trap the user.
+
+        NO FLAGS, and a leading one is refused as a flag rather than resolved
+        as a target (UX round 3, U11): ``--force`` belongs to ``lop stop``, and
+        the TUI's only stop is the deliberate one, so ``/stop --force 62181``
+        used to answer "no live session matches '--force 62181'" about a
+        session the panel one keystroke away lists as live and draining.
         """
         session = self._session
         target = arg.strip()
         if target.lower() == "all":
             self._stop_all(notice)
+            return
+        if target.startswith("-"):
+            # The house shape for an argument a surface does not take
+            # (``/info extra`` → "takes no arguments"), with the remedy the
+            # flag was reaching for named where it exists: this ladder stops a
+            # session deliberately and promptly, and it deliberately does NOT
+            # cut a draining turn — only the shell's ``--force`` does.
+            #
+            # THE FAN-OUT IS NAMED WHEN THAT IS WHAT WAS REACHED FOR. ``--all``
+            # is the shell's (``lop stop --all``) spelling of this surface's own
+            # ``/stop all``, so answering it with the single-session remedy told
+            # the user about the thing they did not ask for while their actual
+            # kill switch went unmentioned (UX round 4, U12). One clause, added
+            # only on the arm it applies to, so every other flag keeps the
+            # sentence the design round measured.
+            fan_out = "; the fan-out is /stop all" if target.lower() == "--all" else ""
+            self._system_notice(
+                f"/stop takes no flags — got {target!r}. Send /stop <pid> to stop a session "
+                "deliberately; `lop stop <pid> --force` from a shell is the one that cuts a "
+                f"draining turn{fan_out}.",
+                "warning",
+            )
             return
         if not target:
             if session is None:
@@ -29010,11 +29096,35 @@ class OperatorApp(App[None]):
             f'stopping "{name}" (pid {record.pid})… waiting for it to answer', "info"
         )
         self._append_block(pending)
-        outcome = await control.stop_session(record, _root=config_dir(), _command="/stop")
+
+        def paint_wait(line: str) -> None:
+            """Restate the pending block with the ladder's own bound (U5, PR #1141).
+
+            The block above promises a wait; this is the same promise with the
+            number, painted by the rung that knows it. The SIGTERM grace is the
+            one wait a `lop` command can spend minutes inside, and before this
+            the screen said nothing at all for its whole length — a user who
+            cannot tell waiting from hung reaches for Ctrl-C, which leaves the
+            outcome ambiguous. Restated in place rather than appended, exactly
+            like the outcome below: one promise on screen, not a log of them.
+            """
+            if pending.is_attached:
+                pending.restate(line, "info")
+
+        outcome = await control.stop_session(
+            record, _root=config_dir(), _command="/stop", on_wait=paint_wait
+        )
+        # A stop that did NOT stop is a warning, not a note: the new ``draining``
+        # outcome joins ``refused`` here because both are the user's request
+        # declining to take effect (and both name what it would cost to insist).
+        # ``busy`` keeps the severity it has always had on this surface, where
+        # the group report — not the receipt — is what names it (M3).
         kind: NoticeKind = (
             "error"
             if outcome.method == "sigkill"
-            else "warning" if outcome.method == "refused" else "info"
+            else (
+                "warning" if outcome.method == "refused" or outcome.method == "draining" else "info"
+            )
         )
         if pending.is_attached:
             pending.restate(outcome.line, kind)
@@ -29138,8 +29248,22 @@ class OperatorApp(App[None]):
             self._stop_all_armed_at = None
             self._system_notice("no sessions to stop")
             return
+        drained = frozenset(rec.pid for rec in targets if (getattr(rec, "leaving", "") or ""))
         rows: list[tuple[int, str, str]] = [
-            (rec.pid, rec.conversation_name or rec.session_id, "") for rec in targets
+            (
+                rec.pid,
+                rec.conversation_name or rec.session_id,
+                # A TARGET THE PRESS WILL DECLINE IS MARKED IN THE LISTING, which
+                # is where the operator decides: the second press asks a draining
+                # runtime again and leaves it alone (the ladder refuses to cut
+                # the turn it is finishing), so a listing that presents it as one
+                # more session to stop promises a stop that will not happen. The
+                # outcome line already reconciles the count afterwards; this is
+                # the same fact one step earlier, where it can still change the
+                # decision (UX round 2, NIT-1).
+                " (already leaving)" if rec.pid in drained else "",
+            )
+            for rec in targets
         ]
         if own_local:
             own_name = getattr(own, "conversation_name", "") or getattr(own, "session_id", "")
@@ -29153,6 +29277,14 @@ class OperatorApp(App[None]):
         # off the painted block (D2-1).
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        if drained:
+            # Named once, above the rows: every marked row below is a session the
+            # press ASKS again and then leaves alone — the plain count would read
+            # as "these will all be stopped".
+            lines[0] = (
+                f"will stop {total} session{'s' if total != 1 else ''} "
+                f"({len(drained)} already leaving — asked again, then left alone):"
+            )
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
             # The qualifier rides inside the truncation budget so it can
@@ -29186,7 +29318,15 @@ class OperatorApp(App[None]):
         # attribute it to another terminal (U4-1).
         self._issued_own_stop = True
         outcomes = await control.stop_all(
-            own_pid=os.getpid(), only_pids=listed, _root=root, _command="/stop --all"
+            own_pid=os.getpid(),
+            only_pids=listed,
+            _root=root,
+            _command="/stop --all",
+            # The sweep is where a silent wait costs the most — one wedged
+            # runtime sits in front of the rest (see ``stop_all``) — so the
+            # ladder's own bound is painted as it is entered, through the same
+            # notice area the outcome lines use (U5).
+            on_wait=lambda line: self._system_notice(line, "info"),
         )
         # Anything that did NOT stop cleanly gets its own line, because the
         # grouped count cannot say WHICH agent was refused or had to be
@@ -29197,6 +29337,18 @@ class OperatorApp(App[None]):
                 self._system_notice(outcome.line, "warning")
             elif outcome.method == "sigkill":
                 self._system_notice(outcome.line, "error")
+            elif outcome.method in control.LEFT_ALONE_METHODS:
+                # A TARGET LEFT ALONE IS NOT A CLEAN STOP, and the grouped count
+                # cannot say WHICH one — the same reason the refusal line above
+                # is painted: it is the one thing the user must act on.
+                # ``busy`` was the third such method and took neither line nor
+                # warning severity, so `/stop all` painted "stopped 2 of 3" and
+                # never named the session it left running (M3, PR #1141);
+                # ``draining`` arrives with the same meaning and the same need.
+                # Read from the shared set rather than listing the methods here,
+                # so a fourth one cannot be added to the ladder and silently
+                # skipped on this surface again.
+                self._system_notice(outcome.line, "warning")
         # Own session LAST, through the in-process branch, which paints its
         # own receipt naming the way back; the report folds it into the
         # total so the numbers reconcile with the listing's promise.

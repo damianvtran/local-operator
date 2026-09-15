@@ -74,9 +74,10 @@ _SEEN: dict[str, Any] = {}
 
 
 async def _fake_stop(  # noqa: ANN001, ANN202
-    record, *, timeout_s, _root, force=False, _command=None
+    record, *, timeout_s, _root, force=False, _command=None, on_wait=None
 ):
     _SEEN["stop_command"] = _command
+    _SEEN["on_wait"] = on_wait
     return _outcome("socket", pid=record.pid)
 
 
@@ -116,6 +117,10 @@ def test_one_target_stopped_exits_0_and_prints_the_receipt(capsys) -> None:
     # The marker's whole value is naming WHO stopped the runtime, so the CLI
     # says what the user typed rather than the function it reached (MINOR-2).
     assert _SEEN["stop_command"] == "lop stop"
+    # And the single stop leans on the same progress painter the sweep does, so
+    # a wedged target's ~150 s silence is not the user's first sign of trouble
+    # (U5).
+    assert _SEEN["on_wait"].__name__ == "_stop_progress"
 
 
 def test_refused_identity_exits_2(capsys) -> None:
@@ -123,7 +128,7 @@ def test_refused_identity_exits_2(capsys) -> None:
     was not stopped, which a script must be able to tell from 'wrong name'."""
 
     async def refuse(  # noqa: ANN001, ANN202
-        record, *, timeout_s, _root, force=False, _command=None
+        record, *, timeout_s, _root, force=False, _command=None, on_wait=None
     ):
         return _outcome("refused", line="refused to signal pid 4242 — identity mismatch")
 
@@ -135,12 +140,64 @@ def test_refused_identity_exits_2(capsys) -> None:
     assert rc == 2
 
 
+def test_a_skipped_busy_target_is_partial_not_clean(capsys) -> None:
+    """A target left alone because a turn is in flight is a PARTIAL result.
+
+    The user asked for these sessions to be stopped and one of them is still
+    running, so a script must not read exit 0 and conclude the machine is
+    quiet. Which is also why the skip gets its own method token (``busy``)
+    rather than reusing the refusal's: the receipt says something different to
+    a human ("stop it again once the turn ends") and the front end derives
+    partial-vs-clean from the token, never from the prose.
+    """
+
+    async def busy(  # noqa: ANN001, ANN202
+        record, *, timeout_s, _root, force=False, _command=None, on_wait=None
+    ):
+        return _outcome(
+            "busy",
+            line='skipped "the agent" (pid 4242) — a turn is in flight; '
+            "stop it again once the turn ends, or --force to signal it now",
+        )
+
+    with (
+        patch("local_operator.cli._resolve_stop_target", return_value=(_Record(), [], "")),
+        patch("local_operator.session.runtime.control.stop_session", busy),
+    ):
+        rc = stop_command(_args(target="the agent"))
+    assert rc == 2
+    assert "turn is in flight" in capsys.readouterr().out
+
+
+def test_the_all_summary_counts_a_skipped_target_separately(capsys) -> None:
+    """The grouped receipt the ``--all`` path paints names the skip as its own group.
+
+    A kill switch that reported a skipped session under "stopped" would be
+    claiming work it did not do — the one thing the summary exists to prevent.
+    """
+    from local_operator.session.runtime.control import summarize
+
+    outcomes = [
+        _outcome("socket", pid=1, line='stopped "one"'),
+        _outcome("busy", pid=2, line='skipped "two" (pid 2) — a turn is in flight'),
+        _outcome("refused", pid=3, line='refused "three" (pid 3) — identity'),
+    ]
+    line = summarize(outcomes)
+    assert "stopped" in line
+    assert "1 left alone (a turn is in flight)" in line
+    assert "1 refused" in line
+    assert "3 sessions" in line
+    capsys.readouterr()
+
+
 def test_already_exited_is_clean(capsys) -> None:
     """The dead-pid resolution is its own method (``gone``): nothing is
     left for a human to do, so it exits 0 — decided from the method, never
     from the receipt text (R1-7)."""
 
-    async def gone(record, *, timeout_s, _root, force=False, _command=None):  # noqa: ANN001, ANN202
+    async def gone(  # noqa: ANN001, ANN202
+        record, *, timeout_s, _root, force=False, _command=None, on_wait=None
+    ):
         return _outcome("gone", line='"the agent" already exited')
 
     with (
@@ -197,9 +254,15 @@ def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, 
     seen: dict[str, Any] = {}
 
     async def fake_all(  # noqa: ANN001, ANN202
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, force=False, _command=None
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, force=False, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
-        seen.update(own_pid=own_pid, only_pids=only_pids, timeout_s=timeout_s, command=_command)
+        seen.update(
+            own_pid=own_pid,
+            only_pids=only_pids,
+            timeout_s=timeout_s,
+            command=_command,
+            on_wait=on_wait,
+        )
         return [
             _outcome("socket", pid=1),
             _outcome("refused", pid=2, line='refused "the agent" (pid 2) — did not answer'),
@@ -217,7 +280,12 @@ def test_all_with_yes_runs_and_reports_partial(monkeypatch: pytest.MonkeyPatch, 
     out = capsys.readouterr().out
     assert "2 sessions: 1 stopped, 1 refused" in out
     # --timeout reaches the ladder (R1-5); the run is scoped to the scan, and a
-    # sweep names itself rather than a single stop (MINOR-2).
+    # sweep names itself rather than a single stop (MINOR-2). ``on_wait`` is the
+    # CLI's progress painter and must reach the sweep too — a wedged runtime in
+    # front of a dozen healthy ones is where its silence costs the most (U5).
+    assert seen["on_wait"] is not None, "the sweep forwards the progress painter (U5)"
+    assert seen["on_wait"].__name__ == "_stop_progress"
+    seen.pop("on_wait")
     assert seen == {
         "own_pid": None,
         "only_pids": {1, 2},

@@ -60,6 +60,7 @@ from local_operator.session.runtime.server import (
 )
 from local_operator.session.runtime.types import (
     RUNNING_SUBAGENT_STATUSES,
+    SIGNAL_DRAIN_CAUSE,
     runtime_must_complete,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
@@ -1262,8 +1263,7 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
-    @staticmethod
-    def _retiring_refusal() -> RuntimeRetiring:
+    def _retiring_refusal(self) -> RuntimeRetiring:
         """The refusal an admission gets once this runtime has committed to leaving.
 
         A TYPED admission category (``session.errors``), not a bare
@@ -1279,10 +1279,61 @@ class ServingSessionHandle(SessionHandle):
         the reason this file imports ``session.errors`` that way everywhere
         else: the module is tiny, the call is rare, and a module-scope import
         here re-sorts the runtime-server import block around it.
+
+        WHICH DEPARTURE IS READ OFF THE LATCHED CAUSE, AND THIS SIDE NAMES IT.
+        ``prompt`` refuses for the whole of any drain and ``begin_drain`` latches
+        from the SIGTERM arm too, so a signalled runtime reaching this accessor
+        used to describe itself as switching to a newer build — a build that does
+        not exist on disk under it and is not coming (design round 4, D10; agent
+        review round 4, MAJOR-2). It is REACHED, measured on a real signalled
+        runtime with the turn parked: a non-streaming prompt (``prompt_and_wait``
+        — the shape a loop, a second viewer, a supervisor or a CLI caller uses)
+        is refused within milliseconds of the signal, while the same runtime's
+        record and ``/info`` row say "signalled; leaving when its turn ends". The
+        interactive composer does not reach it mid-turn, because its text rides
+        the running turn as a steer; a peer wake or steer is spooled for the
+        successor for as long as the drain runs and reaches this refusal only
+        once the exit is committed. ``_retiring_cause`` is the token
+        ``begin_drain``/``begin_retire`` latched and ``_drain_for`` carries to
+        the exit rung, so the departures stay distinguishable all the way to the
+        last refusal.
+
+        AND A DEPARTURE THIS SIDE CANNOT NAME IS SENT AS NO TOKEN RATHER THAN AS
+        A BUILD. It was sent as a build by omission until round 5: the token was
+        "SIGNAL or nothing", and "nothing" meant the build sentence on the far
+        side, which is false for a signalled runtime from this branch's pre-key
+        builds — they announce the signal drain with no phrase key either — and
+        for the reaper's ``idle-exit`` latch, which owes no successor and checked
+        no build (agent review round 5, MINOR-1; UX round 5, U14; design round 5,
+        D11). Those runtimes cannot be taught to send a token, so the far side
+        answers an unnamed departure from the phrase the frame published and with
+        the sentence that names no departure when there is none. The field stays
+        additive and closed either way: ``server`` emits ``error_trigger`` only
+        when the token is truthy, and an older client drops the key.
+
+        WHY THE BUILD CAUSE IS NOT NAMED HERE, though this side does know it. The
+        ``runtime-retired`` latch is shared by the stale-build refresh and by
+        ``/move`` (``server._retire_for``: ``"stale-build"`` with a successor, or
+        ``"moved"`` with none), and the cause token is the same for both — the
+        cause is what a restored session renders, so it cannot be split without
+        changing that vocabulary. Naming it ``BUILD`` would therefore claim "the
+        one it loaded is gone from disk" for a session that merely changed
+        directory. The phrase is the carrier that CAN tell them apart for a
+        drain, and for a build drain the frame publishes it; a move publishes
+        none, and correctly gets the sentence that names no departure.
         """
         from local_operator.session.errors import RuntimeRetiring
 
-        return RuntimeRetiring()
+        # ``SIGNAL_DRAIN_CAUSE`` is the token ``process._drain_for_signal``
+        # commits its drain with — imported from the drain vocabulary rather
+        # than spelled here, because a rename that missed this file would
+        # silently restore the build sentence for a signalled runtime. It is the
+        # ONLY departure this side names: the build arm is left unnamed on
+        # purpose, because its cause token is shared with ``/move`` (see above),
+        # and the far side reads the trigger off the phrase the frame published
+        # instead — which a build drain carries and a move does not.
+        trigger = RuntimeRetiring.SIGNAL if self._retiring_cause == SIGNAL_DRAIN_CAUSE else ""
+        return RuntimeRetiring(trigger=trigger)
 
     async def _spool_for_successor(
         self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]

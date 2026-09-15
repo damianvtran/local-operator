@@ -110,6 +110,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.types import drain_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     ATTACHMENT_KEY,
@@ -825,8 +826,16 @@ class AttachedSession:
         #: the start, and it is the only moment at which a viewer can warn the
         #: operator before their next message is refused — on the drain rung the
         #: EOF is ~26 s away, and every second of it the composer accepts text
-        #: that will be refused (UX round 3, U1; QA round 3, Q-1).
-        self._drain_callback: Callable[[], Any] | None = None
+        #: that will be refused (UX round 3, U1; QA round 3, Q-1). It is called
+        #: with the frame's ``leaving`` phrase — the trigger's own words — so a
+        #: host can paint a sentence about the trigger that produced the drain
+        #: rather than about drains in general (design round 3, D6). ``""`` here
+        #: means THE FRAME NAMED NO TRIGGER AT ALL, not "a runtime older than the
+        #: key": a runtime older than the key that signal-drained hands over
+        #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
+        #: (:func:`types.drain_phrase_for_frame`) and have done since design round
+        #: 4, D9 (agent review round 5, MINOR-2).
+        self._drain_callback: Callable[[str], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -5338,7 +5347,7 @@ class AttachedSession:
         """
         self._refresh_callback = callback
 
-    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
 
         Fired from the ``retiring`` frame itself, so the operator hears it
@@ -5349,15 +5358,36 @@ class AttachedSession:
         the viewer's own now-cold state; QA round 3, Q-1 measured that probe
         reading True for both hands). Fired on the client's reader task, so a
         widget-touching host marshals as it does for every other callback here.
+
+        ``callback`` receives the frame's ``leaving`` phrase — the trigger's own
+        words, read off the frame's ``reason``/``to`` when a runtime older than
+        the key sends none — because the two triggers are not interchangeable in
+        a sentence a person reads (design round 3, D6: the signal trigger used to
+        be painted with the build's notice; design round 4, D9: the frames that
+        carry no key at all). Only a frame that establishes NEITHER trigger
+        reaches the host as ``""``.
         """
         self._drain_callback = callback
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive: a runtime older than the field sends no
-        ``draining`` and is therefore read as the idle handover, which is the
-        pre-change behaviour and paints nothing.
+        The frame is additive twice over: a runtime older than the ``draining``
+        field is therefore read as the idle handover, which is the pre-change
+        behaviour and paints nothing, and a runtime older than ``leaving`` has
+        its trigger read off the frame's ``reason``/``to`` by
+        :func:`types.drain_phrase_for_frame`.
+
+        THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
+        ``""`` on the grounds that an absent phrase is "the build handover, the
+        only departure it announces at all" — true of a runtime from ``main`` or
+        a release, where the stale-build path is the sole ``draining=True``
+        caller, and FALSE of this branch's own intermediate builds, which
+        announce both triggers with no phrase and so handed a signalled runtime
+        the build sentence (design round 4, D9; agent review round 4, MAJOR-1).
+        The frame's own words are on the wire in every one of those builds, so
+        they decide; a frame that names neither trigger still yields ``""``, and
+        the host paints the sentence that is true of any drain.
         """
         if not frame.get("draining"):
             return
@@ -5365,7 +5395,13 @@ class AttachedSession:
         if callback is None:
             return
         try:
-            callback()
+            # The derivation sits INSIDE the guard rather than above it: this
+            # method's stated contract is that a viewer failing to speak cannot
+            # break the pump, and a call outside the ``try`` is one that could
+            # (agent review round 5, NIT-1). The client remembers the same phrase
+            # for the refusals it decodes, from the same helper — see
+            # ``AttachClient._raise_for_reply_error``.
+            callback(drain_phrase_for_frame(frame))
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 

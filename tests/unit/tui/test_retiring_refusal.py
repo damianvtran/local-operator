@@ -37,9 +37,12 @@ from typing import Any
 import pytest
 
 from local_operator.session.errors import RuntimeRetiring, admission_error
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
     DRAIN_NOTICE,
+    DRAIN_NOTICE_OTHER,
     RESTORE_SEAM,
+    SIGNAL_DRAIN_NOTICE,
     OperatorApp,
     _is_retiring_refusal,
     _retiring_notice_text,
@@ -311,7 +314,7 @@ async def test_a_draining_announcement_paints_the_notice(monkeypatch: Any, tmp_p
         await pilot.pause()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
 
-        app._on_runtime_draining()
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
         await pilot.pause()
         notices = _notices(app)
         assert [n._text for n in notices] == [DRAIN_NOTICE], [n._text for n in notices]
@@ -327,6 +330,177 @@ async def test_a_draining_announcement_paints_the_notice(monkeypatch: Any, tmp_p
         app._on_runtime_refreshed()
         await pilot.pause()
         assert [n._text for n in _notices(app)] == [DRAIN_NOTICE], [n._text for n in _notices(app)]
+
+
+@pytest.mark.asyncio
+async def test_the_notice_states_the_trigger_the_frame_named(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """D6: a signalled runtime is not told about a build that does not exist.
+
+    Both triggers commit through one seam and both announce ``draining`` true,
+    so the flag alone cannot pick the sentence — and the one it used to pick
+    promised a newer build to a runtime that had been terminated mid-turn, where
+    there is no newer build and no successor coming. The frame now carries the
+    trigger's own words, and the three cells below are the whole rule: the
+    signal gets its own sentence, the build keeps the one written for it, and a
+    phrase this build cannot place (a newer runtime's) gets neither.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+
+        app._on_runtime_draining(LEAVING_ON_SIGNAL)
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [SIGNAL_DRAIN_NOTICE], _notices(app)
+        assert "newer build" not in SIGNAL_DRAIN_NOTICE, SIGNAL_DRAIN_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_an_unplaceable_phrase_gets_no_other_triggers_words(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """A phrase this build cannot place gets the neutral sentence.
+
+    Two ways to arrive here, one answer. A phrase this build cannot place is a
+    NEWER runtime's trigger; an EMPTY one is a frame that named no trigger at
+    all, which — because ``AttachedSession._on_retiring_frame`` reads the frame's
+    own ``reason``/``to`` first (design round 4, D9) — means the frame itself
+    said nothing about why. Painting either the build notice is the falsehood D6
+    filed one version over, and the build sentence was in fact the old answer for
+    the empty case: it was true of a released runtime, whose only drain is the
+    build handover, and FALSE of this branch's own intermediate builds, which
+    signal-drained into it (agent review round 4, MAJOR-1; UX round 4, U13). The
+    neutral sentence is the only one that is never false, because it says only
+    what ``draining`` establishes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+
+        app._on_runtime_draining("")
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [DRAIN_NOTICE_OTHER], _notices(app)
+
+        app._on_runtime_draining("leaving because a trigger this build has never heard of")
+        await pilot.pause()
+        texts = [n._text for n in _notices(app)]
+        assert texts[-1] == DRAIN_NOTICE_OTHER, texts
+        assert DRAIN_NOTICE_OTHER != DRAIN_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_each_trigger_keeps_its_own_sentence_at_the_notice_seam(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """D6's pair, plus the derivation that stands in for a missing phrase.
+
+    The app is handed ONE phrase and chooses from it, so the interesting cells
+    are the ones where the phrase is absent on the wire: every runtime from
+    ``main`` announces the build handover that way, and every build of this
+    branch before the key was added announces BOTH triggers that way. The frame's
+    own ``reason``/``to`` decide (design round 4, D9), and the frames below are
+    the shapes those runtimes actually send — including the released one, whose
+    only drain is the stale-build handover.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+
+        app._on_runtime_draining(LEAVING_ON_SIGNAL)
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [SIGNAL_DRAIN_NOTICE, DRAIN_NOTICE], _notices(
+            app
+        )
+
+        # The derivation itself, at the seam that owns it.
+        from local_operator.session.attached import AttachedSession
+
+        facade = AttachedSession.__new__(AttachedSession)
+        fired: list[str] = []
+
+        def drain(leaving: str) -> None:
+            fired.append(leaving)
+
+        facade._drain_callback = drain
+        facade._on_retiring_frame(
+            {"op": "retiring", "reason": "shutdown-drain", "to": "", "draining": True}
+        )
+        facade._on_retiring_frame(
+            {"op": "retiring", "reason": "stale-build", "to": "0.55.6@46a4e9b", "draining": True}
+        )
+        facade._on_retiring_frame(
+            {"op": "retiring", "reason": "retiring for 0.55.6@46a4e9b", "draining": True}
+        )
+        assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD, LEAVING_FOR_BUILD], fired
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_face_agrees_with_the_notice_on_a_pre_key_runtime(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """U14/M-1/D11: two faces of ONE drain tell one story, across versions.
+
+    The acceptance statement this round is about, at the seam the operator
+    reads. A build of this branch from before the refusal's ``error_trigger``
+    field — ``8dd605365`` and the twelve rungs around it — signal-drains and
+    refuses an admission, so a ``prompt_and_wait`` is answered by a raiser that
+    cannot name its own departure. The viewer already holds what the raiser
+    cannot say: the phrase it derived from the frame it painted the notice from
+    a moment earlier.
+
+    Rounds through 4 asked only that the NOTICE stop claiming a build; the
+    refusal sat underneath it still inheriting the build sentence, which is the
+    same state told two ways in one window (agent review round 5, MINOR-1; UX
+    round 5, U14; design round 5, D11). Both frames here are the wire shapes
+    measured in rounds 4 and 5, and the refusal is built the way the far side
+    builds it: ``admission_error`` over the category the older raiser does send,
+    with the phrase as the only evidence of which departure it is.
+    """
+    from local_operator.session.errors import admission_error
+    from local_operator.session.runtime.types import drain_phrase_for_frame
+
+    pre_key_signal_frame = {
+        "op": "retiring",
+        "reason": "shutdown-drain",
+        "to": "",
+        "draining": True,
+    }
+    phrase = drain_phrase_for_frame(pre_key_signal_frame)
+    assert phrase == LEAVING_ON_SIGNAL, phrase
+    refusal = admission_error(RuntimeRetiring.code, None, None, phrase)
+    assert isinstance(refusal, RuntimeRetiring), refusal
+
+    session = FakeSession()
+
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> None:
+        raise refusal
+
+    session.prompt = prompt  # type: ignore[assignment]
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._on_runtime_draining(phrase)
+        await pilot.pause()
+        await _send(pilot, editor, "a message sent mid-drain")
+
+        rows = [n._text for n in _notices(app)]
+        assert rows[0] == SIGNAL_DRAIN_NOTICE, rows
+        assert rows[1] == _retiring_notice_text(refusal), rows
+        assert rows[1].startswith(RuntimeRetiring.HEAD_SIGNALLED), rows
+        assert all("newer build" not in text for text in rows), rows
+        assert editor.text == "a message sent mid-drain" + RESTORE_SEAM, editor.text
+        assert _user_texts(app) == [], _user_texts(app)
 
 
 @pytest.mark.asyncio
@@ -360,17 +534,48 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
     notice: the idle rung sends the same op with ``draining`` false, and a
     runtime from before the field sends no ``draining`` at all. Both must stay
     silent — a viewer that guessed from its own state called them all draining
-    (QA round 3, Q-1).
+    (QA round 3, Q-1). The phrase is forwarded verbatim (design round 3, D6), and
+    a frame that carries none has its trigger read off its own ``reason``/``to``
+    (design round 4, D9) — only a frame that names no trigger at all reaches the
+    host as ``""``.
     """
     from local_operator.session.attached import AttachedSession
 
     facade = AttachedSession.__new__(AttachedSession)
     fired: list[str] = []
-    facade._drain_callback = lambda: fired.append("drain")  # type: ignore[method-assign]
+    facade._drain_callback = lambda leaving: fired.append(leaving)  # type: ignore[method-assign]
 
+    facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_ON_SIGNAL})
+    assert fired == [LEAVING_ON_SIGNAL], fired
+
+    facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_FOR_BUILD})
+    assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD], fired
+
+    # A frame that names no trigger: this is the population the old fallback
+    # mislabelled. A pre-``leaving`` build of THIS branch signal-drains through
+    # the same shape as a released build's stale-build handover, and they differ
+    # in ``reason`` — so both are asserted, and so is the one that says neither.
+    facade._on_retiring_frame(
+        {"op": "retiring", "draining": True, "reason": "shutdown-drain", "to": ""}
+    )
+    facade._on_retiring_frame(
+        {"op": "retiring", "draining": True, "reason": "stale-build", "to": "0.55.6@46a4e9b"}
+    )
     facade._on_retiring_frame({"op": "retiring", "draining": True})
-    assert fired == ["drain"]
+    assert fired == [
+        LEAVING_ON_SIGNAL,
+        LEAVING_FOR_BUILD,
+        LEAVING_ON_SIGNAL,
+        LEAVING_FOR_BUILD,
+        "",
+    ], fired
 
     facade._on_retiring_frame({"op": "retiring", "draining": False})
     facade._on_retiring_frame({"op": "retiring"})  # older runtime: no field
-    assert fired == ["drain"], fired
+    assert fired == [
+        LEAVING_ON_SIGNAL,
+        LEAVING_FOR_BUILD,
+        LEAVING_ON_SIGNAL,
+        LEAVING_FOR_BUILD,
+        "",
+    ], fired

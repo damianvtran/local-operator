@@ -35,6 +35,7 @@ import pytest
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import _BuildWatch, _reaper, _should_refresh
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD
 from local_operator.update import BuildStamp
 
 #: The two builds the reporting host's gap spanned, verbatim.
@@ -49,19 +50,24 @@ class FakeRegistrant:
         self._attaches = 0
         self.closed = False
         self._boot_build = boot
-        #: ``(reason, to, draining)`` — the third term is the frame's own
-        #: verdict that admissions are about to be refused, which is what a
-        #: viewer's notice is gated on. Recorded here because the CALLER is
-        #: what decides it: a double that dropped the keyword would make the
-        #: announce fail into the caller's `except` and read as "not
-        #: announced" rather than "announced without the fact".
-        self.retiring: list[tuple[str, str, bool]] = []
+        #: ``(reason, to, draining, leaving)`` — the third term is the frame's
+        #: own verdict that admissions are about to be refused, which is what a
+        #: viewer's notice is gated on, and the fourth is the phrase the SAME
+        #: call publishes on the record for the fleet surfaces (PR #1108's
+        #: reconciliation: one commit, two renderings). Recorded here because
+        #: the CALLER is what decides both: a double that dropped a keyword
+        #: would make the announce fail into the caller's `except` and read as
+        #: "not announced" rather than "announced without the fact" — which is
+        #: exactly what this double did when `leaving` was introduced.
+        self.retiring: list[tuple[str, str, bool, str]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
 
-    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
-        self.retiring.append((reason, to, draining))
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        self.retiring.append((reason, to, draining, leaving))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -171,7 +177,7 @@ async def test_a_busy_runtime_drains_once_the_bound_trips(disk, monkeypatch) -> 
 
     assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
     assert reg.retiring == [
-        ("stale-build", NEW.label(), True)
+        ("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)
     ], "announced once, at drain start, and the frame SAYS a refusal is in force"
     assert handle.drain_cause == "runtime-retired"
     assert "declined" in handle.drain_detail, handle.drain_detail
@@ -316,7 +322,9 @@ async def test_a_latched_drain_wins_over_the_soft_rung_at_the_exit(disk, monkeyp
     handle._busy = False  # the turn ends and the exit path opens up
     assert await _wait_for(lambda: stop.is_set()), "the drain never took the exit"
     assert draws == [(0, child_mod.BUILD_STAGGER_S)], "exactly one stagger, drawn at drain start"
-    assert reg.retiring == [("stale-build", NEW.label(), True)], "one departure, one announce"
+    assert reg.retiring == [
+        ("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)
+    ], "one departure, one announce, and the fleet half of the same commit"
     await task
 
 
@@ -337,7 +345,7 @@ async def test_an_idle_runtime_keeps_todays_soft_refresh(disk, monkeypatch) -> N
     assert stop.is_set() and handle.disposed
     assert not handle.drained, "an idle runtime never needs the hard-stale latch"
     assert reg.retiring == [
-        ("stale-build", NEW.label(), False)
+        ("stale-build", NEW.label(), False, "")
     ], "an idle refresh refuses nothing, so the frame must not say it does"
 
 

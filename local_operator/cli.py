@@ -728,11 +728,50 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "after the socket times out, escalate to signals using the "
-            "record's own fields as identity — for a heartbeating-but-"
-            "starved process the socket cannot reach (use after the plain "
-            "stop refused with a fresh heartbeat)"
+            "escalate past a refusal or a skip: signal a target whose socket "
+            "cannot confirm identity, one that reports a turn in flight, or one "
+            "already leaving after a signal — each of those can cut the turn it "
+            "is in. Not needed for a cooperative mid-turn runtime: the plain "
+            "stop ends that one promptly, through its socket"
         ),
+    )
+
+    # The rotation path (`lop refresh`): ask every live runtime to move to the
+    # build on disk at its next boundary. Top-level beside `sessions`/`send`/
+    # `stop` because it answers a fourth question about this machine — "which
+    # of these is still on the old build, and what is it doing instead" — and
+    # it exists so that making a new build take effect never needs the thing
+    # that destroyed 32 turns on 2026-09-14: an ad-hoc signal sweep.
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help=(
+            "Ask running sessions to move to the build on disk at their next "
+            "boundary (no signals)"
+        ),
+        parents=[parent_parser],
+    )
+    refresh_parser.add_argument(
+        "target",
+        nargs="?",
+        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+    )
+    refresh_parser.add_argument("--pid", type=int, help="target by exact pid")
+    refresh_parser.add_argument("--session", dest="session", help="target by exact session id")
+    refresh_parser.add_argument(
+        "--all",
+        dest="refresh_all",
+        action="store_true",
+        help="ask every live session on this machine (no confirmation: nothing is ended)",
+    )
+    refresh_parser.add_argument(
+        "--json", action="store_true", help="machine-readable outcome per target"
+    )
+    refresh_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="wait per session for its answer (default 10)",
     )
 
     # Scheduled wakes, and the process that fires them for sessions nobody is
@@ -3213,6 +3252,14 @@ def sessions_command(args: argparse.Namespace) -> int:
         for row in rows
     }
     show_why = any(why.values())
+    # ONLY WHEN SOMETHING IS LEAVING, on the same rule as WHY and LAST_ACTIVE
+    # above: a healthy fleet's listing must not gain a column of blanks, and the
+    # table is parsed by people. Unlike WHY this says something true about a row
+    # the operator may be about to act on — a signalled runtime is alive and
+    # working for up to ``SIGNAL_DRAIN_S``, and a plain ``lop stop`` on it cuts
+    # the turn the drain is finishing (U1/U2, PR #1141).
+    leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
+    show_leaving = any(leaving.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3223,6 +3270,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'LAST_ACTIVE':>11}"
     if show_why:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
+    if show_leaving:
+        header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3261,6 +3310,12 @@ def sessions_command(args: argparse.Namespace) -> int:
             # fitted wide cell the blanks it never needed; `_pad_cell` is the
             # same CELLS-not-characters rule the three text columns use above.
             line += f" {_pad_cell(cell, WHY_COLUMN_WIDTH)}"
+        if show_leaving:
+            # `_fit_cell` rather than `_clamp_reason_cell`: this column's text is
+            # the harness's own phrase, so a cut only ever needs to be visible —
+            # the reason clamp's marker exists for provider-authored prose.
+            said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
@@ -4573,6 +4628,33 @@ def _state_cell(state: str) -> str:
 WHY_COLUMN_WIDTH = 48
 
 
+#: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
+#:
+#: A phrase, not an enum: the field's whole purpose is to say what is happening
+#: in the words the operator needs (``signalled; leaving when its turn ends (up
+#: to 2 min)``), so it is bounded like WHY rather than abbreviated to a token
+#: nobody could read. Wide enough for the shipped phrase in full, so the common
+#: case is not cut and a cut one is visibly marked (`_fit_cell`). The column
+#: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
+#: — a listing with no draining runtime is byte-for-byte what it was before.
+#:
+#: A TRAILING COLUMN RATHER THAN A TOKEN IN ``STATE``, which is the decision the
+#: drain's first round recorded (design round 2, D3, kept rather than changed):
+#: ``STATE`` holds seven cells that consumers branch on (``state == "stored"``),
+#: so teaching it a new word to carry a display fact would spend a value the
+#: machine reads to say something only a person needs.
+#:
+#: WIDENED FROM 40 when the phrase grew the drain's bound (UX round 2, U9): the
+#: row that carries this is the one the operator reads most, and
+#: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
+#: can take away. The number is the phrase's own cell width, pinned against it by
+#: ``tests/unit/info/test_sessions_extraction.py`` rather than imported — this
+#: module keeps session internals out of its module scope on purpose (see the
+#: header) — so a reword of the phrase fails loudly there instead of silently
+#: cutting the new clause off the row.
+LEAVING_COLUMN_WIDTH = 51
+
+
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.
 #:
 #: Named rather than left as literals inside the format specs because the row
@@ -4776,6 +4858,7 @@ def stop_command(args: argparse.Namespace) -> int:
                 force=args.force,
                 _root=config_dir(),
                 _command="lop stop --all",
+                on_wait=_stop_progress,
             )
         )
         return _report_stops(outcomes, args.json, summary=True)
@@ -4799,20 +4882,46 @@ def stop_command(args: argparse.Namespace) -> int:
             # The artifact's point is naming WHO stopped it, so the CLI records
             # what the user typed rather than the function they reached.
             _command="lop stop",
+            on_wait=_stop_progress,
         )
     )
     return _report_stops([outcome], args.json)
 
 
+def _stop_progress(line: str) -> None:
+    """Paint one progress line the ladder emits while it waits.
+
+    STDERR, not stdout, and that is the whole reason this is a function rather
+    than an inline ``print``: stdout carries the receipts — under ``--json``, a
+    document a caller parses — and a progress line there would either break that
+    parse or force every consumer to filter a line the final receipt supersedes
+    a moment later. Progress about a wait belongs beside it, which is where the
+    disambiguation listing above already goes.
+
+    It exists because the ladder's rung-2 wait is the longest silence a `lop`
+    command produces (~150 s for a wedged mid-turn target) and it used to print
+    nothing at all until it resolved: an operator clearing a wedged session
+    could not tell a working command from a hung one, and the natural response —
+    Ctrl-C — leaves the outcome ambiguous (U5, PR #1141).
+    """
+    print(line, file=sys.stderr)
+
+
 def _resolve_stop_target(
     args: argparse.Namespace,
 ) -> "tuple[Any | None, list[Any], str]":
-    """Resolve a ``lop stop`` target through the `send` vocabulary.
+    """Resolve a ``lop stop`` / ``lop refresh`` target through the `send` vocabulary.
 
     The same shared resolver `lop send` uses, so every way of addressing a
     peer — name, substring, session id, pid — behaves identically across
-    `send` and `stop`. Only the hint strings differ (the stop parser's own
-    flags).
+    `send`, `stop` and `refresh`. Only the hint strings differ (the parsers'
+    own flags).
+
+    WEDGED targets are included for both commands, for different reasons that
+    happen to want the same set: they are stoppable (the ladder's signal rungs
+    exist for them) and they are worth ASKING about (a rotation reports
+    ``unreachable``, which is the honest answer to "why is this one still on the
+    old build"). `send` keeps refusing them because nobody would read it.
     """
     from local_operator.mobile.peer_send import resolve_peer_target
 
@@ -4864,11 +4973,116 @@ def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) 
             from local_operator.session.runtime.control import summarize
 
             print(summarize(outcomes))
-    # Only a refusal (identity unconfirmed, nothing signalled) is partial;
-    # "gone" (already exited) is a clean resolution — the method says which,
-    # so no receipt text is parsed here.
-    refused = any(o.method == "refused" for o in outcomes)
-    return 2 if refused else 0
+    # Anything that did NOT end the session is partial: a refusal (identity
+    # unconfirmed, nothing signalled) and a skip (a turn in flight, nothing
+    # signalled) alike — in both the target is still running, which is what the
+    # caller asked about. "gone" (already exited) is a clean resolution. The
+    # method says which, so no receipt text is parsed here; ``ENDED_METHODS`` is
+    # the one definition of "it is not running any more".
+    from local_operator.session.runtime.control import ENDED_METHODS
+
+    return 2 if any(o.method not in ENDED_METHODS for o in outcomes) else 0
+
+
+def refresh_command(args: argparse.Namespace) -> int:
+    """``lop refresh`` — move live sessions to the build on disk, without killing.
+
+    The supported way to make a new build take effect on sessions that are
+    WORKING. Run 1 of this command is ``lop-update``: the runtimes notice the
+    moved install on their own and retire when idle, but "when idle" can be
+    hours away, and the only other tool to hand was a signal sweep — which is
+    what cut 32 turns off on 2026-09-14. This asks instead of telling: each
+    runtime judges its own readiness, so a busy session is reported as moving
+    at its next boundary rather than ended.
+
+    Exit codes: **0** every target gave an answer (moved, busy, draining,
+    already current, or its own reason), **1** no target matched, **2** partial
+    — at least one runtime did not answer its control socket, so its move is not
+    going to happen on its own, OR the install on disk had not settled and no
+    runtime could judge it yet (``unsettled``). The second case is deliberately
+    partial rather than clean (D1/M2, PR #1141): this command's own run 1 is
+    ``lop-update``, so it lands inside the settle window for a whole fleet, and
+    exiting 0 there would tell a rotating script the rotation is complete when
+    every session on the machine is about to be retired. The receipt says to ask
+    again in a few seconds, which is the honest next step.
+
+    Imports stay function-local like every other runtime path here (the CLI
+    startup path must stay light — see ``tests/unit/test_import_graph.py``).
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import candidate_lines
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import control
+
+    timeout_s = (
+        args.timeout if args.timeout and args.timeout > 0 else control.DEFAULT_REFRESH_TIMEOUT_S
+    )
+
+    if getattr(args, "refresh_all", False):
+        # NO CONFIRMATION GATE, unlike `stop --all`: this command ends no session
+        # and interrupts no turn, so "every session" is not a decision anyone has
+        # to be talked through. The listing still prints, because the outcome per
+        # session IS the answer the caller came for.
+        targets = control._rotation_targets(config_dir(), own_pid=None)
+        if not targets:
+            print("no live sessions to refresh")
+            return 0
+        outcomes = asyncio.run(control.refresh_all(timeout_s=timeout_s, own_pid=None))
+        return _report_refreshes(outcomes, args.json, summary=True)
+
+    record, candidates, error = _resolve_stop_target(args)
+    if candidates:
+        print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        return 1
+    if error or record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+
+    outcome = asyncio.run(control.refresh_session(record, timeout_s=timeout_s))
+    return _report_refreshes([outcome], args.json)
+
+
+def _report_refreshes(outcomes: list[Any], as_json: bool, *, summary: bool = False) -> int:
+    """Paint the rotation outcomes and derive the exit code.
+
+    0 when every runtime answered (however it answered — "busy" is a queued
+    move, not a failure, and "draining" is that move already scheduled), 2 when
+    at least one could not be asked at all, or could not yet judge the install
+    (``unsettled``, see ``REFRESH_SETTLED_METHODS``). The method is the verdict,
+    exactly as in ``_report_stops``: no receipt text is parsed and the two
+    commands cannot disagree about what counts as partial.
+    """
+    if as_json:
+        import json as _json
+
+        print(
+            _json.dumps(
+                [
+                    {
+                        "pid": o.pid,
+                        "session_id": o.session_id,
+                        "name": o.name,
+                        "method": o.method,
+                        "line": o.line,
+                    }
+                    for o in outcomes
+                ],
+                indent=2,
+            )
+        )
+    else:
+        for outcome in outcomes:
+            print(outcome.line)
+        if summary:
+            from local_operator.session.runtime.control import summarize_refresh
+
+            print(summarize_refresh(outcomes))
+    from local_operator.session.runtime.control import REFRESH_SETTLED_METHODS
+
+    return 2 if any(o.method not in REFRESH_SETTLED_METHODS for o in outcomes) else 0
 
 
 def _format_duration(seconds: float) -> str:
@@ -6661,6 +6875,8 @@ def main() -> int:
             return sessions_command(args)
         elif args.subcommand == "stop":
             return stop_command(args)
+        elif args.subcommand == "refresh":
+            return refresh_command(args)
         elif args.subcommand == "resume-click":
             # Function-local like every other runtime import here: this module
             # is on the CLI startup path and must not pull the spawn/terminal

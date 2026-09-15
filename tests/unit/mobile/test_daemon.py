@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -1513,3 +1514,52 @@ def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeyp
         caplog.clear()
         counter.note(9911)
         assert "first oversized control frame from pid 9911" in caplog.text
+
+
+def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
+    """UX round 2, U8: a signalled runtime also STREAMS, so the list said "busy".
+
+    The phone's row ladder is driven by ``streaming``, which is true of a
+    draining runtime exactly as it is of an ordinary working one — so the list
+    the operator reads on a phone could not tell "finishing a turn somebody
+    asked it to finish" from "working". The record's phrase is carried as its
+    own additive field; a client that does not know it renders exactly as
+    before, which is what makes this safe to ship before the card's own
+    treatment of it.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL, SessionRecord
+
+    def record(session_id: str = "s-drain", pid: int = 4321, **extra: Any) -> SessionRecord:
+        return SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name="draining",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+            **extra,
+        )
+
+    daemon = MobileDaemon(port=0, password="pw")
+    draining = record(leaving=LEAVING_ON_SIGNAL, busy=True)
+    daemon.table.entries[draining.pid] = SessionEntry(draining)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == LEAVING_ON_SIGNAL, rows[0]
+
+    # An ordinary busy session carries nothing, so the field means something.
+    plain = record("s-plain", pid=4322, busy=True)
+    daemon.table.entries[plain.pid] = SessionEntry(plain)
+    daemon.table.entries.pop(draining.pid)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == "", rows[0]
+
+    # And a record written by an OLDER runtime (no such field) is empty rather
+    # than missing: this list is served on a host mid-upgrade.
+    old = record("s-old", pid=4323)
+    del old.leaving  # type: ignore[attr-defined]
+    daemon.table.entries.pop(plain.pid)
+    daemon.table.entries[old.pid] = SessionEntry(old)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == "", rows[0]

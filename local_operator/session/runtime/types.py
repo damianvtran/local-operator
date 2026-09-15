@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol
 
 # The one spelling of the session-directory name, owned by the cleanup policy's
 # vocabulary (``retention``) and imported here rather than re-spelled: the
@@ -291,6 +291,211 @@ def session_dir(root: "Path", session_id: str) -> "Path":
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 
+#: How long a session runtime with WORK IN FLIGHT may defer its own disposal
+#: after a termination signal, before it disposes anyway (the drain in
+#: :func:`~local_operator.session.runtime.process._drain_for_signal`).
+#:
+#: WHY A RUNTIME DEFERS AT ALL: SIGTERM is catchable, so a runtime that receives
+#: one can look at what it is doing. Disposing under a running turn is not a
+#: shutdown, it is data loss — the turn is aborted mid-tool and the transcript
+#: is left with a cut-off — and on 2026-09-14 one broadcast sweep SIGTERM'd 21
+#: runtimes within 6 ms and cut 32 turns off that way. The graceful paths were
+#: always work-aware (``may_refresh``); the signal path was the gap.
+#:
+#: WHY THE DEFERRAL IS BOUNDED, and never an unbounded wait: a wedged or runaway
+#: runtime must stay killable, and "that process ignores SIGTERM" is a worse
+#: failure than losing one turn. On expiry the runtime disposes exactly as it
+#: did before this constant existed. SIGKILL, power loss and a crash are outside
+#: its reach — nothing catchable happens there — and the durable outcome already
+#: reports those honestly.
+#:
+#: WHY IT LIVES HERE, in a module neither side owns: the runtime child
+#: (:mod:`~local_operator.session.runtime.process`) obeys it and the kill ladder
+#: (:mod:`~local_operator.session.runtime.control`) must outlast it, and those
+#: two modules may not import each other — the ladder runs on the CLI startup
+#: path and the child is a ``python -m`` entry point. Same reason
+#: ``HEARTBEAT_TIMEOUT_S`` is published here: one number both ends must agree
+#: on. ``control.SIGTERM_GRACE_S`` is derived from it rather than typed
+#: alongside it, and ``tests/unit/session/runtime/test_signal_drain.py`` pins
+#: that the ladder's escalation cannot land inside this window.
+SIGNAL_DRAIN_S = 120.0
+
+
+def bound_text(seconds: float) -> str:
+    """One bound, as a person reads it: ``2 min``, ``2.5 min``, ``30s``.
+
+    ONE FORMATTER, BECAUSE TWO NEARBY BOUNDS IN TWO UNITS READ AS TWO DIFFERENT
+    KINDS OF NUMBER. The receiver's drain bound and the sender's grace are
+    120 s and 150 s — genuinely different waits, deliberately 30 s apart — and
+    they used to print as ``(up to 2 min)`` and ``waiting up to 150s``, which
+    invites the reader to compare a rounded figure against an exact one and
+    wonder whether they are the same bound (design round 2, D4, PR #1141).
+
+    Minutes, because both bounds are minutes-scale and both lines are prose
+    about a wait a person is sitting in front of; ``:g`` trims the trailing
+    zero so the common case stays ``2 min`` rather than ``2.0 min``, while a
+    sub-minute bound falls back to whole seconds rather than printing
+    ``0.5 min``. Every call site derives its number from the constant, never
+    types it: a bound that moves must move in the words too, or the receipt
+    lies about the wait it is describing.
+
+    HERE, beside the numbers, for the same reason those are: the runtime's
+    record phrase and the ladder's receipts are two front ends' prose about
+    ONE constant, and the formatter is how they agree on how to say it.
+    """
+    if seconds < 60.0:
+        return f"{seconds:.0f}s"
+    return f"{seconds / 60.0:g} min"
+
+
+#: What a runtime publishes on its record (``SessionRecord.leaving``) the moment
+#: a termination signal arrives and it starts draining, and what it answers a
+#: rotation with while that drain runs.
+#:
+#: WHY A PHRASE AND NOT A BOOL. The field exists to close an INVISIBILITY, and
+#: its reader is an operator looking at a fleet, not a parser: ``lop sessions``
+#: has no room for a legend, so a ``True`` would be a fact nobody could read —
+#: the same reason ``pending`` publishes the word ``approval``. It has to say
+#: both halves of what is happening (something signalled it; it is finishing a
+#: turn rather than ignoring the signal), because either half alone is wrong:
+#: "signalled" reads as wedged, "busy" is indistinguishable from the ordinary
+#: spinner the same record already publishes.
+#:
+#: HERE, in the module the child and the ladder both already import, for the
+#: reason ``SIGNAL_DRAIN_S`` is: the runtime writes it and two front ends read
+#: it, and a copy of the sentence in each would be three places to drift.
+#:
+#: WHY THE BOUND IS IN THE SENTENCE. The row that carries this is the one the
+#: operator reads most (``lop sessions``' trailing column), and on its own the
+#: sentence promises a boundary the 120 s bound can take away: a turn longer
+#: than ``SIGNAL_DRAIN_S`` does not reach its boundary, it is cut, and after
+#: that the row simply disappears — the honest cause is only visible by
+#: reopening the session. ``lop refresh``'s receipt already carried
+#: ``(up to 2 min)``; every other surface that shows the drain now says it too,
+#: because they all read this one phrase (UX round 2, U9). The bound is
+#: rendered from the constant beside it (``bound_text``), never typed, so it
+#: cannot drift from the wait it describes.
+LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(SIGNAL_DRAIN_S)})"
+
+#: What a runtime publishes when the departure was forced by THE BUILD ON DISK
+#: rather than by a signal: it has committed to leaving and is finishing the
+#: turn in flight. The same field, the same readers, a different reason — and
+#: the reason has to be the trigger's own words, because "signalled" would be
+#: false here and "leaving" alone would not say why.
+#:
+#: NO BOUND IS NAMED, and that is the one substantive difference:
+#: ``process._drain_for`` waits for this runtime's work and nothing else (the
+#: build path draws no clock), while the signal path is cut by
+#: ``SIGNAL_DRAIN_S`` and says so. A bound in this phrase would be a promise
+#: nothing enforces.
+LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
+
+#: The CAUSE token the SIGNAL drain commits with: ``process._drain_for_signal``
+#: passes it to ``begin_drain``, ``_drain_for`` re-passes it to the exit rung that
+#: finally disposes the runtime, and
+#: ``serving.ServingSessionHandle._retiring_refusal`` reads it back to name the
+#: departure a refusal is about.
+#:
+#: IT IS THE ONLY DEPARTURE THAT ACCESSOR NAMES, deliberately. The build arm's
+#: own cause token is ``runtime-retired``, which ``/move`` latches too — the same
+#: retirement leaves a session whose directory changed, where no build is owed —
+#: so naming that cause a build would tell a moved session its loaded build is
+#: gone from disk. Which BUILD drain a refusal is about is read off the phrase
+#: the drain frame published instead (:func:`drain_phrase_for_frame`), which a
+#: build drain carries and a move does not.
+#:
+#: A CONSTANT RATHER THAN A LITERAL, because the reader is 150 lines away in
+#: another module and the failure mode of a rename is silent: the refusal would
+#: go on describing the build handover for a signalled runtime, which is exactly
+#: the falsehood agent review round 4 (MAJOR-2) filed. It is also a
+#: ``incidents.CUT_OFF_CAUSES`` key — the same token classifies the turn this
+#: drain could not save — so the spelling is already load-bearing beyond this
+#: pair.
+SIGNAL_DRAIN_CAUSE = "runtime-shutdown"
+
+#: The ``reason`` a drain frame is announced with, as the producers write it, and
+#: neither literal is the one you would guess: ``process._commit_to_leaving``
+#: announces its ``label`` as the frame's ``reason`` (``announce(label, …)``),
+#: while the longer ``reason`` it also takes (``"leaving after SIGTERM"``,
+#: ``"retiring for <newer>"``) is the LOG line and the ``_Drain``'s own label —
+#: it is not on the wire at all. So:
+#:
+#: * ``shutdown-drain`` — ``process._SIGNAL_DRAIN_REASON``; the SIGNAL drain.
+#:   Measured across every build of this branch from the work-aware SIGTERM rung
+#:   through the fix that added the phrase key: twelve commit ranges, all
+#:   announcing ``draining=True`` and passing this label, none of them sending a
+#:   ``leaving`` key. That is the population the old fallback mislabelled.
+#: * ``stale-build`` — the build handover, from BOTH paths that raise one
+#:   (``process._begin_drain`` for the draining one, ``process._refresh_for``
+#:   for the idle one, whose frame is not draining and never reaches a reader).
+#:   This is also the label a RELEASED build announces, which is why it must keep
+#:   the build sentence; ``retiring …`` is the idle rotate op's wording
+#:   (``server.announce_retiring`` via ``_retire_if_pristine``, likewise not
+#:   draining) and is accepted for a trigger nobody has measured yet, because it
+#:   too says a successor is coming.
+_SIGNAL_REASON_LABELS = ("shutdown-drain",)
+_BUILD_REASON_LABELS = ("stale-build", "retiring")
+
+
+def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
+    """Which trigger a ``retiring`` frame's OWN WORDS establish, or ``""``.
+
+    FOR THE FRAMES THAT CARRY NO ``leaving`` PHRASE, and only for them. The
+    phrase is the primary carrier and a runtime that writes it says exactly
+    which trigger committed the drain; this answers the same question for the
+    runtimes that do not, which is one population with two members and neither
+    of them served correctly by the app's old fallback:
+
+    * a runtime older than this branch — a RELEASED build, whose only draining
+      announce is the stale-build handover. Its build sentence is true, and this
+      returns :data:`LEAVING_FOR_BUILD` for it.
+    * a build of THIS BRANCH from the work-aware SIGTERM rung through the commit
+      that added the key: those announce ``draining=True`` on BOTH triggers and
+      send no phrase, so an app that treated an absent phrase as "the build
+      handover" told a signalled runtime it was switching builds — both clauses
+      false, and the record saying the opposite at the same moment (design round
+      4, D9; agent review round 4, MAJOR-1). Their ``reason`` separates the two
+      arms, so this returns the phrase that matches the trigger that committed.
+
+    Anything this cannot place returns ``""``, which the app paints with its
+    neutral sentence: a trigger nobody has established must not inherit another
+    trigger's copy. Two readers, both fed by :func:`drain_phrase_for_frame`:
+    ``AttachedSession._on_retiring_frame`` paints from the phrase, and
+    ``AttachClient`` remembers it for the refusals a runtime too old to name its
+    own departure hands back (agent review round 5, MINOR-1).
+    """
+    words = (reason or "").strip()
+    if words.startswith(_SIGNAL_REASON_LABELS):
+        return LEAVING_ON_SIGNAL
+    if to or words.startswith(_BUILD_REASON_LABELS):
+        # ``to`` is the second, independent corroboration: a build handover
+        # normally names the successor it is leaving for, and the signal path
+        # passes none (``_drain_for_signal`` has no successor to name).
+        return LEAVING_FOR_BUILD
+    return ""
+
+
+def drain_phrase_for_frame(frame: Mapping[str, Any]) -> str:
+    """This departure's own words, for a reader that has to speak about it.
+
+    THE ONE ANSWER TO WHICH TRIGGER COMMITTED A DRAIN, called from both ends that
+    read a ``retiring`` frame: the host painting its notice
+    (``AttachedSession._on_retiring_frame``) and the attach client, which must
+    remember which departure refused a message it is about to hand back as a
+    typed refusal (``AttachClient._raise_for_reply_error`` — a runtime built
+    before the refusal's own ``error_trigger`` field cannot say it there). Two
+    copies of the precedence below would be two answers to one question.
+
+    THE PHRASE IS THE PRIMARY CARRIER: a runtime that writes ``leaving`` said
+    exactly which trigger committed the drain, and only the runtimes that do not
+    send it are read off their ``reason``/``to`` (:func:`leaving_phrase_for_frame`).
+    ``""`` is an answer rather than a failure — a frame that named no trigger at
+    all — and never another trigger's default.
+    """
+    return str(frame.get("leaving") or "") or leaving_phrase_for_frame(
+        str(frame.get("reason") or ""), str(frame.get("to") or "")
+    )
+
 
 class DiscoveryRecord(Protocol):
     """The members the shared publication path actually touches.
@@ -402,6 +607,22 @@ class SessionRecord:
     #: cost has to be findable — this field is what puts it in `lop sessions`
     #: and sorts it first in the picker.
     pending: str | None = None
+    #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
+    #: first: a short phrase (``LEAVING_ON_SIGNAL``) while that drain runs,
+    #: ``""`` when it is going nowhere. Set by the signal drain
+    #: (``process._drain_for_signal``) and never cleared, because a drain always
+    #: ends in an exit.
+    #:
+    #: WHY IT IS ON THE RECORD. The drain is bounded by ``SIGNAL_DRAIN_S``, so a
+    #: signalled-but-working runtime stays alive — and, before this field, stayed
+    #: ORDINARY — for up to two minutes. Every surface an operator reads
+    #: (``lop sessions``, a picker, a peer's ``lop stop``) saw an unremarkable
+    #: ``live`` row throughout, so the honest reading of that window was
+    #: impossible and the natural remedy was destructive: a plain stop against a
+    #: draining session cuts the very turn the drain exists to save (U1/U2, PR
+    #: #1141). ``busy`` cannot carry it — that is the picker's spinner bit and is
+    #: ``None`` of the fact that a signal has already been received and acted on.
+    leaving: str = ""
 
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same

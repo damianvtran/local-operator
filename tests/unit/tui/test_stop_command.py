@@ -166,7 +166,7 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
         return target, [], ""
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         # The front end is RECORDED, not merely accepted: this token is what the
         # durable stop marker names the killer by, and the TUI is a real front
@@ -217,6 +217,128 @@ async def test_stop_target_ambiguity_lists_candidates(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+async def test_stop_target_paints_a_declined_stop_at_warning_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, NIT-2: the SINGLE-target severity is pinned, not just the sweep's.
+
+    ``_stop_resolved_record`` routes ``refused`` and ``draining`` to warning and
+    ``sigkill`` to error, and until now only the ``/stop all`` half of that
+    ladder had a cell — so the single-target line could have been painted as an
+    ordinary note (or as an error) with every test still green. It matters more
+    than a colour: a declined stop is the receipt a user reads to learn that the
+    session is STILL RUNNING, and the one thing they must not confuse with
+    success.
+
+    Severity is asserted through the notice's own token, the same way the sweep
+    cell does it, so this is not a re-statement of the wording.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    target = _record(77778, "draining agent")
+    line = (
+        'skipped "draining agent" (pid 77778) — signalled; leaving when its turn ends '
+        "(up to 2 min); stopping it now cuts the turn it is finishing — it leaves by "
+        "itself, nothing to do (to force it, run lop stop --force 77778 in a shell)"
+    )
+
+    monkeypatch.setattr(
+        "local_operator.mobile.peer_send.resolve_peer_target",
+        lambda **kwargs: (target, [], ""),
+    )
+
+    async def fake_stop(  # noqa: ANN001, ANN202
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
+    ):
+        assert _command == "/stop"
+        return control.StopOutcome(
+            record.pid, record.session_id, "draining agent", "draining", line
+        )
+
+    monkeypatch.setattr(control, "stop_session", fake_stop)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop draining")
+        for _ in range(20):
+            await pilot.pause()
+            if line in _notices(app):
+                break
+        painted = {
+            block._text: block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        }
+        assert line in painted, [block._text for block in painted.values()]
+        assert painted[line]._token == NoticeBlock("reference", "warning")._token
+        # A declined stop ends nothing: this session keeps serving.
+        assert app._session is session
+        assert not session.disposed
+
+
+@pytest.mark.asyncio
+async def test_the_arm_listing_marks_a_target_the_press_will_decline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UX round 2, NIT-1: the listing IS the confirmation, so it names the drain.
+
+    The second press asks a draining runtime again and then leaves it alone —
+    the refusal runs ahead of rung 1 by design — so a listing that presents it
+    as one more session to stop promises a stop that will not happen. The
+    outcome line reconciles the count afterwards, but the decision is made one
+    screen earlier, which is why the mark belongs there.
+
+    Both halves are pinned: the row carries the qualifier AND the header stops
+    reading as "all of these will be stopped", since a count is what a user
+    actually reads before pressing twice.
+    """
+    from dataclasses import replace as _replace
+
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+
+    targets = [
+        _record(101, "alpha"),
+        _replace(_record(102, "beta"), leaving=LEAVING_ON_SIGNAL),
+    ]
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: targets)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        for _ in range(20):
+            await pilot.pause()
+            if any("will stop" in n for n in _notices(app)):
+                break
+        listing = [n for n in _notices(app) if "will stop" in n]
+        assert listing, _notices(app)
+        # The count varies with what the host owns (this harness appends its own
+        # session last), so the qualifier is asserted rather than the total —
+        # the header half of the fix is the parenthesis, not the number.
+        assert listing[0].startswith("will stop "), listing[0]
+        assert "(1 already leaving — asked again, then left alone):" in listing[0], listing[0]
+        assert re.search(r"pid +102  beta \(already leaving\)$", listing[0], re.M), listing[0]
+        # The ordinary target is unmarked, so the mark means something.
+        assert "alpha (already leaving)" not in listing[0], listing[0]
+        assert re.search(r"pid +101  alpha\n", listing[0]), listing[0]
+
+        # And a listing with nothing draining keeps the plain header it has
+        # always had: the qualifier is not decoration added to every sweep.
+        app._stop_all_armed_at = None
+        monkeypatch.setattr(
+            control, "_stop_targets", lambda root, own_pid=None: [_record(101, "alpha")]
+        )
+        app._run_slash_command("/stop all")
+        for _ in range(20):
+            await pilot.pause()
+            if any("will stop" in n for n in _notices(app)):
+                break
+        plain = [n for n in _notices(app) if n.startswith("will stop")][-1]
+        assert "already leaving" not in plain, plain
+
+
+@pytest.mark.asyncio
 async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -229,9 +351,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     def fake_targets(root, own_pid=None):  # noqa: ANN001, ANN202
         return targets
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         commands.append(_command)
         # The execution is restricted to what the listing showed (R1-6).
@@ -292,9 +414,9 @@ async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
 async def test_stop_all_repeat_outside_the_window_re_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         # The execution is restricted to what the listing showed (R1-6).
         assert only_pids == {101, 102}
@@ -348,9 +470,9 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
     its own warning line so the user can act on it."""
     monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         return [
             control.StopOutcome(9, "sid-9", "z", "refused", 'refused "z" (pid 9) — identity'),
         ]
@@ -372,6 +494,62 @@ async def test_stop_all_refusals_get_their_own_line(monkeypatch: pytest.MonkeyPa
         assert notices[-1] == "2 sessions: 1 stopped, 1 refused"
         listing = [n for n in notices if "will stop" in n]
         assert listing and listing[0].endswith("stopped 1 of 2")
+
+
+@pytest.mark.asyncio
+async def test_a_target_left_alone_is_named_at_warning_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3: "stopped 1 of 2" cannot say WHICH session was left running.
+
+    ``busy`` (a turn in flight) became a non-clean outcome with the work-aware
+    ladder, and ``draining`` (a signal already has it leaving) joins it here:
+    the session is still running in both, and its NAME is the one thing the user
+    can act on — which is the rule the refusal cell above states for ``refused``.
+    Neither took a line, so ``/stop all`` painted a count and never said which
+    session survived it.
+
+    Severity is asserted through the notice's own token rather than by eye: a
+    receipt that did not stop anything is a WARNING on this surface, exactly
+    like the refusal beside it.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
+    busy_line = 'skipped "z" (pid 9) — a turn is in flight'
+    draining_line = 'skipped "y" (pid 7) — signalled; leaving when its turn ends'
+
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
+        return [
+            control.StopOutcome(9, "sid-9", "z", "busy", busy_line),
+            control.StopOutcome(7, "sid-7", "y", "draining", draining_line),
+        ]
+
+    monkeypatch.setattr(control, "stop_all", fake_all)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        await pilot.pause()
+        app._run_slash_command("/stop all")
+        for _ in range(30):
+            await pilot.pause()
+            if app._session is None:
+                break
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        painted = {block._text: block for block in blocks}
+        assert busy_line in painted, [block._text for block in blocks]
+        assert draining_line in painted
+        warning_token = NoticeBlock("reference", "warning")._token
+        assert painted[busy_line]._token == warning_token
+        assert painted[draining_line]._token == warning_token
 
 
 @pytest.mark.asyncio
@@ -543,9 +721,9 @@ async def test_stop_all_re_arms_when_the_listing_changed(monkeypatch: pytest.Mon
     targets = [_record(101, "alpha")]
     calls: list[str] = []
 
-    async def fake_all(
-        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None
-    ):  # noqa: ANN001, ANN202
+    async def fake_all(  # noqa: ANN001, ANN202
+        *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
+    ):
         calls.append("all")
         return []
 
@@ -976,7 +1154,7 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
         return target, [], ""
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(
@@ -1004,6 +1182,57 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
         # never the substring vocabulary — see the wrong-session test below.
         assert selectors and selectors[0]["session"] == "sess"
         assert not selectors[0]["target"]
+
+
+@pytest.mark.asyncio
+async def test_a_flag_is_refused_as_a_flag_not_resolved_as_a_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U11: ``/stop --force <pid>`` is not a search string over session names.
+
+    ``--force`` belongs to ``lop stop``, which this surface does not run, and
+    nothing here offers it any more — but a user copying the shell shape was
+    answered "no live session matches '--force 62181'" about a session the panel
+    one keystroke away lists as live and draining. The house shape for an
+    argument a surface does not take is a refusal that says so (``/info extra``
+    → "takes no arguments"), and the target resolver is never reached.
+
+    UX round 4 (U12) added the one flag that HAD a spelling on this surface:
+    ``--all`` is how the shell says ``/stop all``, so that arm names the fan-out
+    the user was reaching for while every other flag keeps the single-session
+    sentence unchanged.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_resolve(**kwargs: Any):
+        calls.append(kwargs)
+        return None, [], "no live session matches"
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", fake_resolve)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop --force 62181")
+        await pilot.pause()
+        notices = _notices(app)
+        assert any("takes no flags" in text for text in notices), notices
+        # The remedy the flag was reaching for is named where it exists, and the
+        # session that IS listed is never described as missing.
+        assert any("lop stop" in text for text in notices), notices
+        assert not any("no live session matches" in text for text in notices), notices
+        assert calls == [], calls
+
+        # U12: the SHELL's spelling of this surface's own fan-out is answered with
+        # the spelling that works. ``/stop --all`` is ``lop stop --all`` reaching for
+        # ``/stop all``, and the single-session remedy above says nothing about it.
+        app._run_slash_command("/stop --all")
+        await pilot.pause()
+        notices = _notices(app)
+        assert any("/stop all" in text for text in notices), notices
+        # Not a blanket clause on every flag: ``--force`` still gets the sentence
+        # that names what it was reaching for (``lop stop --force``), unchanged.
+        assert sum("the fan-out is /stop all" in text for text in notices) == 1, notices
 
 
 @pytest.mark.asyncio
@@ -1127,7 +1356,7 @@ async def test_the_unbound_stop_never_reaches_a_look_alike_session(
     stopped: list[str] = []
 
     async def fake_stop(
-        record, *, timeout_s=10.0, _root=None, _command=None
+        record, *, timeout_s=10.0, _root=None, _command=None, on_wait=None
     ):  # noqa: ANN001, ANN202
         stopped.append(record.session_id)
         return control.StopOutcome(

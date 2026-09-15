@@ -14,13 +14,15 @@ before/after of the real command is on the PR; this is the in-suite guard.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
 
 from local_operator.info.collect import session_rows
 from local_operator.info.model import SessionLine
+from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
 
 #: Frozen clock, so every derived duration is a constant rather than a function
 #: of when the suite ran.
@@ -44,6 +46,10 @@ class _Record:
     subagents_queued: int | None = None
     version: str = ""
     source_ref: str = ""
+    #: The drain marker (``SessionRecord.leaving``). Absent from ``_OldRecord``
+    #: below on purpose: an older runtime's record has no such field, and the
+    #: listing must render it as "not leaving" rather than raising.
+    leaving: str = ""
 
 
 @dataclass
@@ -154,6 +160,14 @@ EXPECTED = [
         # whatever store the machine happens to have.
         "completion_kind": "",
         "completion_reason": "",
+        # WHETHER THIS RUNTIME IS FINISHING A TURN BEFORE LEAVING. Appended at
+        # the end of the published key order, like the two above it: the field
+        # is what makes a drain visible to a fleet reader at all (U1/U2, PR
+        # #1141), and ``lop sessions`` prints it in its own LEAVING column.
+        # Empty in this fixture because CONTAMINATING it would change every
+        # BYTE of every row for every other cell in this file — the drain has
+        # its own cells below.
+        "leaving": "",
     },
     {
         "state": "live",
@@ -182,6 +196,8 @@ EXPECTED = [
         # whatever store the machine happens to have.
         "completion_kind": "",
         "completion_reason": "",
+        # NOT LEAVING — present on every row so the published shape is stable.
+        "leaving": "",
     },
     {
         "state": "stale",
@@ -213,7 +229,26 @@ EXPECTED = [
         # whatever store the machine happens to have.
         "completion_kind": "",
         "completion_reason": "",
+        # ``_OldRecord`` predates the field entirely, so this is the getattr
+        # default: a record written by an older runtime lists as "not leaving"
+        # rather than raising.
+        "leaving": "",
     },
+]
+
+
+#: ``FIXTURE`` with one session inside its drain — the shape U2 is about.
+#:
+#: A separate set rather than a field on the shared one, because a non-empty
+#: value there re-flows EVERY row's tail and so every other cell in this file
+#: (the wide-glyph and WHY-clamp cells read the end of the row). The drain has
+#: its own rows, and the rest of the file keeps its assertions.
+DRAINING = [
+    (
+        replace(record, leaving=LEAVING_ON_SIGNAL) if index == 0 else record,
+        state,
+    )
+    for index, (record, state) in enumerate(FIXTURE)
 ]
 
 
@@ -268,12 +303,12 @@ GLYPH_FIXTURE: list[tuple[Any, str]] = [
 ]
 
 
-def _install_fixture(monkeypatch: Any) -> None:
+def _install_fixture(monkeypatch: Any, rows: Any = None) -> None:
     from local_operator.info import collect as collect_mod
     from local_operator.mobile import resources
     from local_operator.session.runtime import registry
 
-    monkeypatch.setattr(registry, "scan", lambda root=None: FIXTURE)
+    monkeypatch.setattr(registry, "scan", lambda root=None: FIXTURE if rows is None else rows)
     monkeypatch.setattr(
         resources,
         "session_resource_usage",
@@ -344,6 +379,10 @@ def test_cli_table_still_renders_every_row(monkeypatch: Any, capsys: Any) -> Non
     assert "Mobile relay" in out
     assert "Dead runtime" in out
     assert out.count("\n") == 4  # header + one row per fixture record
+    # A fleet where nobody is leaving renders exactly as it always did — no new
+    # column, no re-flow — which is what the drain's own cell below asserts from
+    # the other side.
+    assert "LEAVING" not in out
     # And the key never reaches a terminal either.
     assert "control_key" not in out
 
@@ -396,6 +435,99 @@ def test_the_sessions_table_leads_with_words_while_json_keeps_the_token(
     args.json = True
     assert cli.sessions_command(args) == 0
     assert json.loads(capsys.readouterr().out)[0]["state"] == "wedged"
+
+
+def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """The drain reaches every surface an operator reads (U1/U2, PR #1141).
+
+    Before this, a signalled runtime was INDISTINGUISHABLE from an ordinary busy
+    one for up to ``SIGNAL_DRAIN_S``: `lop sessions` reported ``live`` with
+    nothing else to see, and the natural next move — a plain ``lop stop`` — cut
+    the turn the drain was finishing. Both readings are asserted here, from the
+    same input: the published row (which ``/info`` and the JSON contract carry)
+    and the human table.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch, DRAINING)
+    rows = session_rows()
+    assert rows[0]["leaving"] == LEAVING_ON_SIGNAL
+    assert [row["leaving"] for row in rows[1:]] == ["", ""]
+    assert "leaving" in rows[0] and list(rows[0])[-1] == "leaving"
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "LEAVING" in out
+    assert LEAVING_ON_SIGNAL in out, out
+    # ...AND THE BOUND IS INSIDE IT. The row is where an operator decides whether
+    # to touch a draining runtime, and the phrase alone promises a boundary the
+    # 120 s bound can take away (U9): the qualified sentence is the shipped one,
+    # and the column has to be wide enough to print it whole.
+    assert "(up to 2 min)" in out, out
+    # The drain does NOT reclassify the row: STATE is liveness (the process IS
+    # alive and heartbeating), and the drain is what it is doing — the same
+    # division the NEEDS column makes for a parked gate.
+    assert out.startswith("STATE")
+    # Matched on the ROW rather than on a literal run of spaces: the table's
+    # column widths belong to the table (main added an RSS FOOTPRINT column
+    # while this branch was open), and a cell that pins the padding fails for a
+    # change that has nothing to do with the LEAVING column.
+    row = next(line for line in out.splitlines() if line.startswith("live"))
+    assert re.match(r"live\s+4243\b", row), row
+
+
+def test_the_leaving_column_fits_the_shipped_phrase() -> None:
+    """The column width IS the phrase's width, so a reword cannot silently cut it.
+
+    ``cli`` deliberately keeps session internals out of its module scope, so the
+    two cannot be tied together by an import; the pin lives here instead, at the
+    seam that would actually break. ``_fit_cell`` cuts an over-wide cell with a
+    marker rather than wrapping it, which is right for an unforeseeable value and
+    wrong for this one — the phrase is a constant this project authors, so any
+    excess means the two drifted and the new clause is being sliced off the row
+    an operator reads (UX round 2, U9).
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli
+
+    assert cli.LEAVING_COLUMN_WIDTH == cell_len(LEAVING_ON_SIGNAL), (
+        f"LEAVING_COLUMN_WIDTH={cli.LEAVING_COLUMN_WIDTH} but the phrase is "
+        f"{cell_len(LEAVING_ON_SIGNAL)} cells: {LEAVING_ON_SIGNAL!r}"
+    )
+
+
+def test_the_leaving_column_is_absent_when_nobody_is_leaving(monkeypatch: Any, capsys: Any) -> None:
+    """A trailing column of blanks is not an improvement to a healthy listing.
+
+    The rule the WHY and LAST_ACTIVE columns already follow, and the reason this
+    is asserted rather than assumed: every operator reading `lop sessions` on an
+    ordinary day pays for this change, and they must pay nothing — same header,
+    same width, same rows.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "LEAVING" not in out
+    assert "Dead runtime" in out
 
 
 def test_sessions_all_without_limit_passes_the_advertised_default(

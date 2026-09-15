@@ -49,6 +49,12 @@ from local_operator.info.model import (
     is_shadowed_install,
 )
 from local_operator.info.render import build_export, not_answering_clause, plural
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_ON_SIGNAL,
+    SIGNAL_DRAIN_S,
+    bound_text,
+)
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -183,6 +189,31 @@ def _path(value: str, width: int) -> str:
 def _model(value: str, width: int) -> str:
     """Truncate a model id from the RIGHT: the provider and family identify it."""
     return truncate_cells(value, width) if value else "—"
+
+
+#: The drain row's words on the WIDTH FLOOR, and the reason they are their own
+#: strings (design round 3, U10). Below ``_NOTE_MIN`` the meta ladder is shed
+#: WHOLESALE and only ``short_meta`` survives, so a leaving row used to render as
+#: a bare ``● <name>``: the fact that changes what the operator may safely do
+#: next — the one this row's phrase was placed high to protect — was the one
+#: thing the narrow frame dropped, and behind it sat the widest ladder rung in
+#: the panel (the 51-cell phrase ``lop sessions`` sizes its column to).
+#:
+#: Kept as a TABLE keyed by the trigger's own words rather than by cutting the
+#: phrase, because the shelf is ~15 cells and a cut phrase is a fragment:
+#: ``signalled; leav…`` is not a thing a person reads. The bound is not invented
+#: here either — it is ``SIGNAL_DRAIN_S``, the same constant the phrase spells
+#: out in full, so the compact form and the long one cannot disagree. A phrase
+#: this build does not know (written by a newer runtime) falls back to
+#: :data:`_LEAVING_SHORT_OTHER`, which says the irreducible fact rather than
+#: another trigger's words.
+_LEAVING_SHORT: dict[str, str] = {
+    LEAVING_ON_SIGNAL: f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})",
+    LEAVING_FOR_BUILD: "leaving for build",
+}
+
+#: The fallback above: no trigger named, no bound claimed, nothing false.
+_LEAVING_SHORT_OTHER = "leaving"
 
 
 @dataclass
@@ -748,7 +779,9 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             glyph, ink = WEDGED_MARKER, "danger"
         elif line.is_self:
             glyph, ink = ATTACHED_MARKER, "muted"
-        elif line.busy:
+        elif line.busy or line.leaving:
+            # A draining session IS working (``busy`` is true of it), so it keeps
+            # the working ink; what changes is the words beside it, above.
             glyph, ink = IDLE_MARKER, "accent"
         else:
             glyph, ink = IDLE_MARKER, "muted"
@@ -768,6 +801,21 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
             bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+        # THE DRAIN, BEFORE the facts this row sheds. It is placed high in the
+        # list on purpose: the shed drops whole items from the RIGHT, so a fact
+        # appended after the memory figure is the first to go on a narrow frame
+        # — and "this runtime has been signalled and is finishing its turn" is
+        # the opposite of a disposable fact, it is the one that changes what the
+        # reader may safely do next. Without this branch a draining session
+        # rendered as an ordinary `busy` one on the very surface the operator is
+        # typing into, while every other row said otherwise (UX round 2, U8).
+        # The words are the record's own phrase, so this surface, `lop sessions`
+        # and the catalogue cannot drift into three vocabularies for one state —
+        # and the phrase is written by the same call that carries the drain to
+        # the APP (``RuntimeServer.announce_retiring``), so the two cannot
+        # disagree about whether this row is draining at all.
+        if line.leaving:
+            bits.append(line.leaving)
         bits.append(format_duration(line.uptime_s))
         # BOTH of these are shed on a row that is not answering, not merely
         # ordered after the facts (design round 2, D4): usage is sampled for
@@ -786,7 +834,10 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             bits.append(format_bytes(line.footprint_bytes or line.rss_bytes))
         if line.pending:
             bits.append(f"needs {line.pending}")
-        elif line.busy and line.state != "wedged":
+        elif line.busy and line.state != "wedged" and not line.leaving:
+            # `busy` is what the phrase above already says in full, and printing
+            # both reads as two facts where there is one. The wedged guard makes
+            # the same argument for the other state whose words already cover it.
             bits.append("busy")
         metas = tuple(" · ".join(bits[:count]) for count in range(len(bits), 0, -1))
         name = line.conversation_name or line.session_id or f"pid {line.pid}"
@@ -795,13 +846,20 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # This row's whole point is that a reader can tell it apart from the
         # working session above it, and a bare ``✗`` beside a truncated name
         # does not do that.
-        body.marked(
-            glyph,
-            ink,
-            name,
-            metas=metas,
-            short_meta="not answering" if line.state == "wedged" else "",
-        )
+        #
+        # A LEAVING ROW NEEDS ONE TOO, and it needs its own (design round 3,
+        # U10): the state this row publishes is the one that changes what the
+        # reader may safely do next, and on a narrow frame it used to be the
+        # only state reduced to a bare glyph beside a name. The compact form
+        # carries the bound where the phrase has one, so the narrow reader is
+        # told both that it is leaving and how long that can take.
+        if line.state == "wedged":
+            short_meta = "not answering"
+        elif line.leaving:
+            short_meta = _LEAVING_SHORT.get(line.leaving, _LEAVING_SHORT_OTHER)
+        else:
+            short_meta = ""
+        body.marked(glyph, ink, name, metas=metas, short_meta=short_meta)
     if sessions.build_skew:
         body.note(
             "Live sessions are running more than one build — a change may look "
