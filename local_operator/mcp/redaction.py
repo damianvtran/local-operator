@@ -29,6 +29,15 @@ Handlers installed AFTER a value is registered would not carry the filter, so
 :func:`register` re-scans on every call and :func:`attach` is exported for the
 logging setup to call once it has built its handlers.
 
+**What the scrubbers will and will not rewrite.** Only values at or above
+:data:`MIN_SCRUBBED_LENGTH`, because a byte-for-byte replacement of a shorter
+one corrupts ordinary text process-wide rather than protecting anything; and
+registration is REVERSIBLE (:func:`unregister`) so a test or a short-lived
+resolver cannot leave the process scrubbing a value whose reason to exist has
+gone away. Both are there because the first cut of this module was global,
+append-only and unbounded, and that combination was measured corrupting
+unrelated diagnostics (agent review R-1 / QA Q1).
+
 This registers values for SCRUBBING ONLY. It never adds them to a credential
 map, so nothing here makes a value injectable into a child environment or
 readable by a tool — the distinction
@@ -41,6 +50,7 @@ from __future__ import annotations
 import codecs
 import logging
 import threading
+from contextlib import suppress
 
 from local_operator.variables import VariableStore
 
@@ -51,6 +61,29 @@ _STORE = VariableStore(env={})
 #: Guards the store against a resolve running on a worker thread while a log
 #: record is being scrubbed on the event loop.
 _LOCK = threading.Lock()
+
+logger = logging.getLogger(__name__)
+
+#: Shortest value the scrubbers will rewrite.
+#:
+#: **Why a floor, and why here.** The scrubbers replace a registered value
+#: byte-for-byte wherever it appears, so below this length a value cannot be told
+#: apart from ordinary prose and the rewrite is damage rather than protection —
+#: and it is process-wide damage, because the filter below sees every record and
+#: the sinks below build user-visible text. Measured on a three-character value
+#: registered by a store test: an unrelated provider warning became ``expected
+#: [redacted] of minimal, low, medium, high, xhigh, max`` and a rendered MCP
+#: failure became ``ne[redacted]rk: cannot reach …`` (agent review R-1 / QA Q1).
+#: Ordinary diagnostics are full of one-to-seven-character words, so no shorter
+#: bound works; the same collision is why a WORD-shaped credential of any length
+#: still redacts that word, which is the cost of scrubbing at all.
+#:
+#: The residual is named rather than hidden: a credential shorter than this is
+#: NOT scrubbed from diagnostics, and :func:`register` says so at DEBUG (never
+#: the value itself). In practice MCP credentials are long opaque tokens; the
+#: alternative — rewriting every occurrence of a three-character value — protects
+#: nothing and corrupts every log line in the process.
+MIN_SCRUBBED_LENGTH = 8
 
 
 def scrub(text: str) -> str:
@@ -137,9 +170,25 @@ class _Filter(logging.Filter):
     ``getMessage()`` is resolved here and ``args`` cleared: a secret can sit in
     an ARGUMENT rather than in the format string, and a formatter downstream
     would otherwise interpolate the raw value back in.
+
+    **A filter must never raise.** ``Logger.handle`` consults filters before any
+    handler's own error handling, so an exception here does not degrade logging —
+    it turns the CALLER's ``logger.warning(...)`` into a raise, which is a
+    user-visible break for anyone who has ever resolved an MCP credential. The
+    guard below is therefore belt AND braces: the one shape that did raise
+    (``exc_info=False``) is handled where it belongs, and anything left
+    unforeseen passes the record through unscrubbed rather than taking the
+    process down with it. The SOURCE-side scrubs are the control; this filter is
+    defence in depth, so a skipped record is a smaller fault than a crash.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return self._scrub_record(record)
+        except Exception:  # noqa: BLE001 — a filter must never break user logging
+            return True
+
+    def _scrub_record(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
         except Exception:  # noqa: BLE001 — a bad format string is not our business
@@ -148,16 +197,23 @@ class _Filter(logging.Filter):
         if scrubbed != message:
             record.msg = scrubbed
             record.args = ()
-        if record.exc_info is not None:
+        # TRUTHINESS, not ``is not None``: CPython stores a falsy non-None
+        # ``exc_info`` verbatim, and this repo passes one — ``harness/loop.py``
+        # logs ``exc_info=not isinstance(exc, RenderedStreamError)``, i.e. exactly
+        # ``False`` for the case that line exists to handle, and
+        # ``Formatter.formatException(False)`` does ``tb = ei[2]`` and raises
+        # ``TypeError``. CPython's own ``Formatter.format`` guards the same way
+        # (agent review / QA Q2).
+        if record.exc_info:
             # Rendered HERE so the traceback text (which carries the exception's
             # own message, and therefore the child's echoed line) is scrubbed
             # before any handler formats it.
             record.exc_text = scrub(logging.Formatter().formatException(record.exc_info))
             record.exc_info = None
-        elif record.exc_text:
+        elif isinstance(record.exc_text, str):
             record.exc_text = scrub(record.exc_text)
         if record.stack_info:
-            record.stack_info = scrub(record.stack_info)
+            record.stack_info = scrub(str(record.stack_info))
         return True
 
 
@@ -172,12 +228,81 @@ def attach() -> None:
 
 
 def register(value: str) -> None:
-    """Register one resolved credential for scrubbing across MCP sinks."""
+    """Register one resolved credential for scrubbing across MCP sinks.
+
+    Returns without registering when the value is shorter than
+    :data:`MIN_SCRUBBED_LENGTH` — see that constant for the measurement. Nothing
+    is logged but the LENGTH: this is on the path a credential travels.
+    """
+    trimmed = value.strip()
+    if not trimmed:
+        return
+    if len(trimmed) < MIN_SCRUBBED_LENGTH:
+        logger.debug(
+            "MCP credential of %d characters is too short to scrub without rewriting "
+            "unrelated diagnostics; it will not be redacted",
+            len(trimmed),
+        )
+        return
+    with _LOCK:
+        _STORE.register_redaction(trimmed)
+    attach()
+
+
+def unregister(value: str) -> None:
+    """Drop one registration, for a caller whose reason to scrub has ended.
+
+    The deterministic half of :func:`register`. This store is process-global and
+    was append-only, which made any test that registered a value order-dependent
+    against every later test sharing the worker — the shape that turned a
+    store test's value into a failure in an unrelated provider test, and the
+    reason QA asked for registration to be reversible rather than merely
+    bounded. Only values registered here can be dropped; a value that is also a
+    session CREDENTIAL stays registered through that store.
+    """
     if not value:
         return
     with _LOCK:
-        _STORE.register_redaction(value)
-    attach()
+        _STORE.unregister_redaction(value)
+
+
+def _scrub_held_text(exc: BaseException) -> None:
+    """Scrub message text an exception keeps OUTSIDE ``args``, IN PLACE.
+
+    **Why ``args`` is not enough.** The MCP SDK's ``MCPError`` stores its text in
+    ``self.error = ErrorData(message=...)`` and defines ``__str__`` from that
+    field, so the args rewrite above changed nothing a reader could see:
+
+        after the args pass: args=(-32000, 'rejected credential [redacted]', None)
+                             str(exc)='rejected credential <the value>'
+
+    That is the shape a server echoing a rejected credential in a JSON-RPC error
+    arrives in — the credential is in the ERROR MESSAGE, which is the one string
+    every sink publishes — so a scrub that only rewrites ``args`` leaves the
+    leak on both the raised exception and its chained cause.
+
+    The write is attempted on the value READ BACK from the object rather than on
+    the one we asked for, so ``MCPError.message`` (a read-only property over
+    ``error.message``) is skipped instead of raised on once the first write has
+    landed, and a frozen or validating model is left alone: a scrub must never
+    turn an error path into a NEW exception. Exactly two shapes are covered —
+    ``error.message``, which is what an SDK error uses, then a plain ``message``
+    attribute. A type composing its text from anything else is not rewritten
+    here; :meth:`McpServerStderr.explain` fail-closes on that residue.
+    """
+    for holder in (getattr(exc, "error", None), exc):
+        message = getattr(holder, "message", None)
+        if not isinstance(message, str):
+            continue
+        scrubbed = scrub(message)
+        if scrubbed == message:
+            continue
+        # setattr, not ``holder.message = ``: the holder is typed as object here
+        # (an SDK ErrorData, or a bare exception whose attribute only some types
+        # have), and the point of the suppression is that the write is ALLOWED to
+        # fail on a read-only property, a frozen model or a slotted type.
+        with suppress(Exception):  # read-only property, frozen model, slots
+            setattr(holder, "message", scrubbed)
 
 
 def sanitize_exception(exc: BaseException, _seen: set[int] | None = None) -> None:
@@ -188,8 +313,10 @@ def sanitize_exception(exc: BaseException, _seen: set[int] | None = None) -> Non
     ``McpConnectionError`` built from scrubbed text is not enough on its own:
     the exception it is chained to (``raise ... from exc``) still carries its own
     message, and a remote server that echoes the rejected header back in an error
-    BODY puts the credential exactly there. Rewriting ``args`` is what makes the
-    value unreachable through every later reader of that object.
+    BODY puts the credential exactly there. Rewriting the message is what makes
+    the value unreachable through every later reader of that object — ``args``
+    for a builtin, plus the attribute shapes in :func:`_scrub_held_text` for an
+    SDK error, which is the one that carried this leak (agent review R-1).
 
     Suppressing the chain instead (``from None``) is NOT an option here, and that
     was measured rather than assumed: the connect round reads the chained
@@ -213,16 +340,19 @@ def sanitize_exception(exc: BaseException, _seen: set[int] | None = None) -> Non
     scrubbed = tuple(scrub(arg) if isinstance(arg, str) else arg for arg in exc.args)
     if scrubbed != exc.args:
         exc.args = scrubbed
+    _scrub_held_text(exc)
     for chained in (exc.__cause__, exc.__context__):
         if chained is not None:
             sanitize_exception(chained, _seen)
 
 
 __all__ = [
+    "MIN_SCRUBBED_LENGTH",
     "StderrRedactor",
     "attach",
     "register",
     "sanitize_exception",
     "scrub",
+    "unregister",
     "values",
 ]

@@ -1045,6 +1045,15 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "/v1/desktop/sessions/{session_id}/mcp",
         {"action": "list"},
     ),
+    # Added with the route: the MCP credential write reaches the door like every
+    # other bridge-taking call, and this row is what proves it is gated rather
+    # than only that it exists (agent review / QA Q5).
+    _DoorRoute(
+        "mcp_credentials",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/mcp/credentials",
+        {"name": "api", "values": {"HUBSPOT_TOKEN": "synthetic-value"}},
+    ),
     _DoorRoute(
         "credential",
         "POST",

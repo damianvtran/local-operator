@@ -104,13 +104,24 @@ All paths start `/v1/desktop/sessions/{id}` unless noted.
   therefore never joins the environment of every unrelated `bash` child. Every
   submitted ID is validated against the named server's own declared `${NAME}`
   references BEFORE any write, so an unknown server, a config FIELD name
-  (`Authorization`), an undeclared ID, an extra field, an empty value or an
-  oversized body is refused with a code and nothing is half-applied. Replacing an
-  existing value requires that ID in `confirmed_replace`, because the same secret
-  can be shared by several bindings and sessions. The response carries
-  `{name, saved_ids, failed_ids, code}` and never echoes a value. The owner's RPC
-  is a dedicated `mcp_credentials` op, never a `mcp.control` argument — values must
-  not reach the slash argument, the command journal, or a request receipt.
+  (`Authorization`), an undeclared ID, an extra field, an empty value or a
+  missing replacement confirmation returns a coded refusal
+  (`{name, saved_ids, failed_ids, code}`) with the stores unchanged — the
+  `confirmed_replace` gate, the declared-ID check and the per-key validation all
+  run before the first `store.set`. Replacement is confirmation-gated because the
+  same secret can be shared by several bindings and sessions, so overwriting one
+  is a decision the caller has to state. An oversized body never reaches the
+  handler:
+  the request model rejects it and the app answers **422** with
+  `{"detail": "The request has invalid fields."}` (never the rejected input,
+  which is why the app owns that response). One write CAN still land alone: a
+  store failure part-way through a multi-key body returns `code:
+  store_unavailable` with the ids written so far in `saved_ids`, so the caller
+  sees exactly which keys landed rather than a whole-body rollback. The response
+  carries `{name, saved_ids, failed_ids, code}` and never echoes a value. The
+  owner's RPC is a dedicated `mcp_credentials` op, never a `mcp.control` argument
+  — values must not reach the slash argument, the command journal, or a request
+  receipt.
 - `POST /fork`: stable request_id, optional message, boundary=`next_safe`.
   The runtime refuses compaction and uses `Session.request_fork` during a turn;
   otherwise it uses `fork_session`. This is the canonical complete-history fork

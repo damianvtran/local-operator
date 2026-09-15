@@ -88,7 +88,8 @@ credential and will not resolve.
 | `${NAME}` as the whole value | the stored value (the only shape the desktop UI's add form accepts) |
 | `Bearer ${NAME}` | each reference substituted, surrounding text kept |
 | `$${NAME}` | the escape: the literal text `${NAME}`, never a reference (no lookup, no refusal) |
-| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`, or a name the store does not hold such as `${HOME}`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
+| a `${` that is not a reference and names no stored key (`${1BAD}`, `${a b}`, an unclosed `${NAME`) | passed through untouched — it is literal text in a hand-written or imported config whose child expands its own variables |
+| a well-formed reference to a name the store does not hold (`${HOME}`, `${PATH}`) | refused, naming the key — the child expands nothing, and the escape `$${HOME}` is how a config that means it literally carries it through |
 | a `${` whose inner text contains a name the store holds, whatever surrounds it (`${hubspot-token}`, `${NAME:-}`, `${NAME-SUB}`, `${NAME#x}`, `${!NAME}`, `${#NAME}`, `${env:NAME}`, `${ NAME }`) | refused: the key exists, so the fragment cannot be a literal, and passing it through would start the server with the reference as its credential |
 | a well-formed reference mixed with a fragment (`${TOKEN}${1BAD}`) | refused: substituting in part would leave the server unauthenticated |
 
@@ -113,7 +114,10 @@ MCP server 'crm' needs CRM_API_KEY from the encrypted secret store for headers A
 ```
 
 (`for <field> <entry>` names the `env` variable or header the reference sits in;
-the `env` form reads `for env SOME_API_KEY`.) No tool from that server is
+the `env` form reads `for env SOME_API_KEY`.) The same refusal answers a
+well-formed reference the store does not hold, such as `${HOME}`: it names HOME,
+because a name the child would expand and a name the user meant are the same
+string here. No tool from that server is
 registered, the reference text is never passed to the process or the remote
 server, and values are never logged — the message names the key and the entry,
 not the secret. A config that means the reference **literally** — a project

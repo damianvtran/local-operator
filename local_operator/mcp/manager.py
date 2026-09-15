@@ -1071,8 +1071,25 @@ class McpServerStderr:
         return scrub("\n".join(self._tail))
 
     def quoted_tail(self, lines: int = STDERR_QUOTED_LINES) -> str:
-        """The last few lines, joined and bounded, for a one-line error message."""
-        text = " / ".join(list(self._tail)[-lines:])
+        """The last few lines, joined and bounded, for a one-line error message.
+
+        Scrubbed at READ time for the same reason :meth:`tail_text` is: ``feed``
+        scrubbed these bytes before they were retained, which covers a value
+        that was already registered, but a credential entered mid-session and
+        then quoted by a retry of an OLDER line would go out raw — and this is
+        the method ``explain`` builds the raised error from, not a display-only
+        helper. Two read paths over one deque must not disagree about the same
+        bytes (agent review R-3).
+
+        The ``" / "`` join is a residual LIMIT rather than a scrubbed sink: a
+        value the child itself split across a newline comes back reassembled by
+        it (``invalid token: synthetic-to / ken-abcdefghijklmnop``). No
+        line-oriented sink can know two lines were one token, so this is
+        recorded rather than fixed.
+        """
+        from local_operator.mcp.redaction import scrub
+
+        text = scrub(" / ".join(list(self._tail)[-lines:]))
         if len(text) <= STDERR_QUOTED_CHARS:
             return text
         return text[:STDERR_QUOTED_CHARS].rstrip() + "…"
@@ -1104,6 +1121,13 @@ class McpServerStderr:
         error whose text ("") says nothing at all, while the reason it died is
         sitting in the tail. This is what puts that reason in
         ``McpStartupOutcome.failures`` and therefore in the TUI's notice.
+
+        Both arms return text that is already scrubbed: the tail arm because it
+        is BUILT from ``detail``, the tail-less one because
+        ``sanitize_exception`` has rewritten the exception's own message IN
+        PLACE — ``args`` for a builtin, and ``error.message`` for the SDK's
+        ``MCPError``, which is the shape a server echoing a rejected credential
+        in a JSON-RPC error arrives in.
         """
         from local_operator.mcp.redaction import sanitize_exception, scrub
 
@@ -1113,7 +1137,28 @@ class McpServerStderr:
         sanitize_exception(exc)
         detail = scrub(str(exc)).strip() or type(exc).__name__
         if not self._tail:
-            return exc
+            # No child to quote — every REMOTE transport (which spawns nothing)
+            # and any stdio child that stayed quiet — so `exc` IS the diagnostic
+            # and the caller publishes it verbatim: the connect round stores
+            # `str()` of it in `_startup_failures`, which the toast, the
+            # transcript notice, `/mcp` and the desktop projection all render.
+            #
+            # Returned UNCHANGED where the in-place pass left nothing to scrub,
+            # rather than rebuilt from `detail` the way the tail arm is: a
+            # rebuilt `McpConnectionError` would drop `McpTransportError`, and
+            # `_is_network_failure` reads that TYPE off the raised object — it
+            # walks exception groups, not `__cause__` — to decide whether a
+            # failure may be called the user's connectivity being down. This is
+            # the arm every HTTP connect takes, so it is where that label
+            # matters most. The residual check keeps the guarantee either way.
+            if scrub(str(exc)) == str(exc):
+                return exc
+            # Unreachable for the types raised here and by the SDKs (their text
+            # lives in `args` or in `error.message`, both rewritten above); kept
+            # as the fail-closed arm for a type composing its rendered text from
+            # something neither pass can reach. Losing the transport label is
+            # the lesser fault next to publishing a credential.
+            return McpConnectionError(detail)
         return McpConnectionError(f"{detail}: {self.quoted_tail()}")
 
 
@@ -3010,7 +3055,15 @@ class McpManager:
         transport = _transport_failure_text(exc, url)
         if transport is not None:
             return transport
-        return str(exc)
+        # The UNCLASSIFIED arm, scrubbed: whatever text this exception carries is
+        # what the four surfaces render, and it is where a server that echoed a
+        # rejected credential in a JSON-RPC error message lands (`MCPError` keeps
+        # that message in `error.message`, so the text goes out unchanged unless
+        # the value was registered for scrubbing). The classified arms above
+        # compose their own text from exception codes, never from a server's.
+        from local_operator.mcp.redaction import scrub
+
+        return scrub(str(exc))
 
     def _server_url(self, name: str) -> str | None:
         """``name``'s configured endpoint, or ``None`` when it has none (stdio).
@@ -3186,8 +3239,19 @@ class McpManager:
         ``self._startup_failures[name]`` goes through here, and the flag is
         always recomputed from the exception rather than inferred from the
         rendered text.
+
+        Scrubbed HERE, at that single write path, because this map is published:
+        it becomes :class:`McpStartupOutcome.failures`, which the startup toast,
+        the durable transcript notice and ``/mcp`` render, and which
+        ``frontend_state`` projects into ``mcp_startup`` and
+        ``McpServerState.error`` — a module that contains no redaction call of
+        its own (agent review R-1). One scrub here covers every producer of a
+        failure text, including any that composed one without consulting
+        ``redaction``, and it is a no-op for text that never carried a value.
         """
-        self._startup_failures[name] = message
+        from local_operator.mcp.redaction import scrub
+
+        self._startup_failures[name] = scrub(message)
         if network:
             self._startup_network.add(name)
         else:
