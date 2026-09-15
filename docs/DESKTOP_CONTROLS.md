@@ -73,7 +73,7 @@ and rendered verification.
 | usage | ProviderController cached/live normalized reports and age/state | Freshness, quotas, partial/error/re-auth views |
 | context | Runtime typed context result | Unknown vs estimate, breakdown display |
 | analytics | AnalyticsStore aggregate/daily queries | Query controls and cost-knowledge rendering |
-| goal | Runtime show/set/clear | Echo only successful model-facing text |
+| goal | Runtime show/set/clear | Goal form; a set goal also consumes the request once (`goal_set`, same admission rule as team/agent) |
 | loop | Runtime-local cancelable count/goal orchestration, snapshot state | Form, progress/judge state, cancel; never auto-answer gates |
 | btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
 | compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
