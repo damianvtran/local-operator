@@ -1986,7 +1986,14 @@ class BridgeService:
                 method,
             )
             return None
-        return f"{method} unanswered with the link silent for {silent:.0f}s ({strikes} probes)"
+        # `strikes` counts observation WINDOWS, not probes (see the docstring's
+        # "Strikes, from distinct windows"), so the reason must not report it as
+        # a probe count: concurrent command timeouts inside one window strike
+        # once, and a reader told "3 probes" would look for three probes.
+        return (
+            f"{method} unanswered with the link silent for {silent:.0f}s "
+            f"({strikes} silent windows)"
+        )
 
     def _wire_loss(self, expected: tuple[WebSocket | None, int]) -> str:
         """Classify why the wire a command captured is no longer the live one.
