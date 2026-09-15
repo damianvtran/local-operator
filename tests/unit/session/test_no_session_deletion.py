@@ -494,6 +494,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/wakes/store.py::write_entry", "os.replace", "temp FILE -> wakes/<id>.json"),
     ("local_operator/wakes/store.py::write_entry", "os.unlink", "temp FILE -> wakes/<id>.json"),
+    # The wake DELIVERY ledger is the supervisor's OWN state beside the index
+    # (`local_operator/wakes/deliveries.py`): every path in it is
+    # `<config>/wakes/deliveries/<session-id>.json`, built from the config dir
+    # plus a FIXED suffix. The id reaches it only as a filename — the ledger's
+    # callers take it from an index entry's filename (so it can contain no
+    # separator) or from the ledger directory's own listing — and nothing in the
+    # module walks, renames or removes a directory, under `sessions/` or
+    # anywhere else.
+    (
+        "local_operator/wakes/deliveries.py::write_delivery",
+        "os.replace",
+        "temp FILE -> wakes/deliveries/<id>.json",
+    ),
+    (
+        "local_operator/wakes/deliveries.py::write_delivery",
+        "os.unlink",
+        "temp FILE -> wakes/deliveries/<id>.json",
+    ),
+    (
+        "local_operator/wakes/deliveries.py::remove_delivery",
+        "<path>.unlink",
+        "wakes/deliveries/<id>.json FILE",
+    ),
     # The registry's staged write is now ONE helper shared by the discovery
     # record and the durable stop marker, and the reaper MOVES a dead record
     # into the run namespace's `reaped/` sidecar instead of unlinking it (a
