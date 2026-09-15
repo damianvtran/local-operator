@@ -11,6 +11,7 @@ here rather than left to the caller.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -79,8 +80,9 @@ def test_an_interpreter_that_writes_needs_no_repair(
 def test_a_cold_probe_is_reported_cold_then_warm(
     prefix: Path, probe: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The probe tracks the cache, and freshness — not just existence."""
+    """The probe tracks the cache, and validity — not just existence."""
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    source_mtime = probe.stat().st_mtime
     assert bytecode.cache_is_cold() is True
 
     written = bytecode._compile_loaded_modules([probe])
@@ -89,13 +91,14 @@ def test_a_cold_probe_is_reported_cold_then_warm(
     assert cached.exists()
     assert bytecode.cache_is_cold() is False
 
-    # A cache OLDER than its source is a cache the import system will discard
-    # and rebuild — the state a `lop-update` leaves behind, which a process
-    # under the refusal flag can never repair on its own.
-    source_mtime = probe.stat().st_mtime
-    import os
-
-    os.utime(cached, (source_mtime - 10, source_mtime - 10))
+    # A source that moved on after its cache was written is a cache CPython
+    # will discard and rebuild — the state a `lop-update` leaves behind, which
+    # a process under the refusal flag can never repair on its own. Note which
+    # side changes: the HEADER records the source's mtime and size, so moving
+    # the cache's own mtime proves nothing and is deliberately not what this
+    # asserts (that was review round 1, m4).
+    probe.write_text("VALUE = 2\n", encoding="utf-8")
+    os.utime(probe, (source_mtime + 10, source_mtime + 10))
     assert bytecode.cache_is_cold() is True
 
 
@@ -162,4 +165,107 @@ def test_the_child_drops_only_the_refusal_and_keeps_the_redirect(
     import local_operator
 
     parent = str(Path(local_operator.__file__).resolve().parent.parent)
-    assert env["PYTHONPATH"].split(":")[0] == parent
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == parent
+
+
+# --- the findings from review round 1 ----------------------------------------
+
+
+def test_a_prefix_inside_an_app_bundle_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one write this module must never perform.
+
+    The prefix is a redirect, and the safety argument is that the write lands
+    in per-user state rather than inside a code-sealed bundle — a bundle that
+    writes to itself fails `codesign --verify` and refuses the in-app update.
+    The value is reachable: the backend sources the operator's shell rc files,
+    so a stray `export` reaches every python the app runs. Refusing here means
+    neither side has to trust the other's sanitising.
+    """
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    monkeypatch.setattr(
+        sys, "pycache_prefix", str(tmp_path / "Local Operator.app" / "Contents" / "pycache")
+    )
+    assert bytecode.warm_bytecode_cache_in_background() is None
+
+
+def test_the_probe_ignores_modules_that_are_not_installed(
+    tmp_path: Path, prefix: Path, probe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Not installed" is not applicable, not cold.
+
+    ``tiktoken`` is the ``tokenizer`` extra. Reporting an absent extra as cold
+    would spawn a compiler at every daemon and TUI boot, for ever, on a host
+    whose cache is otherwise perfectly warm — the warm would become a cost of
+    its own.
+    """
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    monkeypatch.setattr(bytecode, "_PROBE_MODULES", ("local_operator_no_such_module",))
+    assert bytecode.cache_is_cold() is False
+
+
+def test_the_compile_skips_a_cache_cpython_would_accept(
+    prefix: Path, probe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm run is a header read, not a recompilation.
+
+    ``py_compile.compile`` has NO freshness check — it rewrites its target every
+    time — so the skip has to be explicit. Without it a warm run would recompile
+    and rewrite the whole loaded graph, which is the cost this module exists to
+    remove.
+    """
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    assert bytecode._compile_loaded_modules([probe]) == 1
+    cached = _cache_path(probe)
+    first_mtime = cached.stat().st_mtime_ns
+
+    assert bytecode._compile_loaded_modules([probe]) == 0, "an accepted cache was rewritten"
+    assert cached.stat().st_mtime_ns == first_mtime
+
+
+def test_a_cache_is_rejected_when_its_header_disagrees(
+    prefix: Path, probe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The header, not the mtimes — the ``cp -p`` shape.
+
+    CPython validates a ``.pyc`` against the source mtime and size recorded IN
+    the header. Content changed with the mtime moved backwards (``cp -p``,
+    ``rsync -a``, a restored backup) leaves a cache that is NEWER than its
+    source and still rejected; an mtime comparison calls that warm, and the
+    probe then never repairs it.
+    """
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    assert bytecode._compile_loaded_modules([probe]) == 1
+    cached = _cache_path(probe)
+    assert bytecode._pyc_matches_source(probe, cached) is True
+
+    head = bytearray(cached.read_bytes()[:16])
+    head[12] = (head[12] + 1) % 256  # a source mtime the source no longer has
+    cached.write_bytes(bytes(head) + cached.read_bytes()[16:])
+    assert bytecode._pyc_matches_source(probe, cached) is False
+
+
+def test_the_compiler_child_is_path_isolated_and_optimisation_matched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two properties of the child argv, each of which fails silently alone.
+
+    ``-P``: a ``-c`` child gets its cwd at ``sys.path[0]``, which is searched
+    BEFORE the ``PYTHONPATH`` entry this module prepends. A parent running from
+    a checkout of this project would therefore have the child import and compile
+    a DIFFERENT tree — the warm reports success and the installed tree stays
+    cold.
+
+    ``-O``/``-OO``: the optimisation rung is part of the cache FILENAME
+    (``*.opt-1.pyc``), so a child spawned without it writes a file an optimised
+    parent never reads, and every boot spawns a compiler whose output is
+    unreachable.
+    """
+    from local_operator.interpreter import SAFE_PATH_FLAG
+
+    argv = bytecode._child_argv(optimize=2)
+    assert SAFE_PATH_FLAG in argv
+    assert argv.index(SAFE_PATH_FLAG) < argv.index("-c")
+    assert "-OO" in argv
+    assert argv[-1] == bytecode._CHILD_SOURCE

@@ -58,6 +58,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import struct
 import subprocess
 import sys
 import threading
@@ -133,36 +134,77 @@ print(bytecode._compile_loaded_modules())
 """
 
 
-def _cache_is_current(source: Path) -> bool:
-    """Whether ``source``'s cached bytecode exists and is not older than it.
+def _inside_app_bundle(path: str) -> bool:
+    """Whether ``path`` names something inside a macOS ``.app`` bundle.
 
-    Freshness, not mere existence, and it matters in exactly one place: an
-    install that has moved on (``lop-update``) leaves every ``.pyc`` in place
-    while its source files are newer. A process under the refusal flag never
-    repairs that — it cannot write — so an existence-only probe would report a
-    permanently stale cache as warm and switch this module off for good.
+    Mirrors ``insideAppBundle`` in local-operator-ui's
+    ``src/main/python-bytecode-cache.ts``, deliberately: that predicate is the
+    other half of this module's safety argument, and the two must agree about
+    what "inside a bundle" means or one of them is guarding a door the other
+    leaves open.
 
-    The comparison is deliberately one-directional (cache at least as new as
-    the source). CPython's own rule compares the source's mtime and size
-    recorded in the pyc header, which is stricter; being *stricter here* would
-    only cost, at worst, one extra compile of a file that was fine.
+    A path-SEGMENT test rather than a resolve-and-prefix test, because the
+    bundle root is not known here: any segment ending in ``.app`` is a bundle,
+    including another application's.
     """
-    cache = Path(importlib.util.cache_from_source(str(source)))
+    return any(
+        len(segment) > 4 and segment.endswith(".app")
+        for segment in path.replace("\\", "/").split("/")
+    )
+
+
+def _pyc_matches_source(source: Path, cache: Path) -> bool:
+    """Whether CPython would ACCEPT ``cache`` for ``source``.
+
+    The header, not the mtimes: CPython's ``_validate_timestamp_pyc`` compares
+    the source's mtime and size *as recorded inside the ``.pyc``* against the
+    source, so a cache can be newer than its source and still be rejected —
+    that is exactly what ``cp -p``, ``rsync -a`` and a restored backup produce
+    (content changed, mtime moved backwards). A mtime comparison reports those
+    "warm", and the consequence is a self-disabling loop rather than a missed
+    optimisation: CPython recompiles from source for ever, the probe keeps
+    calling the cache current, and nothing repairs it until some unrelated
+    edit moves a source mtime forward.
+
+    Returns True for a hash-based ``.pyc`` (invalidated by a source hash this
+    function would have to read the whole file to check, and which no tool in
+    this repo writes), and for the ``check_source`` flag, which means the
+    header asks not to be validated at all.
+    """
     try:
-        return cache.stat().st_mtime >= source.stat().st_mtime
+        with cache.open("rb") as handle:
+            head = handle.read(16)
+        stat = source.stat()
     except OSError:
         return False
+    if len(head) < 16 or head[:4] != importlib.util.MAGIC_NUMBER:
+        return False
+    flags = int.from_bytes(head[4:8], "little")
+    if flags & 0b11:  # hash-based, or check_source: no timestamp to compare
+        return True
+    stored_mtime, stored_size = struct.unpack("<II", head[8:16])
+    return (
+        stored_mtime == int(stat.st_mtime) & 0xFFFFFFFF and stored_size == stat.st_size & 0xFFFFFFFF
+    )
 
 
 def cache_is_cold() -> bool:
     """Whether at least one probed module has no usable bytecode cache.
 
     Cold means "a process under the refusal flag is compiling this from source
-    right now", which is the only condition worth spawning for. An absent
-    ``PYTHONPYCACHEPREFIX`` is reported WARM: there is a real cache beside the
-    sources and this module has no business writing into it (see the module
-    docstring), so declaring it warm keeps the caller's decision in one place
-    instead of leaving a second gate to forget.
+    right now", which is the only condition worth spawning for.
+
+    Two states are NOT cold, and both matter:
+
+    * **No prefix.** A real cache sits beside the sources and this module has no
+      business writing into it (see the module docstring), so declaring it warm
+      keeps the caller's decision in one place instead of leaving a second gate
+      to forget.
+    * **A probe module that is not installed.** ``tiktoken`` is the ``tokenizer``
+      extra, and a name can also be renamed or removed by a later version. "Not
+      there" is *not applicable*, not *cold*: reporting it cold would spawn a
+      compiler at every daemon and TUI boot, for ever, on a host whose cache is
+      perfectly warm.
     """
     if sys.pycache_prefix is None:
         return False
@@ -173,22 +215,30 @@ def cache_is_cold() -> bool:
             try:
                 spec = importlib.util.find_spec(name)
             except (ImportError, ValueError):
-                return True
+                continue
             origin = getattr(spec, "origin", None) if spec is not None else None
         if not isinstance(origin, str) or not origin.endswith(".py"):
-            return True
-        if not _cache_is_current(Path(origin)):
+            continue
+        source = Path(origin)
+        cache = Path(importlib.util.cache_from_source(str(source)))
+        if not _pyc_matches_source(source, cache):
             return True
     return False
 
 
 def _compile_loaded_modules(sources: Iterable[str | Path] | None = None) -> int:
-    """Compile every loaded source file; return how many were written.
+    """Compile every loaded source file whose cache is missing or stale.
 
-    Runs in the SUBPROCESS. ``py_compile.compile`` skips a target whose cache is
-    already current, so a warm run is a stat per module rather than a
-    recompilation — which is what makes it safe to invoke this on a schedule no
-    faster than "once per process, in the background".
+    Runs in the SUBPROCESS.
+
+    THE SKIP IS EXPLICIT, and the first version of this function was wrong to
+    assume otherwise: ``py_compile.compile`` has no freshness check at all — it
+    recompiles and rewrites the target every time it is called (verified: the
+    ``.pyc`` mtime advances on a second call with an unchanged source). So a
+    warm run would have been a full recompilation of the loaded graph, the very
+    cost the module exists to remove, on every spawn. :func:`_pyc_matches_source`
+    is the check that makes the docstring true: a cache CPython will accept is
+    left alone, and the run becomes a header read per module.
 
     Deliberately NOT a directory walk: see the note above ``_CHILD_SOURCE``. The
     subprocess imports the graph first and this compiles exactly what that
@@ -219,6 +269,9 @@ def _compile_loaded_modules(sources: Iterable[str | Path] | None = None) -> int:
             continue
         seen.add(path)
         try:
+            cache = Path(importlib.util.cache_from_source(str(path)))
+            if _pyc_matches_source(path, cache):
+                continue
             result = py_compile.compile(str(path), doraise=False, quiet=2)
         except Exception:  # noqa: BLE001 — a cache miss is not a failure
             continue
@@ -248,6 +301,16 @@ def warm_bytecode_cache_in_background() -> threading.Thread | None:
         # module docstring — this is the case the app's own variable exists to
         # make impossible, and guessing otherwise is not ours to do.
         return None
+    if _inside_app_bundle(sys.pycache_prefix):
+        # The prefix is a REDIRECT, and this module's whole safety argument is
+        # that the write it performs lands in per-user state instead of inside
+        # a code-sealed bundle. A prefix that points into one would invert
+        # that, and the value is reachable: the backend sources the operator's
+        # shell rc files, so a stray `export` reaches every python the app
+        # runs. local-operator-ui sanitises the same value on its side with the
+        # same predicate; refusing here means neither has to trust the other.
+        logger.debug("bytecode cache prefix points inside an app bundle; declining")
+        return None
     try:
         if not cache_is_cold():
             return None
@@ -255,9 +318,43 @@ def warm_bytecode_cache_in_background() -> threading.Thread | None:
         logger.debug("bytecode cache probe failed", exc_info=True)
         return None
 
-    thread = threading.Thread(target=_run_child, name="lop-bytecode-warm", daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=_run_child, name="lop-bytecode-warm", daemon=True)
+        thread.start()
+    except RuntimeError:
+        # `can't start new thread`: thread or fd exhaustion. The runtime child
+        # calls this FIRST in `main()` (see session/runtime/process.py), so a
+        # refusal here must not become a boot failure — the whole contract is
+        # that a warm-up is never the thing that breaks.
+        logger.debug("bytecode cache warm could not start a thread", exc_info=True)
+        return None
     return thread
+
+
+def _child_argv(optimize: int | None = None) -> list[str]:
+    """How this module re-enters Python: ``-P``, the optimize rung, then ``-c``.
+
+    ``-P`` IS NOT OPTIONAL. A ``-c`` child gets its cwd at ``sys.path[0]``,
+    which is searched BEFORE the ``PYTHONPATH`` entry :func:`_run_child`
+    prepends — so a parent running from a checkout of this project (the
+    operator's ``~/local-operator``, or a daemon spawned with a checkout as its
+    cwd) would have the child import and compile a DIFFERENT tree than the one
+    the parent reads. The symptom is not an error: the warm reports success, the
+    installed tree stays cold, and the optimisation silently achieves nothing.
+    This is the same hazard ``local_operator.interpreter`` documents, and the
+    flag is taken from there rather than respelled so the two cannot drift.
+
+    The OPTIMIZE RUNG is the other half of "write the cache the parent will
+    read". ``-O``/``-OO`` move the cache filename to ``*.opt-1.pyc``/``opt-2``,
+    so a child spawned without them writes a file an optimised parent never
+    looks for — the probe would find it missing, and every boot would spawn a
+    compiler whose output is unreachable.
+    """
+    from local_operator.interpreter import python_argv
+
+    level = sys.flags.optimize if optimize is None else optimize
+    flags = ["-" + "O" * level] if level else []
+    return python_argv(*flags, "-c", _CHILD_SOURCE)
 
 
 def _run_child() -> None:
@@ -277,7 +374,10 @@ def _run_child() -> None:
         # pycache_prefix`` and programmatic callers set only the attribute, and
         # a child that wrote to a DIFFERENT cache than this process reads would
         # be a silent no-op: the compiler would report success and the next
-        # process would still recompile.
+        # process would still recompile. The guard is unreachable from
+        # :func:`warm_bytecode_cache_in_background`, which returns early when
+        # the prefix is absent; it is here so a future direct caller cannot
+        # bypass the invariant this function depends on.
         if sys.pycache_prefix:
             env["PYTHONPYCACHEPREFIX"] = sys.pycache_prefix
         # The child must import THIS local_operator. An editable install or a
@@ -289,7 +389,7 @@ def _run_child() -> None:
             package_parent if not existing else package_parent + os.pathsep + existing
         )
         completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            [sys.executable, "-c", _CHILD_SOURCE],
+            _child_argv(),
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

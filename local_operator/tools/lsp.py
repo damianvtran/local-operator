@@ -131,10 +131,13 @@ def _jedi_installed() -> bool:
     module for this name — for microseconds instead of 108 ms, because it
     resolves the finder without executing the module.
 
-    A spec can exist for a module that then fails to import (a broken
-    install). That is not silent: the first ``lsp`` call resolves the module
-    and answers with the not-installed error, and ``build_lsp_tool`` would
-    have hidden the tool for the same reason.
+    A spec can exist for a module that then fails to import (a broken install).
+    That is not silent: the first ``lsp`` call resolves the module, and an
+    ``ImportError`` there answers with the not-installed error — the same
+    message ``build_lsp_tool`` hiding the tool would have produced. Any OTHER
+    exception from a broken module propagates into ``execute_lsp``'s guard and
+    becomes the generic execution-fault result, which is the honest report for
+    a package that exists and is damaged.
     """
     resolved = globals().get("jedi", _JEDI_UNRESOLVED)
     if resolved is not _JEDI_UNRESOLVED:
