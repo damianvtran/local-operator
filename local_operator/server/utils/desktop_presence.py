@@ -270,9 +270,30 @@ class DesktopDeliveryPublisher:
         Nothing here touches the DIRECTORY, only individual entries, and every
         failure is suppressed: an unlink is atomic, so a crash between two of
         them leaves a directory the next publisher can still read and write in
-        full. An unreadable or malformed entry is left to its owner rather than
-        deleted — it is not PROVEN dead, and a reader already treats it as an
-        absent answer.
+        full.
+
+        THE BOUNDARY IS THE READER'S LIVE-SET, NOT "CAN I PARSE IT" (review
+        round 3, N6 — this used to claim no malformed entry is ever deleted,
+        which the `pid > 0` conjunct below already contradicted). An entry that
+        does not parse into a mapping, or whose ``pid``/``heartbeat_at`` are not
+        numeric, is LEFT ALONE: no writer in this repo produces that shape, so
+        this loop cannot attribute it to a process and cannot call it dead,
+        and a reader answers it as absent in the meantime. A record that DOES
+        parse and positively declares no live pid — ``pid`` missing, zero or
+        negative, resolved as ``int(data.get("pid") or 0)``, the same spelling
+        `presence._load_record` uses — or silence past
+        :data:`DEAD_RECORD_AGE_S` is unlinked on the first beat, and that is
+        safe for exactly the reason the reader's own rule is safe: `pid <= 0`
+        can never satisfy the reader's liveness conjunct, so no reader can be
+        holding that record as live.
+
+        The keep-set is deliberately WIDER than the reader's: two TTLs of
+        silence here against one in `_load_record`, so a record a reader could
+        still answer as live is never even a candidate for deletion. Anything
+        that changes how either side resolves `pid` — a schema that stops
+        writing it, a reader that stops requiring it — has to change BOTH, or
+        this sweep becomes the revocation path the inode check below exists to
+        prevent.
         """
         try:
             entries = list(delivery_dir(self.root).glob("*.json"))
