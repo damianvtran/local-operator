@@ -58,30 +58,6 @@ Target = tuple[ModuleType, Path, Callable[[], dict[str, object]], str]
 LEGACY_ARGV = ["-m"]
 
 
-class _Launched:
-    """Records every ``launchctl`` invocation the repair makes.
-
-    Normalised across the four modules: three resolve launchctl through a
-    ``_launchctl`` helper that takes the subcommand first, and the tunnel calls
-    ``subprocess.run`` with ``launchctl`` as argv[0] — see
-    :func:`_patch_launcher`. Both are recorded as ``("bootout", domain, path)``.
-    """
-
-    def __init__(self, fail: bool = False) -> None:
-        self.calls: list[tuple[str, ...]] = []
-        self._fail = fail
-
-    def __call__(self, *args: str):
-        self.calls.append(args)
-        fail = self._fail
-
-        class _Completed:
-            returncode = 1 if fail else 0
-            stderr = "Bootstrap failed: 5: Input/output error" if fail else ""
-
-        return _Completed()
-
-
 def _patch_launcher(
     monkeypatch: pytest.MonkeyPatch, module, calls: list[tuple[str, ...]], *, fail: bool = False
 ) -> None:
