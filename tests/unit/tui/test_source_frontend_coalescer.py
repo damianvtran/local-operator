@@ -143,6 +143,38 @@ async def test_a_later_delta_after_the_callback_schedules_again() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_schedule_does_not_latch_the_source_deaf() -> None:
+    """A schedule Textual refused must not claim the bit: nothing will clear it.
+
+    ``call_later`` returns False on a closing/closed pump, so a delta arriving in
+    that window has no callback behind it. Latching the bit there strands the
+    source for the rest of its life — the failure the clear-in-the-callback rule
+    exists to prevent — and the next delta cannot retry, because it finds the bit
+    already set. The refusal is taken from the real pump rather than a stub: the
+    same app object is asked to schedule after its own ``run_test`` has ended.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    wired = _ViewerSource("child-0")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._watch_source_frontend(wired.source)
+        calls: list[SessionInteraction] = []
+        app._source_frontend_changed = calls.append  # type: ignore[method-assign]
+        wired.deliver(1)
+        await pilot.pause()
+        assert calls == [wired.source]
+
+    # The pump is closed now, so Textual won't queue anything else on it. Assert
+    # the premise, then hand the subscription a delta the way the store does.
+    assert app.call_later(lambda: None) is False, "the closed pump accepted a schedule"
+    app._on_source_frontend_updated(wired.source)
+    assert (
+        wired.source.frontend_change_scheduled is False
+    ), "a refused schedule latched the source deaf"
+
+
+@pytest.mark.asyncio
 async def test_a_retired_source_still_clears_its_bit_and_acts_on_nothing() -> None:
     """Retirement is decided by the real callback, and the bit is not its casualty."""
     session = FakeSession()

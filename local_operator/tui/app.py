@@ -5894,11 +5894,21 @@ class OperatorApp(App[None]):
         — a bit that outlived its callback would leave this source permanently
         deaf to its owner, which is exactly the "never goes stale" property these
         subscribers exist to hold.
+
+        That guarantee is why the bit is claimed only when Textual ACCEPTED the
+        callback: ``call_later`` returns False on a closing/closed pump
+        (``textual/message_pump.py``), and latching the bit on such a path would
+        strand the source forever — the callback that clears it is never going to
+        run. A refused schedule therefore leaves the bit unset, and the next delta
+        from the owner tries again rather than finding the source deaf. The
+        residual window is Textual's own: a Callback queued successfully but
+        dropped uninvoked by ``on_callback`` when the app is closing or has no
+        screen (shutdown, no screen stack), not a live lease.
         """
         if source.frontend_change_scheduled:
             return
-        source.frontend_change_scheduled = True
-        self.call_later(self._apply_source_frontend_change, source)
+        if self.call_later(self._apply_source_frontend_change, source):
+            source.frontend_change_scheduled = True
 
     def _apply_source_frontend_change(self, source: SessionInteraction) -> None:
         """Deliver one coalesced change for ``source``, or drop it as superseded.
