@@ -1191,6 +1191,13 @@ class RuntimeServer:
         #: commits, because a retiring runtime must not admit a facade that
         #: would then engage a successor from its own stale cwd.
         self._exclusive_move_fence: _ClientConn | None = None
+        #: Whether the retirement LATCH has committed for this runtime. Read by
+        #: the exclusive-move fence release: ``request_stop`` can raise after
+        #: ``begin_retire`` has already committed, and that is precisely the
+        #: state the retained fence exists for — the runtime is going away and a
+        #: facade admitted now would engage the successor from its own cwd
+        #: (review round 2, N6). Monotonic: a runtime never un-latches.
+        self._retirement_committed = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -2693,8 +2700,10 @@ class RuntimeServer:
                         # once retirement has really committed, because from
                         # then on a facade admitted here would engage the
                         # successor from its own cwd after the move's owner is
-                        # gone.
-                        if not committed:
+                        # gone. ``_retirement_committed`` is the latch's own
+                        # record of that, which is how a ``request_stop`` that
+                        # raises AFTER committing keeps the fence (N6).
+                        if not committed and not self._retirement_committed:
                             self._exclusive_move_fence = None
                 else:
                     detail = await self._retire_for("moved")
@@ -3028,6 +3037,11 @@ class RuntimeServer:
         if callable(begin_retire):
             if not begin_retire("runtime-retired", self._retire_detail(to)):
                 return "kept: work arrived while retiring was announced"
+            # THE LATCH HAS COMMITTED, recorded here rather than derived by the
+            # caller from this function's return value: the stop below can
+            # raise, and a raise must not read as "nothing committed" (review
+            # round 2, N6).
+            self._retirement_committed = True
         else:
             # A reduced/older handle without the latch keeps today's re-check
             # rather than retiring unguarded.

@@ -63,22 +63,34 @@ class MoveIndeterminate(Exception):
     the receipt says the session is there.
 
     The honest answer is "reconcile before claiming either directory", which is
-    what the route turns into a 503 carrying :data:`code`. A subsequent move
-    must first finish that reconciliation under the per-session move lock
-    rather than act on an optimistic ``_cwd``.
+    what the route turns into a 503 whose body is
+    ``{"code": :data:`code`, "message": <the sentence>}`` — the same shape
+    ``DaemonRetiring`` and ``SubagentChildUnavailable`` use in that ladder, and
+    the shape the desktop client already reads (it takes ``detail.message`` when
+    ``detail`` is an object, so a named condition and a plain sentence both
+    render). A subsequent move must first finish that reconciliation under the
+    per-session move lock rather than act on an optimistic ``_cwd``.
+
+    :attr:`detail` is the underlying cause — transport errno, a marker path, the
+    three copies that disagreed — and is deliberately NOT on the wire: it names
+    sockets, control ports and directories. It is LOGGED at the raise site
+    instead, because a 503 whose cause is recorded nowhere leaves an operator
+    with a generic "reconcile" and no thread to pull. The ONE second message is
+    for the publication failure, where the move itself is confirmed and only the
+    viewer's repaint is not.
     """
 
     code = "move_outcome_unknown"
 
-    def __init__(self, detail: str = "") -> None:
-        # ``detail`` is the underlying transport cause, kept for the log and
-        # NEVER echoed to the renderer: an attach transport error names sockets
-        # and control ports (the reason ``ConnectionError`` is re-worded in the
-        # route rather than echoed there).
+    def __init__(self, detail: str = "", *, message: str | None = None) -> None:
         self.detail = detail
         super().__init__(
-            "The move's outcome could not be confirmed. The session may have "
-            "moved; reconcile its working directory before trying again."
+            message
+            or (
+                "The move's outcome could not be confirmed. The session may have "
+                "moved; reconnect, then reconcile its working directory before "
+                "moving again."
+            )
         )
 
 

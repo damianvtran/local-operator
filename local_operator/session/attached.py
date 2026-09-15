@@ -2364,6 +2364,15 @@ class AttachedSession:
         can still send a final delta, so a viewer-local ``mutate`` would consume
         its next sequence number and break synchronization. The successor restores
         its own cwd rather than the previous runtime's checkpoint value.
+
+        A DESKTOP HOST's own frame is the exception to that budget: with a local
+        cwd callback installed the caller publishes ONE authoritative
+        replacement through it, and a failure to do so is raised rather than
+        swallowed — a completed move whose mounted viewer was never repainted is
+        the defect the pre-mutation refusal exists to prevent (review round 2,
+        N4). The in-process notify on the TUI path stays best-effort, because
+        there the facade is the view: a subscriber that cannot be told costs no
+        second authority.
         """
         store = self._frontend_store
         if store is None:
@@ -2378,8 +2387,30 @@ class AttachedSession:
         store.replace(store.state.model_copy(update={"cwd": cwd}))
         try:
             callback(cwd)
-        except Exception:  # noqa: BLE001 — a viewer notice must not break a move
-            logger.debug("local cwd publication failed", exc_info=True)
+        except Exception as error:  # noqa: BLE001 — re-raised as the move's own outcome
+            # NOT SWALLOWED (review round 2, N4). The whole reason a move refuses
+            # while a mounted viewer cannot render the replacement is that no
+            # mounted viewer may be left painting the old directory; answering
+            # 200 after the repaint silently failed would say the opposite. The
+            # move itself is already durable here, so the honest class is the
+            # indeterminate one: the session moved, the VIEW could not be
+            # updated, and the client reconciles rather than being told the move
+            # is complete. Raised through the caller, so the receipt stays
+            # pending and a retry is answered by the journal rather than
+            # re-executing.
+            logger.error(
+                "the replacement publication failed for %s (%s)",
+                cwd,
+                error,
+                exc_info=True,
+            )
+            raise MoveIndeterminate(
+                f"replacement publication failed for {cwd}: {error}",
+                message=(
+                    "The session moved, but this window could not be repainted. "
+                    "Reconnect, then reconcile its working directory."
+                ),
+            ) from error
 
     async def _apply_working_directory(
         self, cwd: str, *, previous: str, exclusive: bool = False

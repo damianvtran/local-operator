@@ -483,15 +483,22 @@ async def errors() -> AsyncIterator[None]:
             404, "Requested session, profile, team or subscription not found"
         ) from None
     except MoveIndeterminate as error:
-        # 503, NOT the 409 refusal below, and the distinction is the whole point
-        # of the class: nothing was refused and NOTHING MAY BE ROLLED BACK — the
+        # 503 with the same NAMED-CONDITION body ``DaemonRetiring`` and
+        # ``SubagentChildUnavailable`` use in this ladder (review round 2, N3),
+        # not the 409 refusal below, and the distinction is the whole point of
+        # the class: nothing was refused and NOTHING MAY BE ROLLED BACK — the
         # retire request reached the owner and no definitive answer came back, so
         # the session may already have moved. A 409 would tell the user the move
         # failed, and they would act on a directory the owner has left. 503 is
-        # the ladder's own "reconcile before retrying" shape. The underlying
-        # transport detail is deliberately NOT echoed: it names sockets and
-        # control ports (the reason ``ConnectionError`` is re-worded just below).
-        raise HTTPException(503, str(error)) from None
+        # the ladder's own "reconcile before retrying" shape, and ``code`` is
+        # what lets a renderer key on the condition instead of matching prose.
+        # The client is already built for this shape: it reads
+        # ``detail.message`` when ``detail`` is an object.
+        #
+        # ``error.detail`` is deliberately NOT echoed — it names sockets, control
+        # ports and directories — and is logged at its raise site instead, which
+        # is where the cause still exists to be named.
+        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
             AttachmentUnavailable,
