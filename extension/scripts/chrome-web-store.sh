@@ -1,6 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Chrome Web Store release client for the Local Operator extension. Three modes,
+# dispatched by the two workflows that hold the store credentials:
+#
+#   chrome-web-store.sh stage ZIP VERSION
+#       Uploads the validated zip, then requests review with deferred release
+#       (STAGED_PUBLISH). Run by .github/workflows/chrome-web-store.yml.
+#
+#   chrome-web-store.sh promote VERSION
+#       Reads fetchStatus, requires the SUBMITTED revision to be STAGED with
+#       VERSION at 100% deployment, publishes it, and polls until PUBLISHED.
+#       Run by .github/workflows/chrome-web-store-promote.yml.
+#
+#   chrome-web-store.sh status
+#       Read-only: a single fetchStatus GET, printed as the same compact summary
+#       the two promote gates attach to a refusal. Nothing is uploaded, nothing
+#       is published and no store state is touched, so the review queue can be
+#       read without a stage dispatch -- which, while an item is in review,
+#       draws HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE. Takes no further
+#       arguments, and exits non-zero on a non-2xx response like every other
+#       mode. No WORKFLOW dispatches it yet: the store credentials exist only
+#       inside the protected environments, so exposing it needs a dispatch path
+#       of its own, which is a release-process decision rather than a diagnostic
+#       one (docs/store/release-record.md states the same: there is no
+#       status-only workflow to dispatch).
+#
+# Why both promote gates print the store's own fields. Promoting the 0.1.12
+# staged revision was refused with nothing but "staged revision must contain
+# version 0.1.12 at 100% deployment", and repeated dispatches since then have
+# failed the same way. That sentence names what the gate WANTED and never what
+# the store SAID, so a rollout still settling (a deployPercentage below 100) and
+# a response whose shape the gate does not recognise (distributionChannels still
+# describing the live 0.1.10 revision, say) were indistinguishable, and the only
+# remedy on offer was a blind re-dispatch on a timer. Both gates therefore append
+# the same rendering that `status` prints, and both keep their leading text so
+# log greps in the docs and in past runs still match. The fields are the store's
+# own (StatusResponse.submittedItemRevisionStatus.state and its
+# distributionChannels[]), taken from the v2 discovery document the comments in
+# report_api_error cite, so nothing here has to be re-derived by the next person
+# to hit it.
+
 MODE=${1:-}
 ZIP_PATH=${2:-}
 EXPECTED_VERSION=${3:-}
@@ -20,8 +60,8 @@ done
 : "${CWS_ACCESS_TOKEN:?CWS_ACCESS_TOKEN is required}"
 [[ "$CWS_EXTENSION_ID" == "$EXPECTED_EXTENSION_ID" ]] \
   || fail "CWS_EXTENSION_ID must be the permanent Local Operator ID $EXPECTED_EXTENSION_ID"
-[[ "$MODE" == "stage" || "$MODE" == "promote" ]] \
-  || fail "usage: chrome-web-store.sh stage ZIP VERSION | promote VERSION"
+[[ "$MODE" == "stage" || "$MODE" == "promote" || "$MODE" == "status" ]] \
+  || fail "usage: chrome-web-store.sh stage ZIP VERSION | promote VERSION | status"
 
 item="publishers/$CWS_PUBLISHER_ID/items/$CWS_EXTENSION_ID"
 status_url="$API_ROOT/v2/$item:fetchStatus"
@@ -127,6 +167,67 @@ fetch_status() {
     || fail "status response identified a different extension"
 }
 
+# Bounds on the compact status summary. A distributionChannels[] entry is a
+# small object and a healthy response carries a handful of them, so these only
+# ever bite on a payload nobody expects -- and an unbounded rendering would work
+# against the readability the summary exists to deliver, exactly as an unbounded
+# error-body echo would (see BODY_PRINT_LIMIT below).
+STATUS_CHANNEL_LIMIT=4
+STATUS_DEPLOY_INFOS_LIMIT=160
+
+# Print the store's own status fields for one fetchStatus response, compactly
+# enough to sit inside a refusal message or to be the whole output of `status`.
+# It must never fail: it is called on paths that are already failing, so a jq
+# error here would replace the diagnosis with a syntax error of our own.
+summarize_status() {
+  local file=$1
+  local summary
+  # Every scalar is rendered as `key=value` and every entry of
+  # distributionChannels[] keeps the field names the STORE uses, so a shape
+  # change is legible as itself (a `version=` where crxVersion was expected)
+  # instead of looking like an absent field. deployInfos is the one nested value
+  # the response defines, so it is truncated rather than dumped.
+  summary=$(jq -r \
+    --argjson channel_limit "$STATUS_CHANNEL_LIMIT" \
+    --argjson deploy_infos_limit "$STATUS_DEPLOY_INFOS_LIMIT" \
+    '
+    def bounded($text; $limit):
+      if ($text | length) > $limit then $text[0:$limit] + "..." else $text end;
+    def channel:
+      ([ (["crxVersion", "version", "deployPercentage"][]) as $key
+         | select(.[$key] != null) | "\($key)=\(.[$key] | tostring)" ]
+       + [ select(.deployInfos != null)
+           | "deployInfos=" + bounded((.deployInfos | tojson); $deploy_infos_limit) ]) as $fields
+      | if ($fields | length) == 0
+        then "<unrecognised shape: " + bounded(tojson; $deploy_infos_limit) + ">"
+        else $fields | join(" ")
+        end;
+    def channels:
+      (.distributionChannels // []) as $all
+      | if ($all | length) == 0 then "<none>"
+        else ($all[0:$channel_limit] | map(channel) | join(" | "))
+             + (if ($all | length) > $channel_limit
+                then " | +\(($all | length) - $channel_limit) more"
+                else "" end)
+        end;
+    def revision($label):
+      $label + " state=" + (.state // "<missing>" | tostring)
+      + " distributionChannels=[" + channels + "]";
+    [
+      ((.submittedItemRevisionStatus // {}) | revision("submitted")),
+      ((.publishedItemRevisionStatus // {}) | revision("published")),
+      (if .lastAsyncUploadState != null
+       then "lastAsyncUploadState=\(.lastAsyncUploadState | tostring)"
+       else empty end)
+    ] | join("; ")
+    ' "$file" 2>/dev/null) || summary=""
+  [[ -n "$summary" ]] || summary="<status response carried no readable fields>"
+  # Redacted for the same reason report_api_error redacts its body: this text is
+  # echoed into a public run log, and although the summary is derived rather than
+  # copied, it is derived from a response an intermediary could have written.
+  printf '%s' "${summary//"$CWS_ACCESS_TOKEN"/<redacted CWS_ACCESS_TOKEN>}"
+}
+
 revision_has_full_deploy() {
   local response=$1
   local revision=$2
@@ -179,14 +280,14 @@ if [[ "$MODE" == "stage" ]]; then
     || fail "staged submission returned unexpected state ${publish_state:-<missing>}"
   printf 'submitted Chrome Web Store extension %s v%s with STAGED_PUBLISH (%s)\n' \
     "$CWS_EXTENSION_ID" "$EXPECTED_VERSION" "$publish_state"
-else
+elif [[ "$MODE" == "promote" ]]; then
   EXPECTED_VERSION=$ZIP_PATH
   [[ -n "$EXPECTED_VERSION" ]] || fail "promote requires VERSION"
   fetch_status "$tmp_dir/before.json"
   [[ $(jq -r '.submittedItemRevisionStatus.state // empty' "$tmp_dir/before.json") == "STAGED" ]] \
-    || fail "only an approved STAGED revision can be promoted"
+    || fail "only an approved STAGED revision can be promoted (store said: $(summarize_status "$tmp_dir/before.json"))"
   revision_has_full_deploy "$tmp_dir/before.json" submittedItemRevisionStatus "$EXPECTED_VERSION" \
-    || fail "staged revision must contain version $EXPECTED_VERSION at 100% deployment"
+    || fail "staged revision must contain version $EXPECTED_VERSION at 100% deployment (store said: $(summarize_status "$tmp_dir/before.json"))"
 
   publish_staged "$tmp_dir/publish.json"
   for _ in $(seq 1 12); do
@@ -200,5 +301,15 @@ else
     fi
     sleep "${CWS_POLL_INTERVAL_SECONDS:-10}"
   done
-  fail "version $EXPECTED_VERSION was not PUBLISHED at 100% before the polling deadline"
+  # Same diagnosis as the two gates above: the deadline is the one place where
+  # the store's own answer is the only way to tell a slow rollout from a
+  # publish call that was accepted but never took effect.
+  fail "version $EXPECTED_VERSION was not PUBLISHED at 100% before the polling deadline (last response said: $(summarize_status "$tmp_dir/after.json"))"
+else
+  # `status`: read the queue, mutate nothing. MODE was validated above, so this
+  # is the only branch left; `request` handles a non-2xx by way of
+  # report_api_error, which is what makes the read fail closed.
+  fetch_status "$tmp_dir/status.json"
+  printf 'Chrome Web Store status for extension %s: %s\n' \
+    "$CWS_EXTENSION_ID" "$(summarize_status "$tmp_dir/status.json")"
 fi
