@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator.session.attached import AttachedSession
+from local_operator.session.errors import MoveIndeterminate
 
 
 @pytest.fixture
@@ -46,11 +47,19 @@ class FakeClient:
         self.answer = answer
         self.error = error
         self.ops: list[str] = []
-        #: ``is_cold`` reads this — a bound facade is one whose client is up.
+        #: The exclusivity flag each call carried, so a test can assert the
+        #: desktop path asked for the owner fence rather than assuming it did.
+        self.exclusive_calls: list[bool] = []
+        # ``is_cold`` reads this — a bound facade is one whose client is up.
         self.connected = True
+        # Advertised exactly as a real owner does. Without it the DESKTOP path
+        # fails closed with the update sentence, so a double that omitted it
+        # would exercise the refusal instead of the move.
+        self.supports_exclusive_move = True
 
-    async def retire_now(self) -> str:
+    async def retire_now(self, *, exclusive: bool = False) -> str:
         self.ops.append("retire_now")
+        self.exclusive_calls.append(exclusive)
         if self.error is not None:
             raise self.error
         return self.answer
@@ -221,14 +230,25 @@ async def test_a_version_skewed_runtime_gets_the_vetted_sentence(cold_session) -
 
 
 @pytest.mark.asyncio
-async def test_any_other_transport_failure_rolls_the_directory_back(cold_session) -> None:
-    """A failure that is NOT version skew still refuses and restores the cwd."""
+async def test_a_lost_transport_is_indeterminate_and_does_not_roll_back(cold_session) -> None:
+    """A transport failure is NOT a refusal, and must not restore the cwd.
+
+    This test used to assert the opposite (``could not move`` plus a rolled-back
+    ``_cwd``). The contract split the two outcomes (review R1's neighbourhood,
+    contract §A): a plain ``RuntimeError`` is a DEFINITE refusal from an owner
+    that answered, which is safe to undo, while a lost socket or an ack timeout
+    means the retire request REACHED the owner and its outcome is unknown. The
+    owner may already have retired and accepted the new directory, so putting
+    the old path back would hand the next engage a directory the owner has left
+    — and the successor would spawn there while the receipt said otherwise. The
+    field therefore stays at the new value and the caller reconciles.
+    """
     session = await cold_session("/tmp")
     _bind(session, FakeClient(error=ConnectionError("socket closed")))
     session.runtime_idle = lambda: True  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="could not move"):
-        await session.set_working_directory("/usr")
-    assert session._cwd == "/tmp"
+    with pytest.raises(MoveIndeterminate):
+        await session.set_working_directory("/usr", exclusive=True)
+    assert session._cwd == "/usr"
 
 
 @pytest.mark.asyncio
@@ -400,3 +420,25 @@ async def test_a_move_CANCELLED_while_joining_the_engage_rolls_back(cold_session
     finally:
         session._bind_lock.release()
     assert session._cwd == "/tmp", "a move cancelled while joining left the directory moved"
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_reports_the_directory_its_next_runtime_will_use(cold_session) -> None:
+    """``cwd`` is the read a move's CALLER needs, and the reason it is a property
+    rather than a second convention beside ``_cwd``.
+
+    The desktop move route has to answer two questions about the session's own
+    directory: where a relative target resolves FROM (``/move ../sibling``), and
+    whether the target is a no-op. Both are answered by this value — and the
+    route's candidate for it, ``DesktopSessionBridge.cwd``, is written once at
+    construction, so it answers with the directory the session LEFT after a first
+    move. Pinned here at the facade, where the value actually lives: the cold
+    directory the next engage will spawn with, and then the moved-to one.
+    """
+    session = await cold_session("/tmp")
+    assert session.cwd == "/tmp"
+
+    _bind(session, FakeClient())
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
+    assert await session.set_working_directory("/usr") == "rebound"
+    assert session.cwd == "/usr", "the viewer's own read lagged the move it just made"

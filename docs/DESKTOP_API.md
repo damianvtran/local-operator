@@ -376,12 +376,13 @@ readings.
 | GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
+| POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | runtime receipt; stale runtime/request/question409 |
-| GET `.../{id}/events` | optional `epoch`, `after_seq` | authenticated SSE, `data: <DesktopSessionFrame>` |
+| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1` | authenticated SSE, `data: <DesktopSessionFrame>` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
@@ -404,6 +405,101 @@ for a retry of the **same** operation. Answer `request_id` is instead the pendin
 gate's opaque ID, and answer `epoch` is the **runtime** epoch from frontend state,
 not the HTTP stream epoch. Approval booleans and question indices are strict.
 Answer bodies are never retained in the HTTP receipt journal or echoed back.
+
+### Moving a live session (`POST .../{id}/working-directory`)
+
+A live session's working directory can be changed with the route the terminal's
+`/move` is built on: one shared implementation, so both surfaces answer "where
+does this session work" the same way. `cwd` may be relative or carry `~`, and it
+resolves against the **session's** current directory (not the server process's),
+so `../sibling` means what the user sees. `outcome` is `cold` (nothing was
+running; the next engage spawns in the new directory), `rebound` (a runtime was
+retired and its successor is owed) or `unchanged` (the session was already
+there; nothing was written and nothing was retired).
+
+**At most once.** The request is receipted with `retry_safe=False`. A row that
+FINISHED replays its stored receipt; a row still PENDING is answered `409
+Request outcome is indeterminate. Reconcile session state before issuing a new
+request` and is never re-executed — a relative target re-resolved against the
+directory the first attempt may already have moved to is a second move
+(`child/child`), and an absolute one can undo a later accepted move. A client
+that still wants the move mints a NEW request id; it must not re-id an
+indeterminate relative path.
+
+**Refusals.** An ordinary refusal is a `409` carrying the session's own
+sentence: mid-turn, a runtime too old to be moved, work that arrived during the
+retire, an absent or unenterable directory, a marker that cannot be read or
+written, another client attached (below), or an older desktop window (below). An
+UNKNOWN owner outcome is NOT a refusal: if the retire request left the process
+and no definitive answer came back, the owner may already have accepted, so the
+answer is `503 {"detail": {"code": "move_outcome_unknown", "message": ...}}` — the
+named-condition shape this ladder already uses (the `code`/`message` pair sits
+under `detail`, which is what the shipped error handler and the desktop client
+both read) — nothing is rolled back, and the
+client reconciles before claiming either directory. A client must not treat
+every move failure as a 409 refusal.
+
+**Exclusivity, and why it is bounded.** A move is honoured by retiring the
+runtime, and every facade attached at that moment engages a successor from its
+OWN cwd, so a second attached client would ask for a runtime in the directory IT
+believes in and the loser of that race decides where the session works. The route
+therefore refuses while another actual attach is registered (`409 … open in
+another terminal or attached client. Disconnect that client, then move again.`)
+and while a mounted desktop viewer cannot render the replacement frame below
+(`409 … Update the desktop app, then move again.`). Several desktop windows
+behind ONE bridge are one attach and are unaffected: the owner counts attach
+CONNECTIONS, not windows or visibility. The owner enforces the fence itself and
+only for a caller that saw `exclusive-move-v1` in its attach capability list; an
+owner that does not advertise it gets the `/reload` update guidance rather than a
+silent unguarded retire. A TUI-initiated `/move` keeps the legacy,
+non-exclusive shape — mixed-viewer target propagation is a non-goal of this
+release, not something it solves.
+
+Two facts a client must not assume away. **Durability:** the new directory is
+written to this session's `desktop.json` marker and to the bridge's own `cwd`
+*before* any runtime is retired, so a server restart or a bridge eviction resumes
+the session where it was moved to; a refused move restores both. Two designed
+exceptions, both reported as indeterminate rather than hidden: an unknown owner
+outcome keeps the target, and a rollback that could not run leaves the marker at
+the target while the facade returns to the owner's directory. A later move
+settles that state against the LIVE OWNER'S OWN RECORD — never against the marker
+alone, which is a copy the failed operation wrote — and repairs the durable copy
+when the owner's record proves it stale. **Re-engage:** the successor is started by the retire
+frame on the bridge, not by this request — the runtime leaves by the `retiring`
+route (never `stopping`), which flips the viewer cold and engages a replacement
+easily, and the successor's own bind is what publishes the new `frontend.cwd`
+that settles the working-directory chip. A client therefore paints its own
+optimistic value and lets the stream confirm it, rather than treating this
+receipt as proof that the successor is up.
+
+**The replacement frame.** A move installs the accepted directory on the facade
+without the owner's epoch or sequence moving, so it cannot travel as an ordinary
+`frontend.update`: that delta carries the owner's UNCHANGED clock, and a renderer
+that requires a newer sequence drops it — leaving a mounted viewer painting the
+old directory forever, with no successor frame to repair it in the cold case. The
+bridge instead publishes, synchronously and exactly once per accepted move,
+`frontend.replace`: `{session_id, epoch, seq, type, payload:{frontend, cold}}`.
+The outer `epoch`/`seq` are the BRIDGE's own cursor (so the frame is ordered
+against every delta around it), `payload.frontend` is the whole bounded
+`FrontendSync` carrying the true owner epoch and sequence, and there is no
+`history` field — this replaces the paint projection, it does not reset the
+conversation. It is replayable, and a renderer applies it only when the outer
+epoch matches the active stream and the outer `seq` is newer than the cursor it
+held BEFORE the frame; duplicates and out-of-order copies are ignored.
+Negotiation is additive: the events stream accepts `frontend_replace=1` and
+`features.frontend_replace: 1` advertises it.
+
+The route is advertised as `features.session_move`, which is **2** from the
+exclusivity fence and the replacement frame onwards. A renderer must offer the
+move controls only with `features.session_move >= 2` AND
+`features.frontend_replace >= 1`; a move refuses before mutating while any
+mounted subscriber has not negotiated the flag, so no successful move can leave
+an already-mounted viewer showing the old directory. A renderer that does not see
+those keys keeps its read-only working-directory chip; a typed `/move <path>`
+must report the same degradation rather than firing a request such a backend
+answers with a 404. `move` itself is NOT an owner command: a bare `/move` still answers a
+`native_action` with destination `session.move`, which asks the renderer to open
+its picker and claims nothing ran.
 
 `GET /v1/desktop/sessions/search` is the CLI's `/resume` search over HTTP: the
 same `local_operator.session.session_search` implementation the TUI picker and
@@ -488,6 +584,11 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
+   `frontend.replace` is the desktop-only REPLACEMENT of that projection,
+   published once per accepted move and ordered by the BRIDGE's outer `seq`
+   rather than the owner's clock (see "The replacement frame" under the move
+   route). It carries no `history` field and neither creates a gap nor
+   invalidates a history cursor.
 5. `notification` carries one bridge-composed banner:
    `{contract,kind,title,status,body,body_is_snippet,body_is_failure,`
    `title_is_session_name,dedupe_key,completion_token,session_name,`

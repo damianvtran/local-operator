@@ -49,6 +49,62 @@ class ProfileRegistryUnavailable(ValueError):
         )
 
 
+class MoveIndeterminate(Exception):
+    """A move whose owner outcome is UNKNOWN, so nothing may be rolled back.
+
+    WHY THIS IS NOT A ``RuntimeError``. The move route maps ``RuntimeError`` to
+    an ordinary 409 refusal and, on that path, the durable marker and the
+    viewer's fields are restored — the correct story for a refusal, and the
+    WRONG one here. This class is raised when the retire REQUEST reached the
+    owner and the answer did not come back definately (a dropped socket, an ack
+    timeout): the owner may already have retired and accepted the new
+    directory, so restoring the old marker would overwrite a committed move
+    with a stale one, and the successor could then spawn in the old path while
+    the receipt says the session is there.
+
+    The honest answer is "reconcile before claiming either directory", which is
+    what the route turns into a 503 whose body is
+    ``{"code": :data:`code`, "message": <the sentence>}`` — the same shape
+    ``DaemonRetiring`` and ``SubagentChildUnavailable`` use in that ladder, and
+    the shape the desktop client already reads (it takes ``detail.message`` when
+    ``detail`` is an object, so a named condition and a plain sentence both
+    render). A subsequent move must first finish that reconciliation under the
+    per-session move lock rather than act on an optimistic ``_cwd``.
+
+    :attr:`detail` is the underlying cause — transport errno, a marker path, the
+    three copies that disagreed — and is deliberately NOT on the wire: it names
+    sockets, control ports and directories. Both raise sites LOG it instead,
+    because a 503 whose cause is recorded nowhere leaves an operator with a
+    generic "reconcile" and no thread to pull: the transport/unknown-outcome
+    raise logs the exception with ``exc_info`` where it is still live
+    (``session/attached.py``, ``set_working_directory``), and the settlement logs
+    all four readbacks plus the path and errno of a repair write that failed
+    (``server/utils/desktop_sessions.py``, ``_settle_unconfirmed_move``).
+
+    :attr:`message` is overridden by exactly two callers, and both sentences are
+    deliberate. The publication failure
+    (``AttachedSession._publish_working_directory``) is its own sentence because
+    the move itself IS confirmed there and only the viewer's repaint is not. The
+    settlement refusal (``_settle_unconfirmed_move``) is its own because the
+    directory is genuinely unresolved — and it names the action (reconnect, then
+    reconcile) rather than the transport. Both carry :data:`code`, so a renderer
+    keys on the condition instead of on the prose.
+    """
+
+    code = "move_outcome_unknown"
+
+    def __init__(self, detail: str = "", *, message: str | None = None) -> None:
+        self.detail = detail
+        super().__init__(
+            message
+            or (
+                "The move's outcome could not be confirmed. The session may have "
+                "moved; reconnect, then reconcile its working directory before "
+                "moving again."
+            )
+        )
+
+
 def admission_error(code: str, count: int | None = None) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
