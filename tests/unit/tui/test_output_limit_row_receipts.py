@@ -13,6 +13,14 @@ carrying model-directed prose as the operator's own receipt, review F2) could
 come straight back. ``test_a_resumed_limit_row_carries_the_receipt`` is the TUI
 half of that pin, asserted on the row a cold resume actually paints.
 
+*The third surface* (review round 3, MINOR-1). The substitution is reached by
+THREE row surfaces, and the settle-painted one — ``app._settle_painted_tool_card``
+— was still unpinned: ``test_reconnect_parity.py`` drives it, but only ever with
+``details: None``, so reverting the substitution there stayed green while the
+same row on a viewer that watched the call being dictated and reconnected after
+the turn ended came back as model-directed prose (F2, one surface over).
+``test_a_settle_painted_limit_row_carries_the_receipt`` is that pin.
+
 *One sentence, one site* (design round 1, D2). Round 1 measured the card body
 and the turn notice two rows below it BYTE-IDENTICAL on the cut arm, and the
 notice claiming a cut on the arm where nothing was cut (D1). The receipt is now
@@ -43,8 +51,10 @@ from local_operator.harness.types import (
     Message,
     TextContent,
     ToolCall,
+    ToolExecutionStartEvent,
 )
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.events import HistoryRowsSettled, ToolStarted
 from local_operator.tui.widgets.tool_card import ToolCard
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
@@ -215,3 +225,91 @@ async def test_the_length_notice_reads_the_arm_off_the_turns_own_results(arms, n
         # And the sentence the notice carries is not a second copy of a row's.
         for receipt in (_CUT_RECEIPT, _TURN_RECEIPT):
             assert notice != receipt
+
+
+#: The call the settle-painted pin drives. One id, because the live card, the
+#: retirement and the durable result all have to name the same call for the
+#: result to reach the card that is already mounted.
+_SETTLE_CALL_ID = "c_settle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arm", "receipt"),
+    [
+        (OUTPUT_LIMIT_ARGUMENTS, _CUT_RECEIPT),
+        (OUTPUT_LIMIT_TURN, _TURN_RECEIPT),
+    ],
+    ids=["cut-arguments", "complete-arguments"],
+)
+async def test_a_settle_painted_limit_row_carries_the_receipt(arm, receipt) -> None:
+    """The THIRD row surface: a card painted LIVE, retired by a disconnect, then
+    settled from the durable gap through ``_settle_painted_tool_card``.
+
+    The cold-resume pin above covers ``replay_tool_call``. This covers the other
+    of the two settle functions — the one a viewer that watched the call being
+    dictated takes when it reconnects after the turn ended. It was the gap
+    review round 3 (MINOR-1) measured: the reviewer instrumented the function
+    while running THIS file and recorded no calls at all, because
+    ``test_reconnect_parity.py`` reaches it only with ``details: None``.
+
+    Reverting ``receipt or result_text`` in ``_settle_painted_tool_card`` turns
+    this red while the cold-resume pin stays green — reported as the mutation
+    evidence on the PR, and the reason this is a pin on THIS surface rather than
+    a second copy of the one above.
+
+    The shape is the gap the reconnect produces, minus its socket: the live
+    relay paints the card, the disconnect handler retires it (marked, out of the
+    registry, still mounted), and the settled-history renderer the reconnect
+    calls with ``HistoryRowsSettled`` hands the durable result back. It is that
+    renderer, not this test, that decides which of the two settle functions runs.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        for _ in range(400):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        # Live: this is the card the operator is watching mid-turn.
+        app.on_tool_started(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id=_SETTLE_CALL_ID,
+                    tool_name="write",
+                    args={"path": "a.txt"},
+                )
+            )
+        )
+        await pilot.pause()
+        card = app._painted_tool_card(_SETTLE_CALL_ID)
+        assert card is not None
+
+        # What the disconnect handler does to a stranded row: mark it and retire
+        # it out of the registry, leaving it MOUNTED for the gap's result.
+        app._retire_live_tool_cards()
+        assert app._painted_tool_card(_SETTLE_CALL_ID) is card
+
+        # The result landed durably while this terminal had no owner socket.
+        app.on_history_rows_settled(
+            HistoryRowsSettled([_limit_result(_SETTLE_CALL_ID, arm, tool="write")])
+        )
+        for _ in range(10):
+            await pilot.pause()
+
+        # The expansion is where the card prints the row's own line whole.
+        card._expanded = True
+        card._refresh_row()
+        for _ in range(5):
+            await pilot.pause()
+
+        # The SAME card settled — the recovered result did not paint a second
+        # row beside the one already on screen.
+        assert [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)] == [card]
+        assert card._error == receipt
+        assert receipt in card._build_content(card._built_width).plain
+        # And no arm of the model-facing prose reaches the row or the frame.
+        screen = _transcript_text(app)
+        assert TRUNCATED_RESULT_TEXT not in screen
+        assert LENGTH_ENDED_CALL_RESULT_TEXT not in screen

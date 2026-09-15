@@ -923,8 +923,11 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 provider_payload=message.provider_payload,
                 # The arm, from this turn's OWN results (design round 1, D1):
                 # the notice may say the limit cut a call only when a call in
-                # this turn says so, or it names a cause the row two rows below
-                # contradicts.
+                # this turn says so, or it names a cause the call's own card
+                # contradicts — the card is folded BEFORE this notice
+                # (``[user, tool row, notice]``, measured on this fold), so the
+                # claim and the row that refutes it are read as one turn rather
+                # than as two facts about it.
                 cut_tool_call=turn_cut_tool_call(message.tool_calls, settled),
             )
             if notice is not None:
