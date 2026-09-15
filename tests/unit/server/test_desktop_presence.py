@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -34,12 +35,24 @@ from local_operator.server.utils.desktop_presence import (
 from local_operator.session.runtime.presence import (
     PRESENCE_TTL_S,
     delivery_path,
+    delivery_record_path,
     desktop_delivery_present,
     desktop_presence,
     desktop_viewing_session,
     read_delivery,
     reset_cache,
 )
+
+
+def _record(publisher: DesktopDeliveryPublisher, root) -> Path:
+    """The ONE file this publisher owns (R6). Publisher assertions read here.
+
+    Deliberately not ``delivery_path``: that is the legacy machine-wide name,
+    which no publisher writes any more. Tests that write it directly are doing
+    something different on purpose — standing in for an older sibling — and say
+    so where they do it.
+    """
+    return delivery_record_path(publisher.instance_id, root)
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +80,7 @@ def test_a_subscribed_app_publishes_an_aggregate_other_processes_can_read(tmp_pa
     publisher = DesktopDeliveryPublisher(tmp_path)
     _beat(publisher, session_id="a" * 12)
 
-    raw = json.loads(delivery_path(tmp_path).read_text())
+    raw = json.loads(_record(publisher, tmp_path).read_text())
     assert raw["pid"] == os.getpid()
     assert raw["can_notify"] is True
     assert raw["can_notify_kinds"] == ["complete", "error"]
@@ -82,9 +95,10 @@ def test_the_file_is_private_and_staged(tmp_path):
     """The permissions ARE the authorization story, copied from `viewers`."""
     publisher = DesktopDeliveryPublisher(tmp_path)
     _beat(publisher)
-    directory = delivery_path(tmp_path).parent
+    directory = _record(publisher, tmp_path).parent
     assert os.stat(directory).st_mode & 0o777 == 0o700
-    assert os.stat(delivery_path(tmp_path)).st_mode & 0o777 == 0o600
+    assert directory.name == "delivery"
+    assert os.stat(_record(publisher, tmp_path)).st_mode & 0o777 == 0o600
     assert not [name for name in os.listdir(directory) if name.endswith(".tmp")]
     publisher.close()
 
@@ -103,7 +117,7 @@ def test_disconnect_revokes_the_lease_immediately(tmp_path):
     publisher.drop("sub-1")
     reset_cache()
     assert desktop_delivery_present(tmp_path, "complete") is False
-    assert not delivery_path(tmp_path).exists()
+    assert not _record(publisher, tmp_path).exists()
     publisher.close()
 
 
@@ -145,7 +159,12 @@ def test_a_claim_with_no_kinds_claims_nothing(tmp_path):
 
 
 def test_a_dead_pid_is_reaped(tmp_path):
-    """A `kill -9`ed server must not keep suppressing banners."""
+    """A `kill -9`ed server must not keep suppressing banners.
+
+    Written to the LEGACY path on purpose: a record is a record, whatever
+    process wrote it, and a reader that only scanned the new directory would go
+    blind to a sibling started before this change (R6).
+    """
     payload = {
         "pid": 999_999_999,
         "can_notify": True,
@@ -219,7 +238,7 @@ def test_a_stale_session_id_on_a_windowless_app_is_ignored(tmp_path):
     _beat(publisher, session_id="e" * 12, window={"exists": False})
 
     assert desktop_viewing_session(tmp_path) == ""
-    raw = json.loads(delivery_path(tmp_path).read_text())
+    raw = json.loads(_record(publisher, tmp_path).read_text())
     assert raw["session_id"] == ""
     # ...and it can still raise a banner, which is what keeps rung 2 eligible.
     assert desktop_delivery_present(tmp_path, "complete") is True
@@ -243,7 +262,7 @@ def test_the_beat_renews_and_the_reaper_expires(tmp_path):
     publisher._reap()
     assert publisher.present() is False
     publisher._write()
-    assert not delivery_path(tmp_path).exists()
+    assert not _record(publisher, tmp_path).exists()
     publisher.close()
 
 
@@ -273,7 +292,47 @@ def test_close_is_idempotent_and_withdraws(tmp_path):
     _beat(publisher)
     publisher.close()
     publisher.close()
-    assert not delivery_path(tmp_path).exists()
+    assert not _record(publisher, tmp_path).exists()
+
+
+def test_two_live_publishers_neither_clobber_nor_revoke_each_other(tmp_path):
+    """R6: presence is per PROCESS, and the file layout has to say so.
+
+    Both directions of the defect are asserted, because they had different
+    causes and a fix for one would not fix the other: a second publisher
+    advertising ``can_notify=False`` must not revoke the first's lease (the
+    overwrite), and a publisher that EXITS must not delete it either (the
+    unlink). Under the shared ``delivery.json`` both happened.
+    """
+    strong = DesktopDeliveryPublisher(tmp_path)
+    weak = DesktopDeliveryPublisher(tmp_path)
+    assert strong.instance_id != weak.instance_id
+
+    _beat(strong, session_id="f" * 12)
+    assert desktop_delivery_present(tmp_path, "complete") is True
+
+    # (1) THE OVERWRITE. The weaker sibling speaks; the stronger one is live.
+    weak.update(
+        "sub-2",
+        can_notify=False,
+        can_notify_kinds=[],
+        window={"exists": False, "focused": False, "visible": False, "minimized": False},
+    )
+    reset_cache()
+    assert desktop_delivery_present(tmp_path, "complete") is True
+    # The union still carries the strong sibling's window, which is the rung-1
+    # signal a last-writer-wins file would have dropped.
+    assert desktop_viewing_session(tmp_path) == "f" * 12
+
+    # (2) THE REVOCATION. The weak sibling exits; the strong one is untouched.
+    weak.close()
+    reset_cache()
+    assert desktop_delivery_present(tmp_path, "complete") is True
+    assert desktop_viewing_session(tmp_path) == "f" * 12
+
+    strong.close()
+    reset_cache()
+    assert desktop_delivery_present(tmp_path, "complete") is False
 
 
 def test_the_claim_dataclass_defaults_to_the_quiet_answer():

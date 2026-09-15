@@ -33,10 +33,11 @@ WHAT MAKES IT SAFE, and the property most likely to be broken by a later edit:
   guard and the store's no-flood bootstrap already apply.
 
 COST. One poller per process, started with the first subscriber and stopped with
-the last. Each tick is TWO ``os.stat`` calls on the store and its journal — the
-doorbell, borrowed from ``config_watch.py``'s treatment of ``config.yml`` — with
-SQL only when the store actually moved. That is what makes detection p50 ~60 ms
-where the per-session poll's floor was 1 s.
+the last. Each tick is THREE ``os.stat`` calls — the store and the two journal
+sidecars it commits through — the doorbell, borrowed from ``config_watch.py``'s
+treatment of ``config.yml`` — with SQL only when one of them actually moved, plus
+one bounded authoritative read every ``AUTHORITATIVE_RECOVERY_INTERVAL_S``. That
+is what makes detection p50 ~60 ms where the per-session poll's floor was 1 s.
 """
 
 from __future__ import annotations
@@ -94,6 +95,27 @@ HEARTBEAT_INTERVAL_S = 15.0
 #: where the design bounds it (two stats per tick).
 CATALOGUE_PROBE_INTERVAL_S = 1.0
 
+#: THE BOUNDED AUTHORITATIVE RECOVERY PATH (review round 1, R1).
+#:
+#: The doorbell is an OPTIMISATION over a stat tuple, and R1's whole point is
+#: that a stat tuple can be wrong: an ``mtime_ns`` the filesystem reuses, an
+#: inode recycled by a rename-over, a sidecar replaced within one timestamp
+#: granule.
+#: Watching the sidecars closes the WAL case that finding names, but it cannot
+#: make a "nothing moved" answer PROOF, and every consumer downstream treats a
+#: quiet tick as "there is nothing to publish". So the revision — the value the
+#: doorbell exists to avoid having to read — is read on its own slow clock as
+#: well, and a tick that finds it moved publishes exactly as a doorbell tick
+#: would.
+#:
+#: 30 s is chosen as a BOUND rather than as a latency: the fix that makes this a
+#: safety net rather than a path is the sidecar staleness above, so what this
+#: interval buys is the guarantee that no missed change can outlive it. Its cost
+#: is one ``SELECT`` on a quiet store every 300 ticks, which is why it can be
+#: this slow — a `revision()` over the ledger is the per-row work the doorbell's
+#: own comment says must not run at 10 Hz.
+AUTHORITATIVE_RECOVERY_INTERVAL_S = 30.0
+
 #: THE BURST CEILING — at most this many individual banners per doorbell tick.
 #:
 #: Several user sessions can finish within a second (a fleet of subagent-owning
@@ -125,20 +147,59 @@ def _fingerprint(path: Path) -> tuple[int, int, int] | None:
     return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
+#: The sidecars SQLite commits into, which the doorbell must watch as well.
+#:
+#: WHY THE MAIN FILE ALONE IS NOT THE DOORBELL (review round 1, R1). A writer's
+#: ``_connect`` touches ``attention.db`` BEFORE its transaction commits, and in
+#: WAL mode the commit itself lands in ``-wal`` while the main file may not move
+#: again until a checkpoint. A tick landing in that window caches the new
+#: main-file fingerprint against the OLD database contents, and every later
+#: quiet tick then returns early — the completion stays unannounced until some
+#: unrelated write happens to move the main file. Journal mode is a property of
+#: whoever opened the database (another process may enable WAL under us), so
+#: both sidecars are watched unconditionally rather than probed for.
+_DB_SIDECAR_SUFFIXES = ("-wal", "-journal")
+
+
+def _db_fingerprint(path: Path) -> tuple[tuple[int, int, int] | None, ...]:
+    """The database's fingerprint TOGETHER WITH its journal sidecars.
+
+    Still pure stats and still no SQLite connection, so the doorbell's cost
+    stays in the same class the design bounds it to; it is three stats on a WAL
+    database instead of one. A sidecar that does not exist contributes ``None``,
+    which is itself a term: a checkpoint that deletes ``-wal`` is a change, and
+    reading its absence as "nothing happened" is the same hole in the other
+    direction.
+    """
+    return (_fingerprint(path), *(_fingerprint(Path(f"{path}{s}")) for s in _DB_SIDECAR_SUFFIXES))
+
+
 @dataclass(eq=False)
 class FeedSubscription:
     """One live SSE client of the feed.
 
-    ``baseline_sequence`` is this connection's own floor: a frame that describes
+    ``baseline_completion_sequence`` is this connection's own floor: a frame that describes
     a completion published BEFORE this client connected is not news to it, and
     the desktop's rule (Q5) is that a completion missed while the app was away
     is recovered by the durable unseen mark rather than by a late banner. The
     filter is per subscription rather than per poller because a second window
     that connects later must not inherit the first one's longer history.
+
+    THE FLOOR IS IN THE DURABLE COMPLETION DOMAIN, NOT THE ENVELOPE'S (review
+    round 1, R3, corroborated by QA Q1). It used to be ``self.sequence`` — the
+    count of SSE frames this process had emitted — and was then compared against
+    ``completions.sequence``, a SQLite AUTOINCREMENT. Those two counters are not
+    related: one publish produces several frames, so the envelope counter runs
+    ahead by a widening margin. The comparison therefore failed in BOTH
+    directions, which is why a reconnecting client lost a genuinely new
+    completion (the envelope floor had run past the new row's durable sequence)
+    and could equally be handed a pre-connect one (the durable counter had run
+    ahead of a quiet envelope). Comparing a durable number to a durable number
+    is the whole fix; the baseline is read from ``MAX(completions.sequence)``.
     """
 
     id: str
-    baseline_sequence: int
+    baseline_completion_sequence: int
     queue: asyncio.Queue[dict[str, Any] | None] = field(default_factory=asyncio.Queue)
     #: Serialized size of each queued entry, in step with ``queue`` because the
     #: two are only ever appended to and popped from together. Kept here rather
@@ -156,6 +217,10 @@ class DesktopFeed:
     ``DesktopSessions`` pool. Not a bridge user: nothing here acquires a
     session, and the only ``DesktopSessions`` contact is the read-only
     ``bridged`` callback, which asks which sessions already have a stream and
+    so must be left to their own composer. ITS KEYS ARE ``session/<id>``, the
+    same domain as the rows it is compared against (review round 1, R10) — the
+    route used to pass bare session ids here, which made the whole exclusion
+    dead code rather than merely wrong.
     therefore must not be duplicated.
     """
 
@@ -184,7 +249,29 @@ class DesktopFeed:
         self._revision: tuple[int, int, int] | None = None
         self._published_sequence = 0
         self._acknowledgements: dict[str, int] = {}
-        self._fingerprint: tuple[int, int, int] | None = None
+        #: Widened with the doorbell itself (R1): the fingerprint is now the
+        #: database PLUS its journal sidecars, so it is a tuple of tuples rather
+        #: than one ``(ino, size, mtime_ns)``.
+        self._fingerprint: tuple[tuple[int, int, int] | None, ...] | None = None
+        #: Set when a tick read its delta but could not finish processing it
+        #: (R5). The cursors committed in ``_emit_delta`` are left untouched in
+        #: that case, so the work is still owed — and this flag is what tells
+        #: the next tick to retry it even though the doorbell has since gone
+        #: quiet. Without it the retry would have to wait for an unrelated write.
+        #:
+        #: INITIALISED HERE, and that is not bookkeeping: ``_tick`` reads it in an
+        #: ``or`` beside the fingerprint comparison, so ``or`` SHORT-CIRCUITS and
+        #: the attribute is only reached on a tick where the fingerprint did NOT
+        #: move — a genuinely quiet feed. Leaving it implicit would therefore have
+        #: passed every test whose ticks follow a write (all of them) and crashed
+        #: on the first idle tick in production.
+        self._delta_pending = False
+        #: The durable completion sequence this client's view already covers.
+        #: See ``FeedSubscription`` for why it is not the envelope counter.
+        self._supersede_cursor = 0
+        #: When the bounded authoritative revision read last ran (R1).
+        #: Monotonic, and initialised to 0 so the FIRST tick pays for it.
+        self._revision_probed_at = 0.0
         self._catalogue_revision = 0
         self._catalogue_names: tuple[str, ...] = ()
         self._catalogue_probed_at = 0.0
@@ -200,7 +287,18 @@ class DesktopFeed:
         """
         if len(self.subscribers) >= SUBSCRIBER_COUNT:
             raise RuntimeError("too many desktop feed subscribers")
-        subscription = FeedSubscription(id=secrets.token_hex(8), baseline_sequence=self.sequence)
+        # THE FLOOR IS READ BEFORE THE SUBSCRIPTION IS PUBLISHED, deliberately
+        # (R3). ``self.subscribers`` is what the fan-out iterates, so a
+        # completion that lands between the two statements below must be treated
+        # as POST-connect: it happened after this client asked to be told about
+        # things. Reading the floor afterwards would instead swallow exactly that
+        # completion, which is the suppression QA Q1 reproduced. The leftover
+        # window is the harmless direction — a completion landing mid-handshake
+        # is both announced and present in the ``open`` snapshot, and the
+        # desktop's own claim map collapses the pair into one banner.
+        subscription = FeedSubscription(
+            id=secrets.token_hex(8), baseline_completion_sequence=self.store.revision()[0]
+        )
         self.subscribers[subscription.id] = subscription
         self._ensure_poller()
         return subscription
@@ -289,12 +387,16 @@ class DesktopFeed:
         ``since_sequence`` is the per-subscriber baseline filter, applied only
         to frames that describe a completion: ``attention`` is a level (a stale
         one is corrected by the next, and the merge is revision-guarded) while
-        ``notification`` is an edge whose whole value is timeliness.
+        ``notification`` is an edge whose whole value is timeliness. Both sides
+        of the comparison are the durable completion sequence (R3).
         """
         frame = self._frame(frame_type, payload, session_id=session_id)
         size = len(json.dumps(frame))
         for subscription in list(self.subscribers.values()):
-            if since_sequence is not None and subscription.baseline_sequence >= since_sequence:
+            if (
+                since_sequence is not None
+                and subscription.baseline_completion_sequence >= since_sequence
+            ):
                 continue
             if subscription.overflow:
                 continue
@@ -355,41 +457,105 @@ class DesktopFeed:
         self._revision = revision
         self._published_sequence = revision[0]
         self._acknowledgements = self.store.acknowledgement_map()
+        # The heal cursor baselines the same way and for the same reason (R4): a
+        # heal that predates the connection is not news, and the ``open``
+        # snapshot this client is about to receive already carries the corrected
+        # state. Replaying it would republish a correction nobody is stale for.
+        healed = self.store.superseded_since(0)
+        self._supersede_cursor = int(healed[-1]["sequence"]) if healed else 0
 
     async def _tick(self) -> None:
-        # 1. THE DOORBELL. Two stats, no SQL, no connection.
-        fingerprint = await asyncio.to_thread(_fingerprint, self.store.path)
-        if fingerprint is not None:
-            if fingerprint == self._fingerprint:
-                return
+        # 1. THE DOORBELL. Three stats, no SQL, no connection — the database and
+        # each journal sidecar (R1; see ``_db_fingerprint`` for why the main file
+        # alone is not a doorbell).
+        fingerprint = await asyncio.to_thread(_db_fingerprint, self.store.path)
+        # THE BOUNDED AUTHORITATIVE RECOVERY (R1). A "nothing moved" answer is not
+        # proof, so the revision is ALSO read on its own slow clock and a move
+        # found there publishes exactly as a doorbell move would. Without this the
+        # only recovery from a doorbell that cannot see a change is another,
+        # unrelated change — which is what the finding says must not be the cure.
+        now = time.monotonic()
+        recovered = now - self._revision_probed_at >= AUTHORITATIVE_RECOVERY_INTERVAL_S
+        # A tick that could not finish its delta left the cursors where they
+        # were, so the work is still owed even though nothing has moved since:
+        # the retry gate is the pending flag, NOT the stat comparison. Gating the
+        # retry on the doorbell is exactly the hole R5 reports — the fingerprint
+        # had already been committed against an event that was then dropped.
+        if fingerprint != self._fingerprint or self._delta_pending or recovered:
+            self._revision_probed_at = now
+            # 2. THE REVISION GATE IS THE AUTHORITY, and the delta below is only
+            # an optimisation. A heal moves neither `MAX(sequence)` nor
+            # `SUM(acknowledged)` — it moves the `supersedes` counter — so a tick
+            # that trusted the delta alone would miss it entirely.
+            revision = await asyncio.to_thread(self.store.revision)
+            if revision != self._revision:
+                # Deliberately NOT wrapped in a try/except here: the exception has
+                # to reach `_poll_loop`, which keeps the poller alive and logs it.
+                # What matters is the ORDER — the pending flag goes up and the
+                # cursors stay uncommitted until the emission has actually
+                # happened, so a transient read failure costs a retry rather than
+                # the event.
+                try:
+                    await self._emit_delta()
+                except Exception:
+                    self._delta_pending = True
+                    # Retried on the next tick, which is ``DOORBELL_INTERVAL_S``
+                    # away, so a persistently unreadable store costs one failing
+                    # read per tick — the same rate a continuously-written store
+                    # already pays for its revision.
+                    raise
+                self._revision = revision
+            self._delta_pending = False
             self._fingerprint = fingerprint
-        # 2. THE REVISION GATE IS THE AUTHORITY, and the delta below is only an
-        # optimisation. A heal moves neither `MAX(sequence)` nor
-        # `SUM(acknowledged)` — it moves the `supersedes` counter — so a tick
-        # that trusted the delta alone would miss it entirely.
-        revision = await asyncio.to_thread(self.store.revision)
-        if revision != self._revision:
-            self._revision = revision
-            await self._emit_delta()
+        # 3. THE CATALOGUE HAS ITS OWN SCHEDULE (R2). Deliberately outside the
+        # doorbell branch above: it was reached only when the attention database
+        # had moved, so on a quiet store — which is the common case — session
+        # directory create/remove never ran the one-second probe at all, and the
+        # sidebar fell back to its 30 s safety poll for membership changes the
+        # design promises in about a second.
         await self._maybe_emit_catalogue()
 
     async def _emit_delta(self) -> None:
-        """Publish one ``attention`` frame per changed session, then banners."""
-        published, acknowledgements = await asyncio.gather(
+        """Publish one ``attention`` frame per changed session, then banners.
+
+        COMMIT-AFTER-PROCESSING, deliberately (R5). Every read this needs is
+        gathered first and every cursor is committed LAST: ``_published_sequence``
+        and ``_acknowledgements`` used to advance while the loop that consumed
+        them was still running, so a ``state_many`` that raised on a locked
+        database had already consumed the row — the poll loop stayed alive, the
+        next tick saw an unchanged fingerprint and returned early, and that
+        completion was then silent on every surface forever. Nothing here may
+        write a cursor before the emission it describes has happened.
+        """
+        published, acknowledgements, superseded = await asyncio.gather(
             asyncio.to_thread(self.store.published_since, self._published_sequence),
             asyncio.to_thread(self.store.acknowledgement_map),
+            asyncio.to_thread(self.store.superseded_since, self._supersede_cursor),
         )
         changed: list[str] = []
         fresh: list[dict[str, Any]] = []
+        #: The cursors this tick would commit IF it finishes; held here rather
+        #: than written to ``self`` until the publishes below have happened.
+        published_sequence = self._published_sequence
+        supersede_cursor = self._supersede_cursor
         for row in published:
-            self._published_sequence = max(self._published_sequence, int(row["sequence"]))
+            published_sequence = max(published_sequence, int(row["sequence"]))
             changed.append(str(row["conversation"]))
             if row["kind"] in BRIDGE_NOTIFIABLE_KINDS:
                 fresh.append(row)
         for conversation, acknowledged in acknowledgements.items():
             if self._acknowledgements.get(conversation) != acknowledged:
                 changed.append(conversation)
-        self._acknowledgements = acknowledgements
+        # R4: the identities the ``supersedes`` term moved, which appear in
+        # NEITHER of the two deltas above because a heal updates its row in
+        # place. They join ``changed`` and so get a corrected ``attention`` frame
+        # — and deliberately NOT ``fresh``, which is what keeps a heal from
+        # producing a second banner: the healed row's own sequence is untouched,
+        # so its ``unseen`` mark is unchanged and the read watermark still
+        # governs it.
+        for row in superseded:
+            supersede_cursor = max(supersede_cursor, int(row["sequence"]))
+            changed.append(str(row["conversation"]))
 
         identities = [item for item in dict.fromkeys(changed) if self._is_user_session(item)]
         states: dict[str, dict[str, Any]] = {}
@@ -407,10 +573,23 @@ class DesktopFeed:
         if fresh:
             await self._emit_notifications(fresh, states)
 
+        # THE COMMIT POINT. Reached only if every read and every publish above
+        # succeeded; an exception before this line leaves the previous cursors in
+        # place and ``_tick`` raises the pending flag for the retry.
+        self._published_sequence = published_sequence
+        self._acknowledgements = acknowledgements
+        self._supersede_cursor = supersede_cursor
+
     async def _emit_notifications(
         self, fresh: list[dict[str, Any]], states: dict[str, dict[str, Any]]
     ) -> None:
-        """Compose a banner for each newly published, unseen, unbridged session."""
+        """Compose a banner for each newly published, unseen, unbridged session.
+
+        ``self._bridged()`` must answer in ``session/<id>`` keys, and must list a
+        session only when its bridge has a LIVE subscriber that can notify:
+        a bridge retained in the pool with nobody attached announces nothing, so
+        excluding it here would leave the completion unannounced everywhere.
+        """
         bridged = set(self._bridged())
         candidates: list[tuple[str, str, str, str, int]] = []
         for row in fresh:
@@ -506,6 +685,31 @@ class DesktopFeed:
             "focus_policy": "always",
             "burst_count": len(overflow),
             "session_ids": [self._session_id(identity) for identity, *_rest in overflow],
+            # THE MEMBERS' OWN TOKENS (review round 1, R8), which is what makes a
+            # digest arbitrable at all. The digest itself has no single
+            # completion to claim — ``completion_token`` is deliberately None, so
+            # the desktop's claim step skips it — and it used to carry only
+            # member IDS. Nothing then marked those members delivered: the real
+            # feed's own reproduction showed all three overflow members still
+            # claimable after the digest had been emitted, so any later individual
+            # frame for one of them (from another feed instance, from the TUI, or
+            # from a re-delivery) was free to raise a SECOND banner for a
+            # completion this digest had already announced, and the per-burst cap
+            # did not bound OS banners at all.
+            #
+            # The contract is the SAME one a single frame uses, one level down:
+            # a member is claimed through ``sessions.notified``, atomically, at
+            # the moment the digest is about to be delivered — never when the
+            # frame is merely queued, which is the preclaim the review forbids and
+            # which would burn a completion for a banner the client then
+            # suppressed by its own focus rule. A member another surface already
+            # won simply is not this digest's to announce; the count stays the
+            # backend's statement of what happened, and its click still lands on
+            # the catalogue, where all of them are listed.
+            "member_tokens": [
+                {"session_id": self._session_id(identity), "completion_token": token}
+                for identity, token, _kind, _policy, _sequence in overflow
+            ],
         }
 
     def _focus_policy_for(self, session_id: str) -> str | None:
@@ -525,8 +729,17 @@ class DesktopFeed:
         that a DIFFERENT conversation finished. A completion for the session the
         app IS attendedly displaying is rung 1: the card is in band on its own
         stream, no banner is raised, and ``None`` says so.
+
+        READ UNCACHED, deliberately (review round 1, R1's presence half; QA round
+        1's ``presence-unfocused``/``presence-hidden`` rows). This decision is
+        TERMINAL — a suppressed completion is not re-decided later, the frame is
+        simply never published — so it must not be made on up to
+        ``PRESENCE_CACHE_TTL_S`` of focus the user has already left. Reading the
+        cache here suppressed a completion that landed just after the user switched
+        away from the window, and the runtime's own rung 4 defers whenever a desktop is
+        reachable, so no surface raised it at all.
         """
-        presence = desktop_presence(self.root)
+        presence = desktop_presence(self.root, cached=False)
         if presence.attended and presence.session_id == session_id:
             return None
         return "always"

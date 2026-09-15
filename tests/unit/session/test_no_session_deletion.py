@@ -172,23 +172,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
-    # The desktop delivery lease. Every path here is `delivery_path()`, which
-    # is a FIXED filename under `<config_dir>/run/desktop/` -- one of the two
-    # run directories this project already owns, beside `run/viewers/`, and
+    # The desktop delivery lease. Every path here derives from this process's
+    # OWN instance id under `<config_dir>/run/desktop/delivery/` -- one of the
+    # two run directories this project already owns, beside `run/viewers/`, and
     # created 0700 rather than derived from anything a caller passes. It cannot
-    # name a session directory: the name is a literal, the parent is the config
-    # root, and an app that never paired leaves the file absent.
+    # name a session directory: the parent is the config root, the filename is a
+    # generated hex id, and an app that never paired leaves the record absent.
+    # Split per process in review round 1 (R6) so a publisher can only ever
+    # withdraw its own record; the legacy fixed `delivery.json` is read but no
+    # longer written.
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.replace",
-        "Atomic replacement of the single delivery.json FILE in run/desktop/, "
-        "never a directory and never under sessions/",
+        "Atomic replacement of THIS process's own <instance_id>.json record FILE "
+        "in run/desktop/delivery/, never a directory and never under sessions/",
     ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "<path>.unlink",
-        "Withdraws run/desktop/delivery.json when the last claim leaves, or the "
-        "tmp FILE of a failed write",
+        "Withdraws this process's own record in run/desktop/delivery/ when its "
+        "last claim leaves, or the tmp FILE of a failed write",
     ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
@@ -198,8 +201,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
         "<path>.unlink",
-        "Shutdown withdraws the same fixed delivery.json FILE, so a stopping "
-        "server does not leave a lease behind",
+        "Shutdown withdraws only its OWN <instance_id>.json record, so a stopping "
+        "server does not leave a lease behind and does not delete a live "
+        "sibling's",
     ),
     # -- the one legitimate remover -----------------------------------------
     (

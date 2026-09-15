@@ -26,12 +26,14 @@ import asyncio
 import contextlib
 import json
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import local_operator.server.utils.desktop_feed as feed_module
 import local_operator.session.runtime.presence as presence_module
 from local_operator.notifications import notification_payload
 from local_operator.resume import mark_session_origin
@@ -41,7 +43,10 @@ from local_operator.server.utils.desktop_feed import (
     FeedSubscription,
 )
 from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
+    DesktopSessions,
+)
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
@@ -161,6 +166,34 @@ def _collect(
                 await task
 
     return asyncio.run(scenario())
+
+
+def _queued(subscription: FeedSubscription) -> list[dict[str, Any]]:
+    """Exactly the frames queued for this subscription, right now.
+
+    Queue-precise rather than ``_collect``'s drain-until-quiet: ``_collect``
+    iterates ``feed.events`` from the beginning every call, so it cannot say
+    which TICK produced a frame.
+
+    Takes the queue's ACCOUNTING with it, for the same reason: the feed keeps a
+    running byte/entry total in step with the queue and declares a client
+    overflowed when it passes ``REPLAY_BYTES``/``REPLAY_COUNT``. Popping frames
+    and leaving the total standing would make a test that reads its own frames
+    look like a client that never drains — and a later tick would then be dropped
+    as an overflow, which reads as a missing frame rather than as a harness bug.
+    """
+    frames: list[dict[str, Any]] = []
+    while not subscription.queue.empty():
+        frame = subscription.queue.get_nowait()
+        # The queue carries `None` as the OVERFLOW marker (the feed puts one
+        # there when a slow client passes `REPLAY_BYTES`). A test helper that
+        # reported it as a frame would make every caller's `frame["type"]` a
+        # wrong answer rather than a loud one.
+        if frame is not None:
+            frames.append(frame)
+    subscription.queued_sizes.clear()
+    subscription.queued_bytes = 0
+    return frames
 
 
 def _notified(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -535,7 +568,12 @@ def test_a_completion_is_not_replayed_to_a_late_subscriber(tmp_path):
     asyncio.run(feed.close())
 
     assert _notified(late_frames) == []
-    assert early.baseline_sequence < late.baseline_sequence
+    # The floor is a durable completion sequence now, not the SSE envelope
+    # counter (review round 1, R3): ``early`` connected before the publication,
+    # ``late`` after it, so the store's own counter separates them by exactly
+    # one — a relationship the envelope counter could only approximate.
+    assert early.baseline_completion_sequence == 0
+    assert late.baseline_completion_sequence == 1
 
 
 def test_the_feed_acquires_no_bridge_and_spawns_no_runtime(tmp_path):
@@ -653,3 +691,218 @@ def test_a_stale_or_dead_lease_is_reaped(tmp_path):
     reset_cache()
     assert desktop_delivery_present(root, "complete") is False
     assert presence_module.read_delivery(root).present is False
+
+
+def test_the_bridge_exclusion_matches_the_real_pool(tmp_path: Path) -> None:
+    """R10: the hook must speak the pool's key domain AND the pool's liveness.
+
+    Everything here runs against a real ``DesktopSessions`` and a real
+    ``DesktopSessionBridge`` registered in its real ``bridges`` map — never a
+    hand-built set. That is the point of the test: the defect was precisely that
+    the unit test's stand-in (prefixed keys) disagreed with what production
+    supplied (bare session ids), so a test that supplies the correct shape
+    itself would have stayed green through the whole bug.
+
+    Driven synchronously, like the rest of this file: ``_tick`` owns its own
+    event loop, so the bridge is entered through its constructor rather than
+    through ``pool.session``'s async context manager.
+    """
+    root = tmp_path
+    sid = "ee" * 6
+    _session(root, sid)
+    pool = DesktopSessions(root)
+    bridge = DesktopSessionBridge(root, sid, cwd=str(root))
+    pool.bridges[sid] = bridge
+    feed = DesktopFeed(root, bridged=pool.bridged_notify_sessions)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    try:
+        live = bridge.subscribe()
+        live.expires = time.monotonic() + 45.0
+        live.can_notify = True
+        assert pool.bridged_notify_sessions() == {
+            f"session/{sid}"
+        }, "the hook is not in the feed's key domain: the exclusion is dead code"
+
+        # ...and the LIVENESS half, which is what stops the prefix fix from
+        # trading a duplicate banner for a silent hole.
+        live.can_notify = False
+        assert pool.bridged_notify_sessions() == set(), "a bridge that cannot notify owns nothing"
+        live.can_notify = True
+        live.expires = time.monotonic() - 1.0
+        assert pool.bridged_notify_sessions() == set(), "an expired lease is gone"
+        live.expires = time.monotonic() + 45.0
+        live.overflow = True
+        assert pool.bridged_notify_sessions() == set(), "an overflowing subscriber owns nothing"
+        live.overflow = False
+        assert pool.bridged_notify_sessions() == {f"session/{sid}"}
+
+        # A LIVE, NOTIFYING BRIDGE OWNS THE BANNER, so the feed yields to it.
+        # Drained per tick from the queue rather than through ``_collect``: the
+        # question here is which TICK produced a banner, and ``_collect``
+        # replays the buffer from the start on every call, which would make the
+        # two ticks indistinguishable.
+        _publish(root, sid)
+        _tick(feed)
+        assert _notified(_queued(subscription)) == []
+
+        # THE RETAINED BUT IDLE BRIDGE. A pooled bridge whose subscriber has
+        # left announces nothing, so the feed has to speak or the completion
+        # reaches nobody at all.
+        bridge.subscribers.pop(live.id, None)
+        assert pool.bridged_notify_sessions() == set()
+        _publish(root, sid)
+        _tick(feed)
+        assert (
+            len(_notified(_queued(subscription))) == 1
+        ), "an idle pooled bridge suppressed a banner nobody else raises"
+    finally:
+        asyncio.run(feed.close())
+
+
+def test_the_bounded_recovery_publishes_when_the_doorbell_cannot_see(tmp_path):
+    """R1's other half: a doorbell that misses a change must not be the end of it.
+
+    Watching the journal sidecars is what closes the WAL case the finding names,
+    but a stat tuple can only ever be evidence, not proof — so the revision is
+    ALSO read on its own slow clock. This test drives that recovery with the
+    doorbell deliberately blinded: the fingerprint is cached against contents
+    that then change, which is the finding's own state ("the new main-file
+    fingerprint with the OLD database revision"), and the only thing left that
+    can notice is the authoritative read.
+
+    Asserted in both directions, because "it published" alone would also be true
+    of a tick that ignored the doorbell entirely.
+    """
+    root = tmp_path
+    _session(root, "a1" * 6)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, "a1" * 6)
+    # THE BLIND DOORBELL: the tick below sees the fingerprint it already has, so
+    # nothing in the ordinary path can reach the delta.
+    feed._fingerprint = feed_module._db_fingerprint(feed.store.path)
+    feed._revision_probed_at = time.monotonic()
+    _tick(feed)
+    assert _notified(_queued(subscription)) == [], "the blinded doorbell published anyway"
+
+    # ...and the bound is what recovers it: past the interval, the same quiet
+    # tick reads the revision and publishes exactly what the doorbell missed.
+    feed._revision_probed_at = 0.0
+    _tick(feed)
+    announced = _notified(_queued(subscription))
+    assert len(announced) == 1, announced
+    assert announced[0]["session_id"] == "a1" * 6
+    assert announced[0]["payload"]["completion_token"]
+    asyncio.run(feed.close())
+
+
+def test_presence_is_read_uncached_where_the_decision_is_terminal(tmp_path):
+    """QA round 1's presence matrix, and the two rows that failed.
+
+    The QA matrix built this state for real — a live subscription, a real
+    publisher, an isolated root — and read `notification=False` for
+    `presence-unfocused-same` and `presence-hidden-same`, where the expected
+    answer is a banner. The cause is the presence CACHE (2 s) rather than the
+    rule: the probe flipped the window state and published inside that window, so
+    the decision was made on focus the user had already given up.
+
+    That matters more here than on the announce path, because this decision is
+    TERMINAL: nothing re-decides a suppressed completion, and the runtime's own
+    rung 4 defers whenever a desktop is reachable, so a suppression here means no
+    surface raised it at all. Hence the uncached read.
+
+    All eight cells, so the fix cannot trade a missing banner for a duplicate
+    one: the ONE suppressing state is a focused window showing THIS
+    conversation, and every other row banners.
+    """
+    root = tmp_path
+    attended = "a1" * 6
+    other = "b2" * 6
+    _session(root, attended)
+    _session(root, other)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    publisher = _attend(root, session_id=attended)
+    window_off = {"exists": True, "focused": False, "visible": False, "minimized": False}
+    cells = [
+        # name, window, same conversation, does a banner get raised?
+        ("focused-same", {"focused": True, "visible": True}, True, False),
+        ("focused-other", {"focused": True, "visible": True}, False, True),
+        ("unfocused-same", {"focused": False, "visible": True}, True, True),
+        ("unfocused-other", {"focused": False, "visible": True}, False, True),
+        ("hidden-same", {"focused": False, "visible": False}, True, True),
+        ("hidden-other", {"focused": False, "visible": False}, False, True),
+        ("no-window-same", {"exists": False}, True, True),
+        ("no-window-other", {"exists": False}, False, True),
+    ]
+    try:
+        for name, window, same, expected in cells:
+            # Deliberately NOT reset_cache(): the stale answer is the state under
+            # test, and the first cell is what warms the cache.
+            publisher.update(
+                "sub-1",
+                can_notify=True,
+                can_notify_kinds=["complete"],
+                session_id=attended,
+                window={**window_off, **window},
+            )
+            _publish(root, attended if same else other)
+            _tick(feed)
+            announced = _notified(_queued(subscription))
+            assert bool(announced) is expected, f"{name}: {announced}"
+            if expected:
+                assert announced[0]["session_id"] == (attended if same else other)
+    finally:
+        publisher.close()
+        reset_cache()
+        asyncio.run(feed.close())
+
+
+def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path):
+    """REVIEW ROUND 1, R8: a burst digest has to be arbitrable member by member.
+
+    The digest deliberately carries no `completion_token` — no single completion
+    owns it — so a client's claim step skips it, and it USED to carry only member
+    ids. Nothing then marked those members delivered: the reviewer's
+    reproduction showed all three overflow members still claimable after the
+    digest was emitted, so any later individual frame for one of them (another
+    feed instance, the TUI, a re-delivery) was free to raise a SECOND banner for
+    a completion the digest had already announced, and the per-burst cap bounded
+    nothing across transports.
+
+    Two facts, and the second is what makes the first worth having: the pairs are
+    named, and they are NOT preclaimed. A frame merely being queued must not burn
+    a completion, because the client may suppress the banner by its own focus
+    rule — the claim belongs immediately before delivery, on the client.
+    """
+    root = tmp_path
+    ids = [f"{index:012x}" for index in range(BURST_LIMIT + 3)]
+    for session_id in ids:
+        _session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    tokens = {session_id: _publish(root, session_id) for session_id in ids}
+    _tick(feed)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    digest = _notified(frames)[-1]["payload"]
+    assert digest["completion_token"] is None
+    assert digest["member_tokens"] == [
+        {"session_id": session_id, "completion_token": tokens[session_id]}
+        for session_id in ids[BURST_LIMIT:]
+    ]
+    store = AttentionStore(root / "attention.db")
+    for member in digest["member_tokens"]:
+        identity = f"session/{member['session_id']}"
+        # Still the digest's to win, through the SAME atomic claim a single
+        # frame uses...
+        assert store.claim_delivery(identity, member["completion_token"], "desktop") is True
+        # ...and exactly once. This is the arbitration the finding asked for: a
+        # member claimed by the digest's surface is no longer available to a
+        # later individual frame or to another feed instance.
+        assert store.claim_delivery(identity, member["completion_token"], "tui") is False

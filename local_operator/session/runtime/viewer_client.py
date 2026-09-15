@@ -212,7 +212,9 @@ def needs_switch(record: ViewerRecord, session_id: str) -> bool:
     return record.current_session != session_id
 
 
-def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord | None:
+def choose_viewer(
+    records: list[ViewerRecord], session_id: str, *, surface: str | None = None
+) -> ViewerRecord | None:
     """Pick the viewer that should take this click, deterministically.
 
     Only viewers speaking a protocol this build knows are considered at all.
@@ -224,25 +226,34 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     anything performed it — the check is here now, because a contract that
     exists only in prose is what shipped this module's original bug.
 
-    Precedence among the remainder, and each rung is a reason rather than a
-    preference:
+    Precedence, and each rung is a reason rather than a preference:
 
-    1. **A viewer already displaying the target.** Switching it is a no-op, so
-       this is the cheapest and least disruptive outcome available. A record
-       that reports NO WINDOW is excluded here even if its ``current_session``
-       names the target: the app's id is stale by a beat, and treating it as
-       "already displaying" would spend the click on a window that does not
-       exist instead of the one that does.
-    2. **The most recently focused viewer that can switch.** The window the
-       user was last in is the best available proxy for where they expect to
-       land.
-    3. **A DESKTOP viewer, as the TIEBREAK only** — ahead of another
-       equally-recent viewer, behind a more recently focused one. This is the
-       landing site, not the notification: the desktop is the preferred surface
-       for RAISING a banner (design Q3), but a click must not yank the user out
-       of the terminal they are sitting in, nor make them wait for a window to
-       be built, when the TUI that raised the banner can switch instantly.
+    1. **UI FIRST: an eligible DESKTOP viewer takes the click**, whatever a TUI
+       is doing. This is the operator's explicit requirement for the notification
+       feature — a click lands on the exact conversation in the preferred
+       application — and an earlier draft replaced it with recency-first, which
+       meant the same click switched a terminal instead of opening the app
+       depending on nothing but incidental focus history. The recency-first order
+       was never authorized, and the tests that pinned it were changed with it
+       (review round 1, R9).
+    2. **Within the chosen surface, an already-displaying viewer.** Switching is
+       a no-op, so this is the cheapest and least disruptive outcome available. A
+       record that reports NO WINDOW is excluded from this rung even if its
+       ``current_session`` names the target: the app's id is stale by a beat, and
+       treating it as "already displaying" would spend the click on a window that
+       does not exist instead of the one that does. It is NOT excluded from
+       rung 1 — a windowless desktop is still the UI, and its recreation path is
+       exactly what the operator asked for.
+    3. **The most recently focused viewer of that surface that can switch.** The
+       window the user was last in is the best available proxy for where they
+       expect to land.
     4. **Lowest pid**, so repeated clicks are stable rather than alternating.
+
+    WHY THE DESKTOP PREFERENCE SITS AT RUNG 1 AND NOT AS A TIE-BREAK. As a
+    tie-break it only decided between two viewers the user had never focused, so
+    a TUI focused once — ever — outranked it for good. The surface the operator
+    named has to be consulted before focus history, or focus history silently
+    becomes the policy.
 
     THE ORDERING IS APPLIED HERE, not inherited from the caller. ``scan_viewers``
     happens to return records in this order already, and an earlier draft of
@@ -252,31 +263,57 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     deterministically" has to do its own sorting; borrowing the guarantee from a
     collaborator is how it gets lost.
 
+    ``surface`` narrows the candidates to ONE surface, which is how the click
+    ladder asks "is there a desktop?" and "is there a TUI?" as separate
+    questions rather than inferring the answer from which viewer came back.
+
     Returns ``None`` when nothing can take it, which is the caller's signal to
     fall back to spawning a terminal — the behaviour that exists today and must
     keep working.
     """
-    speakable = [rec for rec in records if rec.protocol in KNOWN_VIEWER_PROTOCOLS]
+    speakable = [
+        rec
+        for rec in records
+        if rec.protocol in KNOWN_VIEWER_PROTOCOLS and (surface is None or rec.surface == surface)
+    ]
+    if not speakable:
+        return None
+    # Rung 1, and it is deliberately a SEPARATE pass rather than a sort key.
+    # ``can_switch`` is required — a desktop that cannot be told to display the
+    # session cannot take the click, and pretending otherwise would strand it.
+    # The windowless case is INCLUDED: ``needs_switch`` sends the op, and the far
+    # side's documented reading of ``resume_session`` for a windowless record is
+    # to recreate the window and then navigate.
+    desktops = [rec for rec in speakable if rec.surface == DESKTOP_SURFACE and rec.can_switch]
+    if desktops:
+        speakable = desktops
     for record in speakable:
         if record.current_session == session_id and record.has_window:
             return record
     switchable = sorted(
         (rec for rec in speakable if rec.can_switch),
-        # The desktop preference sits BETWEEN focus and pid, which is the whole
-        # point: it decides a tie (two viewers equally recently focused, or two
-        # never focused) and never overrides a window the user was just in.
+        # The desktop term stays as the first tie-break WITHIN this pass, which
+        # matters only when ``surface`` was not narrowed and no desktop exists:
+        # it is then inert, exactly as it should be.
         key=lambda rec: (-rec.focused_at, rec.surface != DESKTOP_SURFACE, rec.pid),
     )
     return switchable[0] if switchable else None
 
 
-def route_click(session_id: str, root: Path | None = None) -> ViewerOutcome:
+def route_click(
+    session_id: str, root: Path | None = None, *, surface: str | None = None
+) -> ViewerOutcome:
     """Resolve and deliver, synchronously, for the detached click process.
 
     Runs its own event loop because the click handler has none — it is a
     short-lived process macOS handed an activation. Returns an outcome whose
     ``switched`` flag is the caller's whole decision: True means a live window
     is now showing the session and nothing should be spawned.
+
+    ``surface`` is the click ladder's way of asking about ONE surface at a time
+    (review round 1, R9): it tries the desktop, then the installed app, then
+    whatever is left, and it must be able to tell those apart rather than
+    guessing from the outcome.
     """
     from local_operator.session.runtime.viewers import scan_viewers
 
@@ -286,7 +323,7 @@ def route_click(session_id: str, root: Path | None = None) -> ViewerOutcome:
         # No viewer directory, or an unreadable one. An ordinary answer on a
         # machine where no TUI has ever run.
         return ViewerOutcome(detail="no viewer records")
-    target = choose_viewer(records, session_id)
+    target = choose_viewer(records, session_id, surface=surface)
     if target is None:
         return ViewerOutcome(detail="no viewer available")
     try:

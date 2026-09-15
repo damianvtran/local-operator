@@ -72,9 +72,18 @@ def launch_rung_enabled(monkeypatch):
 
 @pytest.fixture
 def no_viewer(monkeypatch):
-    """No viewer is running, and the terminal spawn is recorded rather than run."""
+    """No viewer is running, and the terminal spawn is recorded rather than run.
+
+    The double takes ``**_kwargs`` because the ladder asks about ONE surface at a
+    time now (review round 1, R9): ``_route_to_viewer(session_id,
+    surface=...)``. A double with the old single-argument shape raised
+    ``TypeError`` at the call site instead of returning its answer, so every test
+    built on this fixture failed for a reason that had nothing to do with what it
+    asserts — and one written to swallow the keyword would have hidden the order
+    the ladder now applies, which is why the order is asserted explicitly below.
+    """
     spawned: list[str] = []
-    monkeypatch.setattr(resume_click, "_route_to_viewer", lambda session_id: False)
+    monkeypatch.setattr(resume_click, "_route_to_viewer", lambda session_id, **_kwargs: False)
     monkeypatch.setattr(
         resume_click, "_spawn_terminal", lambda session_id: spawned.append(session_id) or True
     )
@@ -85,15 +94,89 @@ def _no_configured_command(monkeypatch) -> None:
     monkeypatch.setattr(resume_click, "_configured_launch_command", lambda: [])
 
 
-def test_rung_one_wins_and_nothing_is_launched(monkeypatch, no_viewer):
-    """A running viewer is switched in place — no process, no window, no wait."""
-    monkeypatch.setattr(resume_click, "_route_to_viewer", lambda session_id: True)
-    launched = []
-    monkeypatch.setattr(resume_click, "_launch_desktop", lambda session_id: launched.append(1))
+def test_a_running_desktop_viewer_wins_and_nothing_is_launched(monkeypatch):
+    """A running viewer is switched in place — no process, no window, no wait.
+
+    Asked about the DESKTOP surface specifically, because that is the rung the
+    operator named and the one this test exists to pin (R9).
+    """
+    asked: list[str | None] = []
+
+    def route(session_id, *, surface=None):
+        asked.append(surface)
+        return surface == "desktop"
+
+    monkeypatch.setattr(resume_click, "_route_to_viewer", route)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: launched.append(session_id) or True
+    )
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_spawn_terminal", lambda session_id: spawned.append(session_id) or True
+    )
 
     assert resume_click.open_session("a" * 12) is True
+    assert asked == ["desktop"], "the ladder did not ask the UI first"
     assert launched == []
+    assert spawned == []
+
+
+def test_the_installed_app_is_launched_before_any_tui_is_switched(monkeypatch, no_viewer):
+    """RUNG 2 BEFORE RUNG 3, which is the whole of R9's ladder.
+
+    The order used to be the other way round: a TUI that happened to be open
+    swallowed the click before discovery ever ran, so a user who asked for the app
+    got their terminal instead — decided by nothing but incidental focus history.
+    """
+    order: list[str] = []
+
+    def route(session_id, *, surface=None):
+        order.append(surface or "tui-or-any")
+        return False
+
+    monkeypatch.setattr(resume_click, "_route_to_viewer", route)
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: order.append("launch") or False
+    )
+    monkeypatch.setattr(
+        resume_click, "_spawn_terminal", lambda session_id: order.append("terminal") or True
+    )
+
+    assert resume_click.open_session("a" * 12) is True
+    assert order == ["desktop", "launch", "tui-or-any", "terminal"]
+
+
+def test_a_launched_app_ends_the_ladder_and_a_terminal_is_never_spawned(monkeypatch, no_viewer):
+    """The UI rungs short-circuit: a terminal next to a window the click just
+    opened is exactly the reported symptom (an orphaned terminal per click)."""
+    monkeypatch.setattr(resume_click, "_launch_desktop", lambda session_id: True)
+    assert resume_click.open_session("a" * 12) is True
     assert no_viewer == []
+
+
+def test_a_refused_desktop_skips_both_ui_rungs_together(monkeypatch, no_viewer):
+    """``LOCAL_OPERATOR_NO_DESKTOP_LAUNCH`` has to mean "the app is not a
+    destination", not "skip the launch and let the routing rung pick the same app
+    up again" — so the viewer scan is not even asked.
+    """
+    asked: list[str | None] = []
+
+    def route(session_id, *, surface=None):
+        asked.append(surface)
+        return False
+
+    monkeypatch.setattr(resume_click, "_route_to_viewer", route)
+    monkeypatch.setenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, "1")
+    launched: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: launched.append(session_id) or True
+    )
+
+    assert resume_click.open_session("a" * 12) is True
+    assert asked == [None], "a refused desktop must not be asked about by surface"
+    assert launched == []
+    assert no_viewer == ["a" * 12]
 
 
 def test_a_configured_launch_command_is_used_verbatim_with_the_session_id(monkeypatch, no_viewer):

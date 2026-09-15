@@ -38,8 +38,8 @@ from typing import Any
 from local_operator.session.runtime.presence import (
     PRESENCE_BEAT_S,
     PRESENCE_TTL_S,
-    delivery_path,
-    desktop_run_dir,
+    delivery_dir,
+    delivery_record_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,12 +75,20 @@ class PresenceClaim:
 
 
 class DesktopDeliveryPublisher:
-    """The aggregate lease one HTTP server publishes.
+    """The lease ONE HTTP server owns, published in its own record (R6).
 
     Created with the feed and torn down with it. Every method is safe to call
     from the event loop: the only filesystem work is the small staged write
     below, which is the same cost ``viewer_server.note_session`` already pays
     on the TUI's focus path.
+
+    WHAT THIS CLASS MAY WITHDRAW. Only its own record, named by
+    :attr:`instance_id`. Several serve processes can be live on one machine at
+    once — that is ordinary here, since each config root gets its own — and
+    while they shared a single ``run/desktop/delivery.json`` the last writer
+    decided the whole machine's answer and the first process to exit deleted a
+    live sibling's lease. Ownership is the fix, and it is why ``close`` unlinks a
+    path derived from this instance rather than the machine-wide one.
     """
 
     def __init__(self, root: Path) -> None:
@@ -140,17 +148,27 @@ class DesktopDeliveryPublisher:
         self._write()
 
     def close(self) -> None:
-        """Stop beating and withdraw the lease. Idempotent, never raises."""
+        """Stop beating and withdraw THIS instance's record. Idempotent, never raises.
+
+        Withdrawing only its own record is the point (R6): this is an exit path,
+        and it used to delete the machine-wide file — so a stopping server took a
+        live sibling's lease with it. The sibling's own reader now keeps seeing
+        the sibling.
+        """
         self.claims.clear()
         if self._beat_task is not None:
             self._beat_task.cancel()
             self._beat_task = None
         try:
-            delivery_path(self.root).unlink()
+            self._record_path().unlink()
         except OSError:
             # Best-effort by contract, like ``unpublish_viewer``: an exit path
             # must not raise over a missing file.
             pass
+
+    def _record_path(self) -> Path:
+        """This instance's own record. The ONLY delivery path this class may remove."""
+        return delivery_record_path(self.instance_id, self.root)
 
     def present(self) -> bool:
         """Whether the aggregate currently asserts reachability."""
@@ -213,24 +231,32 @@ class DesktopDeliveryPublisher:
     # -- the file ----------------------------------------------------------
 
     def _write(self) -> None:
-        """Materialise the aggregate, or withdraw the file when nothing is left.
+        """Materialise this instance's record, or withdraw it when nothing is left.
 
         Written on every change AND on the beat, so a reader's 45 s TTL is
         always three missed beats away rather than one slow moment away.
+
+        ONE RECORD PER PROCESS (R6). The payload is this server's own assertion
+        about its own live subscriptions; it is not a machine-wide answer, and
+        the reader is what unions several of them. So there is no cross-process
+        state to merge here, and no writer can clobber another's.
         """
-        directory = desktop_run_dir(self.root)
         if not self.claims:
             try:
-                delivery_path(self.root).unlink()
+                self._record_path().unlink()
             except OSError:
                 pass
             return
 
+        # Staged in the record's OWN directory so the replace stays on one
+        # filesystem, and created 0700 with the parent.
+        directory = delivery_dir(self.root)
         claims = list(self.claims.values())
         # The newest claim's window is the one reported: one app, one window
         # (a second instance is refused by the app itself), so "which window is
-        # attended" has exactly one answer and picking the freshest beat makes
-        # a replacement window's state take effect immediately.
+        # attended" has exactly one answer within this process, and picking the
+        # freshest beat makes a replacement window's state take effect
+        # immediately.
         newest = max(claims, key=lambda claim: claim.seen_at)
         payload = {
             "pid": os.getpid(),
@@ -257,7 +283,7 @@ class DesktopDeliveryPublisher:
             with os.fdopen(fd, "w") as handle:
                 json.dump(payload, handle)
             os.chmod(tmp, 0o600)
-            os.replace(tmp, delivery_path(self.root))
+            os.replace(tmp, self._record_path())
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)

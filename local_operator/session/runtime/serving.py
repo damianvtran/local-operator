@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import inspect
 import logging
 import secrets
@@ -133,6 +134,37 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
+
+#: THE RUNG-4 RETRY LADDER (review round 1, R7).
+#:
+#: The only attempt used to be the turn-settled task, so a spawn that failed
+#: transiently, or a deferral to a desktop lease that then went away, lost the
+#: banner PERMANENTLY — production had no second caller, and the only reason the
+#: round-1 test looked recovered is that the test called the arm again by hand.
+#: Three retries, and the delays are chosen against the timeouts that can make
+#: the first attempt wrong rather than at random:
+#:
+#: * 2 s is ``PRESENCE_CACHE_TTL_S`` — the deferral in rung 2 is a cached
+#:   answer, so retrying sooner than this can only re-read the same stale lease.
+#: * 8 s is half a beat, so a desktop that dropped its socket is caught while
+#:   its 45 s TTL is still fresh enough that a reader would otherwise believe it.
+#: * 30 s is two beats: past the point where a live app has certainly re-beaten,
+#:   so a deferral that survives this one is a real app and not a dying one.
+#:
+#: BOUNDED ON PURPOSE. The ladder's total span is about 40 s and it ends there.
+#: Giving up costs the OS banner, never the event: the completion keeps its
+#: durable unseen mark, so every catalogue still shows it as unread. A retry loop
+#: with no end would be the "unbounded runtime residency" the review forbids.
+_COMPLETION_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 8.0, 30.0)
+
+#: What one rung-4 attempt concluded. Retry is driven by the DIFFERENCE, not by
+#: a blanket timer: ``delivered`` and ``settled`` are terminal, and only a
+#: deferral (a richer surface is expected to deliver) or a failure (this one was
+#: owed and could not) is worth another attempt.
+_ANNOUNCE_DELIVERED = "delivered"
+_ANNOUNCE_SETTLED = "settled"
+_ANNOUNCE_DEFERRED = "deferred"
+_ANNOUNCE_FAILED = "failed"
 
 
 def _already_bounded(images: Any) -> bool:
@@ -851,6 +883,12 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # THE RETRY LADDER ENDS WITH THE RUNTIME (R7). A pending attempt sleeps
+        # up to the ladder's last delay, and a runtime that is going away must
+        # not keep a task — or a banner scheduled behind it — alive afterwards.
+        task = self._completion_task
+        if task is not None and not task.done():
+            task.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
         # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
         # that disposes in place. Recorded BEFORE the abort below so the turn's
@@ -2566,16 +2604,21 @@ class ServingSessionHandle(SessionHandle):
         self._publish_busy_soon()
         self._schedule_completion_announce()
 
-    def _schedule_completion_announce(self) -> None:
-        """Run :meth:`_announce_completion` off the event loop.
+    def _schedule_completion_announce(self, *, attempt: int = 0) -> None:
+        """Run :meth:`_announce_completion` off the event loop, and retry it.
 
         The hook fires inside the turn pipeline's ``finally``, still under
         ``_turn_lock``. The arm takes a SQLite delivery claim and may spawn a
         notification helper, so running it inline would make the next turn's
         admission wait on a decorative banner — the same reason the TUI's own
-        background announcer runs in a worker. The task is held by reference:
-        a `create_task` whose result nobody keeps can be collected before it
-        ever runs, which would show up as an intermittently missing toast.
+        background announcer runs in a worker. The task is held by reference: a
+        `create_task` whose result nobody keeps can be collected before it ever
+        runs, which would show up as an intermittently missing toast.
+
+        ``attempt`` is the retry ladder's position (R7). Retries are scheduled
+        BACK ONTO THIS SAME SLOT so there is exactly one announcement chain per
+        handle, and so the ``dispose`` that cancels ``_completion_task`` ends the
+        whole ladder rather than the first link of it.
         """
         if self._disposing:
             return
@@ -2584,12 +2627,45 @@ class ServingSessionHandle(SessionHandle):
         except RuntimeError:
             return
         try:
-            self._completion_task = loop.create_task(asyncio.to_thread(self._announce_completion))
+            self._completion_task = loop.create_task(self._run_completion_announce(attempt))
         except Exception:  # noqa: BLE001 — scheduling is chrome, never the turn
             logger.debug("could not schedule the completion announcement", exc_info=True)
 
-    def _announce_completion(self) -> None:
+    async def _run_completion_announce(self, attempt: int, delay_s: float = 0.0) -> None:
+        """One attempt, then the next rung of the ladder if the completion is still owed.
+
+        BOUNDED BY CONSTRUCTION (R7): the ladder is finite, every delay is finite,
+        and :meth:`dispose` cancels the chain. No attempt acquires a bridge or
+        spawns a runtime — the work is one SQLite read, one presence read and at
+        most one short-lived helper process — so retrying cannot extend this
+        process's residency beyond the ladder's own schedule.
+        """
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        outcome = await asyncio.to_thread(self._announce_completion)
+        if outcome in (_ANNOUNCE_DELIVERED, _ANNOUNCE_SETTLED) or self._disposing:
+            return
+        if attempt >= len(_COMPLETION_RETRY_DELAYS_S):
+            # OUT OF ATTEMPTS, and the end of the ladder is deliberate. The
+            # durable unseen mark is untouched, so the completion still shows as
+            # unread everywhere; what is given up is the OS banner.
+            logger.debug("completion announcement gave up after %d retries", attempt)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._completion_task = loop.create_task(
+                self._run_completion_announce(attempt + 1, _COMPLETION_RETRY_DELAYS_S[attempt])
+            )
+        except Exception:  # noqa: BLE001 — scheduling is chrome, never the turn
+            logger.debug("could not schedule the completion retry", exc_info=True)
+
+    def _announce_completion(self) -> str:
         """RUNG 4: raise a completion's banner when nobody else can.
+
+        Returns one of the ``_ANNOUNCE_*`` outcomes, because the caller has to
+        tell "this surface delivered" and "a richer surface is about to" from
+        "the event is still owed and nothing is coming" — only the last two are
+        worth retrying (R7).
 
         THE LAST RUNG, AND A GATE RATHER THAN A RACE. This runs at turn settle,
         which is EARLIER than every other surface learns about the completion —
@@ -2621,12 +2697,16 @@ class ServingSessionHandle(SessionHandle):
 
         A claim that then fails to deliver is handed straight back, because a
         watermark asserting a banner nobody received is the silent hole
-        ``release_delivery`` exists to close.
+        ``release_delivery`` exists to close. That release is also guaranteed
+        when the RAISE ITSELF raises (R7): the previous arrangement let an
+        exception escape past the release branch, which left exactly that
+        watermark behind for a banner that was never raised — the worst of both
+        outcomes, since the completion was neither announced nor left claimable.
         """
         try:
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
-                return
+                return _ANNOUNCE_DEFERRED
             from local_operator.paths import config_dir
             from local_operator.server.utils.desktop_sessions import (
                 BRIDGE_NOTIFIABLE_KINDS,
@@ -2645,22 +2725,40 @@ class ServingSessionHandle(SessionHandle):
             # outcome", for the same reason the bridge reads it and asks no
             # questions about jobs: re-deciding here would mean deciding again
             # in a process with less information.
+            #
+            # ``unseen`` also makes the retry self-terminating: whatever surface
+            # delivers, delivers by claiming, and the next attempt reads this
+            # same field and finds nothing owed.
             if not token or kind not in BRIDGE_NOTIFIABLE_KINDS or not state.get("unseen"):
-                return
+                return _ANNOUNCE_SETTLED
             if desktop_delivery_present(root, kind):
-                # Rung 2.
-                return
+                # Rung 2. DEFERRED rather than settled (R7): this answer is a
+                # CACHED lease with a 2 s TTL, and the app behind it may be
+                # disconnecting right now. Returning "settled" here is what
+                # lost the banner for an app that had just gone away.
+                return _ANNOUNCE_DEFERRED
             if _tui_viewer_running(root):
                 # Rung 3.
-                return
+                return _ANNOUNCE_DEFERRED
             if not store.claim_delivery(identity, token, "runtime"):
                 # Another surface reached the watermark first. It is delivering.
-                return
-            delivered = self._raise_completion_banner(str(kind), session_id)
+                return _ANNOUNCE_SETTLED
+            try:
+                delivered = self._raise_completion_banner(str(kind), session_id)
+            except BaseException:
+                # THE CLAIM MUST NOT SURVIVE A RAISE (R7). Release before the
+                # exception leaves, so a failing banner cannot leave the
+                # watermark asserting a toast nobody received.
+                with contextlib.suppress(Exception):
+                    store.release_delivery(identity, token)
+                raise
             if not delivered:
                 store.release_delivery(identity, token)
+                return _ANNOUNCE_FAILED
+            return _ANNOUNCE_DELIVERED
         except Exception:  # noqa: BLE001 — chrome must never affect a turn
             logger.debug("completion announcement failed", exc_info=True)
+            return _ANNOUNCE_FAILED
 
     def _raise_completion_banner(self, kind: str, session_id: str) -> bool:
         """Raise the rung-4 OS banner. Reports whether a child was STARTED.

@@ -94,6 +94,7 @@ way — `lop --resume <id>` in their own terminal.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 logger = logging.getLogger(__name__)
@@ -165,17 +166,57 @@ def _session_cwd(session_id: str) -> str:
 def open_session(session_id: str) -> bool:
     """Take the user to ``session_id``. True if anything was achieved.
 
-    Three rungs, in the order the module docstring states them: a running viewer
-    switches in place, an installed-but-not-running desktop app is launched into
-    the conversation, and only then does anything spawn a terminal. The last
-    rung is the behaviour that shipped before viewers existed and is
-    deliberately byte-identical to it.
+    FOUR rungs, and the ORDER is the operator's stated requirement rather than a
+    measurable preference (review round 1, R9): the requested destination is the
+    DESKTOP UI, and the terminal is the fallback.
+
+    1. **A running DESKTOP viewer** — including a windowless one, whose
+       ``resume_session`` recreates the window and then navigates, which is
+       exactly the "app is alive but its window is closed" click.
+    2. **An installed-but-not-running desktop app**, launched into the
+       conversation.
+    3. **A running TUI viewer**, switched in place.
+    4. **A terminal**, byte-identical to the behaviour that shipped before
+       viewers existed.
+
+    RUNGS 2 AND 3 USED TO BE THE OTHER WAY ROUND, and that is the defect: a TUI
+    that happened to be open swallowed every click before discovery ever ran, so
+    a user who asked for the app got their terminal instead — decided by nothing
+    but incidental focus history. The UI is tried first, and only a UI that is
+    unavailable OR fails within its bounded attempt diverts into a terminal.
+
+    The refusal in :data:`DESKTOP_LAUNCH_REFUSED_ENV` still short-circuits rungs
+    1 and 2 together: "never launch the desktop" has to mean the app is not a
+    destination, or the setting would only skip the launch and then have the
+    routing rung pick the same app up again.
     """
+    app_available = not _desktop_launch_refused()
+    if app_available:
+        # Local import, like the viewer stack below it: this module is reached
+        # from a detached click process where startup cost is the user's
+        # latency, and the surface name is the only thing needed from it here.
+        from local_operator.session.runtime.viewers import DESKTOP_SURFACE
+
+        if _route_to_viewer(session_id, surface=DESKTOP_SURFACE):
+            return True
+    if app_available and _launch_desktop(session_id):
+        return True
     if _route_to_viewer(session_id):
         return True
-    if _launch_desktop(session_id):
-        return True
     return _spawn_terminal(session_id)
+
+
+def _desktop_launch_refused() -> bool:
+    """Whether the user (or the suite) forbade the desktop app entirely.
+
+    Read in ONE place so the two UI rungs cannot disagree about it, and so
+    "refused" can be answered WITHOUT doing any discovery work — the refusal is
+    checked before the scan, not after it. ``_launch_desktop`` keeps its own
+    check for the same reason it always had one: it is the rung that could
+    actually start the app, and it must not depend on a caller having asked
+    first.
+    """
+    return bool(os.environ.get(DESKTOP_LAUNCH_REFUSED_ENV))
 
 
 def _configured_launch_command() -> list[str]:
@@ -308,17 +349,21 @@ def _launch_once(argv: list[str], env: dict[str, str]) -> bool:
         return True
 
 
-def _route_to_viewer(session_id: str) -> bool:
+def _route_to_viewer(session_id: str, *, surface: str | None = None) -> bool:
     """Ask an already-running viewer to display the session. True if one did.
 
     Every failure mode — no viewer, a wedged one, a refused socket, a viewer
     that died between the scan and the dial, **and a viewer that took the
     request but could not display the session** — returns False and falls
-    through to the spawn, which is the path that works when nothing is running.
-    That last one is why the viewer's ack resolves against the boot OUTCOME
-    rather than the dispatch: a "yes" for a session that failed to open would
-    suppress this fallback AND cost the user the conversation they were reading,
-    leaving them on an error splash with no window and no way back.
+    through to the next rung. That last one is why the viewer's ack resolves
+    against the boot OUTCOME rather than the dispatch: a "yes" for a session
+    that failed to open would suppress the fallback AND cost the user the
+    conversation they were reading, leaving them on an error splash with no
+    window and no way back.
+
+    ``surface`` narrows the question to one surface (review round 1, R9), which
+    is how :func:`open_session` asks "is the desktop app running?" separately
+    from "is anything at all running?" without inferring either from the other.
 
     The dial is bounded end to end (``viewer_client``), so a wedged viewer costs
     a second or two rather than the click.
@@ -330,7 +375,7 @@ def _route_to_viewer(session_id: str) -> bool:
     try:
         from local_operator.session.runtime.viewer_client import route_click
 
-        outcome = route_click(session_id)
+        outcome = route_click(session_id, surface=surface)
     except Exception:  # noqa: BLE001 — routing must never eat the click
         logger.debug("viewer routing failed; falling back to a spawn", exc_info=True)
         return False
