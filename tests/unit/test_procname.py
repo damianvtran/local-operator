@@ -602,10 +602,13 @@ class TestLaunchdPrograms:
 class TestSpawnIdentity:
     """``(argv[0], executable)`` — the pairing that makes every spawn named.
 
-    The ladder's middle rung is the reason this is ONE function: on POSIX
-    ``Popen(argv=[…])`` with ``executable=None`` EXECUTES ``argv[0]``, so a
-    spawn site that decorated ``argv[0]`` with a label on its own would ask the
-    kernel to run a file named ``Local Operator [eval] session=…``.
+    A PAIR, and only a pair: on POSIX ``Popen(argv=[…])`` with
+    ``executable=None`` EXECUTES ``argv[0]``, so a spawn site that decorated
+    ``argv[0]`` with a label on its own would ask the kernel to run a file named
+    ``Local Operator [eval] session=…``. The other half of the contract is the
+    one CI taught: the label is applied ONLY alongside a branded image, because
+    a labelled ``argv[0]`` empties the child's ``sys.executable`` on Linux (see
+    ``tests/unit/test_spawn_naming_fallback.py``).
     """
 
     def test_pairs_the_label_with_the_branded_image(self, branded):
@@ -613,30 +616,40 @@ class TestSpawnIdentity:
         assert argv0 == "Local Operator [session] id=abcd1234"
         assert executable == str(branded)
 
-    def test_without_an_image_the_argv_row_is_still_named(self, monkeypatch):
-        """Rung 2: no plantable link is not a reason to read as ``python3.x``."""
+    def test_without_an_image_the_label_is_withheld(self, monkeypatch):
+        """Rung 2, and the reason it is not "argv-only labelling".
+
+        The row stays ``python3.x`` here. Labelling it would look better in
+        ``ps`` and cost the child its interpreter identity on Linux, which is a
+        trade this project does not make: see the module ladder and the
+        Linux-executed child test in ``test_spawn_naming_fallback.py``.
+        """
         monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
         argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
-        assert argv0 == procname.branded_argv0(procname.LABEL_EVAL, id="deadbeef")
-        assert executable == sys.executable
+        assert argv0 == sys.executable
+        assert executable is None
 
     def test_the_pair_actually_runs(self, monkeypatch):
-        """The pairing is EXECUTED, not merely returned.
+        """The pairing is EXECUTED, not merely returned — and the child is whole.
 
-        This is the rung that used to be promised and missing, so it is tested
-        by running a child rather than by reading the tuple back.
+        Both halves at once: the argv/``executable=`` pair starts the
+        interpreter, and the child that comes out of it can still say which
+        interpreter it is (the property Linux loses to a label).
         """
         monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
         argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
         result = subprocess.run(
-            [argv0, "-c", "print('ran')"],
+            [argv0, "-c", "import sys; print(sys.executable or 'missing')"],
             executable=executable,
             capture_output=True,
             text=True,
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "ran"
+        # realpath, not string equality: a platform is free to report the image
+        # it resolved, and the property under test is that the child HAS a
+        # working interpreter rather than which spelling of it came back.
+        assert os.path.realpath(result.stdout.strip()) == os.path.realpath(sys.executable)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX execve semantics")
     def test_a_label_without_an_image_cannot_be_executed(self):
@@ -647,16 +660,16 @@ class TestSpawnIdentity:
                 timeout=30,
             )
 
-    def test_a_failing_probe_still_labels(self, monkeypatch):
-        """No-raise applies to the probe too: rung 3 names the process."""
+    def test_a_failing_probe_withholds_the_label_too(self, monkeypatch):
+        """No-raise applies to the probe too: a failed probe is rung 2, not a label."""
 
         def explode():
             raise RuntimeError("no stat")
 
         monkeypatch.setattr(procname, "ensure_branded_interpreter", explode)
         argv0, executable = procname.spawn_identity(procname.LABEL_SERVE, port=1)
-        assert argv0 == "Local Operator [serve] port=1"
-        assert executable == sys.executable
+        assert argv0 == sys.executable
+        assert executable is None
 
 
 class TestLaunchdJob:

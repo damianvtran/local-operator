@@ -54,6 +54,19 @@ def _client(transport: httpx.MockTransport) -> httpx.Client:
     return httpx.Client(transport=transport)
 
 
+@pytest.fixture
+def branded_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the labelled rung, so a test never depends on the host's venv.
+
+    The label rides with a planted image (see ``procname.spawn_identity``): a
+    machine that cannot plant one — a framework interpreter, CI's Linux job —
+    gets the bare interpreter and no label instead. The tests below assert the
+    PAIRING, so the image is forced rather than hoped for; the rung-2 shape has
+    its own tests in ``test_spawn_naming_fallback.py``.
+    """
+    monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: Path(sys.executable))
+
+
 def test_parse_version_accepts_only_x_y_z() -> None:
     assert parse_version("0.27.0") == (0, 27, 0)
     assert parse_version("1.0.0") == (1, 0, 0)
@@ -351,7 +364,7 @@ def test_install_kind_editable_outranks_pip_installer(tmp_path: Path) -> None:
         assert install_kind(prefix=tmp_path) is InstallKind.EDITABLE
 
 
-def test_perform_upgrade_runs_detected_argv(tmp_path: Path) -> None:
+def test_perform_upgrade_runs_detected_argv(tmp_path: Path, branded_image) -> None:
     seen: list[list[str]] = []
 
     def run(argv: list[str]) -> int:
@@ -394,7 +407,7 @@ def test_perform_upgrade_runs_detected_argv(tmp_path: Path) -> None:
     ]
 
 
-def test_installer_invocation_pairs_the_label_with_its_image() -> None:
+def test_installer_invocation_pairs_the_label_with_its_image(branded_image) -> None:
     """The pairing, at the seam a spawn actually uses."""
     argv, executable = installer_invocation(InstallKind.PIP, executable="/venv/bin/python")
     assert argv[0] == procname.branded_argv0(procname.LABEL_INSTALL)
@@ -578,7 +591,7 @@ def test_refresh_unsupervised_when_live_without_plist() -> None:
     run.assert_not_called()
 
 
-def test_refresh_restarts_via_new_distribution() -> None:
+def test_refresh_restarts_via_new_distribution(branded_image) -> None:
     with (
         patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
         patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
@@ -689,7 +702,7 @@ class TestServiceDaemonRefresh:
         assert refresh.lines == () and refresh.warnings == ()
         run.assert_not_called()
 
-    def test_the_child_is_the_new_wheel_and_is_named(self) -> None:
+    def test_the_child_is_the_new_wheel_and_is_named(self, branded_image) -> None:
         plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
         completed = subprocess.CompletedProcess(
             [], 0, stdout="tunnel daemon: refreshed a stale LaunchAgent and restarted it\n"
@@ -806,6 +819,83 @@ class TestServiceDaemonRefresh:
         assert captured.out == ""
         assert "source checkout" in captured.err
 
+    def test_the_child_refuses_to_rewrite_a_foreign_non_editable_install(self, capsys) -> None:
+        """A hand-made venv may not repoint the operator's daemons at itself.
+
+        THE INVARIANT: a repair may change how a daemon is NAMED, never WHICH
+        INSTALL it runs. A durable install (a uv tool, pipx) IS the interpreter
+        the daemons should run and may repair what it owns; a bare pip install
+        in some other venv must not, because that venv can be deleted while the
+        plists keep pointing at it. The comparison is by PREFIX, so the legacy
+        ``<prefix>/bin/python3`` plist and the branded
+        ``<prefix>/bin/Local Operator`` one count as the same install.
+        """
+        from local_operator import launchd
+
+        plists = [Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist")]
+        with (
+            patch.object(update_mod, "install_kind", return_value=InstallKind.PIP),
+            patch.object(update_mod, "_installed_daemon_plists", return_value=plists),
+            patch.object(
+                launchd,
+                "load",
+                return_value={"Program": "/opt/other-venv/bin/Local Operator"},
+            ),
+            patch.object(update_mod, "installer_argv", side_effect=AssertionError("must not run")),
+        ):
+            assert update_mod.daemons_refresh_command() == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "another installation" in captured.err, captured.err
+        assert "/opt/other-venv" in captured.err, captured.err
+
+    def test_the_child_repairs_a_pip_install_of_its_own_prefix(self, capsys) -> None:
+        """The same guard, on the machine it must NOT block.
+
+        Both plist shapes are exercised: the legacy ``ProgramArguments[0]``
+        interpreter and the branded ``Program``. A venv pip-installed from PyPI
+        whose prefix is the one the daemons already record is repairing itself,
+        which is exactly what the guard must allow.
+        """
+        from local_operator import launchd
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
+        from local_operator.wakes import install as wakes_install
+
+        plists = [
+            Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist"),
+            Path("/Users/x/Library/LaunchAgents/com.local-operator.tunnel.plist"),
+        ]
+        loaded = [
+            {
+                "ProgramArguments": [
+                    f"{sys.prefix}/bin/python3",
+                    "-m",
+                    "local_operator.mobile.service",
+                ]
+            },
+            {"Program": f"{sys.prefix}/bin/Local Operator"},
+        ]
+        with (
+            patch.object(update_mod, "install_kind", return_value=InstallKind.PIP),
+            patch.object(update_mod, "_installed_daemon_plists", return_value=plists),
+            patch.object(launchd, "load", side_effect=loaded),
+            ExitStack() as stack,
+        ):
+            for module in (mobile_install, browser_install, tunnel_install, wakes_install):
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        "refresh_plist_if_stale",
+                        return_value=launchd.PlistRefresh("d", "current"),
+                    )
+                )
+            assert update_mod.daemons_refresh_command() == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
     def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
         """One line per daemon that CHANGED; silence for one already current."""
         from local_operator import launchd
@@ -857,7 +947,9 @@ def test_update_command_no_plist_prints_only_install_lines(
     assert captured.err == ""
 
 
-def test_update_command_restarted_prints_phone_line(capsys: pytest.CaptureFixture[str]) -> None:
+def test_update_command_restarted_prints_phone_line(
+    capsys: pytest.CaptureFixture[str], branded_image
+) -> None:
     with (
         _upgrade_cmd(),
         patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),

@@ -543,11 +543,12 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         spawn_options["start_new_session"] = True
-    # Brand the worker on BOTH axes, and on both rungs of the ladder: `argv[0]`
-    # is always the label (what `ps`/`top` show) and `executable=` is always a
-    # real image — the branded hardlink when one is planted, `sys.executable`
-    # otherwise. It is a pair, not two independent choices: a label with no
-    # `executable=` would be EXECUTED as a path on POSIX.
+    # Brand the worker on BOTH axes, together or not at all: the label is
+    # `argv[0]` (what `ps`/`top` show) exactly when `executable=` names the
+    # planted branded link, and where no link can be planted the pair is the
+    # bare interpreter with the label withheld — a labelled `argv[0]` empties
+    # the child's `sys.executable` on Linux, which is far worse than an unnamed
+    # row. See `procname.spawn_identity`.
     from local_operator import procname
 
     argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id=_label_id(session_key))

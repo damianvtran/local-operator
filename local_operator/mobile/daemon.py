@@ -2053,8 +2053,9 @@ class MobileDaemon:
         # every session begun from the phone showed up as a bare ``python3.x``
         # row in Activity Monitor for its whole life. The session id is truncated
         # to 8 to match ``launch.py``, so `ps` correlates the same handle from
-        # either surface; `spawn_identity` also keeps ``executable=`` a real
-        # interpreter on the rung where no branded image could be planted.
+        # either surface; `spawn_identity` applies the label only alongside a
+        # planted image, because a labelled `argv[0]` costs the child its
+        # `sys.executable` on Linux (see `procname.spawn_identity`).
         from local_operator import procname
         from local_operator.interpreter import SAFE_PATH_FLAG
 

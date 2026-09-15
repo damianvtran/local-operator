@@ -1193,7 +1193,7 @@ def _mobile_healthz_answers() -> bool:
         return False
 
 
-def _mobile_restart_invocation() -> tuple[list[str], str] | None:
+def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
     """``(argv, executable)`` for the *new* distribution's ``mobile restart``.
 
     ``sys.executable -m local_operator.cli`` is the post-upgrade
@@ -1205,7 +1205,9 @@ def _mobile_restart_invocation() -> tuple[list[str], str] | None:
     build while reporting success. If this interpreter is gone after the
     upgrade, the refresh fails honestly and the copy names the recovery.
 
-    ``SAFE_PATH_FLAG`` (via ``python_argv``), because the sentence above is
+    ``SAFE_PATH_FLAG``, written literally rather than through
+    ``python_argv`` (this argv's ``argv[0]`` is a label, and ``python_argv``
+    builds an interpreter-first argv), because the sentence above is
     only true with it. :func:`refresh_mobile_after_upgrade` runs this argv with
     no ``cwd=``, so the child inherits the directory the update was started
     from — ``update.py``'s own ``lop update`` and the in-TUI ``/update`` worker
@@ -1275,7 +1277,7 @@ def refresh_mobile_after_upgrade() -> MobileRefresh:
         return MobileRefresh(kind="failed", error=str(exc))
 
 
-def _daemon_refresh_invocation() -> tuple[list[str], str] | None:
+def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
     """``(argv, executable)`` for the *new* distribution's daemon repair.
 
     Same argument as :func:`_mobile_restart_invocation`, and it matters more
@@ -1441,6 +1443,52 @@ def _print_daemon_refreshes(refreshes: Sequence[DaemonRefresh]) -> None:
             print(warning, file=sys.stderr)
 
 
+def _repair_refusal() -> str | None:
+    """Why this process must not rewrite the installed daemons, or ``None``.
+
+    TWO QUESTIONS, and the second is the invariant this guard exists for: a
+    repair may change how a daemon is NAMED, never WHICH INSTALL it runs.
+
+    1. **Is this an installation at all?** An editable or unknown install is
+       refused outright — that is the incident this guard came from, where a
+       worktree venv rewrote the operator's four live plists to point at
+       itself.
+    2. **Is it the SAME installation the plists already run?** A durable
+       install — a uv tool, pipx — IS the interpreter ``lop`` runs from, so it
+       may repair what it owns. Anything else (a hand-made venv with a PyPI
+       install, a second tool env) is refused unless its prefix is the prefix
+       the installed plists already record, so that such a venv cannot repoint
+       the operator's daemons at itself and then be deleted.
+
+    Prefix equality, not path equality, is the test: a stale plist recording
+    ``<prefix>/bin/python3`` and the branded shape recording
+    ``<prefix>/bin/Local Operator`` are the SAME install.
+    """
+    kind = install_kind()
+    if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
+        return (
+            "installed daemons are only refreshed by an installed "
+            "distribution; this is a source checkout, so nothing was touched"
+        )
+    if kind in (InstallKind.UV_TOOL, InstallKind.PIPX):
+        return None
+    from local_operator import launchd
+
+    mine = Path(sys.prefix).resolve()
+    others: list[str] = []
+    for path in _installed_daemon_plists():
+        recorded = launchd.recorded_install_prefix(launchd.load(path))
+        if recorded is not None and recorded != mine:
+            others.append(f"{path.name} runs {recorded}")
+    if others:
+        return (
+            f"the installed daemons belong to another installation "
+            f"({'; '.join(others)}), so this one ({mine}) left them alone; "
+            "upgrade from that installation to repair them"
+        )
+    return None
+
+
 def daemons_refresh_command() -> int:
     """``lop update --refresh-daemons``: the repair, run under the NEW wheel.
 
@@ -1467,12 +1515,11 @@ def daemons_refresh_command() -> int:
     refused before the refresh), but the hidden flag can, and the guard belongs
     where the writing happens rather than in the caller.
     """
-    if install_kind() in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
-        print(
-            "warning: installed daemons are only refreshed by an installed "
-            "distribution; this is a source checkout, so nothing was touched",
-            file=sys.stderr,
-        )
+    refusal = _repair_refusal()
+    if refusal is not None:
+        # A refusal is printed rather than silent: it is the difference between
+        # "nothing needed repairing" and "this process is not allowed to".
+        print(f"warning: {refusal}", file=sys.stderr)
         return 0
     from local_operator.browser_bridge import install as browser_install
     from local_operator.mobile import install as mobile_install

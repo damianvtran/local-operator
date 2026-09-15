@@ -179,6 +179,17 @@ def _module_for(name: str) -> str:
     }[name]
 
 
+#: The recovery command each daemon's repair must name when it leaves the job
+#: stopped. Spelled out here rather than imported so a change to one of the
+#: installer's strings has to be a decision in this file too.
+_RECOVERY = {
+    "mobile": "lop mobile install",
+    "browser bridge": "lop browser install",
+    "tunnel": "lop tunnel install",
+    "wakes supervisor": "lop wake install",
+}
+
+
 @pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
 def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
     name: str, targets: dict[str, Target], monkeypatch: pytest.MonkeyPatch
@@ -272,7 +283,14 @@ def test_a_failed_bootstrap_is_reported_not_raised(
 
     assert outcome.kind == "failed", (name, outcome)
     assert "launchctl could not load it" in outcome.detail, outcome
-    assert outcome.warning().startswith("warning: ")
+    # The job is DOWN at this point — bootout already succeeded — so the detail
+    # must name the command that brings it back, and the warning the upgrade
+    # prints must carry the same sentence rather than swallowing it.
+    recovery = _RECOVERY[name]
+    assert f"run `{recovery}` to reinstall it" in outcome.detail, outcome
+    assert "STOPPED" in outcome.detail, outcome
+    assert recovery in outcome.warning(), outcome
+    assert outcome.warning().startswith("warning: "), outcome
 
 
 @pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])

@@ -342,9 +342,11 @@ def _spawn_runtime(
     # an indistinguishable `python3.x` row in Activity Monitor. The session id is
     # already a hex handle the user sees in `lop sessions`, and it is truncated
     # to 8 so `ps -o ucomm`'s 16-char window still separates two sessions.
-    # `spawn_identity` returns BOTH axes and both rungs of the fallback ladder:
-    # the label is argv[0] even when no branded image could be planted, and
-    # `executable=` is always a real interpreter, never the label.
+    # `spawn_identity` returns BOTH axes, and only as a pair: the label is
+    # `argv[0]` when a branded image was planted, and on the rung that could not
+    # plant one it hands back the bare interpreter with the label deliberately
+    # withheld — a labelled `argv[0]` empties the child's `sys.executable` on
+    # Linux (see `procname.spawn_identity`).
     from local_operator import procname
 
     argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])

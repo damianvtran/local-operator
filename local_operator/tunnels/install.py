@@ -105,12 +105,11 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             ["launchctl", "bootstrap", domain, str(path)], capture_output=True, timeout=20
         )
         if result.returncode:
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
             detail = result.stderr.decode(errors="replace").strip()[:200]
-            return launchd.PlistRefresh(
-                name=name,
-                kind="failed",
-                detail=f"rewrote {path} but launchctl could not load it: "
-                f"{detail or result.returncode}",
+            return launchd.reload_failure(
+                name, path, "lop tunnel install", detail or str(result.returncode)
             )
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade

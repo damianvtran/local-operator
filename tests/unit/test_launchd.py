@@ -184,3 +184,34 @@ class TestRewriteIfStale:
             path.chmod(0o600)
         assert outcome.kind == "failed"
         assert outcome.warning().startswith("warning: ")
+
+    def test_the_recorded_install_prefix_reads_both_plist_shapes(self) -> None:
+        """The test the repair's identity guard runs on.
+
+        Prefix equality rather than path equality is the point: a stale plist
+        recording ``<prefix>/bin/python3`` and the branded shape recording
+        ``<prefix>/bin/Local Operator`` are the SAME install, so a repair that
+        upgrades one into the other must not read as "another installation".
+        """
+        branded = {"Program": "/opt/tool/bin/Local Operator"}
+        legacy = {
+            "ProgramArguments": ["/opt/tool/bin/python3", "-m", "local_operator.wakes.supervisor"]
+        }
+        assert launchd.recorded_install_prefix(branded) == Path("/opt/tool")
+        assert launchd.recorded_install_prefix(legacy) == Path("/opt/tool")
+
+    def test_the_recorded_install_prefix_gives_up_rather_than_guessing(self) -> None:
+        """``None`` is "cannot tell", which callers must treat as no objection.
+
+        The branded shape carries the image in ``Program``, so a LABEL in
+        ``ProgramArguments[0]`` is not a path and must not be read as one — a
+        guess here would refuse a legitimate repair on a machine whose plist
+        this code simply does not understand.
+        """
+        assert launchd.recorded_install_prefix({}) is None
+        assert launchd.recorded_install_prefix(None) is None
+        assert launchd.recorded_install_prefix({"ProgramArguments": []}) is None
+        assert (
+            launchd.recorded_install_prefix({"ProgramArguments": ["Local Operator [wakes]"]})
+            is None
+        )

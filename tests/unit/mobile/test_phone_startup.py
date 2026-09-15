@@ -70,22 +70,27 @@ def fixture_children(monkeypatch):
     children = []
 
     async def spawn(*args, **kwargs):
-        # The PHONE-started runtime is named on both axes, exactly as the
-        # viewer's spawn is (see local_operator.procname). It used to be the one
-        # session start with no branding at all, so a session begun from the
-        # phone was a bare `python3.x` row for the whole of its life. `-P` is
-        # part of the contract, not decoration: without it the child imports
-        # whatever checkout happens to be the cwd instead of the installed
-        # distribution (see local_operator.interpreter).
-        assert args[0].startswith("Local Operator [session] id="), args
+        # The PHONE-started runtime is named on both axes whenever a branded
+        # image was planted, exactly as the viewer's spawn is (see
+        # local_operator.procname), and is the bare interpreter with NO label
+        # where one could not be — a labelled argv[0] there is what empties the
+        # child's `sys.executable` on Linux, which is a worse outcome than an
+        # unnamed row. It used to be the one session start with no branding at
+        # all, so a session begun from the phone was a bare `python3.x` row for
+        # the whole of its life. `-P` is part of the contract, not decoration:
+        # without it the child imports whatever checkout happens to be the cwd
+        # instead of the installed distribution (see local_operator.interpreter).
+        if kwargs["executable"]:
+            # A label with no `executable=` would be a PATH the kernel was asked
+            # to execute, so the image always travels with the label.
+            assert args[0].startswith("Local Operator [session] id="), args
+        else:
+            assert args[0] == sys.executable, args
         assert args[1:] == (
             "-P",
             "-m",
             "local_operator.session.runtime.process",
         )
-        # A label with no `executable=` would be a PATH the kernel was asked to
-        # execute, so the image always travels with the label.
-        assert kwargs["executable"], kwargs
         assert kwargs["start_new_session"] is True
         assert "LOP_RUNTIME_DEFER_MATERIALISE" not in kwargs["env"]
         child = await actual_spawn(sys.executable, "-c", CHILD, **kwargs)

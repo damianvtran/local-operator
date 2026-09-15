@@ -202,11 +202,13 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         _launchctl("bootout", _domain(), str(path))
         loaded = _launchctl("bootstrap", _domain(), str(path))
         if loaded.returncode:
-            return launchd.PlistRefresh(
-                name=name,
-                kind="failed",
-                detail=f"rewrote {path} but launchctl could not load it: "
-                f"{loaded.stderr.strip()[:200] or loaded.returncode}",
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
+            return launchd.reload_failure(
+                name,
+                path,
+                "lop browser install",
+                loaded.stderr.strip()[:200] or str(loaded.returncode),
             )
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade

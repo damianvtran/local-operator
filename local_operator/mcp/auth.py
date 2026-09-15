@@ -660,10 +660,11 @@ async def open_browser_quietly(url: str) -> bool:
 
         # Named like every other process this product spawns: a user's OAuth
         # login is exactly the moment an EDR is watching, and the child opens a
-        # browser at an arbitrary URL. `spawn_identity` supplies both axes and
-        # both rungs of the ladder — the label is argv[0] (a label with no
-        # `executable=` would be EXECUTED as a path on POSIX) and the image is
-        # the branded interpreter when one is planted.
+        # browser at an arbitrary URL. `spawn_identity` supplies both axes as a
+        # pair — the label is argv[0] (a label with no `executable=` would be
+        # EXECUTED as a path on POSIX) when the branded interpreter was planted,
+        # and the bare interpreter with no label when it was not, so that an
+        # argv[0] label never costs the child its `sys.executable` on Linux.
         argv0, image = procname.spawn_identity(procname.LABEL_OPEN_BROWSER)
         process = await asyncio.create_subprocess_exec(
             # ``SAFE_PATH_FLAG``, which is what ``python_argv`` contributes here:

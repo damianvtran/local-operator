@@ -97,10 +97,69 @@ class PlistRefresh:
         return ""
 
     def warning(self) -> str:
-        """The line for the upgrade summary's stderr, or ``""``."""
+        """The line for the upgrade summary's stderr, or ``""``.
+
+        A failure DETAIL is a whole sentence rather than a token: the reload
+        failures name the command that restores a stopped daemon, and that
+        sentence is the point of the line, so it is printed as it stands.
+        """
         if self.kind == "failed":
             return f"warning: {self.name} daemon was not refreshed: {self.detail}"
         return ""
+
+
+def reload_failure(name: str, path: Path, recovery: str, error: str) -> PlistRefresh:
+    """Outcome for a repair that rewrote the plist but could not reload the job.
+
+    THE ONE FAILURE IN THE LADDER THAT LEAVES THE MACHINE CHANGED **AND** THE
+    SERVICE DOWN: ``bootout`` succeeded, so the daemon the operator had is no
+    longer running, and a bare ``launchctl`` error reads like a stale-file
+    problem rather than a stopped service. The ``recovery`` command named here
+    is that daemon's own installer (``lop mobile install``, ``lop browser
+    install``, ``lop tunnel install``, ``lop wake install``), which rewrites
+    the same plist and loads it again. One helper so all four installers cannot
+    drift in how they say this.
+    """
+    return PlistRefresh(
+        name=name,
+        kind="failed",
+        detail=(
+            f"rewrote {path} but launchctl could not load it: {error} "
+            f"— the daemon is now STOPPED; run `{recovery}` to reinstall it"
+        ),
+    )
+
+
+def recorded_install_prefix(data: object) -> Path | None:
+    """The install prefix the plist's interpreter lives in, or ``None``.
+
+    Reads the interpreter path from either plist shape: the branded ``Program``
+    (``<prefix>/bin/Local Operator``) or, on a plist written before that key
+    existed, ``ProgramArguments[0]`` when it is a path rather than a label.
+    Used to answer "is this the SAME installation?" — see
+    :func:`update.daemons_refresh_command`, where the repair may change how a
+    daemon is NAMED but must never change WHICH INSTALL it runs.
+
+    ``None`` means "cannot tell", which callers must treat as no objection: a
+    plist this code cannot read is not evidence of a different install.
+    """
+    if not isinstance(data, dict):
+        return None
+    program = data.get("Program")
+    candidates: list[str] = []
+    if isinstance(program, str):
+        candidates.append(program)
+    argv = data.get("ProgramArguments")
+    if isinstance(argv, list) and argv and isinstance(argv[0], str):
+        candidates.append(argv[0])
+    for candidate in candidates:
+        if not candidate.startswith("/"):
+            # A label, not a path: the branded shape carries the image in
+            # ``Program``, and anything else here is not a candidate prefix.
+            continue
+        prefix = Path(candidate).parent.parent
+        return prefix
+    return None
 
 
 def real_home() -> Path | None:

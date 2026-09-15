@@ -102,29 +102,40 @@ a stamp is a second source of truth that can itself go stale.
 
 EVERY FUNCTION HERE IS NO-RAISE BY CONTRACT, in the style of ``proc.py``. This
 is decoration on a process listing: no failure of it may ever stop a session
-from starting. The fallback ladder is hardlink+symlink → argv-only labelling →
-exactly today's behaviour, and every rung is a silent no-op on failure.
+from starting. The fallback ladder is hardlink+symlink → the unbranded
+interpreter → exactly today's behaviour, and every rung is a silent no-op on
+failure.
 
 THE LADDER, AND WHERE EACH RUNG IS IMPLEMENTED
 ----------------------------------------------
-The middle rung is the one that used to be promised and missing: a spawn site
-that fell back to ``argv[0] = sys.executable`` when no branded image could be
-planted left a bare ``python3.14`` row on a machine whose interpreter is a
-non-venv or a framework build, even though naming argv costs nothing there.
-
 - **Rung 1 — the image AND the argv row.** ``ensure_branded_interpreter()``
   plants the hardlink; :func:`spawn_identity` hands a spawn site the label for
   ``argv[0]`` and the link for ``executable=``.
-- **Rung 2 — argv only.** With no link, :func:`spawn_identity` still returns
-  the label as ``argv[0]`` and pairs it with ``sys.executable`` as
-  ``executable=``. This is the whole reason the pairing is a single function:
-  on POSIX ``Popen(argv=[…])`` EXECUTES ``argv[0]`` when ``executable`` is
-  unset, so a label WITHOUT an explicit ``executable=`` would try to run a file
-  named ``Local Operator [session] id=…``. Use this helper rather than
-decorating ``argv[0]`` at a call site.
+- **Rung 2 — the interpreter, unlabelled.** With no link,
+  :func:`spawn_identity` returns ``(sys.executable, None)``: ``argv[0]`` stays
+  the interpreter path and NO label is applied, so the row is ``python3.x``,
+  exactly as it was before this module existed.
 - **Rung 3 — nothing.** :func:`launchd_job` falls back to the plist shape every
   installer wrote before branding (no ``Program`` key), and
   :func:`brand_this_process` is a no-op off Linux.
+
+**THE ARGV-ONLY RUNG THIS MODULE USED TO PROMISE IS DELIBERATELY NOT
+IMPLEMENTED, and the reason is measured.** A label is not free: on Linux
+CPython derives ``sys.executable`` from ``argv[0]``, so a labelled ``argv[0]``
+leaves the child with ``sys.executable == ""``. CI reproduced it on
+ubuntu/py3.12 — the eval worker's own broker spawn, ``secrets/client.py:298``,
+dies with ``PermissionError: [Errno 13] Permission denied: ''``, four tests on
+one cause — and the same breakage reaches any user cell doing
+``subprocess.run([sys.executable, …])``. macOS hides it completely: it resolves
+the interpreter from the EXECUTED IMAGE, so the identical child reports a real
+``sys.executable`` there, which is why this shipped once and only failed on
+Linux. A label that costs the child its interpreter identity is not a naming
+improvement, so the label rides with the image or not at all.
+
+Linux therefore names this product on the ``comm`` axis — set in-process by
+:func:`brand_this_process`, 15 bytes, brand only — and the argv axis belongs to
+rung 1, where the image already carries the interpreter. No half-renamed rows:
+where the product cannot be named on either axis, the row says ``python3.x``.
 """
 
 from __future__ import annotations
@@ -476,7 +487,8 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
 
     ``EXDEV`` (cross-device) is an EXPECTED outcome, not an error: an
     interpreter on a different filesystem from the venv simply cannot be
-    hardlinked, and the caller falls back to argv-only labelling.
+    hardlinked, and the caller falls back to rung 2 — the interpreter, with no
+    label on either axis (see the ladder in the module docstring).
     """
     tmp = link.with_name(f".{BRAND}.{os.getpid()}.tmp")
     try:
@@ -719,30 +731,53 @@ def reexec_branded(label: str | None = None) -> None:
         logger.debug("branded re-exec skipped", exc_info=True)
 
 
-def spawn_identity(label: str, **fields: object) -> tuple[str, str]:
+def spawn_identity(label: str, **fields: object) -> tuple[str, str | None]:
     """``(argv[0], executable)`` for a child this product spawns.
 
     The two independent name axes of the module docstring, in one call, so no
     spawn site can implement half of them:
 
-    - ``argv[0]`` is ALWAYS the rendered label, which is what ``ps -o args``,
-      ``top -o command`` and ``pgrep -f`` read;
-    - ``executable`` is the branded hardlink when one is planted (what
-      Activity Monitor reads, via ``p_comm``) and ``sys.executable`` otherwise.
+    - ``argv[0]`` is the rendered label — what ``ps -o args``, ``top -o
+      command`` and ``pgrep -f`` read — and it is a label ONLY alongside a
+      branded image (below);
+    - ``executable`` is the branded hardlink when one is planted (what Activity
+      Monitor reads, via ``p_comm``), and ``None`` otherwise.
 
-    ``executable`` is returned on EVERY rung, and that is the load-bearing
-    part. On POSIX, ``Popen(argv=[…])`` with ``executable=None`` EXECUTES
-    ``argv[0]``, so handing a label to a spawn without a real image would look
-    for a file literally named ``Local Operator [session] id=…`` and fail to
-    start at all. Returning the pair together is what makes the argv-only rung
-    safe to reach. ``secrets/client.py``'s broker spawn is the original of this
-    shape; this is that pairing, shared, and never raises.
+    WHY THE LABEL RIDES WITH THE IMAGE, measured on CI rather than reasoned:
+    on Linux CPython derives ``sys.executable`` from ``argv[0]``, so a labelled
+    ``argv[0]`` leaves the child with an EMPTY ``sys.executable``. That is not
+    cosmetic — ``secrets/client.py`` spawns the broker with
+    ``executable=sys.executable`` and dies with ``PermissionError: [Errno 13]
+    Permission denied: ''``, and so does any eval cell doing
+    ``subprocess.run([sys.executable, …])``. Rung 2 is precisely the rung
+    WITHOUT an image, so there is nothing to buy that cost back. macOS cannot
+    show this (it resolves the interpreter from the executed image), which is
+    why it must be pinned by a Linux-executed child test rather than by a
+    parent-side assertion: see ``tests/unit/test_procname_linux.py``.
+
+    ``None`` rather than ``sys.executable`` for the image is deliberate: it
+    says "no branded image" to the caller, which keeps ``executable=`` set only
+    when it names the link — the invariant ``tests/unit/test_exec_mode.py``
+    pins — and ``subprocess`` treats ``None`` exactly as an unset keyword.
+
+    On POSIX the pairing is also load-bearing for rung 1: ``Popen(argv=[…])``
+    with ``executable`` unset EXECUTES ``argv[0]``, so a label returned without
+    the image would look for a file literally named ``Local Operator [session]
+    id=…``. Callers must pass both halves straight through; no call site should
+    decorate ``argv[0]`` itself.
+
+    Never raises: a name is decoration, and no spawn may fail for one.
     """
     try:
         link = ensure_branded_interpreter()
     except Exception:  # noqa: BLE001 — a name is decoration, never a failure
         link = None
-    return branded_argv0(label, **fields), (str(link) if link is not None else sys.executable)
+    if link is None:
+        # Rung 2 — see the module ladder: no label, because a labelled argv[0]
+        # costs the child its sys.executable on Linux and there is no image
+        # here to restore it.
+        return sys.executable, None
+    return branded_argv0(label, **fields), str(link)
 
 
 def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, object]:
@@ -871,9 +906,11 @@ def brand_this_process(label: str | None = None) -> None:
 
     ``label`` is accepted and ignored on purpose: Linux ``comm`` is capped at
     15 bytes, so only ``BRAND`` (14) fits and a role label would be truncated
-    into an unreadable prefix. There the ROLES live on the argv axis —
-    :func:`spawn_identity`'s label, which ``/proc/<pid>/cmdline`` and
-    ``ps -o args`` show in full — and ``comm`` carries only the product name.
+    into an unreadable prefix. On Linux this is the ONLY naming axis the
+    product has, because the argv label belongs to rung 1 and a branded image
+    cannot be planted there (see the module ladder); ``/proc/<pid>/cmdline``
+    therefore shows the plain interpreter argv, and ``comm``/``ps -o comm``
+    shows the product name.
     """
     del label  # Linux comm is capped at 15 bytes, so only BRAND fits
     set_process_name()

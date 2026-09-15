@@ -53,8 +53,9 @@ def spawn_detached(
     ``executable=`` (what Activity Monitor reads) and ``argv[0]`` becomes the
     label (what ``ps``/``top`` read) — the two independent name axes documented
     in :mod:`local_operator.procname`. Opt-in and best-effort: with no branded
-    image available the argv is still labelled but spawned with the bare
-    interpreter as its image, so a caller can set it unconditionally.
+    image available the pair is the bare interpreter with NO label, because a
+    labelled ``argv[0]`` is not free (see :func:`procname.spawn_identity`), so a
+    caller can set it unconditionally.
     """
     launch = list(argv)
     executable: str | None = None
@@ -66,11 +67,12 @@ def spawn_detached(
         # must keep its own image, or `executable=` would run Python under that
         # program's arguments.
         if os.path.realpath(launch[0]) == os.path.realpath(sys.executable):
-            # Both axes, both rungs: the label is argv[0] whether or not a
-            # branded image exists (a machine that cannot plant one still gets
-            # a named row), and `executable=` is ALWAYS a real interpreter here
-            # — a label with no `executable=` is a path the kernel would be
-            # asked to execute. See `procname.spawn_identity`.
+            # Both axes, as one pair: the label is argv[0] when a branded image
+            # was planted, and where none could be, the launch keeps the bare
+            # interpreter with no label — never a label with no `executable=`,
+            # which is a path the kernel would be asked to execute (and, on
+            # Linux, a child with an empty `sys.executable`). See
+            # `procname.spawn_identity`.
             launch[0], executable = procname.spawn_identity(label)
 
     try:
