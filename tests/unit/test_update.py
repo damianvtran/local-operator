@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +15,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from local_operator import procname
 from local_operator import update as update_mod
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.update import (
@@ -25,6 +26,7 @@ from local_operator.update import (
     check_latest,
     install_kind,
     installer_argv,
+    installer_invocation,
     is_behind,
     parse_version,
     perform_upgrade,
@@ -375,7 +377,45 @@ def test_perform_upgrade_runs_detected_argv(tmp_path: Path) -> None:
         executable="/venv/bin/python",
         prefix=tmp_path,
     )
-    assert seen == [["/venv/bin/python", "-m", "pip", "install", "-U", "local-operator"]]
+    # The pip path is the one installer this product runs ITSELF, so its argv[0]
+    # is the role label and the interpreter travels beside it — see
+    # `installer_invocation`. A caller that took this argv alone and spawned it
+    # without `executable=` would ask the kernel to execute a file named
+    # "Local Operator [install] pip".
+    assert seen == [
+        [
+            procname.branded_argv0(procname.LABEL_INSTALL),
+            "-m",
+            "pip",
+            "install",
+            "-U",
+            "local-operator",
+        ]
+    ]
+
+
+def test_installer_invocation_pairs_the_label_with_its_image() -> None:
+    """The pairing, at the seam a spawn actually uses."""
+    argv, executable = installer_invocation(InstallKind.PIP, executable="/venv/bin/python")
+    assert argv[0] == procname.branded_argv0(procname.LABEL_INSTALL)
+    assert executable == "/venv/bin/python"
+
+
+def test_installer_invocation_leaves_third_party_binaries_named() -> None:
+    """``uv`` and ``pipx`` keep their own argv[0] AND their own image.
+
+    Labelling them would both mislabel the row (they are named already) and lose
+    the binary the user's PATH resolves, which is the documented reason
+    ``installer_argv`` returned them untouched before this change.
+    """
+    assert installer_invocation(InstallKind.UV_TOOL) == (
+        ["uv", "tool", "install", "--force", "local-operator"],
+        None,
+    )
+    assert installer_invocation(InstallKind.PIPX) == (
+        ["pipx", "upgrade", "local-operator"],
+        None,
+    )
 
 
 def test_perform_upgrade_refuses_editable_and_unknown() -> None:
@@ -482,7 +522,7 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check"])
     with patch("local_operator.update.update_command", return_value=2) as cmd:
         assert main() == 2
-        cmd.assert_called_once_with(check=True)
+        cmd.assert_called_once_with(check=True, refresh_daemons=False)
 
 
 def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -491,7 +531,7 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False)
+        cmd.assert_called_once_with(check=False, refresh_daemons=False)
 
 
 class _FakePlist:
@@ -549,14 +589,22 @@ def test_refresh_restarts_via_new_distribution() -> None:
     # `SAFE_PATH_FLAG`, and BEFORE `-m`: this runs with no `cwd=`, so a bare
     # `-m` would restart the daemon through a checkout that merely happened to
     # be the update's working directory -- pre-upgrade code reporting success.
+    # argv[0] is the role LABEL, so `executable=` must carry the interpreter:
+    # a label with no image is a file the kernel would be asked to execute.
     assert run.call_args.args[0] == [
-        sys.executable,
+        procname.branded_argv0(procname.LABEL_MOBILE_RESTART),
         SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
         "restart",
     ]
+    # The image travels BESIDE the label and is always a real file — never the
+    # label itself, which the kernel would try to execute. It is the branded
+    # hardlink wherever one can be planted, and the interpreter where it cannot.
+    image = run.call_args.kwargs["executable"]
+    assert image != run.call_args.args[0][0]
+    assert os.path.basename(image) in {procname.BRAND, os.path.basename(sys.executable)}
 
 
 def test_refresh_failed_child_exit() -> None:
@@ -622,6 +670,173 @@ def test_refresh_failed_when_executable_gone() -> None:
     run.assert_not_called()
 
 
+class TestServiceDaemonRefresh:
+    """The daemons ``lop-update`` used to leave behind, repaired by one child.
+
+    The repair RENDERS a plist, so it cannot run in-process: the updater's own
+    already-imported modules are the PREVIOUS build and would render the
+    previous plist shape. Every assertion here is about that child and about
+    what the summary says it did.
+    """
+
+    def test_nothing_installed_means_no_child_at_all(self) -> None:
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh == update_mod.DaemonRefresh("service daemons")
+        assert refresh.lines == () and refresh.warnings == ()
+        run.assert_not_called()
+
+    def test_the_child_is_the_new_wheel_and_is_named(self) -> None:
+        plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout="tunnel daemon: refreshed a stale LaunchAgent and restarted it\n"
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[plist]),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        # `SAFE_PATH_FLAG` before `-m`, like the mobile bounce: this runs with no
+        # `cwd=`, so a bare `-m` would load a checkout the update happened to be
+        # started in. The label is argv[0], so the image travels beside it.
+        assert run.call_args.args[0] == [
+            procname.branded_argv0(procname.LABEL_DAEMONS_REFRESH),
+            SAFE_PATH_FLAG,
+            "-m",
+            "local_operator.cli",
+            "update",
+            "--refresh-daemons",
+        ]
+        # The image travels BESIDE the label and is always a real file — never
+        # the label itself, which the kernel would try to execute. It is the
+        # branded hardlink wherever one can be planted, and the interpreter
+        # where it cannot.
+        image = run.call_args.kwargs["executable"]
+        assert image != run.call_args.args[0][0]
+        assert os.path.basename(image) in {procname.BRAND, os.path.basename(sys.executable)}
+        assert refresh.lines == ("tunnel daemon: refreshed a stale LaunchAgent and restarted it",)
+        assert refresh.warnings == ()
+
+    def test_a_nonzero_child_is_a_warning_not_a_failure(self) -> None:
+        plist = Path("/tmp/Library/LaunchAgents/com.local-operator.wakes.plist")
+        completed = subprocess.CompletedProcess([], 3, stdout="", stderr="error: boom\n")
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[plist]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.warnings == ("warning: could not refresh installed daemons: error: boom",)
+        assert refresh.lines == ()
+
+    def test_a_timeout_is_a_warning(self) -> None:
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.warnings == ("warning: daemon refresh timed out",)
+
+    def test_the_services_run_before_the_mobile_bounce(self) -> None:
+        """The order the plist repair makes load-bearing.
+
+        The service child REWRITES plists; the mobile bounce must restart from a
+        plist that is already current, or it restarts the previous definition and
+        the second start is the only one on the new shape.
+        """
+        order: list[str] = []
+        with (
+            patch.object(
+                update_mod,
+                "refresh_service_daemons_after_upgrade",
+                side_effect=lambda: order.append("services") or update_mod.DaemonRefresh("s"),
+            ),
+            patch.object(
+                update_mod,
+                "refresh_mobile_after_upgrade",
+                side_effect=lambda: order.append("mobile")
+                or update_mod.MobileRefresh(kind="restarted"),
+            ),
+        ):
+            refreshes = update_mod.refresh_daemons_after_upgrade()
+        assert order == ["services", "mobile"]
+        assert [refresh.name for refresh in refreshes] == ["s", "mobile"]
+        assert refreshes[1].lines == ("mobile daemon restarted — refresh the phone UI",)
+
+    def test_only_the_installed_plists_are_probed(self, tmp_path, monkeypatch) -> None:
+        """A pure filesystem probe, and one that a redirected HOME turns off."""
+        directory = tmp_path / "Library" / "LaunchAgents"
+        directory.mkdir(parents=True)
+        (directory / "com.local-operator.tunnel.plist").write_bytes(b"")
+        (directory / "com.local-operator.wakes.plist").write_bytes(b"")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        found = update_mod._installed_daemon_plists()
+        assert sorted(path.name for path in found) == [
+            "com.local-operator.tunnel.plist",
+            "com.local-operator.wakes.plist",
+        ]
+
+    def test_the_flag_bypasses_the_pypi_check(self, capsys) -> None:
+        """``--refresh-daemons`` is a repair, not an upgrade: no network, no version."""
+        with (
+            patch.object(update_mod, "check_latest") as check,
+            patch.object(update_mod, "daemons_refresh_command", return_value=0) as command,
+        ):
+            assert update_command(refresh_daemons=True) == 0
+        check.assert_not_called()
+        command.assert_called_once()
+        assert capsys.readouterr().out == ""
+
+    def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys) -> None:
+        """The rule the upgrade path already enforces, at the point that WRITES.
+
+        A source checkout's interpreter is not the daemon's, so a repair from
+        one would point the operator's LaunchAgents at that checkout. The
+        visible entry points cannot reach this (an editable install is refused
+        before the refresh); the hidden flag can.
+        """
+        with (
+            patch.object(update_mod, "install_kind", return_value=InstallKind.EDITABLE),
+            patch.object(update_mod, "installer_argv", side_effect=AssertionError("must not run")),
+        ):
+            assert update_mod.daemons_refresh_command() == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "source checkout" in captured.err
+
+    def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
+        """One line per daemon that CHANGED; silence for one already current."""
+        from local_operator import launchd
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
+        from local_operator.wakes import install as wakes_install
+
+        outcomes = (
+            (mobile_install, launchd.PlistRefresh("mobile", "repaired")),
+            (browser_install, launchd.PlistRefresh("browser bridge", "current")),
+            (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
+            (wakes_install, launchd.PlistRefresh("wakes supervisor", "repaired")),
+        )
+        with (
+            patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+            ExitStack() as stack,
+        ):
+            for module, outcome in outcomes:
+                stack.enter_context(
+                    patch.object(module, "refresh_plist_if_stale", return_value=outcome)
+                )
+            assert update_mod.daemons_refresh_command() == 0
+        captured = capsys.readouterr()
+        assert captured.out.splitlines() == [
+            "mobile daemon: refreshed a stale LaunchAgent and restarted it",
+            "wakes supervisor daemon: refreshed a stale LaunchAgent and restarted it",
+        ]
+        assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
+
+
 def test_update_command_no_plist_prints_only_install_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -654,13 +869,19 @@ def test_update_command_restarted_prints_phone_line(capsys: pytest.CaptureFixtur
     # to survive the `lop update` path too, which is one of the two callers
     # that runs with a user cwd.
     assert run.call_args.args[0] == [
-        sys.executable,
+        procname.branded_argv0(procname.LABEL_MOBILE_RESTART),
         SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
         "restart",
     ]
+    # The image travels BESIDE the label and is always a real file — never the
+    # label itself, which the kernel would try to execute. It is the branded
+    # hardlink wherever one can be planted, and the interpreter where it cannot.
+    image = run.call_args.kwargs["executable"]
+    assert image != run.call_args.args[0][0]
+    assert os.path.basename(image) in {procname.BRAND, os.path.basename(sys.executable)}
     assert "installed 0.28.0" in captured.out
     assert "mobile daemon restarted — refresh the phone UI" in captured.out
     assert captured.err == ""
