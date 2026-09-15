@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -926,6 +927,12 @@ async def test_the_tight_budget_methods_can_still_corroborate(
     (1.2 intervals, peer answering) is what stops that from becoming a licence
     to tear down healthy links: together they pin "the clock alone cannot
     decide; the answer can".
+
+    The probe is now TWO-STRIKE, so the escalation is asserted across two
+    consecutive commands: the first unanswered probe answers its own command and
+    leaves the link up, the second severs. Both halves are the point — a `read`
+    must still be able to reach a teardown inside its own budget, and one miss
+    must not be that teardown.
     """
 
     monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
@@ -945,13 +952,206 @@ async def test_the_tight_budget_methods_can_still_corroborate(
         return None
 
     service.link.send = mute  # type: ignore[method-assign]
+    first = await service._dispatch_serialized(
+        Request(id="r-frozen-1", method="read", params={"tab": "bridge:9:n"})
+    )
+    first_body = bytes(first.body).decode().replace(" ", "")
+    assert '"timeout_s":0.05' in first_body, first_body
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in first_body, first_body
+    assert socket.closed == [], "one unanswered probe severed the link"
+    assert service.link.websocket is socket
+
+    second = await service._dispatch_serialized(
+        Request(id="r-frozen-2", method="read", params={"tab": "bridge:9:n"})
+    )
+    second_body = bytes(second.body).decode().replace(" ", "")
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value in second_body, second_body
+    assert '"phase":"response"' in second_body
+    assert socket.closed == [4000], "a twice-unanswered probe must still sever"
+
+
+# --- the two-strike probe --------------------------------------------------
+#
+# The promotion rule's PROBE arm, reviewed against the incident it came from:
+# one unanswered question severed the link, `disconnect()` failed every pending
+# future on that worker, and the teardown was announced as "the link silent for
+# 1s" — one second after the peer had spoken. Three properties follow, and each
+# row below can fail on the pre-fix tree (they are guards, not
+# characterisations): ESCALATION (a second consecutive miss still severs),
+# ISOLATION (one timed-out command fails only itself) and RESTRAINT (nothing is
+# severed while the peer's last frame is inside one ping interval).
+
+
+@pytest.mark.asyncio
+async def test_one_unanswered_probe_fails_only_its_own_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single timed-out command must not become a fleet-wide teardown.
+
+    The incident this pins is multi-session: four sessions driving four tabs on
+    ONE worker. The first command to consume its budget severed the link, so the
+    other three heard "the extension stopped answering" and lost whatever they
+    had in flight — one slow `read` answering for everybody. Here a SIBLING
+    future is registered exactly as a second session's command would be, and the
+    assertions are that it is neither failed nor deregistered while the link
+    stays up.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    socket = _connected(service, silent_for=1.2)
+
+    async def mute(payload: dict[str, Any], *, wire: Any = None) -> None:
+        return None
+
+    service.link.send = mute  # type: ignore[method-assign]
+    # A second session's command, already on the wire and waiting for an answer
+    # this worker will never send.
+    sibling = service._register_pending(
+        Request(id="r-sibling", method="snapshot", params={"tab": "bridge:8:n"})
+    )
+
     response = await service._dispatch_serialized(
-        Request(id="r-frozen", method="read", params={"tab": "bridge:9:n"})
+        Request(id="r-lonely", method="read", params={"tab": "bridge:9:n"})
     )
     body = bytes(response.body).decode().replace(" ", "")
-    assert ErrorCode.EXTENSION_UNRESPONSIVE.value in body
-    assert '"phase":"response"' in body
-    assert socket.closed == [4000], "a mute peer inside the slack must be severed"
+    assert '"timeout_s":0.05' in body, body
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in body, body
+    assert socket.closed == [], "one command's timeout severed the link"
+    assert service.link.websocket is socket
+    assert service.link.pending.get("r-sibling") is sibling
+    assert not sibling.done(), "a sibling session's in-flight future was failed"
+    # …and the sibling is still answerable, which is what "left alone" means.
+    sibling.set_result(Response(id="r-sibling", ok=True, result={"text": "ok"}))
+    assert sibling.result().result == {"text": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_the_probe_arm_never_severs_while_the_peer_spoke_recently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is severed while the peer's last frame is inside one ping interval.
+
+    The hostile drop the incident produced: the silence a teardown reports is
+    measured at the COMMAND's timeout, so a worker that spoke one second earlier
+    was severed and the log said "silent for 1s". Two guards now stand in front
+    of that, and this row isolates the second one by reaching the strike count
+    the escalation rule requires (`probe_strikes == 2`) and still not severing,
+    because the peer's last frame is younger than `PING_INTERVAL_S`.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    # Spoke 0.1 s ago: inside one ping interval for the whole row (each probe
+    # adds only its own 0.05 s window).
+    socket = _connected(service, silent_for=0.1)
+
+    async def mute(payload: dict[str, Any], *, wire: Any = None) -> None:
+        return None
+
+    service.link.send = mute  # type: ignore[method-assign]
+    for index in (1, 2):
+        response = await service._dispatch_serialized(
+            Request(id=f"r-fresh-{index}", method="read", params={"tab": "bridge:9:n"})
+        )
+        body = bytes(response.body).decode().replace(" ", "")
+        assert '"timeout_s":0.05' in body, body
+        assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in body, body
+
+    assert service.link.probe_strikes == 2, "the strikes should have accrued"
+    assert socket.closed == [], "a peer that spoke inside the last ping interval was severed"
+    assert service.link.websocket is socket
+    assert not service.link.dropped_unproven()
+
+
+@pytest.mark.asyncio
+async def test_an_answered_probe_forgets_the_earlier_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strikes are CONSECUTIVE misses, so any frame clears them.
+
+    Without this the counter would be a tally: two misses an hour apart, on a
+    link that answered everything in between, would sever a healthy worker — the
+    failure mode the escalation rule exists to avoid, arriving by accumulation
+    instead of in one step. `frame_event` is set by the receive loop on EVERY
+    frame, so "answered" includes a peer that spoke on its own.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    _connected(service, silent_for=1.2)
+
+    async def mute(payload: dict[str, Any], *, wire: Any = None) -> None:
+        return None
+
+    service.link.send = mute  # type: ignore[method-assign]
+    await service._dispatch_serialized(
+        Request(id="r-miss", method="read", params={"tab": "bridge:9:n"})
+    )
+    assert service.link.probe_strikes == 1
+
+    async def answering(payload: dict[str, Any], *, wire: Any = None) -> None:
+        _peer_spoke(service)
+        return None
+
+    service.link.send = answering  # type: ignore[method-assign]
+    assert await service._peer_answers_a_solicited_ping() is True
+    assert service.link.probe_strikes == 0, "a link that answered kept its strikes"
+
+
+@pytest.mark.asyncio
+async def test_the_ping_tick_publishes_its_own_loop_lag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A starved daemon must be tellable apart from a mute peer in the log.
+
+    Both produce the same silence measurement and — before this — the same log
+    line, which is why the original incident took hours to localise: every line
+    said the browser had gone quiet, and none said the daemon had stopped
+    running. The tick's own lateness is therefore published per tick, announced
+    at WARNING when it crosses `PING_TICK_LAG_WARN_S`, and carried on the
+    teardown line a reader actually meets during an incident.
+
+    LEVELS ARE PART OF THE GUARD: the daemon configures no logging of its own and
+    its supervisor log holds WARNING and above, so the per-tick record is DEBUG
+    and cannot be what makes this row pass.
+    """
+
+    caplog.set_level(logging.DEBUG)
+    service = BridgeService(root=tmp_path)
+    _connected(service, silent_for=0.0)
+
+    # The first tick has no interval to be late for, so it reports nothing.
+    service._note_ping_tick_lag()
+    assert not [r for r in caplog.records if "lag" in r.getMessage()]
+    caplog.clear()
+
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    service._ping_tick_at = time.monotonic() - 4.0  # a cycle 3 s over its interval
+    service._note_ping_tick_lag()
+    assert any(
+        record.levelno == logging.DEBUG and "daemon loop lag" in record.getMessage()
+        for record in caplog.records
+    ), "the per-tick lag record is missing"
+    assert any(
+        record.levelno == logging.WARNING and "loop lag" in record.getMessage()
+        for record in caplog.records
+    ), "a late tick was not announced"
+    assert service._ping_tick_lag_s == pytest.approx(3.0, abs=0.2)
+
+    # And the teardown names it, so "peer went mute" and "our loop starved" are
+    # distinguishable on the line that says the link was dropped.
+    caplog.clear()
+    await service._drop_unproven_link("probe test")
+    dropped = [r for r in caplog.records if "dropped an unresponsive extension" in r.getMessage()]
+    assert dropped, "the teardown was not announced"
+    assert "daemon loop lag" in dropped[0].getMessage()
 
 
 # --- D2 / R1-5 / Q1 -------------------------------------------------------
@@ -1673,9 +1873,10 @@ async def test_a_lost_answer_on_a_replaced_wire_names_the_replacement(
     link's state was dropped and the replacement installed itself: the replacement
     does not fail that future (it was not in the map when the superseded link's
     state was dropped), so this command's answer never arrives on either wire.
-    By the time its budget expires the promotion rule finds, on a mute
-    replacement, nothing of ours left to sever — and the honest answer is that
-    the extension replaced its connection.
+    By the time its budget expires the arm has nothing of ours left to sever — the
+    fence refuses on the captured wire, and the two-strike guard refuses earlier
+    still, because the replacement has just spoken — and in both shapes the honest
+    answer is that the extension replaced its connection.
 
     That answer carries `extension_disconnected`, whose copy tells the reader no
     browser is attached and to ask the user to open one. `phase: replaced` is
