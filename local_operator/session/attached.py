@@ -1962,6 +1962,29 @@ class AttachedSession:
         return self._client is None or not self._client.connected or not self._ready_for_events
 
     @property
+    def owner_reachable(self) -> bool:
+        """Whether there is a LIVE OWNER to ask — reachability only, no sync state.
+
+        The honest term for "can this facade dial the owner", and deliberately NOT
+        ``is_cold``. That predicate is three disjuncts and its third is
+        ``not _ready_for_events``, which is a RESYNC state: ``_refresh_display_history``
+        and the degraded-delta resync clear it while the client stays connected and
+        the runtime keeps serving for the whole of a frontend sync plus a history
+        page load. A caller that folded that into "no owner" would treat a live,
+        mid-resync session as absent — exactly the conflation ``/move``'s seam
+        already grades MAJOR in this file (see ``set_working_directory``: "Liveness
+        of the socket is the honest term"), and the reason the desktop interrupt
+        route read a streaming session as ``idle`` and stopped nothing.
+
+        A True answer promises only that a client object exists and its socket is
+        up. It says NOTHING about whether work is running — that is the caller's
+        question, and on the desktop route it is answered from the follower's
+        published roster, which stays readable throughout a resync because the
+        store is installed from the attach snapshot and updated by deltas.
+        """
+        return self._client is not None and self._client.connected
+
+    @property
     def can_ever_bind(self) -> bool:
         """Whether a bind attempt on this facade could EVER succeed.
 

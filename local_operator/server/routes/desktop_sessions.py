@@ -1352,7 +1352,7 @@ async def warm(session_id: str, body: Warm, request: Request):
         return reply({"state": await bridge.warm()})
 
 
-def _work_is_running(state: Any, pending_gate: Any) -> bool:
+def _work_is_running(remote: Any) -> bool:
     """Whether there is anything the interrupt rung would actually STOP.
 
     WHY THIS EXISTS AT ALL, and it is not an optimisation. Everything this route
@@ -1366,7 +1366,11 @@ def _work_is_running(state: Any, pending_gate: Any) -> bool:
 
     The terms are the RUNG's own effects, one per thing ``abort`` does:
 
-    * a live TURN (``streaming``) — the main case;
+    * a live TURN — ``is_streaming``, the facade's own mirror of the canonical
+      flag, and ``activity_phase_clock``, which is non-empty from the moment a
+      turn's work begins until it ends. The second is not redundant: it covers
+      the pipeline the streaming flag has not caught up with yet, which is the
+      window a press would otherwise be swallowed in (see the LIMIT below);
     * a PARKED GATE — the orphan card that outlived its turn, which this rung
       settles (``_deny_pending_gates``). This term is why the predicate is not
       "is the follower streaming": that card is precisely the case the abort's
@@ -1381,22 +1385,42 @@ def _work_is_running(state: Any, pending_gate: Any) -> bool:
     interrupt to stop — the receipt names those jobs as untouched, and a caller
     that wanted them gone has the Jobs surface.
 
+    THE FIRST THREE READS ARE CLONE-FREE ON PURPOSE. ``is_streaming`` is the
+    facade's mirror, and ``pending_gate``/``activity_phase_clock`` are the store's
+    own documented copy-free seams. The roster itself is NOT: ``jobs`` is a mutable
+    container, so the store deliberately keeps handing its readers a deep copy for
+    it (``_SHAREABLE_STATE_FIELDS``), and one press therefore pays exactly one clone
+    on this path — the overwhelmingly common press (a streaming turn) pays NONE,
+    because it returns on the first read.
+
+    LIMIT, STATED RATHER THAN HIDDEN: the owner's ``_turn_lock`` flush window is
+    not visible from a follower at all, so a prompt admitted but not yet started
+    cannot be told from an idle session by reading canonical state. The activity
+    phase narrows that window to the admission-to-first-work gap, and the residue
+    is not reachable from the desktop: the button and Esc are both offered on the
+    same ``streaming`` flag this reads, so a press cannot exist in a window where
+    this predicate is false.
+
     RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
     delta. Both directions are benign here. A stale ``False`` cannot swallow a
-    press the user could make, because the desktop offers the control (and the
-    Esc accelerator) on the SAME ``frontend.streaming`` flag read here, so the
-    press only exists while this predicate is already true. A stale ``True`` at
+    press the user could make, for the reason just given. A stale ``True`` at
     worst reaches the abort a moment after the turn settled, which is the
     pre-existing behaviour of a press racing a turn's end.
     """
-    if getattr(state, "streaming", False):
+    if remote.is_streaming:
         return True
-    if pending_gate is not None:
+    if remote.pending_gate is not None:
         return True
-    jobs = getattr(state, "jobs", None) or []
-    if any(getattr(row, "type", "") == "task" and row.status == "running" for row in jobs):
+    if remote.activity_phase_clock()[0]:
         return True
-    loop = getattr(state, "loop", None) or {}
+    state = remote.frontend_state
+    # Bare attributes rather than getattr probes: the store hands out real
+    # ``JobState`` rows (``_public_job`` detaches every one), so a probe would hide
+    # a rename behind a silent ``""`` instead of failing, which is the opposite of
+    # what this file's sibling reads want.
+    if any(row.type == "task" and row.status == "running" for row in state.jobs):
+        return True
+    loop = state.loop or {}
     return loop.get("status") in {"running", "judging"}
 
 
@@ -1415,10 +1439,10 @@ def _running_work_counts(state: Any) -> tuple[int, int]:
     there work", after it for "what survived" — instead of cloning it twice for
     one of them.
     """
-    jobs = getattr(state, "jobs", None) or []
-    running = [row for row in jobs if getattr(row, "status", "") == "running"]
-    children = sum(1 for row in running if getattr(row, "type", "") == "task")
-    background = sum(1 for row in running if getattr(row, "type", "") == "bash")
+    jobs = state.jobs
+    running = [row for row in jobs if row.status == "running"]
+    children = sum(1 for row in running if row.type == "task")
+    background = sum(1 for row in running if row.type == "bash")
     return children, background
 
 
@@ -1470,17 +1494,34 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     ``interrupted`` for a press that stopped nothing would be shown a success
     that did not happen.
 
+    "NO OWNER" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is
+    the whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a
+    RESYNC state which is true of a connected, SERVING session for the duration
+    of a frontend sync plus a history page load, so gating on it answered
+    ``idle`` for a live streaming turn and stopped nothing — this PR's own defect
+    class, arriving through its own new door.
+
     RECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,
     because a retry after a lost response must not fire a second interrupt at a
     turn that has since moved on — the journal replays the stored answer
-    verbatim, and the same ``request_id`` with a different body is a 409.
-    Retry-safe, because unlike ``/stop`` and ``/move`` the operation is
-    idempotent: "make the current turn stop" creates and destroys nothing, and
-    a pending row that never ran is re-executed to the same end. That is also
-    why this route does NOT need ``/stop``'s ``assert_admitting`` call before
-    the claim (``desktop_lifecycle.stop``): its receipt is ``retry_safe=False``,
-    so a claimed-but-unrun row is INDETERMINATE for the client, whereas here a
-    retry is the remedy rather than a hazard.
+    verbatim. ``retry_safe=True``, because unlike ``/stop`` and ``/move`` the
+    operation is idempotent: "make the current turn stop" creates and destroys
+    nothing, and a pending row that never ran is re-executed to the same end.
+    That is also why this route does NOT need ``/stop``'s ``assert_admitting``
+    call before the claim (``desktop_lifecycle.stop``): its receipt is
+    ``retry_safe=False``, so a claimed-but-unrun row is INDETERMINATE for the
+    client, whereas here a retry is the remedy rather than a hazard.
+
+    THE JOURNAL'S 409 ARM CANNOT FIRE HERE, and that is a property of the body
+    rather than an omission (review round 1, MINOR-2). A receipt's fingerprint is
+    a pure function of its request body, and this body has exactly one field, so
+    the same ``request_id`` can only ever arrive with the same fingerprint —
+    which replays — or with a body the closed model refuses, which is a 422
+    before the journal is reached. ``extra="forbid"`` is what makes the second
+    case a shape error rather than a silently-ignored extra, so nothing is lost
+    by naming it plainly here instead of documenting a 409 a caller could never
+    provoke. The journal's own rule is unchanged and tested where it lives
+    (``test_receipts_survive_adapter_restart_and_reject_changed_body``).
 
     STATUS CODES are the shared ladder's, with one shape to state because it
     looks like a bug: an UNKNOWN session id and a MALFORMED one are both 404.
@@ -1495,22 +1536,27 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
 
         async def execute():
             assert bridge.remote is not None
-            # A cold session is a no-op, NOT a runtime spawn.
-            if bridge.remote.is_cold:
+            # NO REACHABLE OWNER is a no-op, NOT a runtime spawn — and the term is
+            # REACHABILITY, deliberately not ``is_cold``. That property's third
+            # disjunct is ``not _ready_for_events``, a RESYNC state which is true of
+            # a connected, SERVING session for the whole of a frontend sync plus a
+            # history page load: gating on it read a live streaming turn as `idle`
+            # and stopped nothing, which is this PR's own defect class arriving
+            # through its own new door (review round 1, MAJOR-1).
+            if not bridge.remote.owner_reachable:
                 return {
                     "status": "idle",
                     "receipt": "",
                     "children_running": 0,
                     "background_jobs": 0,
                 }
-            # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no runtime to
-            # stop it with: ``idle``, on a 200, without dialling the owner. The
-            # roster is sampled BEFORE the press for that question and again
-            # after it for the counts, because those are different questions —
-            # "was there work" is about the moment of the press and "what
-            # survived" is about the moment after it.
-            state = bridge.remote.frontend_state
-            if not _work_is_running(state, bridge.remote.pending_gate):
+            # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no owner to stop
+            # it with: ``idle``, on a 200, without dialling. That question is asked
+            # of the follower's published roster, which stays readable through a
+            # resync — the store is installed from the attach snapshot and
+            # maintained by deltas, so a mid-refresh viewer still knows whether
+            # work is running.
+            if not _work_is_running(bridge.remote):
                 # Nothing was stopped, so "what survived" is simply what is
                 # running. ``children_running`` is zero by construction (a
                 # running ``task`` job is a term above), while backgrounded
@@ -1521,9 +1567,11 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
                     "status": "idle",
                     "receipt": "",
                     "children_running": 0,
-                    "background_jobs": _running_work_counts(state)[1],
+                    "background_jobs": _running_work_counts(bridge.remote.frontend_state)[1],
                 }
             receipt = await bridge.remote.interrupt()
+            # Read AGAIN, after the press: "what survived" is a different question
+            # from "was there work", and the children settle in between.
             children_running, background_jobs = _running_work_counts(bridge.remote.frontend_state)
             return {
                 "status": "interrupted",

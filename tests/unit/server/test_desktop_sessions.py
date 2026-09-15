@@ -1074,6 +1074,65 @@ async def test_detaching_a_bridge_cancels_the_warm_it_started(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_mid_resync_viewer_still_interrupts_a_live_turn(tmp_path, monkeypatch):
+    """MAJOR-1: `is_cold` is NOT "there is no owner", and reading it as one is
+    this PR's own defect class arriving through this route's new door.
+
+    ``is_cold`` is three disjuncts and its third is ``not _ready_for_events`` —
+    a RESYNC state, true of a CONNECTED, SERVING session for the whole of a
+    frontend sync plus a history page load (the degraded-delta resync path is
+    production-reachable for every follower, not gated on any facade). Gating
+    the no-dial branch on it therefore answered ``idle`` for a session whose
+    turn was streaming, with an empty receipt and nothing stopped: a press
+    reported as success that did nothing, which is exactly what this route was
+    written to stop doing.
+
+    This test FAILS before the fix — the connection is live, the roster is
+    synced and ``streaming`` is True, and the only thing unusual is that the
+    viewer is mid-refresh.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "interrupt-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer interrupt-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            owner = InterruptClient(receipt="stopping this turn")
+            bridge.remote._client = owner  # type: ignore[assignment]
+            _publish_roster(bridge, streaming=True)
+            # The resync state, and THE ONLY difference from a plain live press:
+            # the socket is up (``owner_reachable`` is True) while the event feed
+            # is mid-refresh.
+            bridge.remote._ready_for_events = False
+            assert bridge.remote.is_cold, "the fixture is not the state under test"
+            assert bridge.remote.owner_reachable, "the owner is live"
+
+            response = await client.post(
+                f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": str(uuid.uuid4())}
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["status"] == "interrupted", result
+            assert result["receipt"] == "stopping this turn", result
+            assert owner.ops == ["abort"], "a live, mid-resync owner was never dialled"
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_an_interrupt_on_a_cold_session_is_idle_and_spawns_nothing(tmp_path, monkeypatch):
     """A press on a session with no runtime must not cost a process.
 
@@ -1157,21 +1216,21 @@ class InterruptClient:
 
 
 def _publish_roster(bridge: Any, **fields: Any) -> None:
-    """Make a bound bridge carry a canonical roster, the way a follower does.
+    """Install a canonical snapshot on a bound bridge, the way an owner does.
 
-    ``is_cold`` needs a live client; everything the interrupt route asks about
-    the OWNER (is work running, what survived) it asks the follower's published
-    state. Tests therefore have to publish one, and doing it here keeps the four
-    interrupt cases reading as the states they describe rather than as store
-    construction.
+    ``is_cold`` and the interrupt route's predicate ask the OWNER's state, so a
+    test has to publish one. This goes through ``_install_frontend`` — the real
+    snapshot path, which builds the store AND refreshes the facade mirrors from
+    it — rather than assigning ``_frontend_store`` directly: the route reads the
+    facade's ``is_streaming`` mirror (canonical-equivalent in production because
+    this same call maintains it) beside the store's own clone-free seams, and a
+    fixture that set only one of the two would be testing a state no follower can
+    reach.
     """
-    from local_operator.session.frontend_state import (
-        FrontendSessionState,
-        FrontendStateStore,
-    )
+    from local_operator.session.frontend_state import FrontendSessionState
 
-    bridge.remote._frontend_store = FrontendStateStore(
-        FrontendSessionState(session_id=bridge.session_id or "s1", epoch="e1", **fields)
+    bridge.remote._install_frontend(
+        FrontendSessionState(session_id=bridge.session_id, epoch="e1", **fields)
     )
 
 

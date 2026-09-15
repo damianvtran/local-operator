@@ -206,7 +206,10 @@ the one the desktop client reads): nothing is rolled back, the
 
   `status` is `interrupted` or `idle`; `idle` is a 200 and a SUCCESS — a
   cold session is NOT engaged to answer this, and one between turns simply has
-  nothing to stop. `interrupted` is a CLAIM that work was stopped, so the route answers
+  nothing to stop. "No owner" here means the SOCKET is down, not that the viewer is
+  cold: a session mid-refresh holds a live, serving runtime while its event feed
+  resyncs, and it must be interrupted rather than answered `idle`.
+  `interrupted` is a CLAIM that work was stopped, so the route answers
   `idle` whenever nothing would be: it reads the follower's published roster first
   and skips the owner call entirely when there is no live turn, no parked card, no
   running `task` job and no running goal loop. (A running backgrounded `bash` job is
