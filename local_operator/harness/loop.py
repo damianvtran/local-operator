@@ -46,6 +46,9 @@ from local_operator.harness.intent import (
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    OUTPUT_LIMIT_ARGUMENTS,
+    OUTPUT_LIMIT_KEY,
+    OUTPUT_LIMIT_TURN,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -136,18 +139,79 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
-# What the model is told about a call the OUTPUT LIMIT cut in half, kept distinct
-# from ``ABORTED_RESULT_TEXT`` on purpose rather than for style: "aborted" says a
-# turn stopped and explains nothing about the argument fragment the model now
-# sees replayed in its own history. Measured on a real provider, a model handed
-# that bare "aborted" reported that its call "came through empty and was
-# aborted", declined to retry, and the large file it was asked to write was
-# never written and nothing said so (QA round 1, Q2: base wrote 110,703 chars,
-# the truncated branch produced ``tool_executions: []``). The remedy is the
-# model's to take, so the result has to name it.
+# What the model is told about a call the OUTPUT LIMIT kept from running, kept
+# distinct from ``ABORTED_RESULT_TEXT`` on purpose rather than for style:
+# "aborted" says a turn stopped and explains nothing about the state of the call
+# the model now sees replayed in its own history. Measured on a real provider, a
+# model handed that bare "aborted" reported that its call "came through empty
+# and was aborted", declined to retry, and the large file it was asked to write
+# was never written and nothing said so (QA round 1, Q2: base wrote 110,703
+# chars, the truncated branch produced ``tool_executions: []``). The remedy is
+# the model's to take, so the result has to name it.
+#
+# HOW it is named decides whether the model takes it. The first wording
+# ("cut off at the output limit ... re-emit this call with a smaller payload")
+# demanded the size reduction without the authority to make it: under an
+# instruction to emit the whole content and not abbreviate, the model read
+# "smaller payload" as a requirement the user had forbidden it to satisfy and
+# answered in prose instead of re-issuing the call -- measured on deepseek-flash
+# at `high` with the same 3,000-line write cell, 1/6 runs wrote any file against
+# 6/6 for the bare ``ABORTED_RESULT_TEXT``, and the single-variable
+# counterfactual on that tree flipped it to base's shape 2/2 (QA #1077, Q10;
+# full sample on the PR). ``TRUNCATED_RESULT_TEXT`` therefore grants the
+# reduction instead of demanding it: the limit bounds ONE CALL's arguments and
+# is not a licence to shorten the ANSWER, so a payload that fits is what to send
+# here. It grants it without naming an instruction it cannot see (the loop is
+# not shown the conversation's own standing instructions, so it must not assert
+# that the user prohibited anything: review F3).
+#
+# TWO ARMS, TWO TEXTS, and the difference is load-bearing. The length arm
+# appends its placeholder to EVERY call in the turn, and not every one of them
+# was cut: a turn can dictate a call to completion and then hit the cap while
+# writing prose or a second call. Telling such a call its arguments "were larger
+# than the output limit allows" and would "be cut again" asserts two things that
+# are false there -- and measurably so, since re-issuing those identical 43-byte
+# arguments on the next turn ran and wrote the file (review F1 == QA Q1). Only
+# ``TRUNCATED_RESULT_TEXT`` may carry the size claim; a call whose arguments
+# arrived complete takes ``LENGTH_ENDED_CALL_RESULT_TEXT``, which says the one
+# thing that is true of it (the turn ended before it ran) and still tells the
+# model to re-issue it. ``_limit_cut_arguments`` below draws that line.
+#
+# NEITHER text claims a file was written or not written. The Q2 clause was
+# "no file was written", which is vacuous for a ``read``/``bash``/``grep`` call
+# and would be a false statement of consequence for any tool that writes
+# nothing (review F5); "the tool was never executed" is the same guarantee and
+# holds for every tool.
+#
+# BOTH are MODEL-FACING, and that is now their only audience. The message they
+# are carried on is the tool result the transcript persists, so a resumed card
+# used to paint this prose as the operator's own receipt -- imperatives
+# addressed to a model, about a file, on the user's screen (review F2). The row
+# takes its words from ``harness/rows.output_limit_call_receipt`` instead, keyed
+# off the ``OUTPUT_LIMIT_KEY`` marker riding in ``details``; edit these strings
+# freely, and edit THAT vocabulary if what an operator reads should change.
 TRUNCATED_RESULT_TEXT = (
-    "cut off at the output limit before the arguments finished; nothing ran -- "
-    "re-emit this call with a smaller payload"
+    "this call did not run: the output limit cut it off before its arguments "
+    "finished arriving, so the tool was never executed. The limit is a size "
+    "bound on one call's arguments, not a licence to shorten the answer — a "
+    "payload that fits within it is what to send here. Re-issue the call now; "
+    "the identical oversize arguments will be cut again. Reply with the call "
+    "itself, not with an explanation of why it cannot be sent."
+)
+
+# The other arm of the same limit: a call whose arguments arrived COMPLETE in a
+# turn the limit ended before it could run. Nothing here was cut and nothing
+# here is oversize, so this text carries no size claim and asks for no
+# reduction -- shrinking the payload would be a change the model has no reason
+# to make. What it does carry is the fact that the call did not run and will
+# not, which is the Q2 guarantee, and the instruction to re-issue it unchanged
+# (the identical arguments do execute on the next turn; review F1).
+LENGTH_ENDED_CALL_RESULT_TEXT = (
+    "this call did not run: the turn ended at the output limit before this call "
+    "was run, and a call in a turn that ends that way is not executed. Its "
+    "arguments arrived complete, so there is nothing here to shrink. Re-issue "
+    "this call as it is. Reply with the call itself, not with an explanation of "
+    "why it cannot be sent."
 )
 
 #: Cap on the reason carried by a never-run call's terminal compose frame.
@@ -629,6 +693,65 @@ def _batches_shared(item: _PlannedCall) -> bool:
     )
 
 
+def _limit_cut_arguments(call: ToolCall) -> bool:
+    """Whether the OUTPUT LIMIT cut this call's arguments mid-dictation.
+
+    The length arm appends its placeholder to every call in the turn, but only
+    some of those calls were cut. A turn can dictate a call to COMPLETION and
+    then spend its remaining budget on prose or on a second call, and the loop
+    already treats such a call as a request the model did make -- the
+    connectivity arm draws the same line (``truncated = [...]`` below: "a call
+    whose arguments finished arriving BEFORE the cut is a complete request").
+    Handing it the size framing would assert a cause the loop has not
+    established: measured, the identical 43-byte arguments re-issued on the next
+    turn ran and wrote the file (review F1 == QA Q1).
+
+    Deliberately STRICTER than that site's ``raw_arguments and not arguments``,
+    which cannot tell "the raw text would not parse" from "it parsed to an empty
+    mapping": a zero-argument call serialized as ``{}`` -- or any complete call
+    whose JSON is not an object -- has truthy raw text and empty ``arguments``
+    either way, so the shorthand would repeat the false cause here. Re-parsing
+    the raw text answers the question the TEXT needs answered -- did the
+    arguments finish arriving -- and this runs only in the length arm, once per
+    call, on a string the assembler already parsed once this turn.
+
+    The parse failing means the arguments did not arrive as a COMPLETE JSON
+    document. On a length-stopped turn that is the truncation: a JSON object
+    cannot balance and then continue, so a fragment that fails to parse is a
+    fragment that never finished, and a value that parses is a value the model
+    finished emitting (``_assemble_tool_call`` reads the accumulated deltas
+    once and leaves BOTH ``arguments`` empty and the unparseable fragment in
+    ``raw_arguments`` when it cannot parse).
+
+    It is NOT only that, and this is the boundary the predicate really draws:
+    a call whose arguments arrived COMPLETE but are not valid JSON -- the case
+    ``validate_tool_arguments`` exists for, e.g. a dictation cut short by the
+    model rather than by the limit, like ``{"a": }`` -- fails the same parse
+    and takes the size claim, on a call that was neither cut nor oversize
+    (review round 2, MINOR-3). The two are NOT distinguishable from the
+    fragment alone, and the residual is accepted in this direction on purpose:
+    "cut" tells the model the call as dictated cannot be sent and to send it
+    again, which is actionable for both, whereas the other arm's text asserts
+    the arguments arrived COMPLETE -- a claim nothing unparseable supports, and
+    the false-cause class this family exists to remove. The malformed case also
+    self-corrects one turn later, where the next call's validation reports the
+    parse failure by name.
+
+    Unreachable for whitespace-only ``raw_arguments`` in production, and the
+    ``not call.raw_arguments`` arm below says why: ``_assemble_tool_call``
+    stores ``raw or None``, so a whitespace-only fragment arrives as ``None``
+    rather than as a string that fails to parse (review round 2, NIT-1).
+    """
+    if not call.raw_arguments:
+        # No raw text at all: a zero-argument call, complete by definition.
+        return False
+    try:
+        json.loads(call.raw_arguments)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -> str | None:
     """Recognize exact repeated failure without retaining tool output bodies.
 
@@ -643,11 +766,23 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
     for call, result in zip(calls, results):
         # The two synthetic texts below are the loop's own statement that the
         # call never ran, so they break the streak rather than counting as
-        # evidence of the model repeating itself. ``TRUNCATED_RESULT_TEXT``
-        # belongs here for exactly the same reason: a model re-emitting a call
-        # the output limit cut is not a model floundering, and without this it
-        # would be stopped by the no-progress guard on its second attempt.
-        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT, TRUNCATED_RESULT_TEXT):
+        # evidence of the model repeating itself. Both are minted by the
+        # EXECUTOR for calls it parks or skips, which is why they arrive here
+        # paired with the results they stand for.
+        #
+        # ``TRUNCATED_RESULT_TEXT`` is deliberately NOT in this tuple, although a
+        # model re-emitting a call the limit cut is no more floundering than
+        # those two. It cannot be exempted HERE: the length arm appends its
+        # placeholders to the context and never records them as results, so this
+        # function is handed that turn with calls and no results and has already
+        # returned ``None`` one guard above (``len(calls) != len(results)``)
+        # before the membership test is reachable. An entry here would therefore
+        # protect nothing while telling the next reader it was load-bearing
+        # (review round 1, F4). If the length arm ever begins pairing its
+        # placeholders with results, that ordering must be revisited with this
+        # line -- the exemption this tuple provides only works for texts the
+        # executor itself put in ``results``.
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
             return None
         args = {key: value for key, value in call.arguments.items() if key != INTENT_FIELD}
         digest.update(
@@ -1412,6 +1547,14 @@ class AgentLoop:
                         # cannot describe one event in two voices.
                         has_text = bool(assistant.text and assistant.text.strip())
                         silent = not has_text and not assistant.tool_calls
+                        # The limit's ARM, per call, computed ONCE — the notice
+                        # below states the turn's arm from this list and the
+                        # placeholder loop stamps each call's marker from it, so
+                        # the turn-level sentence the operator reads and the
+                        # per-call row underneath it cannot disagree about the
+                        # same call. Empty (and therefore harmless) on the arms
+                        # with no call: `silent`, and the prose arms.
+                        cut_calls = [_limit_cut_arguments(call) for call in assistant.tool_calls]
                         if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
                             lower = _lower_effort(config.model)
                             if lower is not None:
@@ -1497,42 +1640,84 @@ class AgentLoop:
                             )
                         elif assistant.tool_calls:
                             # Visible truncation with a call in flight and no prose
-                            # to pronounce it: the call was cut mid-arguments and
-                            # will NOT be executed (the batch below pairs
-                            # placeholders instead). Nothing else said so -- the
-                            # loop's only length notice was the silent arm above,
-                            # no surface had a length arm at all, and the result
-                            # the model got back read just "aborted" -- so a model
-                            # asked to write a large file reported that the call
-                            # "came through empty", declined to retry, and the file
-                            # was never written (QA round 1, Q2). Say which limit
-                            # it was and that the loop is re-asking.
+                            # to pronounce it: the call was NOT executed (the
+                            # batch below pairs placeholders instead). Nothing
+                            # else said so -- the loop's only length notice was
+                            # the silent arm above, no surface had a length arm
+                            # at all, and the result the model got back read just
+                            # "aborted" -- so a model asked to write a large file
+                            # reported that the call "came through empty",
+                            # declined to retry, and the file was never written
+                            # (QA round 1, Q2). Say which limit it was and what
+                            # the loop is doing about it.
                             #
-                            # Reachable only when the turn streamed NO prose (the
-                            # arm above takes that case). The reader still learns
-                            # the call never ran, from the placeholder result
-                            # appended below: ``TRUNCATED_RESULT_TEXT`` says so on
-                            # the call's own row.
+                            # WHICH ARM, though: `cut_calls` above already
+                            # answers it, and this line used to answer "cut"
+                            # unconditionally. On a turn whose calls all arrived
+                            # COMPLETE that told the operator the model was being
+                            # re-asked for a smaller call while the model's own
+                            # result for it said the opposite ("Its arguments
+                            # arrived complete, so there is nothing here to
+                            # shrink. Re-issue this call as it is.") and the
+                            # call's row said the opposite again -- the same
+                            # false cause as review F1, one surface up (design
+                            # round 1, D1; QA Q-R2-1; review round 2, MINOR-2).
+                            # A MIXED turn takes the cut line: a call in it really
+                            # was cut mid-dictation, which is what that clause
+                            # claims, and the complete calls' rows stay precise
+                            # about themselves.
+                            #
+                            # The reader also still learns the call never ran,
+                            # from the placeholder result appended below:
+                            # ``rows.output_limit_call_receipt`` says so on the
+                            # call's own row, from the arm marker that result
+                            # carries (not from this model-facing text, which a
+                            # row must not paint: review F2).
                             yield NoticeEvent(
                                 text=(
                                     "the model hit the output limit mid tool call "
                                     "— nothing was executed; re-asking it to "
                                     "re-emit the call in smaller pieces"
+                                    if any(cut_calls)
+                                    else "the model hit the output limit before the "
+                                    "call ran — nothing was executed; re-asking it "
+                                    "to re-issue the call as it is"
                                 ),
                                 kind="warning",
                             )
                         # Truncated: pair placeholders, do NOT execute.
                         #
-                        # ``TRUNCATED_RESULT_TEXT`` rather than the bare
+                        # A synthetic result rather than the bare
                         # ``ABORTED_RESULT_TEXT``: the model sees this as the result
                         # of the call it watched itself emit, and the actionable
-                        # fact is that the OUTPUT LIMIT cut it, not that some turn
-                        # ended. Same distinction, and same measured cost, as the
-                        # constant's own comment.
-                        placeholders = [
-                            self._synthetic_result(call, TRUNCATED_RESULT_TEXT)
-                            for call in assistant.tool_calls
-                        ]
+                        # fact is that the OUTPUT LIMIT ended the turn, not that
+                        # some turn ended. Same distinction, and same measured
+                        # cost, as the constants' own comment.
+                        #
+                        # The TEXT is chosen per call, and so is the marker in
+                        # ``details``: the size framing is true only where the
+                        # limit really did cut the arguments, and a call that
+                        # arrived complete gets the text that says so. The marker
+                        # is what a display surface reads to render the row in
+                        # its own vocabulary instead of this prose (review F1,
+                        # F2 -- see ``_limit_cut_arguments``).
+                        placeholders: list[ToolResult] = []
+                        for call, cut in zip(assistant.tool_calls, cut_calls, strict=True):
+                            placeholders.append(
+                                self._synthetic_result(
+                                    call,
+                                    (
+                                        TRUNCATED_RESULT_TEXT
+                                        if cut
+                                        else LENGTH_ENDED_CALL_RESULT_TEXT
+                                    ),
+                                    details={
+                                        OUTPUT_LIMIT_KEY: (
+                                            OUTPUT_LIMIT_ARGUMENTS if cut else OUTPUT_LIMIT_TURN
+                                        )
+                                    },
+                                )
+                            )
                         self._append_results(
                             context,
                             placeholders,

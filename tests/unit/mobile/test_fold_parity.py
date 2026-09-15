@@ -61,6 +61,10 @@ from local_operator.harness.comms import (
     PARENT_MESSAGE_TAG,
     TO_CHILD_INSTRUCTIONS,
 )
+from local_operator.harness.loop import (
+    LENGTH_ENDED_CALL_RESULT_TEXT,
+    TRUNCATED_RESULT_TEXT,
+)
 from local_operator.harness.rows import (
     assistant_row_text,
     assistant_stop_notice,
@@ -70,6 +74,9 @@ from local_operator.harness.rows import (
     wake_receipt_headline,
 )
 from local_operator.harness.types import (
+    OUTPUT_LIMIT_ARGUMENTS,
+    OUTPUT_LIMIT_KEY,
+    OUTPUT_LIMIT_TURN,
     AgentMessage,
     CustomMessage,
     Message,
@@ -683,12 +690,17 @@ def test_a_length_stop_is_announced_on_both_surfaces() -> None:
 
     # A truncated TOOL CALL produced something, but not an ANSWER, so it takes
     # its own arm rather than the content one: the call card directly above
-    # already says the arguments were cut, and repeating "answer cut off" there
-    # was a second, false row for one event (design round 1, D3).
+    # already says what happened to the call, and repeating "answer cut off"
+    # there was a second, false row for one event (design round 1, D3).
+    #
+    # The line is ARM-NEUTRAL when the caller cannot tell which arm the limit
+    # was in, which is what the call above does: it passes no arm at all (design
+    # round 1, D1). The two arms' lines are asserted in
+    # ``test_the_length_notice_reads_the_arm_off_the_turns_own_results``.
     with_call = assistant_stop_notice(
         text="", has_tool_calls=True, stop_reason="length", provider_payload=None
     )
-    assert with_call == ("tool call cut off at the output limit (nothing ran)", "warning")
+    assert with_call == ("turn cut off at the output limit — nothing ran", "warning")
 
     # Prose and a cut call together is the content arm: there IS an answer, and
     # the live loop agrees -- it tests ``has_text`` before ``tool_calls`` too
@@ -718,6 +730,105 @@ def test_a_length_stop_is_announced_on_both_surfaces() -> None:
     assert page == ["user", "assistant", "notice"]
     notice_row = _page_rows(history)[-1]
     assert "output limit" in notice_row.text
+
+
+def _limit_turn(arm: str | None) -> list[AgentMessage]:
+    """One length-stopped turn as the harness persists it, arm included.
+
+    The call the model was still dictating plus the SYNTHETIC result the loop
+    pairs it with (``_synthetic_result``'s shape). Built from the real
+    constants and the real marker, so this pins the CONTRACT — marker to
+    receipt to notice line — rather than a remembered wording.
+    """
+    call = ToolCall(id="c_limit", name="write", arguments={"path": "a.txt"})
+    model_text = (
+        TRUNCATED_RESULT_TEXT if arm == OUTPUT_LIMIT_ARGUMENTS else LENGTH_ENDED_CALL_RESULT_TEXT
+    )
+    payload = None if arm is None else {"details": {OUTPUT_LIMIT_KEY: arm, "__synthetic": True}}
+    result = Message(
+        role="tool",
+        content=[TextContent(text=model_text)],
+        tool_call_id="c_limit",
+        tool_name="write",
+        is_error=True,
+        provider_payload=payload,
+    )
+    return [Message.user("go"), _assistant("", calls=[call], stop="length"), result]
+
+
+#: The two arms' operator lines, spelled out because they are USER-VISIBLE COPY:
+#: a reworded notice is the change this test exists to catch, and comparing
+#: against the module's own constant would follow the reword instead of pinning
+#: what the operator reads (review round 2, MINOR-1).
+_CUT_RECEIPT = "tool call cut off at the output limit (nothing ran)"
+_TURN_RECEIPT = "turn cut off at the output limit before this call ran"
+_CUT_NOTICE = "turn cut off at the output limit mid tool call — nothing ran"
+_TURN_NOTICE = "turn cut off at the output limit — nothing ran"
+
+
+def test_the_limit_receipt_is_the_rows_line_and_not_the_expansions() -> None:
+    """The display half of review F2, pinned on the package that changed.
+
+    Nothing outside ``tests/unit/harness/test_loop.py`` mentioned the receipt
+    strings, so reverting ``receipt or result_text`` on ANY single row surface
+    stayed green (review round 2, MINOR-1 == QA Q-R2-2). This is the mobile
+    half of that pin, and it asserts the row the operator reads rather than the
+    helper's return value.
+
+    It pins the DECISION'S shape too: the receipt is the row's error line and
+    nothing else. Writing it to the expansion as well is what made one tap show
+    one sentence twice in two styles, and the notice a third time (design round
+    1, D5). A call that never ran has no output to expand; it has arguments.
+    """
+    for arm, receipt in (
+        (OUTPUT_LIMIT_ARGUMENTS, _CUT_RECEIPT),
+        (OUTPUT_LIMIT_TURN, _TURN_RECEIPT),
+    ):
+        rows = _page_rows(_limit_turn(arm))
+        row = next(r for r in rows if r.kind == "tool")
+        assert row.error == receipt
+        assert row.details.get("output", "") == ""
+        assert "args" in row.details
+        # Neither the model-facing prose nor a size claim reaches the operator.
+        for model_text in (TRUNCATED_RESULT_TEXT, LENGTH_ENDED_CALL_RESULT_TEXT):
+            assert model_text not in str(row.details)
+            assert model_text not in row.error
+        assert "oversize" not in str(rows)
+
+
+def test_the_length_notice_reads_the_arm_off_the_turns_own_results() -> None:
+    """One limit, two arms, and the notice may only name the one that happened.
+
+    On the arm where every call's arguments arrived COMPLETE, the turn-level
+    notice read "tool call cut off at the output limit (nothing ran)" two rows
+    under a card that said "turn cut off at the output limit before this call
+    ran": one event, two opposite explanations of it, while the model was being
+    re-asked for a smaller call it had no reason to shrink (design round 1, D1;
+    QA Q-R2-1; review round 2, MINOR-2).
+
+    The arm is read off the turn's OWN results — the marker the loop stamps on
+    the synthetic result — so the notice and the row cannot disagree. A
+    transcript the fold cannot read an arm from (one written before the marker
+    existed) takes the line that is true either way, never the dramatic one.
+    """
+    cut_rows = _page_rows(_limit_turn(OUTPUT_LIMIT_ARGUMENTS))
+    turn_rows = _page_rows(_limit_turn(OUTPUT_LIMIT_TURN))
+
+    assert [r.text for r in cut_rows if r.kind == "notice"] == [_CUT_NOTICE]
+    assert [r.text for r in turn_rows if r.kind == "notice"] == [_TURN_NOTICE]
+
+    # The notice states the TURN and the row states the CALL, so the sentence
+    # is painted once: no notice line is a receipt, verbatim (design round 1,
+    # D2 measured the two rows byte-identical before this).
+    assert {_CUT_NOTICE, _TURN_NOTICE}.isdisjoint({_CUT_RECEIPT, _TURN_RECEIPT})
+
+    # Unmarked (legacy) result: the arm is unknown, so the notice makes no arm
+    # claim at all — and the row keeps its own text, because the receipt is
+    # keyed on the marker and not on the shape of an error row.
+    legacy_rows = _page_rows(_limit_turn(None))
+    assert [r.text for r in legacy_rows if r.kind == "notice"] == [_TURN_NOTICE]
+    legacy_row = next(r for r in legacy_rows if r.kind == "tool")
+    assert legacy_row.error != _TURN_RECEIPT
 
 
 def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
