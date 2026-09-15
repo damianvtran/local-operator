@@ -22,7 +22,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from local_operator import procname
+from local_operator import launchd, procname
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import (
     DEFAULT_PORT,
@@ -134,19 +134,28 @@ def log_path() -> Path:
 
 
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
+    """The LaunchAgent for this config root and port.
+
+    ``launchd_job`` rather than ``launchd_program``: ``Program`` carries the
+    branded image (what Activity Monitor reads) and ``ProgramArguments[0]``
+    carries this daemon's role label (what ``ps`` reads), so the bridge stops
+    reading as the same bare row as the mobile daemon and the tunnel. macOS
+    names a background item by the basename of ``ProgramArguments[0]``, so the
+    old bare ``sys.executable`` is what made installing the bridge notify that
+    'python3 is running in the background'. The trade-off that shape accepts is
+    recorded in ``procname.launchd_job``; with no link to plant, this is
+    byte-for-byte the plist this function wrote before.
+    """
     return {
         # Per-config-root label (this PR) over #752's branded interpreter
         # image: the two are orthogonal — one decides WHICH daemon launchd is
         # told about, the other decides what the user sees it called.
         "Label": label(),
-        # Branded interpreter image when one can be planted: macOS names this
-        # background item by the basename of ProgramArguments[0], so a bare
-        # `sys.executable` is what made installing the bridge notify that
-        # 'python3 is running in the background'. Falls back to sys.executable.
-        "ProgramArguments": procname.launchd_program(
+        **procname.launchd_job(
             "local_operator.browser_bridge.daemon",
             "--port",
             str(port),
+            label=procname.branded_argv0(procname.LABEL_BROWSER, port=port),
         ),
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
@@ -154,6 +163,56 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         "StandardErrorPath": str(log_path()),
         "ProcessType": "Interactive",
     }
+
+
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Rewrite this daemon's LaunchAgent when an older build wrote it.
+
+    Same gap as the mobile and tunnel daemons, and nothing repaired it either:
+    ``lop-update`` never touched the bridge plist, so a daemon installed before
+    branding keeps its bare ``python3`` image until someone reinstalls.
+
+    Guarded like the others: only the plist the real passwd home produces is
+    eligible (``launchctl`` always addresses the real user's session whatever
+    ``HOME`` says), and the port comes off the plist being replaced, so a daemon
+    on a non-default port stays there. There is deliberately no config-dir guard:
+    a non-default config ROOT does not share this plist at all — it has its own
+    label and its own path (:func:`label`, :func:`plist_path`), so a sandbox
+    either finds no file or finds one whose identity check fails.
+
+    Never raises. A platform without ``launchctl`` is reported unsupported: the
+    systemd unit is re-read on every start and has no image name to go stale.
+    """
+    name = "browser bridge"
+    try:
+        if _supervisor() != "launchctl":
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not launchd.is_own_plist(path, label()):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The port comes off the plist being REPLACED: a repair must not move a
+        # daemon someone installed on a non-default port back to the default.
+        port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind != "repaired":
+            return outcome
+        # bootout + bootstrap, NOT kickstart -k: measured — a kickstart after a
+        # rewrite restarts the job from launchd's in-memory definition and keeps
+        # running the old argv. See :mod:`local_operator.launchd`.
+        _launchctl("bootout", _domain(), str(path))
+        loaded = _launchctl("bootstrap", _domain(), str(path))
+        if loaded.returncode:
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
+            return launchd.reload_failure(
+                name,
+                path,
+                "lop browser install",
+                loaded.stderr.strip()[:200] or str(loaded.returncode),
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
 
 
 #: ``StandardOutput=append:`` landed in systemd 240 (upstream NEWS; confirmed

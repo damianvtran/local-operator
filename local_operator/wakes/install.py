@@ -57,7 +57,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_operator import procname
+from local_operator import launchd, procname
+from local_operator.paths import config_dir as ambient_config_dir
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +136,11 @@ def _launchd_is_addressable() -> bool:
     redirected home produces a different path wherever it points, so the only
     way to satisfy this is to genuinely be the real home.
     """
-    import pwd
-
-    try:
-        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
-    except (KeyError, OSError):
-        return False
-    try:
-        expected = (real_home / "Library" / "LaunchAgents" / f"{LABEL}.plist").resolve()
-        return plist_path().resolve() == expected
-    except (OSError, ValueError):
-        return False
+    # The identity test itself lives in :mod:`local_operator.launchd`, because
+    # the other three daemon installers now need exactly it and a guard whose
+    # reasoning is this sharp should exist once. The reasoning above stays here:
+    # it records the incident that put the guard in.
+    return launchd.is_own_plist(plist_path(), LABEL)
 
 
 def _config_lives_in_real_home(config_dir: Path) -> bool:
@@ -158,16 +153,8 @@ def _config_lives_in_real_home(config_dir: Path) -> bool:
     the config dir is an ordinary path the user may legitimately place
     anywhere under their home; only dirs OUTSIDE it are the sandbox shape.
     """
-    import pwd
-
-    try:
-        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
-    except (KeyError, OSError):
-        return False
-    try:
-        return config_dir.resolve().is_relative_to(real_home)
-    except (OSError, ValueError):
-        return False
+    # Shared with the other three installers; see :mod:`local_operator.launchd`.
+    return launchd.config_lives_in_real_home(config_dir)
 
 
 def render_plist(config_dir: Path) -> dict[str, object]:
@@ -178,11 +165,19 @@ def render_plist(config_dir: Path) -> dict[str, object]:
     """
     return {
         "Label": LABEL,
-        # Branded interpreter image when one can be planted: macOS names this
-        # background item by the basename of ProgramArguments[0], so a bare
-        # `sys.executable` is what makes installing a supervised unit notify
-        # 'python3 is running in the background'. Falls back to sys.executable.
-        "ProgramArguments": procname.launchd_program("local_operator.wakes.supervisor"),
+        # ``launchd_job`` rather than ``launchd_program``: ``Program`` carries
+        # the branded interpreter image and ``ProgramArguments[0]`` this
+        # supervisor's role label, so the four supervised daemons stop reading
+        # as one indistinguishable row. macOS names this background item by the
+        # basename of ``ProgramArguments[0]``, so a bare ``sys.executable`` is
+        # what makes installing a supervised unit notify 'python3 is running in
+        # the background'. The trade-off that shape accepts is recorded in
+        # ``procname.launchd_job``; with no link to plant this is byte-for-byte
+        # the plist this function wrote before.
+        **procname.launchd_job(
+            "local_operator.wakes.supervisor",
+            label=procname.branded_argv0(procname.LABEL_WAKES),
+        ),
         "RunAtLoad": True,
         # SELF-RETIREMENT, and the reason this key is not optional: the
         # supervisor exits 0 when the index empties. Keying restarts on
@@ -462,6 +457,54 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the persist already won
         logger.debug("wake supervisor install failed", exc_info=True)
         return InstallOutcome(installed=False, reason=f"install failed: {exc}")
+
+
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Rewrite the supervisor's plist when an older build wrote it.
+
+    ``ensure_supervisor_installed`` already repairs by CONTENT, on every wake
+    persist, so this is the one daemon whose staleness was never permanent —
+    but that repair is only reached by a session that WRITES a wake. A machine
+    that stops scheduling keeps running whatever plist was there last, so the
+    upgrade path repairs it here too, on the same terms.
+
+    Never raises, and the same two guards in the same order as the installer:
+    the plist must be the one the real passwd home produces, and the store it
+    records must live under the real home.
+    """
+    name = "wakes supervisor"
+    try:
+        if not is_supported():
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not _launchd_is_addressable():
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The store the plist already names, not this process's ambient one: a
+        # repair brings a unit up to date in place instead of migrating it. The
+        # ambient dir is only the fallback for a plist that records none.
+        store = launchd.config_dir_from_plist(launchd.load(path)) or ambient_config_dir()
+        if not _config_lives_in_real_home(store):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
+        if outcome.kind != "repaired":
+            return outcome
+        # bootout + bootstrap, unlike the `kickstart -k` a few lines up in
+        # ``ensure_supervisor_installed``: that repair restarts a STOPPED job
+        # whose plist is already correct, while this one has just CHANGED the
+        # plist, and launchd restarts a kickstarted job from its in-memory
+        # definition — measured, it keeps running the old argv. See
+        # :mod:`local_operator.launchd`.
+        _launchctl("bootout", _domain(), str(path))
+        loaded = _launchctl("bootstrap", _domain(), str(path))
+        if loaded.returncode != 0:
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
+            return launchd.reload_failure(
+                name, path, "lop wake install", loaded.stderr.strip() or str(loaded.returncode)
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
 
 
 def _is_loaded(config_dir: Path) -> bool:

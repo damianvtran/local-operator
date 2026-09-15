@@ -13126,6 +13126,7 @@ class OperatorApp(App[None]):
             is_git_snapshot,
             perform_upgrade,
             refresh_mobile_after_upgrade,
+            refresh_service_daemons_after_upgrade,
             tui_editable_refusal,
             tui_installer_failure,
         )
@@ -13173,17 +13174,32 @@ class OperatorApp(App[None]):
             self.call_from_thread(self._system_notice, f"update failed: {exc}", "error")
             self.call_from_thread(self._finish_update)
             return
+        # Repair the OTHER supervised daemons FIRST, and in a child process: the
+        # plists have to be rendered by the wheel the installer just wrote, not
+        # by the pre-upgrade modules this process still holds in memory, and the
+        # mobile bounce below has to restart from a plist that is already
+        # current. Failure is a notice, never a rollback: the wheel is already in.
+        services = refresh_service_daemons_after_upgrade()
         # Bounce the LaunchAgent *before* the TUI image is replaced so the
         # new daemon is already scanning when this process comes back.
         # Failure is a notice, never a rollback: the wheel is already in.
         mobile = refresh_mobile_after_upgrade()
 
         # ``restarting…`` only once exit 75 is actually happening — a
-        # typed-ahead turn used to make ``_request_relaunch`` refuse after
+        # typed-ahead loop used to make ``_request_relaunch`` refuse after
         # this line had already painted. Wrapped so ``call_from_thread``
         # does not have to forward the keyword.
 
         def _relaunch_after_upgrade() -> None:
+            for line in services.lines:
+                # No token: `_system_notice`'s default kind is `info`, which the
+                # transcript renders as the dim style the mobile restart notice
+                # already uses.
+                self._system_notice(line)
+            for warning in services.warnings:
+                # The CLI's summary is plain text, so its lines carry a
+                # "warning: " prefix; a notice already carries the token.
+                self._system_notice(warning.removeprefix("warning: "), "warning")
             if mobile.kind == "restarted":
                 self._system_notice("mobile daemon restarted — refresh the phone UI")
             elif mobile.kind == "failed":
