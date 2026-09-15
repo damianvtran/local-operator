@@ -70,7 +70,14 @@ def proto_supported(
 #: being older, and nothing is forced by it. Its one use is the update advisory
 #: below, which says a newer version exists without claiming the build is
 #: unusable — the store decides when a newer version is actually offered.
-EXPECTED_EXTENSION_VERSION = "0.1.17"
+#:
+#: A bump here is never a one-line edit. This constant is an INPUT to
+#: ``gen_ts``, so its two generated TypeScript halves — ``extension/src/
+#: protocol.gen.ts`` and the ``extension/ui-vendor/`` bundle — must be
+#: REGENERATED, not hand-edited, or the ``--check`` gate in both CI workflows
+#: goes red; and the two synthetic performance fixtures report the tree's
+#: version on the wire, so they move with it.
+EXPECTED_EXTENSION_VERSION = "0.1.18"
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
