@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import errno
 import json
 import os
 import shutil
@@ -5959,3 +5960,84 @@ async def test_a_bound_move_publishes_the_moved_directory_at_once(move_api) -> N
         )
         assert bridge.remote.frontend_state.cwd == str(after)
         assert bridge.remote.frontend_state.conversation_title == "Final owner update"
+
+
+# --- the catalogue read: unavailability versus an empty answer -------------------
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_refuses_rather_than_answering_an_empty_catalogue(
+    draft_api, monkeypatch
+) -> None:
+    """A store that cannot be walked is a 503, not "you have no conversations".
+
+    This is the operator-visible half of the defect: the sidebar adopts this
+    answer as MEMBERSHIP and replaces the rows it is showing, so an empty listing
+    did not merely hide the catalogue — it wiped it, for as long as the failure
+    lasted, with a 200 that said everything was fine.
+
+    503 rather than 500 because the condition is transient by construction
+    (descriptor exhaustion, an I/O error, a permissions blip) and the correct
+    client behaviour — keep the rows you have, retry the poll — is the one a
+    retryable code asks for.
+    """
+    from tests.unit.session.test_catalog_read_failures import _failing_open, _store
+
+    client, root = draft_api
+    store = _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    _failing_open(monkeypatch, store, OSError(errno.EMFILE, "Too many open files"))
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 503, answer.text
+    assert "Conversations could not be read right now" in answer.json()["detail"]
+    # Nothing about the store's own contents leaked into the sentence.
+    assert str(root) not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_names_what_it_could_not_read(draft_api, monkeypatch) -> None:
+    """The degraded sources reach the wire once, and on every row of the page.
+
+    The listing-level field is what a renderer checks before it says "nothing is
+    running"; the per-row field is what lets it qualify an individual row. Both
+    are additive, so an older client ignores them and renders as it always did.
+    """
+    from local_operator.session.runtime import registry
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+
+    def explode(_directory):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(registry, "scan", explode)
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["degraded"] == ["liveness"]
+    assert [row["degraded"] for row in result["sessions"]] == [["liveness"], ["liveness"]]
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_listing_declares_nothing_degraded(draft_api) -> None:
+    """Always present, empty when everything was read.
+
+    Present rather than omitted so a client can tell "nothing to report" from
+    "this server is too old to know", which is the difference between drawing an
+    ordinary catalogue and drawing one it must not trust.
+    """
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa")
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["degraded"] == []
+    assert [row["degraded"] for row in result["sessions"]] == [[]]

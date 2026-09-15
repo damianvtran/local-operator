@@ -2503,7 +2503,17 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   the cost this whole mechanism exists to avoid. The ROW STATE that
     #:   matters — `live_state` — IS compared, so entering and leaving the
     #:   condition still repaints on the frame it happens.
-    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s")
+    #: * `degraded` is the one excluded field that CAN change under an open list
+    #:   (a decoration read starts failing on some later poll), and it is still
+    #:   excluded because nothing on THIS screen paints it: the field reports
+    #:   that a live-state read could not be taken, and the picker shows the rows
+    #:   it has either way. Comparing it would repaint the list on a change no
+    #:   pixel reflects. THE DAY A TUI SURFACE RENDERS IT — a caption saying
+    #:   "live status unavailable", say — it moves into `_SIGNATURE_FIELDS`,
+    #:   because then two rows differing only here are not the same row on
+    #:   screen. Its desktop consumer is a separate renderer with its own
+    #:   refresh, not this signature.
+    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded")
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form
     # checked only that every signature NAME is a real field, which catches a
@@ -2523,7 +2533,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
     # a MISCLASSIFIED one: moving `kind` into `_SIGNATURE_EXCLUDED` keeps the
     # union equal and passes here, and only `tests/unit/tui/test_session_picker.py`
     # (which asserts `kind` drives a repaint, and that the exclusions are the
-    # two fields whose immutability is argued above) fails. Verified by making
+    # fields whose exclusion is argued above) fails. Verified by making
     # exactly that mutation: import succeeds, two tests go red.
     assert set(_SIGNATURE_FIELDS) | set(_SIGNATURE_EXCLUDED) == set(SessionRow._fields), (
         "picker signature is out of step with SessionRow — "

@@ -272,6 +272,40 @@ class MoveIndeterminate(Exception):
         )
 
 
+class SessionStoreUnavailable(OSError):
+    """The session store could not be walked, so no listing built from it is true.
+
+    THE FAILURE THIS EXISTS TO STOP: an unreadable store being reported as an
+    EMPTY one. ``resume._scan_sessions`` answered ``[]`` for any ``OSError``
+    raised by the ``sessions/`` directory -- ``EMFILE``/``ENFILE`` under file
+    descriptor exhaustion, ``EACCES``, ``EIO``, ``ENOTDIR`` -- so the desktop
+    list route answered ``200 {"sessions": [], "truncated": false}`` to a
+    client that cannot tell that from "you have no conversations". The sidebar
+    adopts that answer as MEMBERSHIP and replaces what it is showing, so a
+    transient descriptor exhaustion emptied the operator's visible catalogue
+    for as long as it lasted, with nothing in the response and nothing at the
+    default log level to say why.
+
+    WHY AN ``OSError`` SUBCLASS rather than a plain ``Exception``: every call
+    site that already TOLERATES an unreadable store -- the phone daemon's
+    search and listing, the CLI's ``/resume`` picker, the retention policy --
+    tolerates it with ``except OSError``, and a parallel hierarchy would
+    silently change their catch shape. Subclassing leaves those tolerances
+    exactly as they were, while giving the sites that must NOT tolerate it
+    (the catalogue, whose answer a UI adopts as membership) something typed to
+    catch and map to a retryable sentence instead of an empty listing.
+
+    The message names no directory: this one is not echoed to a client -- the
+    list route answers with its own vetted 503 sentence, the rule the module
+    docstring sets for every category here -- and the cause (which does carry
+    the path) rides along as ``__cause__`` for the log.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        self.detail = detail
+        super().__init__("The session store could not be read" + (f": {detail}" if detail else "."))
+
+
 def admission_error(
     code: str,
     count: int | None = None,
