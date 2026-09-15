@@ -68,6 +68,10 @@
     "help_keys_shot.py": [
       "default"
     ],
+    "liveness_shot.py": [
+      "info",
+      "sidebar"
+    ],
     "model_picker_shot.py": [
       "default"
     ],

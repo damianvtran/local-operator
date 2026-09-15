@@ -405,9 +405,14 @@ def _identity_by_record(record: SessionRecord) -> tuple[bool, str]:
        against the same file, so it adds no evidence about the PROCESS. It
        is an authorization and freshness check, not an identity proof.
     2. A heartbeat fresher than the timeout, and the pid still HOLDING the
-       recorded control port. A starved runtime keeps heartbeating (that
-       thread is independent of the socket loop), which is what separates
-       "alive but not answering" from "record outlived its process".
+       recorded control port. Both are WINDOW checks: a lapsed beat says the
+       recorded owner stopped reporting, and a port that has moved on says the
+       name belongs to a different process now. Neither asks the process
+       anything, which is why this clause narrows the accident rather than
+       closing it — the beat is written by the runtime's OWN event loop (see
+       ``registry.classify``), so it is not evidence about the socket loop and
+       cannot separate "alive but not answering" from "record outlived its
+       process" on its own.
     3. The process did not start AFTER the record's last heartbeat. This is
        the clause that carries the weight: (1) and (2) together are still
        satisfiable by a stranger that inherited a dead lop's pid AND its

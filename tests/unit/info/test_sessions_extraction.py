@@ -348,6 +348,56 @@ def test_cli_table_still_renders_every_row(monkeypatch: Any, capsys: Any) -> Non
     assert "control_key" not in out
 
 
+def test_the_sessions_table_leads_with_words_while_json_keeps_the_token(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """D5/QA Q1: the STATE column is read by a person; ``--json`` is not.
+
+    ``lop wake status`` ends its wedge line with "'lop sessions' shows it", so
+    this table is where an operator is sent — and it was the one person-facing
+    surface where the raw state token stood with no sentence to qualify it,
+    beside an ``HB_AGE`` that measures the same fact. The token itself stays
+    exactly where a machine reads it: ``--json``'s ``state`` is the wire value
+    the ~15 call sites and the desktop catalogue's ``status.code`` branch on.
+    """
+    import argparse
+    import json
+
+    from local_operator import cli
+    from local_operator.info import collect as collect_mod
+    from local_operator.mobile import resources
+    from local_operator.session.runtime import registry
+
+    quiet = _Record(
+        pid=6001,
+        kind="daemon",
+        session_id="cafebabecafe",
+        conversation_name="Quiet owner",
+        cwd="/tmp/probe/quiet",
+        model_label="anthropic/claude-opus-5",
+        started_at=NOW - 900.0,
+        heartbeat_at=NOW - 300.0,
+        busy=True,
+    )
+    monkeypatch.setattr(registry, "scan", lambda root=None: [(quiet, "wedged")])
+    # Usage sampling is for LIVE pids only, so this one has no measurement at
+    # all — which is itself part of what the /info row now declines to print.
+    monkeypatch.setattr(resources, "session_resource_usage", lambda pids, **kwargs: {})
+    monkeypatch.setattr(collect_mod.time, "time", lambda: NOW)
+
+    args = argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    assert cli.sessions_command(args) == 0
+    out = capsys.readouterr().out
+    assert "STATE" in out
+    row = next(line for line in out.split("\n") if "Quiet owner" in line)
+    assert row.startswith("not answering"), row
+    assert "wedged" not in row, row
+
+    args.json = True
+    assert cli.sessions_command(args) == 0
+    assert json.loads(capsys.readouterr().out)[0]["state"] == "wedged"
+
+
 def test_sessions_all_without_limit_passes_the_advertised_default(
     monkeypatch: Any, tmp_path: Any, capsys: Any
 ) -> None:

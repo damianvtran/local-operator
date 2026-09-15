@@ -674,19 +674,26 @@ async def _engage_one(
                 # No promise, in either direction. The owner is not answering
                 # (that is the whole of what a stale beat establishes), so the
                 # sentence says the wake is overdue rather than that it will
-                # fire later; and the remedy is named with its cost — the
-                # forced stop SIGNALS the process rather than asking it to
-                # leave — because that is the rung that reaches an owner whose
-                # socket is not answering.
+                # fire later; and the remedy names the rung that ACTS on a
+                # lapsed beat, with the forced rung's cost beside it so the
+                # operator picks deliberately. Which rung reaches which shape is
+                # the ladder's own rule (``control._identity_by_record`` re-reads
+                # a record only while its beat is inside ``HEARTBEAT_TIMEOUT_S``,
+                # so --force can turn no refusal into a stop here) — see
+                # ``info.render.not_answering_clause``.
                 logger.warning(
                     "wedged: skipping %s — a runtime exists (pid %d) and has not "
                     "reported for %.0fs, so it holds the transcript lease without "
                     "answering; the wake is %.1fs overdue. Nothing here can recover "
-                    "it — 'lop stop --pid %d --force' force-signals that process",
+                    "it — 'lop stop --pid %d' asks it to stop and signals it if it "
+                    "will not answer, while 'lop stop --pid %d --force' "
+                    "signal-stops the process, discarding its in-flight turn, for "
+                    "an owner that is still beating but silent",
                     session_id,
                     pid,
                     age_s,
                     overdue_s,
+                    pid,
                     pid,
                 )
             return False

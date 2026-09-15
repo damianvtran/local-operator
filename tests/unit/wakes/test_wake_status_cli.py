@@ -1230,21 +1230,26 @@ def test_the_when_note_lands_under_the_table_not_under_the_legends(
     ), out
 
 
-def test_a_quiet_owner_line_names_the_age_and_the_forced_stop(
+def test_a_quiet_owner_line_names_the_age_and_the_ladders_first_rung(
     tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """R2, as an assertion: `wake status` must not advertise a stop that refuses.
+    """R2/D3, as an assertion: `wake status` must not advertise a stop that refuses.
 
     The line used to end "... 'lop stop --pid N' ends it", and it also claimed
     "It will not recover on its own". Both were wrong in the same direction. A
     plain ``lop stop --pid N`` asks the owner's socket, then needs an identity
     proof that a fresh heartbeat forbids — on an owner that is still beating it
-    refuses, so the advertised recovery may never become available; and a stale
-    beat does not establish that the owner cannot recover, because the beat is
-    authored by the runtime's own event loop and a long turn produces it.
+    refuses; and a stale beat does not establish that the owner cannot recover,
+    because the beat is authored by the runtime's own event loop and a long
+    turn produces it.
 
-    What the surface names instead is the FORCED rung, described as what it
-    does, plus the measurement that was actually taken.
+    What the surface names instead is the rung that ACTS on a lapsed beat —
+    the plain ``lop stop``, whose start-time proof ``_identity_by_start_time``
+    admits precisely because the beat has lapsed — with the forced rung's cost
+    beside it. ``--force`` is the rung for the still-beating silent owner and
+    it cannot admit a lapsed record at all (``_identity_by_record`` refuses on
+    its own age gate), so it is named for the shape it IS for, priced, and
+    left to the operator's judgement.
     """
     from local_operator.cli import wake_command
 
@@ -1266,7 +1271,9 @@ def test_a_quiet_owner_line_names_the_age_and_the_forced_stop(
     flat = " ".join(capsys.readouterr().out.split())
     assert "wedged: quietown0001 (pid 4242)" in flat, flat
     assert "has not sent a heartbeat in 5m and is not answering its socket" in flat, flat
-    assert "'lop stop --pid 4242 --force' force-signals the process" in flat, flat
+    assert "'lop stop --pid 4242' asks it to stop" in flat, flat
+    assert "'lop stop --pid 4242 --force' signal-stops the process" in flat, flat
+    assert "discarding its in-flight turn" in flat, flat
     # The claims that were withdrawn.
     assert "ends it" not in flat, flat
     assert "recover on its own" not in flat, flat

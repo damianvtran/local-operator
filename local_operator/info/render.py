@@ -215,17 +215,26 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
     age, keeps the pid (which is the evidence that the process is still there),
     and stops short of any diagnosis.
 
-    The remedy is named with its cost, because the STOP LADDER is where the old
-    wording lied: a plain ``lop stop --pid N`` asks the owner's socket first and
-    refuses when the record is still heartbeating, so promising that it "ends
-    it" advertised a graceful stop that may never become available. ``--force``
-    is the rung that reaches an owner that is not answering — it signal-stops
-    the process rather than asking it to leave — so it is what the operator is
-    told about, described as what it does.
+    The remedy names the ladder's FIRST rung, and that is a correction rather
+    than a preference (design round 2, D3). Which rung reaches which shape is
+    readable from the ladder itself: ``control._identity_by_record`` re-reads
+    the record's own fields only while the beat is INSIDE
+    ``HEARTBEAT_TIMEOUT_S``, so on a record :func:`registry.classify` has
+    already called ``wedged`` the forced rung can turn no refusal into a stop —
+    the rung that acts here is the plain one, whose start-time proof
+    ``_identity_by_start_time`` admits precisely BECAUSE the beat has lapsed.
+    Naming only the forced stop handed the reader a heavier command that cannot
+    do more on this state, and it said nothing about what running it costs.
     """
     if sessions is None or not sessions.available or not sessions.wedged:
         return ""
-    one = sessions.wedged == 1
+    # The COUNT is the header's, not the row list's: the two can disagree in a
+    # hand-built ``SessionsInfo``, and the sentence sits under a header that
+    # states this number — a lead that contradicts the line above it reads as
+    # two different problems (review round 2, N2). The ROWS still supply the
+    # age and the pids, because those are the parts no header carries.
+    count = sessions.wedged
+    one = count == 1
     rows = [line for line in sessions.lines if line.state == "wedged"]
     if not rows:
         # A hand-built ``SessionsInfo`` (a test, a partial snapshot) whose count
@@ -234,21 +243,34 @@ def not_answering_clause(sessions: SessionsInfo | None) -> str:
         # pid and the remedy are the parts that need a row, and inventing a pid
         # would be worse than the vaguer sentence.
         return (
-            f"{plural(sessions.wedged, 'session')} {'is' if one else 'are'} not "
+            f"{plural(count, 'session')} {'is' if one else 'are'} not "
             f"answering; {'its' if one else 'their'} counts are as of "
             f"{'its' if one else 'their'} last heartbeat"
         )
     worst = max(rows, key=lambda line: line.heartbeat_age_s)
-    pids = ", ".join(str(line.pid) for line in rows[:_NOT_ANSWERING_PIDS])
-    if len(rows) > _NOT_ANSWERING_PIDS:
-        pids += f" and {len(rows) - _NOT_ANSWERING_PIDS} more"
+    listed = min(len(rows), _NOT_ANSWERING_PIDS)
+    pids = ", ".join(str(line.pid) for line in rows[:listed])
+    if count > listed:
+        pids += f" and {count - listed} more"
+    # The remedy names ONE pid on the single-row sentence and a PATTERN when the
+    # row list is longer: the old form listed up to three pids and then handed
+    # the reader a command for an arbitrary one of them (review round 2, N2).
+    remedy = (
+        f"'lop stop --pid {worst.pid}' asks it to stop and signals it if it will "
+        f"not answer, '/stop {worst.pid}' from this screen does the same, and "
+        f"'lop stop --pid {worst.pid} --force' signal-stops the process, discarding "
+        f"its in-flight turn, for an owner that is still beating but silent"
+        if one
+        else "'lop stop --pid N', once per pid above, asks each to stop and signals "
+        "it if it will not answer, '/stop N' from this screen does the same, and "
+        "'lop stop --pid N --force' signal-stops the process, discarding its "
+        "in-flight turn, for an owner that is still beating but silent"
+    )
     return (
-        f"{plural(len(rows), 'session')} {'is' if one else 'are'} not answering — "
+        f"{plural(count, 'session')} {'is' if one else 'are'} not answering — "
         f"last runtime heartbeat {format_duration(worst.heartbeat_age_s)} ago "
         f"(pid {pids}); {'its counts are' if one else 'their counts are'} as of "
-        f"{'that heartbeat' if one else 'those heartbeats'}, and "
-        f"'lop stop --pid {worst.pid} --force' force-signals the process to stop "
-        f"{'it' if one else 'one of them'}"
+        f"{'that heartbeat' if one else 'those heartbeats'}. {remedy}"
     )
 
 
@@ -354,20 +376,27 @@ def build_export(snapshot: InfoSnapshot) -> str:
         for line in sessions.lines:
             mark = "*" if line.is_self else "-"
             name = line.conversation_name or line.session_id or str(line.pid)
-            memory = format_bytes(line.footprint_bytes or line.rss_bytes)
-            extra = ""
-            # The measured half of "not answering", beside the state token
-            # rather than only in the caveat below: a pasted export is read on
-            # its own, and `[wedged]` with no age beside it is exactly the bare
-            # verdict the wording on every other surface now avoids.
+            # A wedged row sheds two fields rather than merely ordering them
+            # last (design round 2, D4): usage is sampled for LIVE pids only, so
+            # the "—" this field would print is a measurement that was never
+            # taken for this one, and "busy" is the record's PRE-silence flag —
+            # the row exists to remove unqualified progress, so it must not end
+            # by asserting activity. It ends on the facts it exists for.
+            fields = [f"{mark} [{line.state}] {name}", line.kind, f"pid {line.pid}"]
+            fields.append(format_duration(line.uptime_s))
             if line.state == "wedged":
-                extra += f" · last heartbeat {format_duration(line.heartbeat_age_s)} ago"
-            extra += " · busy" if line.busy else ""
-            extra += f" · needs {line.pending}" if line.pending else ""
-            lines.append(
-                f"  {mark} [{line.state}] {name} · {line.kind} · pid {line.pid} · "
-                f"{format_duration(line.uptime_s)} · {memory}{extra}"
-            )
+                # The measured half of "not answering", beside the state token
+                # rather than only in the caveat below: a pasted export is read
+                # on its own, and `[wedged]` with no age beside it is exactly
+                # the bare verdict the wording on every other surface avoids.
+                fields.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+            else:
+                fields.append(format_bytes(line.footprint_bytes or line.rss_bytes))
+                if line.busy:
+                    fields.append("busy")
+            if line.pending:
+                fields.append(f"needs {line.pending}")
+            lines.append("  " + " · ".join(fields))
             lines.append(f"      {relativise_home(line.cwd)} · {line.model_label or '—'}")
 
     lines += ["", "## Agents and subagents"]
