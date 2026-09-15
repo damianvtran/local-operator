@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 
 from local_operator.session.runtime import process
+from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
 from local_operator.session.runtime.process import (
     _commit_to_leaving,
     _drain_for_signal,
@@ -120,17 +121,26 @@ class _RecordingRuntime:
     """A runtime that records the retirement announcements it is asked to send."""
 
     def __init__(self, events: list[str] | None = None) -> None:
-        self.announced: list[tuple[str, bool]] = []
+        #: ``(reason, draining, leaving)`` — the phrase is recorded because it is
+        #: half of the one commit the seam makes: a stub that silently swallowed
+        #: the keyword would let a refactor drop the record publication while the
+        #: frame still went out (which is exactly what the e2e visibility cell
+        #: caught during the rebase).
+        self.announced: list[tuple[str, bool, str]] = []
         self.events = events if events is not None else []
         self._boot_build: Any = None
 
-    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
-        self.announced.append((reason, draining))
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        self.announced.append((reason, draining, leaving))
         self.events.append(f"announce:{reason}")
 
 
 class _RaisingRuntime:
-    async def announce_retiring(self, reason: str, *, to: str = "", draining: bool = False) -> None:
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
         raise RuntimeError("the viewer's writer is gone")
 
 
@@ -225,8 +235,8 @@ async def test_the_drain_commits_at_the_signal_and_waits_afterwards() -> None:
         await asyncio.sleep(process.REAP_CHECK_S * 2 + 0.05)
         assert not stop.is_set(), "the drain left while the turn was still running"
         assert runtime.announced == [
-            (process._SIGNAL_DRAIN_REASON, True)
-        ], "the departure is announced as it is committed, carrying draining=True"
+            (process._SIGNAL_DRAIN_REASON, True, LEAVING_ON_SIGNAL)
+        ], "the departure is announced as it is committed: draining=True and the phrase"
         assert handle.drain_latches, "and the drain is latched, so nothing new is admitted"
         assert handle.retires == [], "but the cut-off cause is NOT noted while a turn runs"
         # ORDER IS THE CORRECTNESS ARGUMENT, so it is asserted rather than
@@ -278,7 +288,7 @@ async def test_the_drain_is_bounded_and_then_disposes_as_the_signal_path_always_
         )
 
     assert stop.is_set(), "a signal must never become an unbounded wait"
-    assert runtime.announced == [(process._SIGNAL_DRAIN_REASON, True)]
+    assert runtime.announced == [(process._SIGNAL_DRAIN_REASON, True, LEAVING_ON_SIGNAL)]
     assert handle.retires == [], "the bound's exit is not a retirement"
     assert any("drain bound" in record.message for record in caplog.records), caplog.text
 
