@@ -5,6 +5,13 @@ Never certify a message by its wording: an arbitrary RuntimeError may contain
 socket addresses, credentials or another conversation's identity.
 """
 
+# The two departure phrases, imported rather than retyped, so the sentence this
+# module picks and the phrase the runtime publishes cannot drift apart: the
+# table below is keyed on them, and a reworded phrase must fail at import time
+# rather than silently stop matching. Safe to import here (no cycle):
+# ``session.runtime.types`` reaches ``session.retention`` and the stdlib only.
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
+
 
 class AttachmentUnavailable(ValueError):
     code = "unresolved_attachment"
@@ -63,6 +70,16 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: the module docstring gives for the codes: the far side rebuilds the
     #: SENTENCE from a category, so the only thing that may ride along is a token
     #: from a closed set, never text this side composed.
+    #:
+    #: WHICH OF THE TWO A RAISER ACTUALLY SENDS, because a reader tracing the
+    #: field should not have to go hunting for a producer that is not there:
+    #: ``SIGNAL`` is the one, raised by
+    #: ``serving.ServingSessionHandle._retiring_refusal`` from the cause its own
+    #: latch committed (``types.SIGNAL_DRAIN_CAUSE``). ``BUILD`` is decoded and
+    #: reachable — a peer may name it, and it is what the far side resolves a
+    #: build drain TO from the phrase that drain published — but nothing in this
+    #: tree raises it: the cause behind a build drain is the one ``/move`` shares,
+    #: and the phrase, not the cause, is what tells those two apart.
     SIGNAL = "signal"
     BUILD = "build"
 
@@ -88,23 +105,82 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: rows read as one event, and drops every build claim, exactly as the signal
     #: notice does.
     HEAD_SIGNALLED = "This session was signalled to stop; it will not start a new turn."
+    #: The sentence for a departure NOBODY NAMED, and it names none either.
+    #:
+    #: Reached only when the raiser sent no token (every build older than the
+    #: field) AND the far side's own phrase established no trigger — a frame that
+    #: named neither, or a refusal whose connection saw no draining frame at all.
+    #: The old answer was the build sentence, which is what round 5 filed: with a
+    #: signal-draining runtime from this branch's own older builds (the pre-key
+    #: rungs of PR #1141, e.g. `8dd605365`) the viewer painted "switching to a
+    #: newer build; the one it loaded is gone from disk" directly under a notice
+    #: that said the session had been signalled to stop — the contradiction this
+    #: PR exists to remove (agent review round 5, MINOR-1; UX round 5, U14; design
+    #: round 5, D11). Correct for a RELEASED build, whose only draining announce is
+    #: the stale-build handover; false for those.
+    #:
+    #: WHY IT SAYS ONLY THIS. The instance is built only by a latched departure, so
+    #: "leaving, and it will not start a turn" is the one thing this gate
+    #: establishes by itself — true of both unnamed raisers, while anything
+    #: narrower is not. In particular the drain notice's neutral sentence ("it is
+    #: finishing in-flight work first") is not borrowed here: that clause is
+    #: established by a frame that said ``draining``, and one unnamed raiser — the
+    #: reaper's ``idle-exit`` latch, which owes no successor and has no work in
+    #: flight — never sent one.
+    HEAD_UNNAMED = "This session is leaving; it will not start a new turn."
     REFUSED = "The message was not admitted"
     TAIL = "send it again once the session is running again."
 
-    def __init__(self, trigger: str = "") -> None:
+    def __init__(self, trigger: str = "", leaving: str = "") -> None:
         # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
-        # carries different sentences for the two departures, and the far side
+        # carries different sentences for the departures, and the far side
         # rebuilds whichever one the raiser's enumerated ``trigger`` names.
         #
-        # AN ABSENT OR UNKNOWN TRIGGER KEEPS THE BUILD SENTENCE, deliberately
-        # rather than by omission: the raisers that cannot name one are a runtime
-        # older than the field (whose only drain IS the build handover) and the
-        # idle-exit rung, and the alternative — a third generic sentence — would
-        # take the build information away from the one case the copy was written
-        # for. The signal arm is the one that had no sentence of its own.
+        # A TRIGGER NOBODY NAMED IS NOT ASSUMED TO BE THE BUILD. It used to be,
+        # and that fallback claimed more than it had measured: it asserted that a
+        # raiser which cannot name a departure is "a runtime older than the field,
+        # whose only drain IS the build handover". True of a released runtime
+        # (its only draining announce is the stale-build handover) and false of
+        # this branch's own intermediate builds, which announce a SIGNAL drain
+        # with no token, so the sentence contradicted the notice above it in the
+        # one window this PR is about.
+        #
+        # SO THE FAR SIDE SUPPLIES WHAT THE RAISER COULD NOT, and ``leaving`` is
+        # that evidence: the phrase the viewer already derived from the frame it
+        # is watching (``types.drain_phrase_for_frame``), which for the pre-key
+        # builds is the trigger's own words off the wire, and which is the ONLY
+        # thing that tells a build drain from the ``/move`` retirement sharing its
+        # cause. It is matched against the two known phrases rather than
+        # interpolated — a peer's words may key a table, for the reason ``count``
+        # may not be a sentence — and it is read ONLY when the token names nothing,
+        # because an explicit token is the raiser's own enumeration of its own
+        # latch and outranks an inference. What is left when neither establishes
+        # anything is the sentence that names no departure at all.
         self.trigger = trigger if trigger in (self.SIGNAL, self.BUILD) else ""
-        self.HEAD = self.HEAD_SIGNALLED if self.trigger == self.SIGNAL else type(self).HEAD
+        if not self.trigger:
+            self.trigger = _TRIGGER_FOR_LEAVING.get(leaving, "")
+        self.HEAD = _HEADS.get(self.trigger, self.HEAD_UNNAMED)
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
+
+
+#: Which sentence each enumerated departure earns. Keyed by the token, so the
+#: two arms cannot be swapped by editing one branch of an ``if`` — the same shape
+#: the app uses to pick its drain NOTICE (``app._DRAIN_NOTICES``), for the same
+#: reason: these are two readings of one state and they must be chosen the same
+#: way at both ends.
+_HEADS: dict[str, str] = {
+    RuntimeRetiring.SIGNAL: RuntimeRetiring.HEAD_SIGNALLED,
+    RuntimeRetiring.BUILD: RuntimeRetiring.HEAD,
+}
+
+#: The departure a phrase establishes, for a raiser that could not name one.
+#: Only the two phrases the runtime publishes are keys: anything else — an empty
+#: phrase, or a phrase written by a build this one has never heard of — is
+#: evidence about nothing, and the unnamed sentence is the answer for it.
+_TRIGGER_FOR_LEAVING: dict[str, str] = {
+    LEAVING_ON_SIGNAL: RuntimeRetiring.SIGNAL,
+    LEAVING_FOR_BUILD: RuntimeRetiring.BUILD,
+}
 
 
 class ProfileRegistryUnavailable(ValueError):
@@ -197,7 +273,10 @@ class MoveIndeterminate(Exception):
 
 
 def admission_error(
-    code: str, count: int | None = None, trigger: str | None = None
+    code: str,
+    count: int | None = None,
+    trigger: str | None = None,
+    leaving: str | None = None,
 ) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
@@ -219,11 +298,26 @@ def admission_error(
     transport must not be able to carry prose into a sentence this side builds.
     An unknown or missing token means "this raiser cannot name its departure",
     which is the pre-field behaviour.
+
+    ``leaving`` is the ONE argument that is not off the wire: it is what the
+    CALLER — the far side, the connection that is watching this runtime — already
+    knows about the departure, i.e. the phrase it derived from the ``retiring``
+    frame (``types.drain_phrase_for_frame``). It exists for the raiser whose
+    build predates ``error_trigger``, which is exactly this branch's own
+    intermediate builds: they signal-drain, publish the trigger in the frame's
+    own words, and can say nothing in the refusal's fields. It is therefore read
+    only where the token names nothing, and it is matched against the two known
+    phrases rather than rendered — the frame's phrase is still a peer's words,
+    and a table key is all this boundary admits of those (MINOR-1/U14/D11,
+    round 5). It never reaches an error object; the trigger it resolves to does.
     """
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == RuntimeRetiring.code:
-        return RuntimeRetiring(trigger=trigger if isinstance(trigger, str) else "")
+        return RuntimeRetiring(
+            trigger=trigger if isinstance(trigger, str) else "",
+            leaving=leaving if isinstance(leaving, str) else "",
+        )
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

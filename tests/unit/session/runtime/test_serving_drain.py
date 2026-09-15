@@ -217,15 +217,26 @@ def test_the_refusal_describes_the_departure_the_handle_latched(tmp_path: Path) 
     latched is the discriminator, and it survives to the exit rung because
     ``process._drain_for`` re-passes ``drain.cause`` to ``begin_retire``.
 
-    BOTH HALVES ARE PINNED HERE, because the fix would be just as wrong the
-    other way round: the build handover keeps the sentence the design rounds
-    measured for it, and the signal arm is the one that had none of its own.
+    BOTH HALVES ARE PINNED HERE, because a fix to one arm is exactly how the
+    other goes wrong: the signal arm gets a sentence of its own, and the build
+    arm is NOT named by this accessor. The cause behind it (``runtime-retired``)
+    is the one ``/move`` latches too, where no build is owed, so a build refusal
+    is left unnamed here and the far side reads it off the phrase the drain frame
+    publishes
+    (``test_an_unnamed_refusal_is_resolved_from_the_phrase_the_frame_published``,
+    and on the real wire in the cross-version cell). What this accessor must not
+    do is claim a build on its own.
+
+    AND A THIRD ARM: the reaper's ``idle-exit`` latch — a departure with no
+    successor at all, which used to inherit the build sentence with nobody having
+    compared a build (round 5, MINOR-1/U14/D11).
     """
     host, _session = _host(tmp_path, busy=True)
 
     assert host.begin_drain(SIGNAL_DRAIN_CAUSE, "SIGTERM: drained to the turn's end") is True
     signalled = host._retiring_refusal()
     assert isinstance(signalled, RuntimeRetiring)
+    assert signalled.trigger == RuntimeRetiring.SIGNAL, signalled.trigger
     assert signalled.HEAD == RuntimeRetiring.HEAD_SIGNALLED, signalled.HEAD
     assert "newer build" not in str(signalled), str(signalled)
     assert "send it again" in str(signalled), "the one act left still has to be named"
@@ -235,7 +246,20 @@ def test_the_refusal_describes_the_departure_the_handle_latched(tmp_path: Path) 
     assert host.begin_drain("runtime-retired", " (0.54.33@7fe8b10 → 0.54.39@dec7933)") is True
     build = host._retiring_refusal()
     assert isinstance(build, RuntimeRetiring)
-    assert build.HEAD == RuntimeRetiring.HEAD, build.HEAD
+    assert build.trigger == "", build.trigger
+    assert build.HEAD == RuntimeRetiring.HEAD_UNNAMED, build.HEAD
+
+    # The reaper's quiet exit: nothing compared a build, so ``busy=False`` is
+    # what lets ``begin_retire`` latch at all.
+    host, _session = _host(tmp_path, busy=False)
+    assert host.begin_retire("idle-exit", "idle for 20s with no viewer") is True
+    idle = host._retiring_refusal()
+    assert isinstance(idle, RuntimeRetiring)
+    assert idle.trigger == "", idle.trigger
+    assert idle.HEAD == RuntimeRetiring.HEAD_UNNAMED, idle.HEAD
+    assert "newer build" not in str(idle), "nothing checked a build on the idle-exit rung: " + str(
+        idle
+    )
 
 
 @pytest.mark.parametrize(
@@ -250,16 +274,82 @@ def test_only_the_two_enumerated_triggers_cross_the_transport(token: str) -> Non
     category and nothing else — which is why the count is an int and not a
     string. A trigger is therefore admitted only from the closed set, and
     anything else (including absent, which is what an older runtime sends) means
-    "this raiser cannot name its departure": the default sentence.
+    "this raiser cannot name its departure" — whose sentence names no departure
+    EITHER. It used to be the build sentence, and that is the round-5 finding:
+    a signal-draining runtime from this branch's pre-key builds sent no token,
+    so the far side told the operator about a build that did not exist while the
+    notice above it said the session had been signalled to stop (MINOR-1/U14/
+    D11). The phrase arm is the next cell.
     """
     from local_operator.session.errors import admission_error
 
     decoded = admission_error(RuntimeRetiring.code, None, token)
     assert isinstance(decoded, RuntimeRetiring)
-    expected = (
-        RuntimeRetiring.HEAD_SIGNALLED if token == RuntimeRetiring.SIGNAL else RuntimeRetiring.HEAD
-    )
+    expected = {
+        RuntimeRetiring.SIGNAL: RuntimeRetiring.HEAD_SIGNALLED,
+        RuntimeRetiring.BUILD: RuntimeRetiring.HEAD,
+    }.get(token, RuntimeRetiring.HEAD_UNNAMED)
     assert decoded.HEAD == expected, (token, decoded.HEAD)
+
+
+def test_an_unnamed_refusal_is_resolved_from_the_phrase_the_frame_published() -> None:
+    """The cross-version arm, on the shapes those runtimes actually send (round 5).
+
+    The raiser cannot help: ``error_trigger`` is new in this branch, so every
+    build older than it — a RELEASED one and this branch's own pre-key rungs —
+    crosses with ``error_code`` alone. The only witness to which departure
+    refused the message is the ``retiring`` frame that crossed on the SAME
+    connection moments earlier, so the far side hands its own reading of that
+    frame in as evidence (``types.drain_phrase_for_frame``), and the sentence is
+    built from it.
+
+    THREE POPULATIONS, one rule. A released runtime's only draining announce is
+    the stale-build handover, so it keeps the build sentence; a pre-key rung of
+    this branch signal-drains, so it gets the signal sentence under its own
+    signal notice; and a phrase the far side cannot place resolves nothing, which
+    leaves the sentence that names no departure. The frames below are the wire
+    shapes measured in rounds 4 and 5, not invented ones.
+    """
+    from local_operator.session.errors import admission_error
+    from local_operator.session.runtime.types import (
+        LEAVING_FOR_BUILD,
+        LEAVING_ON_SIGNAL,
+        drain_phrase_for_frame,
+    )
+
+    # ``8dd605365``: the signal drain, before the phrase key existed (round 3/5).
+    pre_key_signal = {"reason": "shutdown-drain", "to": "", "draining": True}
+    # A RELEASED build (0.55.4-.6): its only draining announce is the handover.
+    released_build = {
+        "reason": "stale-build",
+        "to": "0.55.6@f4a70b9",
+        "draining": True,
+    }
+    # A frame that named nothing at all.
+    names_neither = {"reason": "", "to": "", "draining": True}
+
+    assert drain_phrase_for_frame(pre_key_signal) == LEAVING_ON_SIGNAL
+    assert drain_phrase_for_frame(released_build) == LEAVING_FOR_BUILD
+    assert drain_phrase_for_frame(names_neither) == ""
+
+    def decode(frame: dict[str, Any]) -> RuntimeRetiring:
+        """The far side's own decode: category + the phrase THIS frame published."""
+        decoded = admission_error(RuntimeRetiring.code, None, None, drain_phrase_for_frame(frame))
+        assert isinstance(decoded, RuntimeRetiring), decoded
+        return decoded
+
+    heads = [decode(frame).HEAD for frame in (pre_key_signal, released_build, names_neither)]
+    assert heads == [
+        RuntimeRetiring.HEAD_SIGNALLED,
+        RuntimeRetiring.HEAD,
+        RuntimeRetiring.HEAD_UNNAMED,
+    ], heads
+
+    # The token wins where a raiser can send one: an inference never overrides
+    # the enumeration of the side that latched the drain.
+    explicit = admission_error(RuntimeRetiring.code, None, RuntimeRetiring.BUILD, LEAVING_ON_SIGNAL)
+    assert isinstance(explicit, RuntimeRetiring), explicit
+    assert explicit.HEAD == RuntimeRetiring.HEAD, explicit.HEAD
 
 
 def test_begin_retire_still_records_the_cut_off_it_owes(tmp_path: Path) -> None:

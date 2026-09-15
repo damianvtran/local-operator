@@ -443,6 +443,67 @@ async def test_each_trigger_keeps_its_own_sentence_at_the_notice_seam(
 
 
 @pytest.mark.asyncio
+async def test_the_refusal_face_agrees_with_the_notice_on_a_pre_key_runtime(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """U14/M-1/D11: two faces of ONE drain tell one story, across versions.
+
+    The acceptance statement this round is about, at the seam the operator
+    reads. A build of this branch from before the refusal's ``error_trigger``
+    field — ``8dd605365`` and the twelve rungs around it — signal-drains and
+    refuses an admission, so a ``prompt_and_wait`` is answered by a raiser that
+    cannot name its own departure. The viewer already holds what the raiser
+    cannot say: the phrase it derived from the frame it painted the notice from
+    a moment earlier.
+
+    Rounds through 4 asked only that the NOTICE stop claiming a build; the
+    refusal sat underneath it still inheriting the build sentence, which is the
+    same state told two ways in one window (agent review round 5, MINOR-1; UX
+    round 5, U14; design round 5, D11). Both frames here are the wire shapes
+    measured in rounds 4 and 5, and the refusal is built the way the far side
+    builds it: ``admission_error`` over the category the older raiser does send,
+    with the phrase as the only evidence of which departure it is.
+    """
+    from local_operator.session.errors import admission_error
+    from local_operator.session.runtime.types import drain_phrase_for_frame
+
+    pre_key_signal_frame = {
+        "op": "retiring",
+        "reason": "shutdown-drain",
+        "to": "",
+        "draining": True,
+    }
+    phrase = drain_phrase_for_frame(pre_key_signal_frame)
+    assert phrase == LEAVING_ON_SIGNAL, phrase
+    refusal = admission_error(RuntimeRetiring.code, None, None, phrase)
+    assert isinstance(refusal, RuntimeRetiring), refusal
+
+    session = FakeSession()
+
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> None:
+        raise refusal
+
+    session.prompt = prompt  # type: ignore[assignment]
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._on_runtime_draining(phrase)
+        await pilot.pause()
+        await _send(pilot, editor, "a message sent mid-drain")
+
+        rows = [n._text for n in _notices(app)]
+        assert rows[0] == SIGNAL_DRAIN_NOTICE, rows
+        assert rows[1] == _retiring_notice_text(refusal), rows
+        assert rows[1].startswith(RuntimeRetiring.HEAD_SIGNALLED), rows
+        assert all("newer build" not in text for text in rows), rows
+        assert editor.text == "a message sent mid-drain" + RESTORE_SEAM, editor.text
+        assert _user_texts(app) == [], _user_texts(app)
+
+
+@pytest.mark.asyncio
 async def test_an_idle_handover_paints_nothing(monkeypatch: Any, tmp_path: Any) -> None:
     """The deliberate silence stays for the refresh nobody can lose anything to.
 

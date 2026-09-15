@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol
 
 # The one spelling of the session-directory name, owned by the cleanup policy's
 # vocabulary (``retention``) and imported here rather than re-spelled: the
@@ -390,13 +390,21 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: nothing enforces.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 
-#: The CAUSE token the SIGNAL drain commits with (``begin_drain``/
-#: ``begin_retire``): ``process._drain_for_signal`` passes it, ``_drain_for``
-#: re-passes it to the exit rung that finally disposes the runtime, and
-#: ``serving.ServingSessionHandle._retiring_refusal`` derives which departure a
-#: refusal is about from the cause the handle latched.
+#: The CAUSE token the SIGNAL drain commits with: ``process._drain_for_signal``
+#: passes it to ``begin_drain``, ``_drain_for`` re-passes it to the exit rung that
+#: finally disposes the runtime, and
+#: ``serving.ServingSessionHandle._retiring_refusal`` reads it back to name the
+#: departure a refusal is about.
 #:
-#: A CONSTANT RATHER THAN THREE LITERALS, because the reader is 150 lines away in
+#: IT IS THE ONLY DEPARTURE THAT ACCESSOR NAMES, deliberately. The build arm's
+#: own cause token is ``runtime-retired``, which ``/move`` latches too — the same
+#: retirement leaves a session whose directory changed, where no build is owed —
+#: so naming that cause a build would tell a moved session its loaded build is
+#: gone from disk. Which BUILD drain a refusal is about is read off the phrase
+#: the drain frame published instead (:func:`drain_phrase_for_frame`), which a
+#: build drain carries and a move does not.
+#:
+#: A CONSTANT RATHER THAN A LITERAL, because the reader is 150 lines away in
 #: another module and the failure mode of a rename is silent: the refusal would
 #: go on describing the build handover for a signalled runtime, which is exactly
 #: the falsehood agent review round 4 (MAJOR-2) filed. It is also a
@@ -451,8 +459,10 @@ def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
 
     Anything this cannot place returns ``""``, which the app paints with its
     neutral sentence: a trigger nobody has established must not inherit another
-    trigger's copy. The single reader is
-    ``AttachedSession._on_retiring_frame``.
+    trigger's copy. Two readers, both fed by :func:`drain_phrase_for_frame`:
+    ``AttachedSession._on_retiring_frame`` paints from the phrase, and
+    ``AttachClient`` remembers it for the refusals a runtime too old to name its
+    own departure hands back (agent review round 5, MINOR-1).
     """
     words = (reason or "").strip()
     if words.startswith(_SIGNAL_REASON_LABELS):
@@ -463,6 +473,28 @@ def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
         # passes none (``_drain_for_signal`` has no successor to name).
         return LEAVING_FOR_BUILD
     return ""
+
+
+def drain_phrase_for_frame(frame: Mapping[str, Any]) -> str:
+    """This departure's own words, for a reader that has to speak about it.
+
+    THE ONE ANSWER TO WHICH TRIGGER COMMITTED A DRAIN, called from both ends that
+    read a ``retiring`` frame: the host painting its notice
+    (``AttachedSession._on_retiring_frame``) and the attach client, which must
+    remember which departure refused a message it is about to hand back as a
+    typed refusal (``AttachClient._raise_for_reply_error`` — a runtime built
+    before the refusal's own ``error_trigger`` field cannot say it there). Two
+    copies of the precedence below would be two answers to one question.
+
+    THE PHRASE IS THE PRIMARY CARRIER: a runtime that writes ``leaving`` said
+    exactly which trigger committed the drain, and only the runtimes that do not
+    send it are read off their ``reason``/``to`` (:func:`leaving_phrase_for_frame`).
+    ``""`` is an answer rather than a failure — a frame that named no trigger at
+    all — and never another trigger's default.
+    """
+    return str(frame.get("leaving") or "") or leaving_phrase_for_frame(
+        str(frame.get("reason") or ""), str(frame.get("to") or "")
+    )
 
 
 class DiscoveryRecord(Protocol):
