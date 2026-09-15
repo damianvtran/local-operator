@@ -63,7 +63,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # A benchmark under scripts/ must read the tree it lives in, not whatever tree
 # the venv was installed from (AGENTS.md, "Every feature worktree owns its own
@@ -204,7 +204,7 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
     )
     marks: dict[str, float] = {}
     try:
-        inner = session._stream_fn
+        inner = cast(Any, session)._stream_fn
 
         class TimedStream:
             """Wrap the session's stream fn to timestamp the first delta."""
@@ -232,7 +232,7 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
 
         for label in ("cold_", "warm_"):
             base = time.perf_counter()
-            session._stream_fn = TimedStream(inner, base, label)
+            cast(Any, session)._stream_fn = TimedStream(inner, base, label)
             await session.prompt("Reply with one short sentence.")
             marks[label + "turn_ms"] = (time.perf_counter() - base) * 1000
         return marks
@@ -292,10 +292,12 @@ async def _serve(address: socket.socket) -> Any:
     return server, task
 
 
-async def _next_frame(lines: Any, predicate: Any, timeout: float = FRAME_TIMEOUT_S) -> dict:
+async def _next_frame(
+    lines: Any, predicate: Any, timeout: float = FRAME_TIMEOUT_S
+) -> dict[str, Any]:
     """Read SSE frames until one satisfies ``predicate``."""
 
-    async def read() -> dict:
+    async def read() -> dict[str, Any]:
         async for line in lines:
             if line.startswith("data: "):
                 frame = json.loads(line[6:])
@@ -306,7 +308,7 @@ async def _next_frame(lines: Any, predicate: Any, timeout: float = FRAME_TIMEOUT
     return await asyncio.wait_for(read(), timeout)
 
 
-def _is_text(frame: dict) -> bool:
+def _is_text(frame: dict[str, Any]) -> bool:
     """The first frame that carries streamed assistant text.
 
     The desktop wire projects streamed text as ``message_update`` frames with a

@@ -73,7 +73,7 @@ def test_an_interpreter_that_writes_needs_no_repair(
     """Nothing is refused, so imports cache themselves on the way past."""
     monkeypatch.setattr(sys, "dont_write_bytecode", False)
     assert bytecode.warm_bytecode_cache_in_background() is None
-    assert not list(prefix.rglob("*.pyc")) if prefix.exists() else True
+    assert not prefix.exists(), "a warm-up that declined must not have written anything"
 
 
 def test_a_cold_probe_is_reported_cold_then_warm(

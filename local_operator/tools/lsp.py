@@ -104,13 +104,22 @@ def _jedi() -> Any:
     return jedi
 
 
-def _refactoring_error() -> type[BaseException]:
-    """``jedi.RefactoringError``, or :class:`_NeverRaised` when jedi is absent."""
+def _refactoring_error() -> type[Exception]:
+    """``jedi.RefactoringError``, or :class:`_NeverRaised` when jedi is absent.
+
+    Typed ``type[Exception]`` rather than ``type[BaseException]`` because the
+    only thing anyone does with it is ``except`` it: the rename path binds the
+    caught value to ``last_error: Exception | None`` and renders it into an
+    error result, and a ``BaseException`` there is neither bindable nor
+    truthful — jedi's class derives from ``Exception``.
+    """
     resolved = globals().get("RefactoringError", _JEDI_UNRESOLVED)
     if resolved is not _JEDI_UNRESOLVED:
         return resolved  # type: ignore[no-any-return]
     module = _jedi()
-    error = _NeverRaised if module is None else module.RefactoringError
+    error: type[Exception] = _NeverRaised
+    if module is not None:
+        error = module.RefactoringError
     globals()["RefactoringError"] = error
     return error
 
