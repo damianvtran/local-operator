@@ -52,6 +52,65 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.17 — submitted 2026-09-15, pending review as of 2026-09-15
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.17 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; a revision of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `ae560d4d8` — the merge commit of #1167, i.e. `main` itself at dispatch time |
+| `extension/` tree hash | `bc3cfba6c13623b036588afd67cb109426821056` (`git rev-parse ae560d4d8:extension`) |
+| Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.12, v0.1.10 and earlier* |
+| Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.17`) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 35036966759](https://github.com/damianvtran/local-operator/actions/runs/35036966759), dispatched by `damianvtran` at 2026-09-15T23:43:57Z with `ref=main` `version=0.1.17` |
+| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.17` once the store reports the revision `STAGED` |
+| Store state | `PENDING_REVIEW` at 100% — the store reports `submittedItemRevisionStatus` `state=PENDING_REVIEW`, `crxVersion=0.1.17`, `deployPercentage=100` |
+| State last checked | 2026-09-15T23:52Z — promote run [35037244157](https://github.com/damianvtran/local-operator/actions/runs/35037244157), which refused at gate 1 and printed the store's own fields |
+| Approval timestamp | *pending — append when the review completes* |
+| Previously published | v0.1.15 (live 2026-09-14) |
+
+**One number, one tree — but read this before citing a SHA for 0.1.17.** The rule
+is that a submitted version names exactly one tree; what makes 0.1.17 clean is the
+**submission**, not the renumber that first took the number. `ef7f761c2`
+("chore(extension): renumber the tree to 0.1.17") named its own tree, and two
+commits afterwards changed **bundled extension source** without a bump:
+
+- **`724fd6fea`** — `extension/src/state.ts`, which is imported by all three build
+  entries (`src/worker.ts`, `src/popup/popup.ts`, `src/options/options.ts`)
+- **`a6f980e49`** — `extension/src/driver/deadline.ts`, re-exported by `src/settle.ts`
+
+So the tree `ef7f761c2` named **was never submitted**, and the store's `0.1.17` is
+`ae560d4d8` — the two commits above are *inside* what shipped. Anyone auditing from
+the renumber commit alone will pin the wrong tree: use the table above.
+
+**A renumber to 0.1.18 was opened (#1169) and closed unmerged, deliberately.**
+Merging it would have left `main` at 0.1.18 while the store's in-review revision is
+0.1.17 built from 0.1.17's tree — `main` ahead of the queue with no submission
+behind it — and the obvious follow-through, staging 0.1.18, would have re-submitted
+identical content for another ~4.5-day review of a `debugger` + broad-host
+extension. The branch remains the template if a future submission needs a number
+above 0.1.17: it moved all seven version sites and regenerated **both** generated
+targets (`extension/src/protocol.gen.ts` and `extension/ui-vendor/`), with
+`gen_ts --check` green. That generator's two-target behaviour is worth knowing when
+the next bump happens — the vendored copy is not optional, because the generated
+header carries an input hash over `protocol.py`, and editing only the extension
+target leaves that hash stale.
+
+**Promotion route, second occurrence of the same gap.** As with v0.1.12, the
+publication of v0.1.15 has **no successful `chrome-web-store-promote.yml` run**
+behind it — the last successful promote anywhere remains 0.1.10's (run 34610983340,
+2026-09-11), and every promote dispatch since has failed. Google's publish
+reference says `STAGED_PUBLISH` stages on approval and is then published *by the
+developer* (against `DEFAULT_PUBLISH`, which publishes on approval), so an approved
+staged revision does not go live by itself: the publication was an explicit
+developer action taken from the dashboard or an out-of-band API call, by an
+operator or session this checkout holds no record of. Our documented sequence
+("wait for `STAGED`, then promote") is not implicated, but it is also not what
+happened, twice — worth resolving in the runbook rather than re-deriving per
+release.
+
 ## v0.1.15 — on `main`, NOT submitted (as of 2026-09-14)
 
 The number moved so that the extension version pins exactly one tree again.
@@ -86,6 +145,18 @@ moves with it (`extension/manifest.json` and `extension/package.json` are the
 source of truth; a unit test pins the constant to them), so the update advisory
 keeps telling users a newer extension exists without ever implying the store can
 serve it yet.
+
+**Post-release addendum (appended 2026-09-15).** This entry was written when the
+number had been taken but nothing had been dispatched. It **was** subsequently
+submitted: `chrome-web-store.yml` run 34886613253, 2026-09-14T19:23:41Z,
+`STAGED_PUBLISH` → `PENDING_REVIEW`; the store now reports it **`PUBLISHED` at
+100%** (`publishedItemRevisionStatus` `crxVersion=0.1.15`, `deployPercentage=100`,
+read 2026-09-15). Two rows below are consequently stale — `Store state` and
+`Promotion route` — and the heading's "NOT submitted" is superseded by this
+addendum. The heading is left standing rather than rewritten, because this file
+does not rewrite a shipped entry. As with v0.1.12, no successful
+`chrome-web-store-promote.yml` run exists behind that publication; see the v0.1.17
+entry for the full reading.
 
 ## v0.1.13 and v0.1.14 — two trees landed on `main`, NEITHER submitted
 
