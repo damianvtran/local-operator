@@ -75,6 +75,7 @@ from local_operator.mcp.config import (
     load_all_mcp_configs,
     validate_server_config,
 )
+from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
     build_agent_tool,
     create_mcp_tool_name,
@@ -1035,7 +1036,9 @@ class McpServerStderr:
         """Record one line of the child's stderr."""
         # Stripped: the child may ignore CHILD_QUIET_ENV, and a raw CSI in the
         # log file corrupts `less`/`tail` the same way it corrupted the frame.
-        text = strip_control_sequences(line).rstrip()
+        from local_operator.mcp.redaction import scrub
+
+        text = scrub(strip_control_sequences(line)).rstrip()
         if not text:
             return
         if len(text) > STDERR_LINE_LIMIT:
@@ -1053,12 +1056,40 @@ class McpServerStderr:
         return bool(self._tail)
 
     def tail_text(self) -> str:
-        """The retained tail as one block of text."""
-        return "\n".join(self._tail)
+        """The retained tail as one block of text, scrubbed at READ time.
+
+        Scrubbed twice on purpose. ``feed`` already scrubbed these bytes before
+        they were retained, which is the control; this read-time pass covers the
+        one ordering the write-time pass cannot — a credential registered AFTER
+        a line was retained (a value entered mid-session, then a retry that
+        quotes an older line). It costs one scan of at most
+        ``STDERR_TAIL_LINES`` lines, and the alternative is a retained line that
+        was unsafe by the time anybody read it.
+        """
+        from local_operator.mcp.redaction import scrub
+
+        return scrub("\n".join(self._tail))
 
     def quoted_tail(self, lines: int = STDERR_QUOTED_LINES) -> str:
-        """The last few lines, joined and bounded, for a one-line error message."""
-        text = " / ".join(list(self._tail)[-lines:])
+        """The last few lines, joined and bounded, for a one-line error message.
+
+        Scrubbed at READ time for the same reason :meth:`tail_text` is: ``feed``
+        scrubbed these bytes before they were retained, which covers a value
+        that was already registered, but a credential entered mid-session and
+        then quoted by a retry of an OLDER line would go out raw — and this is
+        the method ``explain`` builds the raised error from, not a display-only
+        helper. Two read paths over one deque must not disagree about the same
+        bytes (agent review R-3).
+
+        The ``" / "`` join is a residual LIMIT rather than a scrubbed sink: a
+        value the child itself split across a newline comes back reassembled by
+        it (``invalid token: synthetic-to / ken-abcdefghijklmnop``). No
+        line-oriented sink can know two lines were one token, so this is
+        recorded rather than fixed.
+        """
+        from local_operator.mcp.redaction import scrub
+
+        text = scrub(" / ".join(list(self._tail)[-lines:]))
         if len(text) <= STDERR_QUOTED_CHARS:
             return text
         return text[:STDERR_QUOTED_CHARS].rstrip() + "…"
@@ -1069,6 +1100,9 @@ class McpServerStderr:
         Once: the connect path and the transport teardown both notice the same
         dead child, and one failure deserves one report.
         """
+        from local_operator.mcp.redaction import scrub
+
+        reason = scrub(reason)
         if self._reported or not self._tail:
             return
         self._reported = True
@@ -1087,10 +1121,44 @@ class McpServerStderr:
         error whose text ("") says nothing at all, while the reason it died is
         sitting in the tail. This is what puts that reason in
         ``McpStartupOutcome.failures`` and therefore in the TUI's notice.
+
+        Both arms return text that is already scrubbed: the tail arm because it
+        is BUILT from ``detail``, the tail-less one because
+        ``sanitize_exception`` has rewritten the exception's own message IN
+        PLACE — ``args`` for a builtin, and ``error.message`` for the SDK's
+        ``MCPError``, which is the shape a server echoing a rejected credential
+        in a JSON-RPC error arrives in.
         """
+        from local_operator.mcp.redaction import sanitize_exception, scrub
+
+        # The cause's own text is sanitized IN PLACE, not dropped: the raised
+        # exception keeps its chain (which the round reads as evidence) while the
+        # value becomes unreachable through it. See `sanitize_exception`.
+        sanitize_exception(exc)
+        detail = scrub(str(exc)).strip() or type(exc).__name__
         if not self._tail:
-            return exc
-        detail = str(exc).strip() or type(exc).__name__
+            # No child to quote — every REMOTE transport (which spawns nothing)
+            # and any stdio child that stayed quiet — so `exc` IS the diagnostic
+            # and the caller publishes it verbatim: the connect round stores
+            # `str()` of it in `_startup_failures`, which the toast, the
+            # transcript notice, `/mcp` and the desktop projection all render.
+            #
+            # Returned UNCHANGED where the in-place pass left nothing to scrub,
+            # rather than rebuilt from `detail` the way the tail arm is: a
+            # rebuilt `McpConnectionError` would drop `McpTransportError`, and
+            # `_is_network_failure` reads that TYPE off the raised object — it
+            # walks exception groups, not `__cause__` — to decide whether a
+            # failure may be called the user's connectivity being down. This is
+            # the arm every HTTP connect takes, so it is where that label
+            # matters most. The residual check keeps the guarantee either way.
+            if scrub(str(exc)) == str(exc):
+                return exc
+            # Unreachable for the types raised here and by the SDKs (their text
+            # lives in `args` or in `error.message`, both rewritten above); kept
+            # as the fail-closed arm for a type composing its rendered text from
+            # something neither pass can reach. Losing the transport label is
+            # the lesser fault next to publishing a credential.
+            return McpConnectionError(detail)
         return McpConnectionError(f"{detail}: {self.quoted_tail()}")
 
 
@@ -1208,10 +1276,20 @@ async def _stdio_transport(
         if stderr is None:  # pragma: no cover - PIPE always yields one
             stderr_drained.set()
             return
+        from local_operator.mcp.redaction import StderrRedactor, values
+
+        # Line-bounded holdback: this sink must hand over a COMPLETE line as soon
+        # as it arrives (see the class), because a child that prints its startup
+        # line and then goes quiet is the normal case for a stdio server.
+        redactor = StderrRedactor(values())
         text_stream = TextReceiveStream(stderr, encoding="utf-8", errors="replace")
         try:
             buffer = ""
             async for chunk in text_stream:
+                # Scrub BEFORE line splitting AND before the overflow bound: either
+                # boundary may bisect a credential, and the retained line is what
+                # the error path later quotes.
+                chunk = redactor.feed(chunk.encode())
                 lines = (buffer + chunk).split("\n")
                 buffer = lines.pop()
                 # A single unterminated line must not grow without bound: a
@@ -1222,6 +1300,7 @@ async def _stdio_transport(
                     buffer = ""
                 for line in lines:
                     stderr_log.feed(line)
+            buffer += redactor.feed(b"", final=True)
             if buffer:
                 stderr_log.feed(buffer)
         except Exception:
@@ -1506,7 +1585,12 @@ class ServerConnection:
     """One live MCP connection: session plus the resources that own it."""
 
     name: str
-    config: MCPServerConfig
+    # ``repr=False``: the config is not a secret in itself, but six registration
+    # paths install one on a live connection and a dataclass repr prints every
+    # field, so a future ``logger.debug("%r", conn)`` would be one edit away
+    # from a header value in the log. See ``_connect_server`` for which config
+    # a connection carries.
+    config: MCPServerConfig = field(repr=False)
     # ``None`` only during the window in which the transport callbacks close
     # over this object while its session is still being constructed; use
     # :attr:`live_session` everywhere else.
@@ -1580,8 +1664,13 @@ class McpManager:
         cwd: str | os.PathLike[str],
         tool_cache: McpToolCache | None = None,
         auth_store: ManagedAuthStore | None = None,
+        *,
+        secret_base: os.PathLike[str] | None = None,
+        register_secret: Callable[[str], object] | None = None,
     ) -> None:
         self.cwd = str(cwd)
+        self.secret_base = secret_base
+        self._register_secret = register_secret
         self.tool_cache = tool_cache
         # The session's AuthStore, when injected: every OAuth MCP server's
         # token storage shares it instead of opening its own SQLite
@@ -1832,8 +1921,12 @@ class McpManager:
             cfg.model_copy(update={"timeout": timeout_ms}) if timeout_ms is not None else cfg
         )
         conn = await self._connect_server(name, connect_cfg, interactive=interactive)
-        # The live connection must carry the pristine config too — tool calls
-        # read their timeout from conn.config, not from _configs.
+        # ``_connect_server`` installs the PRISTINE config it was handed — the
+        # reference form, no resolved values — but for a login that config is the
+        # widened copy above, and tool calls read their timeout from
+        # ``conn.config``, not from ``_configs``. So this restores the budget for
+        # the connection's whole life; the secret-reference half is already
+        # guaranteed by the connect seam.
         conn.config = cfg
         # The widened budget also became the SESSION's default read timeout
         # (ClientSession(read_timeout_seconds=...) baked in at connect), which
@@ -2218,9 +2311,46 @@ class McpManager:
         stored refresh token against the DISCOVERED token endpoint, race-free
         across concurrently starting sessions, so a day-old access token never
         forces a browser grant on startup.
+
+        ``env`` and ``headers`` arrive as ``${NAME}`` secret references and are
+        resolved to their values first (see :mod:`local_operator.mcp.secret_refs`),
+        so the child process and the HTTP client are never handed the reference
+        text. The resolution is per connect ATTEMPT on purpose — a credential
+        added while the session is running is picked up by a reconnect — and the
+        reference form is what both ``self._configs`` (which ``config_digest``
+        hashes for the tool cache) and the live :class:`ServerConnection` keep, so
+        no resolved value outlives the transport that needed it.
         """
-        timeout_s = resolve_mcp_timeout_s(cfg)
-        await self._ensure_oauth_fresh(name, cfg)
+        from pathlib import Path
+
+        from local_operator.mcp.secret_refs import has_references
+
+        # Registration is COLLECTED in the resolver and applied here on the loop:
+        # the value goes into live redaction sets that this loop iterates while
+        # scrubbing output, and adding to a set another thread is iterating is a
+        # RuntimeError in the response path rather than a scrubbed line.
+        resolved_values: list[str] = []
+        resolve_kwargs = {
+            "base": Path(self.secret_base) if self.secret_base is not None else None,
+            "register": resolved_values.append,
+        }
+        if has_references(cfg):
+            # ONLY here is there blocking disk/broker work to keep off the loop.
+            # A config with no reference resolves to itself in one comparison and
+            # reads no store, so hoisting it would add a thread hop to every
+            # connect and perturb the connect round's cancellation timing for no
+            # benefit at all.
+            transport_cfg = await asyncio.to_thread(
+                resolve_config_secrets, name, cfg, **resolve_kwargs
+            )
+        else:
+            transport_cfg = resolve_config_secrets(name, cfg, **resolve_kwargs)
+        # BEFORE the child can start: the value has to be scrubbable by the time
+        # anything it prints could reach a sink.
+        for value in resolved_values:
+            self.register_secret_redaction(value)
+        timeout_s = resolve_mcp_timeout_s(transport_cfg)
+        await self._ensure_oauth_fresh(name, transport_cfg)
         stack = AsyncExitStack()
         # One collector per connect ATTEMPT, so a retry never quotes the
         # previous attempt's stderr as this one's reason. Made unconditionally:
@@ -2239,12 +2369,21 @@ class McpManager:
             conn = await self._open_transport_and_session(
                 stack,
                 name,
-                cfg,
+                transport_cfg,
                 timeout_s,
                 stderr_log,
                 interactive=interactive,
                 challenge_watcher=challenge_watcher,
             )
+            # The live connection carries the PRISTINE config, never the resolved
+            # one: ``ServerConnection`` is a plain dataclass, six registration
+            # paths install it, and the only things that read ``conn.config`` are
+            # the timeout resolver and the command/args security log — neither of
+            # which needs a value. Holding the reference form here keeps resolved
+            # secrets off an object whose repr and lifetime are not this seam's to
+            # control, and it is what the interactive login path already restores
+            # for the same reason (see ``connect_configured_server``).
+            conn.config = cfg
             tools = await self._list_all_tools(conn.live_session)
         except BaseException as exc:
             # Tear down FIRST: for a stdio child this stops the process and
@@ -2465,6 +2604,15 @@ class McpManager:
             if challenge is not None:
                 raise challenge from exc
             stderr_log.report_failure(f"failed to connect: {exc}")
+            # The CAUSE is kept, deliberately, and `from exc` is not a formality:
+            # the round reads the chained exception to tell a cancellation apart
+            # from a network failure, so suppressing it (`from None`) changed how
+            # a bare-cancellation attempt SETTLED and left the startup round
+            # waiting until its ceiling
+            # (`test_a_bare_cancellation_settles_the_round_as_a_network_failure`).
+            # Keeping the chain while losing the secret means sanitizing the
+            # cause's own text instead of dropping it — see
+            # `redaction.sanitize_exception`, which `explain` calls.
             raise stderr_log.explain(exc) from exc
 
         conn.tools = tools
@@ -2475,6 +2623,13 @@ class McpManager:
                 config_digest(self._configs.get(name)),
             )
         return conn
+
+    def register_secret_redaction(self, value: str) -> None:
+        from local_operator.mcp.redaction import register
+
+        register(value)
+        if self._register_secret is not None:
+            self._register_secret(value)
 
     async def _open_transport_and_session(
         self,
@@ -2488,6 +2643,10 @@ class McpManager:
         challenge_watcher: "_AuthChallengeWatcher | None" = None,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
+
+        ``cfg`` is the TRANSPORT config: the resolved one from
+        ``_connect_server``, whose references have already been substituted, so
+        this helper never sees a ``${NAME}`` and never touches the store.
 
         ``stderr_log`` is what the stdio transport writes the child's stderr to
         instead of the terminal. The remote transports spawn nothing and leave
@@ -2896,7 +3055,15 @@ class McpManager:
         transport = _transport_failure_text(exc, url)
         if transport is not None:
             return transport
-        return str(exc)
+        # The UNCLASSIFIED arm, scrubbed: whatever text this exception carries is
+        # what the four surfaces render, and it is where a server that echoed a
+        # rejected credential in a JSON-RPC error message lands (`MCPError` keeps
+        # that message in `error.message`, so the text goes out unchanged unless
+        # the value was registered for scrubbing). The classified arms above
+        # compose their own text from exception codes, never from a server's.
+        from local_operator.mcp.redaction import scrub
+
+        return scrub(str(exc))
 
     def _server_url(self, name: str) -> str | None:
         """``name``'s configured endpoint, or ``None`` when it has none (stdio).
@@ -3072,8 +3239,19 @@ class McpManager:
         ``self._startup_failures[name]`` goes through here, and the flag is
         always recomputed from the exception rather than inferred from the
         rendered text.
+
+        Scrubbed HERE, at that single write path, because this map is published:
+        it becomes :class:`McpStartupOutcome.failures`, which the startup toast,
+        the durable transcript notice and ``/mcp`` render, and which
+        ``frontend_state`` projects into ``mcp_startup`` and
+        ``McpServerState.error`` — a module that contains no redaction call of
+        its own (agent review R-1). One scrub here covers every producer of a
+        failure text, including any that composed one without consulting
+        ``redaction``, and it is a no-op for text that never carried a value.
         """
-        self._startup_failures[name] = message
+        from local_operator.mcp.redaction import scrub
+
+        self._startup_failures[name] = scrub(message)
         if network:
             self._startup_network.add(name)
         else:

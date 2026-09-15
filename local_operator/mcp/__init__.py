@@ -94,6 +94,9 @@ async def discover_and_load_mcp_tools(
     cwd: str,
     tool_cache: McpToolCache | None = None,
     auth_store: ManagedAuthStore | None = None,
+    *,
+    secret_base=None,
+    register_secret=None,
 ) -> tuple[McpManager, list[AgentTool], list[dict[str, str]]]:
     """Convenience loader that discovers and loads MCP tools in one pass.
 
@@ -123,10 +126,25 @@ async def discover_and_load_mcp_tools(
     ``local_operator.mcp.McpManager`` stays the single seam a caller (or a test)
     can substitute: reading the class straight off ``local_operator.mcp.manager``
     would quietly stop honouring a patch of the documented export.
+
+    ``secret_base`` and ``register_secret`` are the credential seam the session
+    wiring passes and a bare call leaves ``None``: the config root whose ENCRYPTED
+    store the ``${NAME}`` references in a server's ``env``/``headers`` resolve
+    against, and the sink that registers each resolved value for scrubbing. Both
+    are forwarded rather than defaulted because a manager built without them
+    resolves against the wrong store and registers nothing for the MCP sinks to
+    sanitize — the two ways a resolved credential has leaked before
+    (``mcp/secret_refs.py``, ``mcp/redaction.py``).
     """
     from local_operator import mcp as mcp_package
 
-    manager = mcp_package.McpManager(cwd, tool_cache or McpToolCache(), auth_store=auth_store)
+    manager = mcp_package.McpManager(
+        cwd,
+        tool_cache or McpToolCache(),
+        auth_store=auth_store,
+        secret_base=secret_base,
+        register_secret=register_secret,
+    )
     try:
         result = await manager.discover_and_connect()
     except Exception as exc:

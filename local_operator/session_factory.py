@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import inspect
 import logging
 import os
 import sys
@@ -2262,6 +2263,37 @@ def _fire_mcp_sink(session: Session) -> None:
             logger.warning("MCP outcome refresh of the frontend store failed", exc_info=True)
 
 
+def _accepted_kwargs(callee: Callable[..., Any], **candidates: Any) -> dict[str, Any]:
+    """``candidates`` narrowed to the keyword arguments ``callee`` accepts.
+
+    **Why narrow rather than pass.** ``discover_and_load_mcp_tools`` grew the
+    additive ``secret_base``/``register_secret`` seam, and this repo patches
+    discovery with the pre-seam signature (``(cwd, auth_store=None)``) in about
+    twenty places: passing the keywords unconditionally turned every one of those
+    doubles into a ``TypeError``, which ``wire_mcp_into_session``'s degradation
+    handler then reported as "no MCP tools" — silent, and 22 tests red on the PR
+    head (QA Q3). The same shape reaches any embedder's own discovery wrapper, so
+    the seam tolerates a callee that predates it instead of demanding it grow two
+    parameters: a callee declaring both names (the real function) gets both, a
+    callee taking ``**kwargs`` gets both, and a pre-seam callee gets exactly the
+    call it was written for.
+
+    What that costs is stated rather than implied: for such a callee the seam is
+    NOT applied, so its manager resolves against the process config dir and
+    registers no redaction sink. That is correct for a double (which returns its
+    own canned result and builds no manager) and is why the fallback is a
+    signature probe rather than a ``try``/``except TypeError`` retry — a retry
+    would also swallow a ``TypeError`` raised from inside the real discovery.
+    """
+    try:
+        parameters = inspect.signature(callee).parameters
+    except (TypeError, ValueError):  # a C callable: assume it takes the seam
+        return dict(candidates)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return dict(candidates)
+    return {name: value for name, value in candidates.items() if name in parameters}
+
+
 async def wire_mcp_into_session(
     session: Session,
     builtin_tools: list[AgentTool],
@@ -2316,7 +2348,22 @@ async def wire_mcp_into_session(
         return None
 
     try:
-        manager, mcp_tools, errors = await discover_and_load_mcp_tools(cwd, auth_store=auth_store)
+        # The owner's config root (which store the references resolve against) and
+        # its redaction sink, taken from the session rather than defaulted: a
+        # manager built without them would read the wrong store and register
+        # nothing for the MCP sinks to scrub. Both are getattr-probed because a
+        # reduced host may implement neither, and the manager treats `None` as
+        # "no registration" rather than requiring a stub.
+        variables = getattr(session, "variables", None)
+        manager, mcp_tools, errors = await discover_and_load_mcp_tools(
+            cwd,
+            auth_store=auth_store,
+            **_accepted_kwargs(
+                discover_and_load_mcp_tools,
+                secret_base=getattr(session, "config_dir", None),
+                register_secret=getattr(variables, "register_redaction", None),
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
         # Discovery raising IS reportable, unlike the import gap above: reaching
         # this line means the config layer was present and still could not be

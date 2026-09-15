@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 114 public members and a POSITIVE
+    than stylistic. This protocol carries 115 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -597,7 +597,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
     112 once the lease-warm retry needed ``recovering``, 113 once
     ``restored_spend`` joined the shared surface a viewer inherits, 114 once
-    session code memory joined the session contract with ``variables_op``), so
+    session code memory joined the session contract with ``variables_op``, 115
+    once ``mcp_credentials_op`` joined ``ViewerSessionProtocol``), so
     recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1092,6 +1093,26 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         images: Sequence[ImageContent] | None = None,
     ) -> Any:
         """Run a slash command on the runtime and return its result."""
+        ...
+
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Write declared MCP credential values to the RUNTIME's encrypted store.
+
+        Declared for the same reason as :meth:`warm_runtime` below: the desktop
+        bridge reaches it through ``bridge.remote`` on
+        ``POST /v1/desktop/sessions/{id}/mcp/credentials``, so a rename here has
+        to be a type error rather than a silently missing capability — this is the
+        route that stores the key a UI-added MCP server authenticates with.
+
+        A VIEWER forwards it to the owner rather than writing locally: the store
+        it resolves against is the one the runtime's connects read, and a value
+        written anywhere else would be a copy no server ever sees. ``body`` is the
+        validated ``MCPCredentials`` payload (``name``/``values``/
+        ``confirmed_replace``), and the answer is the frozen envelope
+        (``{code, saved_ids, failed_ids, name}``) — never the value, which is why
+        the shape carries ids only. Raises when there is no owner to write
+        through, unlike the read-side probes that report a disconnected state.
+        """
         ...
 
     def move_will_wait(self) -> bool:

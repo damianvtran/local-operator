@@ -1468,6 +1468,10 @@ class AttachClient:
         """
         return await self._request_payload("credential", action=action, key=key, value=value)
 
+    async def mcp_credentials(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Dedicated value transport: never a slash/receipt payload."""
+        return await self._request_payload("mcp_credentials", body=body)
+
     async def variables(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> Any:
