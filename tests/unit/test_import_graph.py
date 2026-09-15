@@ -163,6 +163,35 @@ def test_session_factory_import_stays_off_the_heavy_stacks(
     _assert_absent(session_factory_modules, "textual", "TUI front end; the server has no terminal")
 
 
+# --- The tool registry -------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def tools_registry_modules() -> set[str]:
+    """Modules loaded by importing the table every session build walks."""
+    return _imported_modules("local_operator.tools.registry")
+
+
+def test_tool_registry_import_does_not_load_jedi(
+    tools_registry_modules: set[str],
+) -> None:
+    # jedi is the `lsp` extra, and its import executes the whole inference
+    # graph — 108 ms measured on an M-series box, against ~600 ms for the whole
+    # of create_session with its own imports pre-warmed. tools/registry.py
+    # imports the lsp module EAGERLY to fill its factory table, so a
+    # module-scope `import jedi` in tools/lsp.py puts that 108 ms on every
+    # session construction whether or not the model ever asks a symbol
+    # question. On the desktop plane a session construction is a fresh runtime
+    # child, which makes it a cost paid on every attach. tools/lsp.py now
+    # probes with find_spec and imports on first USE; this pin is what makes a
+    # revert loud.
+    _assert_absent(
+        tools_registry_modules,
+        "jedi",
+        "108 ms of inference-graph import per session build; only an `lsp` call needs it",
+    )
+
+
 # --- Per-session model configuration -----------------------------------------
 
 

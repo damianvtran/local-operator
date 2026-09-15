@@ -571,3 +571,71 @@ class TestThreadSafetyForOffloadedEstimation:
             )
         finally:
             mod._compute_tokens = real_compute
+
+
+# --- first-use warm (the attach-latency seam) --------------------------------
+
+
+def test_warm_tokenizer_loads_the_encoding(monkeypatch):
+    """``warm_tokenizer`` is the same load first use would do, brought forward.
+
+    Building cl100k_base is 122 ms cold against 0.004 ms warm on this machine,
+    and its first use is ``measure_request`` — which the stream function awaits
+    before it opens the provider request. Bring it forward to boot and the
+    first turn does not pay it.
+    """
+    monkeypatch.setattr(tokens_mod, "_ENCODING", None)
+    monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", False)
+
+    tokens_mod.warm_tokenizer()
+
+    assert tokens_mod._ENCODING is not None or tokens_mod._ENCODING_FAILED
+
+
+def test_warm_tokenizer_is_idempotent(monkeypatch):
+    """The second call must not rebuild the table — the singleton is the point."""
+    monkeypatch.setattr(tokens_mod, "_ENCODING", None)
+    monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", False)
+    tokens_mod.warm_tokenizer()
+    loaded = tokens_mod._ENCODING
+
+    tokens_mod.warm_tokenizer()
+
+    assert tokens_mod._ENCODING is loaded
+
+
+def test_warm_tokenizer_never_raises(monkeypatch):
+    """A warm-up must not be the thing that reports a missing extra."""
+
+    def explode():
+        raise RuntimeError("tiktoken is having a day")
+
+    monkeypatch.setattr(tokens_mod, "_get_encoding", explode)
+    tokens_mod.warm_tokenizer()  # must not raise
+
+
+def test_background_warm_returns_none_when_already_loaded(monkeypatch):
+    """Nothing to wait for means no thread and no scheduling cost."""
+    monkeypatch.setattr(tokens_mod, "_ENCODING", object())
+    monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", False)
+    assert tokens_mod.warm_tokenizer_in_background() is None
+
+
+def test_background_warm_refuses_to_retry_a_failed_load(monkeypatch):
+    """A host without the tokenizer extra must not spawn a thread per boot."""
+    monkeypatch.setattr(tokens_mod, "_ENCODING", None)
+    monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", True)
+    assert tokens_mod.warm_tokenizer_in_background() is None
+
+
+def test_background_warm_loads_on_a_thread(monkeypatch):
+    """The cold path returns a started thread, and the load lands on it."""
+    monkeypatch.setattr(tokens_mod, "_ENCODING", None)
+    monkeypatch.setattr(tokens_mod, "_ENCODING_FAILED", False)
+
+    thread = tokens_mod.warm_tokenizer_in_background()
+
+    assert thread is not None
+    thread.join(60)
+    assert not thread.is_alive()
+    assert tokens_mod._ENCODING is not None or tokens_mod._ENCODING_FAILED

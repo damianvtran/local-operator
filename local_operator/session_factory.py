@@ -157,6 +157,14 @@ def warm_session_imports() -> None:
     16 ms worst case, against 699 ms for the unwarmed factory. The factory
     itself is unchanged: it still imports what it needs, and finds it cached.
 
+    The TOKENIZER rides along, and not for the same reason as the modules
+    above: it is not an import, so nothing else warms it, but its first use
+    sits inside the first turn's critical path all the same (122 ms to build
+    cl100k_base's rank table — see
+    :func:`local_operator.compaction.tokens.warm_tokenizer`). A TUI pays that
+    cost once and keeps it; paying it at BOOT instead means the user's first
+    prompt does not.
+
     Never raises. An optional extra that is not installed (``mcp``) or a module
     that fails to import is the factory's problem to report, in the factory's
     own words, at the point where it actually needs it.
@@ -168,6 +176,29 @@ def warm_session_imports() -> None:
             importlib.import_module(name)
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
             logger.debug("prewarm skipped %s", name, exc_info=True)
+
+    # Both of these are guarded INCLUDING their imports, so this function keeps
+    # the contract its docstring states. Neither callee raises on its own; the
+    # import statement is the half a caller cannot see, and this one runs from
+    # a boot thread where a raise would surface as a silent missing warm.
+    try:
+        from local_operator.compaction.tokens import warm_tokenizer
+
+        warm_tokenizer()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("tokenizer prewarm skipped", exc_info=True)
+
+    # And the bytecode cache, for the environments where a later process
+    # cannot write its own: see ``local_operator.bytecode``. It is a no-op
+    # unless this interpreter is under ``PYTHONDONTWRITEBYTECODE`` with a
+    # ``PYTHONPYCACHEPREFIX``, and it is backgrounded because the work belongs
+    # to the NEXT process, not to this one.
+    try:
+        from local_operator.bytecode import warm_bytecode_cache_in_background
+
+        warm_bytecode_cache_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("bytecode prewarm skipped", exc_info=True)
 
 
 def coerce_compaction_settings(raw: object) -> CompactionSettings | None:
