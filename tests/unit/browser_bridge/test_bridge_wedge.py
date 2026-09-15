@@ -1043,10 +1043,11 @@ class _RecoverFailure:
     """A browser resource whose recovery preamble raises the given error.
 
     Deliberately the REAL seams `execute_browser` drives (`lock`, `initialize`,
-    `recover`, `recovered`) rather than a stubbed render helper: the defect this
-    stands in for was a GREEN guard over a broken path, because the guard called
-    `format_error` directly with the default empty `action` while the tool passed
-    the daemon's verb name (design D2-1, review R2-2).
+    `recover`, `recovered`, and — since the ownership lane became host-selected —
+    `host`) rather than a stubbed render helper: the defect this stands in for was
+    a GREEN guard over a broken path, because the guard called `format_error`
+    directly with the default empty `action` while the tool passed the daemon's
+    verb name (design D2-1, review R2-2).
     """
 
     def __init__(self, exc: BaseException, *, recovered: bool) -> None:
@@ -1055,6 +1056,9 @@ class _RecoverFailure:
         self.record: dict[str, Any] = {"surface_id": "bridge:9:nonce"}
         self.recovered = recovered
         self.lock = asyncio.Lock()
+        # The lane's selected host, in the resource's own record spelling; ""
+        # means the bridge, which is what an unselected session gets.
+        self.host = ""
 
     def initialize(self) -> None:
         return None

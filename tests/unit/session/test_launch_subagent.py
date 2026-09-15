@@ -188,7 +188,7 @@ async def test_completed_subagent_disposes_its_owned_browser_surface(tmp_path, m
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     calls: list[tuple[str, dict[str, str], str]] = []
 
-    async def fake_bridge_call(tool_call_id, action, params, *, surface=""):
+    async def fake_bridge_call(tool_call_id, action, params, *, surface="", client=None):
         calls.append((action, params, surface))
         return {}, None
 
