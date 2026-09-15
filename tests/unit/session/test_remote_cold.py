@@ -964,6 +964,223 @@ async def test_a_restored_reading_is_dropped_when_the_model_changed(
         await viewer.dispose()
 
 
+def test_the_restore_adopts_a_local_window_with_the_tokens_measured_against_it() -> None:
+    """Finding 1: the numerator and its denominator come from ONE source.
+
+    A local endpoint's spec is METADATA-RICH by construction
+    (``providers/local.py`` sets ``context_metadata_resolved``), so the window
+    branch's old gate — "adopt the checkpoint's window unless the fresh spec has
+    resolved metadata" — stopped firing for the whole local population the day the
+    cold pair started being resolved. That is a numerator from the checkpoint under
+    a denominator from the endpoint: 20,000 tokens from a 32,768 checkpoint read as
+    ``488.2%`` of the endpoint's current 4,096 (review round 1, minor 1).
+
+    The gate is now ``_restored_pair`` — the same one the NUMERATOR is taken on —
+    so the two halves cannot disagree, and the assertion below checks both of them
+    rather than only the spec.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+
+    # The local shape: the endpoint's answer for THIS model (the fallback working
+    # budget when no listing row describes it), carried with the resolved flag.
+    state = FrontendSessionState(
+        session_id="coldlocal01",
+        epoch="cold",
+        selected_model=FrontendModelSpec(
+            provider="ollama",
+            model_id="qwen3:32b",
+            context_window=4_096,
+            context_metadata_resolved=True,
+        ),
+        effective_model=FrontendModelSpec(
+            provider="ollama",
+            model_id="qwen3:32b",
+            context_window=4_096,
+            context_metadata_resolved=True,
+        ),
+    )
+    durable = FrontendSessionState(
+        session_id="coldlocal01",
+        epoch="previous-owner",
+        context_tokens=20_000,
+        context_window=32_768,
+        selected_model=FrontendModelSpec(
+            provider="ollama", model_id="qwen3:32b", context_window=32_768
+        ),
+    )
+
+    context = AttachedSession._consistent_context(state, durable)
+    specs = AttachedSession._restored_model_specs(state, durable)
+
+    window = specs["selected_model"].context_window
+    assert window == 32_768, (
+        "the checkpoint's window is the one those tokens were measured against, so "
+        "adopting its numerator means adopting its denominator too"
+    )
+    assert specs["effective_model"].context_window == window, (
+        "the band reads the EFFECTIVE spec for its label and window, so both halves "
+        "of the state must carry the same number"
+    )
+    assert (
+        context["context_tokens"] == 20_000 and context["context_window"] == window
+    ), "the state-level reading is the same pair, so no paint order can mix them"
+    assert (
+        context["context_tokens"] / window < 1.0
+    ), "the frame must not paint a context percentage over 100%"
+
+
+@pytest.mark.parametrize(
+    "fresh_name",
+    [
+        # Naming refuses an id handed back as a name ...
+        "zzz-9",
+        # ... and a listing name that belongs to ANOTHER curated model, so a route
+        # cannot borrow a direct provider's marketing string.
+        "Claude Opus 5",
+    ],
+)
+def test_a_name_naming_refuses_is_adopted_from_the_checkpoint(fresh_name: str) -> None:
+    """Finding 2: ask naming's rule, do not re-derive one of its refusals.
+
+    The adoption gate used to re-implement naming's ID-ECHO refusal alone, so a
+    fresh name refused for one of the rule's other reasons — an ambiguity, a
+    borrowed curated name — blocked the adoption forever: the first frame kept the
+    bare id while the conversation's own checkpoint held a name naming would have
+    accepted (review round 1, minor 2). The gate now asks ``model_label`` whether
+    the render resolved a name at all, which is the same question the band answers
+    when it paints.
+    """
+    from local_operator.model.naming import model_label
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+
+    provider, model_id = "deepseek", "zzz-9"
+    assert (
+        model_label(provider, model_id, fresh_name).full == f"{provider}/{model_id}"
+    ), "precondition: naming refuses this name, so the first frame paints the selector"
+    state = FrontendSessionState(
+        session_id="coldname01",
+        epoch="cold",
+        selected_model=FrontendModelSpec(
+            provider=provider, model_id=model_id, display_name=fresh_name
+        ),
+    )
+    durable = FrontendSessionState(
+        session_id="coldname01",
+        epoch="previous-owner",
+        selected_model=FrontendModelSpec(
+            provider=provider, model_id=model_id, display_name="DeepSeek Nine"
+        ),
+    )
+
+    specs = AttachedSession._restored_model_specs(state, durable)
+
+    assert specs["selected_model"].display_name == "DeepSeek Nine", (
+        "the conversation's own record of its identity is the only name this "
+        "process could not resolve itself"
+    )
+    assert model_label(provider, model_id, specs["selected_model"].display_name).full == (
+        "DeepSeek Nine"
+    ), "the adopted name is one the band will actually print"
+
+
+def test_a_name_naming_resolves_is_never_replaced_by_the_checkpoint() -> None:
+    """The adoption is a FILL, not an override: naming's own answer wins.
+
+    The mirror of the test above. A fresh resolution that DID produce a name is a
+    fact about this model read from the catalogue this process can see, and an old
+    checkpoint's name must not displace it — the band would then caption the model
+    with a string the current registry does not answer to.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+
+    state = FrontendSessionState(
+        session_id="coldname02",
+        epoch="cold",
+        selected_model=FrontendModelSpec(
+            provider="deepseek", model_id="deepseek-flash", display_name="DeepSeek Flash"
+        ),
+    )
+    durable = FrontendSessionState(
+        session_id="coldname02",
+        epoch="previous-owner",
+        selected_model=FrontendModelSpec(
+            provider="deepseek", model_id="deepseek-flash", display_name="DeepSeek V4 Flash"
+        ),
+    )
+
+    specs = AttachedSession._restored_model_specs(state, durable)
+
+    assert (
+        specs["selected_model"].display_name == "DeepSeek Flash"
+    ), "a resolved name is this process's own reading, not a gap to fill"
+
+
+def test_a_pinned_fallback_spec_is_never_patched_with_the_selections_name() -> None:
+    """Finding 5: the update is derived from the SELECTED model, so it follows it.
+
+    ``stored`` is the checkpoint's selected model, and an effective spec can name a
+    pinned fallback route instead. The cold state sets both fields from one object,
+    so the divergence is an invariant to enforce rather than a reachable path — but
+    an unenforced invariant is one refactor away from captioning a fallback with the
+    selection's identity, on the one segment the band reads for its label.
+
+    Asserted on the WINDOW, which this restore always has once ``_restored_pair``
+    matches and the checkpoint carries one, so the test pins the GATE rather than
+    the naming rules — those have the two tests above, and this one must not depend
+    on what this environment's catalogue happens to call `deepseek/deepseek-flash`.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+
+    state = FrontendSessionState(
+        session_id="coldroute01",
+        epoch="cold",
+        selected_model=FrontendModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        # The route actually serving, which is not the selection.
+        effective_model=FrontendModelSpec(
+            provider="openrouter",
+            model_id="deepseek/flash-v4",
+            display_name="DeepSeek V4 Flash",
+            context_window=262_144,
+        ),
+    )
+    durable = FrontendSessionState(
+        session_id="coldroute01",
+        epoch="previous-owner",
+        context_tokens=20_000,
+        context_window=1_000_000,
+        selected_model=FrontendModelSpec(
+            provider="deepseek",
+            model_id="deepseek-flash",
+            context_window=1_000_000,
+            display_name="DeepSeek Flash",
+        ),
+    )
+
+    specs = AttachedSession._restored_model_specs(state, durable)
+
+    assert (
+        specs["selected_model"].context_window == 1_000_000
+    ), "precondition: the same-model gate adopts the checkpoint's window"
+    assert (
+        specs["effective_model"].context_window == 262_144
+    ), "a spec that names another model must not take the selection's denominator"
+    assert (
+        specs["effective_model"].display_name == "DeepSeek V4 Flash"
+    ), "nor its name — the band reads the effective spec for its label"
+
+
 @pytest.mark.asyncio
 async def test_a_cold_viewer_never_paints_a_job_as_running(tmp_path: Path, monkeypatch) -> None:
     """With no runtime, nothing is running — and the roster must say so.
@@ -1298,32 +1515,30 @@ async def test_the_seeded_cost_is_a_marked_floor_not_an_exact_total(
 
 
 @pytest.mark.asyncio
-async def test_a_seeded_reading_keeps_no_window_it_cannot_vouch_for(
+async def test_a_seeded_reading_carries_the_denominator_the_band_divides_by(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Absolute tokens, no arc — never a defaulted 128k denominator.
+    """The band's denominator and its numerator must arrive together.
 
-    The UNRESOLVED-flag half of the window rule. The placeholder half — the case
-    where ``context_metadata_resolved`` is True and the window is still a guess —
-    is ``test_a_cold_openai_session_does_not_divide_by_the_placeholder_window``
-    below and, at the function itself, ``tests/unit/session/test_usage_seed.py``.
-    This test cannot fail on the window assertion alone (with the seed neutered it
-    fails on the numerator), which is exactly why the placeholder case needed its
-    own evidence.
+    The window the strip divides by is the EFFECTIVE SPEC's — ``tui.app._context_window``
+    reads exactly that on every later paint, deliberately, because the percentage
+    predicts when the next request overflows. The state's own ``context_window`` was
+    the stricter sibling of that reader: it took a denominator only from
+    ``usage_seed.reading_window``, which additionally requires the reading to be
+    ATTRIBUTABLE (a receipt for this model) and the metadata to be ACCOUNT-resolved.
+    So on a config-only spec the numerator was published with the field left unset,
+    and ``StatusLine.update`` reads ``None`` as LEAVE-ALONE: the first frames kept
+    whatever the previous session had painted. The operator's own report is that
+    frame — ``287.5k/—`` for two paints before the spec's own refresh landed 18ms
+    later (QA round 1, Q1), and ``224.6%/128k`` when the outgoing session had a
+    smaller window (Q2, the ``/resume`` path).
 
-    ``ModelSpec`` supplies a 128k default when no metadata row was resolved, and
-    the seed's reading was measured against whatever window the provider really
-    had. Dividing it by the default is the ``268.2%/128k`` defect the checkpoint
-    path already guards against (``context_metadata_resolved``); the seeded path
-    needs the same refusal, so the strip renders its honest ``window unknown``
-    state while still showing the tokens it does know.
-
-    The SPEC's window is no longer the default here: the config path now resolves
-    the configured pair through its own metadata (the effort ladder and level the
-    desktop strip gates its chips on), so the window is the MODEL's — exactly what
-    every runtime-built spec carries. What the flag says, and what this test
-    exists for, is unchanged: nothing ACCOUNT-scoped was resolved, so the state
-    still refuses to adopt the window as a denominator.
+    Carrying the spec's own number makes the two agree by construction. The refusal
+    that survives is the VALUE one, shared with ``reading_window``
+    (``usage_seed.denominator_window``): a placeholder window is still never a
+    denominator for a real reading — see
+    ``test_a_cold_openai_session_does_not_divide_by_the_placeholder_window``, which
+    asserts exactly that on the 128k placeholder and must keep doing so.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
@@ -1351,10 +1566,14 @@ async def test_a_seeded_reading_keeps_no_window_it_cannot_vouch_for(
             "row, not a bare default (the config path resolves the pair so the effort "
             "ladder and level are answerable)"
         )
-        assert (
-            state.context_window is None
-        ), "a defaulted window must not be adopted as the denominator for a real reading"
+        assert state.context_window == spec.context_window, (
+            "the state must carry the same denominator the band divides by on every "
+            "later paint, or the numerator and its window arrive a paint apart"
+        )
         assert state.context_tokens == 322_546, "the numerator is still a fact"
+        assert (
+            state.context_tokens / state.context_window <= 1.0
+        ), "the first frame must not paint a context percentage over 100%"
     finally:
         await viewer.dispose()
 

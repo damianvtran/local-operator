@@ -24,6 +24,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 from local_operator.harness.types import ModelSpec
 from local_operator.session.frontend_state import (
@@ -35,6 +36,7 @@ from local_operator.session.model_selection import (
     StoredModelSelection,
     read_model_selection,
 )
+from local_operator.session.usage_seed import denominator_window
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +196,59 @@ def configured_base_model(config_dir: Path) -> FrontendModelSpec:
     return resolve_configured_model(provider, model_id, config_dir)
 
 
+def resolve_birth_model(birth: ModelSpec, config_dir: Path) -> FrontendModelSpec:
+    """The caller's own selection, resolved the way the runtime resolves it.
+
+    The THIRD source of a conversation's model, beside config and the journal: a
+    pair the CALLER named for this session (the CLI's own ``resolve_hosting_model``,
+    a desktop draft's picked row). It arrives as a SELECTOR — the CLI builds
+    ``ModelSpec(provider, model_id)`` and nothing else — so a cold frame painted
+    from it carried the pair plus ``ModelSpec``'s own defaults: the 128k
+    placeholder standing in as the band's denominator under a real restored
+    reading, and no name, ladder or level (QA round 1, Q3). Resolving the pair is
+    the same treatment the configured and saved branches already get, and for the
+    same reason: the first frame must be the frame the runtime will paint.
+
+    FILL ONLY, field by field. A caller may hand over a spec that is already
+    resolved and already states its own opinions — the desktop preview passes
+    ``build_model_spec``'s result carrying the level its user picked
+    (``_preview_birth_model``) — and answering THOSE with this machine's
+    ``model_effort`` would put the preview and the first turn on different rungs,
+    which is the R6 defect. So a field the caller expressed is kept, and only the
+    ones it left at a default are answered: the name, the effort LADDER, the
+    LEVEL, and a window that is still ``ModelSpec``'s placeholder.
+    """
+    carried = FrontendModelSpec(**birth.model_dump())
+    if not carried.provider or not carried.model_id:
+        return carried
+    try:
+        resolved = resolve_configured_model(carried.provider, carried.model_id, config_dir)
+    except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
+        logger.debug("birth model metadata could not be resolved", exc_info=True)
+        return carried
+    update: dict[str, Any] = {}
+    if not carried.display_name:
+        update["display_name"] = resolved.display_name
+    if not carried.reasoning_efforts:
+        update["reasoning_efforts"] = resolved.reasoning_efforts
+        update["reasoning_default_effort"] = resolved.reasoning_default_effort
+    if carried.reasoning_effort is None:
+        update["reasoning_effort"] = resolved.reasoning_effort
+    # An unvouched window is the PLACEHOLDER, never a budget: the same value rule
+    # the receipt seed applies (``usage_seed.denominator_window``), so a caller's
+    # genuine 128k row is not overwritten and a defaulted one is still replaced.
+    if denominator_window(carried) is None and denominator_window(resolved) is not None:
+        update.update(
+            {
+                "context_window": resolved.context_window,
+                "default_context_window": resolved.default_context_window,
+                "max_context_window": resolved.max_context_window,
+                "context_metadata_resolved": resolved.context_metadata_resolved,
+            }
+        )
+    return carried.model_copy(update=update) if update else carried
+
+
 def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> FrontendModelSpec:
     """The conversation's OWN saved selection as the spec a resumed turn runs on.
 
@@ -236,9 +291,23 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
     try:
         from local_operator.providers.failover import FallbackTarget, spec_for_target
 
-        resolved = spec_for_target(
-            configured_base_model(config_dir), FallbackTarget(saved.selector, saved.effort)
+        # The base exists for the two things a hop may CARRY, and neither is
+        # reachable when the journal named a level: ``spec_for_target`` reads the
+        # base's effort only under ``target.effort is None``, and reads its
+        # ``fast_mode`` only through an ``and`` — where a base built from
+        # ``build_model_spec`` is always False, because that field is NOT seeded
+        # ("Only the AVAILABILITY is seeded", ``configure.py``; measured: 0 of the
+        # 120 shipped rows carry it). So a saved selection that names its level
+        # skips a SECOND full metadata resolution on the path whose whole purpose
+        # is the first frame: ``configured_base_model`` costs 7-200ms warm here and
+        # far more cold, and the resolution below already resolves the target
+        # (review round 1, minor 4).
+        base = (
+            configured_base_model(config_dir)
+            if saved.effort is None
+            else FrontendModelSpec(provider="", model_id="")
         )
+        resolved = spec_for_target(base, FallbackTarget(saved.selector, saved.effort))
     except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
         logger.debug("saved model metadata could not be resolved", exc_info=True)
         return bare
@@ -289,7 +358,7 @@ def resolve_conversation_model(
         if selection_sink is not None:
             selection_sink(saved)
         if birth_model is not None and (saved is None or model_selection_override):
-            model = FrontendModelSpec(**birth_model.model_dump())
+            model = resolve_birth_model(birth_model, config_dir)
         elif saved is not None:
             # The conversation's own pair, resolved through its OWN metadata — the
             # same treatment the configured pair below already gets, and for the

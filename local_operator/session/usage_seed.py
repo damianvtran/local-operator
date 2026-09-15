@@ -201,6 +201,12 @@ def reading_window(
     A ``None`` here is not a refusal to show the tokens — the caller still has
     the numerator — it is the band's honest ``window unknown`` state: absolute
     tokens and no arc, which is what the strip already renders.
+
+    The VALUE half of the rule is :func:`denominator_window`, shared with the
+    second caller that has to ask it: a cold viewer carries this number into the
+    state it publishes, which is the denominator the band divides by on every
+    later paint. Both callers must refuse the same values, or the first frame and
+    the settled frame disagree about the budget a reading is a percentage of.
     """
     identity = reading_identity(usage, fallback=fallback)
     if identity is None or spec is None:
@@ -210,6 +216,36 @@ def reading_window(
     ):
         return None
     if not getattr(spec, "context_metadata_resolved", False):
+        return None
+    return denominator_window(spec)
+
+
+def denominator_window(spec: Any) -> int | None:
+    """The window a spec can be DIVIDED BY, or ``None``.
+
+    The value half of :func:`reading_window`, split out because a second caller
+    asks the same question of the same spec: a cold state carries this number as
+    its ``context_window``, and the band divides a restored reading by it on every
+    paint (``tui.app._context_window`` reads the effective spec's own window).
+    Two spellings of "is this a budget or a placeholder" would let the first frame
+    and the settled frame disagree, which is the flicker a single rule removes.
+
+    What it refuses is the PLACEHOLDER only: ``UNKNOWN_CONTEXT_WINDOW`` (128k) is
+    written by ``context_spec_for_access`` TOGETHER WITH
+    ``context_metadata_resolved: True`` whenever the account could not be resolved,
+    so the flag alone vouches nothing and the value alone cannot tell the two
+    populations apart — the evidence of a real 128k budget is
+    ``default_context_window == window``, the settings path that prefers exactly
+    that value (see :func:`reading_window` for the full argument and the known
+    false negative on the static rows).
+
+    Deliberately NOT the whole of :func:`reading_window`: that one additionally
+    requires the reading to be ATTRIBUTABLE to this spec, because a receipt from
+    another model is not this model's reading. A spec's own window is a fact about
+    the model regardless of who measured anything against it, and it is what the
+    band prints either way.
+    """
+    if spec is None:
         return None
     window = int(getattr(spec, "context_window", 0) or 0)
     if window <= 0:
