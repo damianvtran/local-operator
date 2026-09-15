@@ -254,9 +254,19 @@ def session_dir(root: "Path", session_id: str) -> "Path":
 
 
 #: How often a runtime rewrites its record's ``heartbeat_at``. The daemon
-#: treats a record as wedged (not merely quiet) after ``HEARTBEAT_TIMEOUT_S``.
-#: A ``serve`` daemon beats at the same interval — one freshness budget for
-#: both record kinds, so a reader needs a single rule for "is this alive".
+#: treats a record as wedged after ``HEARTBEAT_TIMEOUT_S``. A ``serve`` daemon
+#: beats at the same interval — one freshness budget for both record kinds, so
+#: a reader needs a single rule for "is this alive".
+#:
+#: THE BEAT IS AUTHORED BY THE RUNTIME'S OWN EVENT LOOP, and that is a limit on
+#: what freshness can prove rather than a detail. For ``kind=daemon``/``exec``
+#: the runtime shares the workload's loop, so a long turn or a starved
+#: scheduler stalls this write while the process is demonstrably working —
+#: measured at 105.8 s and 205.8 s gaps against the 45 s timeout below on
+#: sessions whose CPU time was advancing. Treat a stale beat as "the owner has
+#: not reported and is not answering", never as death and never as proof the
+#: workload stopped: see ``registry.classify``, which owns that rule, and the
+#: per-surface wording that follows it.
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 

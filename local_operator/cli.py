@@ -2894,6 +2894,15 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except TimeoutError as exc:
+        # NOT "could not deliver": a read deadline expiring means no
+        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
+        # already in the owner's socket buffer, and the receiver commits before
+        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
+        # invites a duplicate steer or wake. Same split, and the same words, as
+        # the send TOOL's arm below it.
+        _peer_red(f"no delivery confirmation: {exc}")
+        return 1
     except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
         # ValueError covers a read fault the frame reader could still surface
         # (e.g. an oversized non-welcome line): it must become the same soft,
@@ -4479,12 +4488,24 @@ def wake_command(args: argparse.Namespace) -> int:
         # every other non-running state (round 2, D14): the surface points at
         # `lop wake install` elsewhere, and here no wake-subsystem action can
         # help at all, so it names the two commands that can.
+        #
+        # The remedy is spelled `--force`, and it did not used to be. A plain
+        # `lop stop --pid N` asks the owner's socket first and then needs an
+        # identity proof that a fresh heartbeat forbids, so on an owner that is
+        # still beating it refuses — advertising it here promised a graceful
+        # stop the ladder may never admit. The forced rung is the one that
+        # reaches an owner whose socket is not answering, and it SIGNALS the
+        # process rather than asking it to leave, which is what the sentence
+        # says. "It will not recover on its own" went with it: a stale beat is
+        # evidence the owner stopped reporting, not a forecast about a long
+        # turn that may simply finish (``registry.classify``).
         print(
             _wrap_status(
                 f"{session_id} (pid {pid}) has not sent a heartbeat in "
-                f"{_format_duration(age)}; it holds the session lease, so its wake "
-                f"cannot fire. It will not recover on its own — 'lop sessions' shows "
-                f"it, 'lop stop --pid {pid}' ends it",
+                f"{_format_duration(age)} and is not answering its socket; it holds "
+                f"the session lease, so its wake cannot fire while it does not "
+                f"answer. Nothing here can recover it — 'lop sessions' shows it, and "
+                f"'lop stop --pid {pid} --force' force-signals the process to stop it",
                 "wedged:",
             )
         )

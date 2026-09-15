@@ -764,3 +764,34 @@ def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, mo
         assert ("not both" in err) or ("not responding" in err), label
         # The stored lookalike received nothing: the refusal was the answer.
         assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists(), label
+
+
+def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
+    """R4: a deadline expiry is not proof the message did not land.
+
+    ``_dial_or_explain`` gives the message-less ``TimeoutError`` a sentence, and
+    it re-raises the SAME exception class on purpose: both callers branch on the
+    type to choose their wording, and the confident "could not deliver" arm is
+    reserved for ``RuntimeError`` — the peer ANSWERING no. Reporting a timeout
+    that way asserts a non-delivery this side cannot know (the op is already in
+    the owner's socket buffer, and the receiver commits before it acks), and a
+    sender who believes it duplicates the steer or the wake.
+    """
+    other_pid = os.getppid() + 9999
+    with (
+        patch("local_operator.cli._resolve_peer_target", return_value=(_Record(other_pid), [], "")),
+        patch("local_operator.cli._peer_red") as red,
+        patch(
+            "local_operator.mobile.peer_client.send_peer_message",
+            side_effect=TimeoutError,
+        ),
+    ):
+        rc = send_command(_send_args(steer=True))
+
+    assert rc == 1
+    assert red.called
+    line = red.call_args[0][0]
+    assert line.startswith("no delivery confirmation:"), line
+    assert "could not deliver" not in line, line
+    assert "delivery is UNCONFIRMED" in line, line
+    assert "do not send it again" in line, line

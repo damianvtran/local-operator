@@ -1048,10 +1048,132 @@ def test_the_lower_bound_caveat_appears_only_when_a_session_did_not_report() -> 
 
 def test_a_wedged_session_is_named_as_possibly_stale() -> None:
     """Its counts are real but as of its last heartbeat, and the screen says so
-    rather than presenting them as current."""
+    rather than presenting them as current.
+
+    The WORD changed with the copy: "wedged" invited a diagnosis the evidence
+    does not support (a stale beat is authored by the runtime's own event loop),
+    so the sentence says what was measured. See ``render.not_answering_clause``.
+    """
     text = _text(_snapshot(sessions=_fleet_sessions(wedged=1), agents=AgentsInfo()))
-    assert "1 session is wedged" in text
+    assert "1 session is not answering" in text
     assert "last heartbeat" in text
+
+
+def _quiet_owner_sessions() -> SessionsInfo:
+    """One quiet owner beside one working session, for the wording tests below."""
+    return SessionsInfo(
+        lines=(
+            SessionLine(
+                pid=4242,
+                state="wedged",
+                kind="daemon",
+                conversation_name="Quiet owner",
+                uptime_s=900.0,
+                heartbeat_age_s=243.0,
+                busy=True,
+                rss_bytes=190_000_000,
+            ),
+            SessionLine(
+                pid=4243,
+                state="live",
+                kind="tui",
+                conversation_name="Working session",
+                uptime_s=120.0,
+                heartbeat_age_s=3.0,
+                busy=True,
+            ),
+        ),
+        total=2,
+        live=1,
+        wedged=1,
+        busy=2,
+    )
+
+
+def test_the_quiet_owner_caveat_names_the_age_the_pid_and_the_forced_stop() -> None:
+    """D2, as an assertion: the advertised command has to be one that WORKS.
+
+    The remedy used to be a plain ``lop stop --pid N`` described as ending the
+    session. That rung asks the owner's socket first and then needs an identity
+    proof a fresh heartbeat forbids, so on an owner that is still beating it
+    refuses — an advertised recovery that may never become available. The
+    forced rung is the one that reaches a silent socket, and the sentence says
+    what it does (it SIGNALS the process) rather than implying a graceful exit.
+    The measurement travels with it, because "not answering" without the age
+    is a bare verdict and a stale beat does not establish what caused it.
+    """
+    body = _unwrapped(_text(_snapshot(sessions=_quiet_owner_sessions()), width=120))
+    assert "1 session is not answering" in body
+    assert "last runtime heartbeat 4m ago" in body
+    assert "(pid 4242)" in body
+    assert "'lop stop --pid 4242 --force'" in body
+    assert "force-signals the process" in body
+    # The old promise, gone in both directions: no claim that the graceful stop
+    # is available and no claim that the owner will recover.
+    assert "ends it" not in body
+
+
+def test_the_export_prints_the_measured_age_beside_the_state_token() -> None:
+    """The export is read on its own, inside a bug report.
+
+    ``[wedged]`` with no age beside it is the bare verdict the sentences here
+    exist to replace, and a pasted export has no screen to cross-reference.
+    """
+    from local_operator.info.render import build_export
+
+    export = build_export(_snapshot(sessions=_quiet_owner_sessions()))
+    assert "1 live · 1 not answering · 2 total" in export
+    row = next(line for line in export.split("\n") if "Quiet owner" in line)
+    assert "[wedged]" in row, row
+    assert "last heartbeat 4m ago" in row, row
+
+
+@pytest.mark.parametrize("width", [60, 70])
+def test_a_narrow_frame_keeps_the_qualifier_on_the_row_it_qualifies(width: int) -> None:
+    """D1's narrow-width half, driven through the real render.
+
+    The header's meta is shed from the right, so by 60 columns ``1 not
+    answering`` is gone from the top of the section — which is fine, and is why
+    the ROW carries the same fact again. What must not happen is the row going
+    quiet: a reader on a narrow terminal has to see that this session is not
+    answering, ahead of the uptime and the memory figure they can do without.
+    """
+    rows = [
+        line
+        for line in _lines(_snapshot(sessions=_quiet_owner_sessions()), width=width)
+        if "Quiet" in line
+    ]
+    assert len(rows) == 1, rows
+    assert "not answering" in rows[0], rows[0]
+    assert "last heartbeat 4m ago" in rows[0], rows[0]
+    assert "✗" in rows[0], rows[0]
+    # The jargon is gone from the row: the state token survives only where a
+    # machine reads it (the export's brackets and the JSON), never as the word
+    # a person is given for what they are looking at.
+    assert "wedged" not in rows[0], rows[0]
+
+
+@pytest.mark.parametrize("width", [56, 40])
+def test_below_the_note_floor_the_words_survive_even_though_the_age_does_not(
+    width: int,
+) -> None:
+    """D1's narrow half at the width the floor actually bites.
+
+    56 cells is the body width a 70-column terminal leaves this card, and
+    ``_NOTE_MIN`` sheds EVERY meta below 60 — so the row degraded to a bare
+    ``✗`` beside a truncated name, which is the unqualified state D1 rejected.
+    The words are the irreducible fact and now have their own rung; the age and
+    the memory figure are the optional details and are still shed.
+    """
+    rows = [
+        line
+        for line in _lines(_snapshot(sessions=_quiet_owner_sessions()), width=width)
+        if "Quiet" in line
+    ]
+    assert len(rows) == 1, rows
+    assert "not answering" in rows[0], rows[0]
+    assert "last heartbeat" not in rows[0], rows[0]
+    assert "181 MB" not in rows[0], rows[0]
 
 
 def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:
@@ -1251,7 +1373,7 @@ def test_the_caveats_agree_with_themselves_in_the_singular() -> None:
     wedged = _unwrapped(
         _text(_snapshot(sessions=_fleet_sessions(wedged=1), agents=AgentsInfo(running=1)))
     )
-    assert "1 session is wedged; its counts are as of its last heartbeat." in wedged
+    assert "1 session is not answering; its counts are as of its last heartbeat" in wedged
     assert "their counts" not in wedged
 
 
@@ -1269,12 +1391,12 @@ def test_the_export_discloses_wedged_staleness_like_the_panel() -> None:
     export = build_export(
         _snapshot(sessions=_fleet_sessions(live=4, wedged=2), agents=AgentsInfo(running=1))
     )
-    assert "2 sessions are wedged; their counts are as of their last heartbeat" in export
+    assert "2 sessions are not answering; their counts are as of their last heartbeat" in export
 
     single = build_export(
         _snapshot(sessions=_fleet_sessions(live=5, wedged=1), agents=AgentsInfo(running=1))
     )
-    assert "1 session is wedged; its counts are as of its last heartbeat" in single
+    assert "1 session is not answering; its counts are as of its last heartbeat" in single
 
     # Conditional, not standing: with nothing wedged the CAVEAT is absent,
     # though the runtimes row still reports "· 0 wedged" as a breakdown.
@@ -1497,4 +1619,4 @@ def test_the_export_states_both_caveats_as_one_parenthetical() -> None:
     caveats = [line for line in export.split("\n") if "lower bound" in line]
     assert len(caveats) == 1, caveats
     assert "1 session runs an older build" in caveats[0]
-    assert "1 session is wedged; its counts" in caveats[0]
+    assert "1 session is not answering; its counts" in caveats[0]

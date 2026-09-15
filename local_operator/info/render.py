@@ -39,6 +39,7 @@ from pathlib import Path
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
+    SessionsInfo,
     SubagentLine,
     format_bytes,
     format_duration,
@@ -194,6 +195,63 @@ def plural(count: int, noun: str) -> str:
     return f"{count} {_IRREGULAR_PLURALS.get(noun, noun + 's')}"
 
 
+#: How many pids the not-answering sentence names before it stops listing
+#: them. A host with ten such sessions has one problem, so the sentence stays a
+#: sentence: the count leads and the remainder is summarised.
+_NOT_ANSWERING_PIDS = 3
+
+
+def not_answering_clause(sessions: SessionsInfo | None) -> str:
+    """The sentence for a runtime that has stopped reporting. ``""`` if none.
+
+    ONE sentence, shared by the export and the panel, for the reason
+    :func:`plural` is shared: this text lands in bug reports pasted off the
+    screen, and two copies would drift into admitting different amounts.
+
+    It says what was MEASURED and never what it means. ``registry.classify`` is
+    explicit that a stale heartbeat is degraded-responsiveness evidence — the
+    beat is authored by the runtime's own event loop, so a long turn produces
+    the same reading as a frozen process — and the sentence therefore names the
+    age, keeps the pid (which is the evidence that the process is still there),
+    and stops short of any diagnosis.
+
+    The remedy is named with its cost, because the STOP LADDER is where the old
+    wording lied: a plain ``lop stop --pid N`` asks the owner's socket first and
+    refuses when the record is still heartbeating, so promising that it "ends
+    it" advertised a graceful stop that may never become available. ``--force``
+    is the rung that reaches an owner that is not answering — it signal-stops
+    the process rather than asking it to leave — so it is what the operator is
+    told about, described as what it does.
+    """
+    if sessions is None or not sessions.available or not sessions.wedged:
+        return ""
+    one = sessions.wedged == 1
+    rows = [line for line in sessions.lines if line.state == "wedged"]
+    if not rows:
+        # A hand-built ``SessionsInfo`` (a test, a partial snapshot) whose count
+        # and rows disagree. The DISCLOSURE still holds — a count that includes
+        # these runtimes is as of a heartbeat that stopped — but the age, the
+        # pid and the remedy are the parts that need a row, and inventing a pid
+        # would be worse than the vaguer sentence.
+        return (
+            f"{plural(sessions.wedged, 'session')} {'is' if one else 'are'} not "
+            f"answering; {'its' if one else 'their'} counts are as of "
+            f"{'its' if one else 'their'} last heartbeat"
+        )
+    worst = max(rows, key=lambda line: line.heartbeat_age_s)
+    pids = ", ".join(str(line.pid) for line in rows[:_NOT_ANSWERING_PIDS])
+    if len(rows) > _NOT_ANSWERING_PIDS:
+        pids += f" and {len(rows) - _NOT_ANSWERING_PIDS} more"
+    return (
+        f"{plural(len(rows), 'session')} {'is' if one else 'are'} not answering — "
+        f"last runtime heartbeat {format_duration(worst.heartbeat_age_s)} ago "
+        f"(pid {pids}); {'its counts are' if one else 'their counts are'} as of "
+        f"{'that heartbeat' if one else 'those heartbeats'}, and "
+        f"'lop stop --pid {worst.pid} --force' force-signals the process to stop "
+        f"{'it' if one else 'one of them'}"
+    )
+
+
 def _tree_lines(tree: tuple[SubagentLine, ...], deeper: int) -> list[str]:
     out: list[str] = []
     for node in tree:
@@ -283,15 +341,28 @@ def build_export(snapshot: InfoSnapshot) -> str:
     elif not sessions.lines:
         lines.append("  none")
     else:
+        # The prose says what the evidence supports; the bracketed token per row
+        # below stays the STATE WORD, printed verbatim so a reader can grep it
+        # against ``--json`` and against the record's own field. That split is
+        # deliberate: the vocabulary is a wire contract with ~15 call sites and
+        # the desktop catalogue's ``status.code``, and renaming it would change a
+        # value to restate a sentence. Every SENTENCE is honest.
         lines.append(
-            f"  {sessions.live} live · {sessions.wedged} wedged · {sessions.total} total"
-            + (" · BUILD SKEW" if sessions.build_skew else "")
+            f"  {sessions.live} live · {sessions.wedged} not answering · "
+            f"{sessions.total} total" + (" · BUILD SKEW" if sessions.build_skew else "")
         )
         for line in sessions.lines:
             mark = "*" if line.is_self else "-"
             name = line.conversation_name or line.session_id or str(line.pid)
             memory = format_bytes(line.footprint_bytes or line.rss_bytes)
-            extra = " · busy" if line.busy else ""
+            extra = ""
+            # The measured half of "not answering", beside the state token
+            # rather than only in the caveat below: a pasted export is read on
+            # its own, and `[wedged]` with no age beside it is exactly the bare
+            # verdict the wording on every other surface now avoids.
+            if line.state == "wedged":
+                extra += f" · last heartbeat {format_duration(line.heartbeat_age_s)} ago"
+            extra += " · busy" if line.busy else ""
             extra += f" · needs {line.pending}" if line.pending else ""
             lines.append(
                 f"  {mark} [{line.state}] {name} · {line.kind} · pid {line.pid} · "
@@ -307,7 +378,7 @@ def build_export(snapshot: InfoSnapshot) -> str:
         # sum below, so the denominator printed here has to match it.
         lines.append(
             f"  runtimes          {sessions.live + sessions.wedged} total — "
-            f"{sessions.live} live · {sessions.wedged} wedged"
+            f"{sessions.live} live · {sessions.wedged} not answering"
         )
         # Same rule as the screen: the sum runs over runtimes that REPORTED, so
         # when some did not the total is a floor, and when none did there is no
@@ -394,19 +465,16 @@ def build_export(snapshot: InfoSnapshot) -> str:
             f"{'does' if one else 'do'} not report subagents — lower bound"
         )
     if sessions.available and sessions.wedged:
-        # PARITY with the panel, which has said this since the counts landed.
-        # The totals above deliberately include wedged runtimes — a quiet pid
-        # can still have children working — so their contribution is as of
-        # their last heartbeat, and an export that omitted the disclosure would
-        # present stale counts as current in the one artifact that outlives the
-        # screen.
-        one = sessions.wedged == 1
-        caveats.append(
-            f"{sessions.wedged} session{'' if one else 's'} "
-            f"{'is' if one else 'are'} wedged; "
-            f"{'its' if one else 'their'} counts are as of "
-            f"{'its' if one else 'their'} last heartbeat"
-        )
+        # PARITY with the panel, which has said this since the counts landed,
+        # now through ONE shared sentence: the totals above deliberately include
+        # these runtimes — a quiet pid can still have children working — so their
+        # contribution is as of their last heartbeat, and an export that omitted
+        # the disclosure would present stale counts as current in the one
+        # artifact that outlives the screen. The sentence also carries the
+        # REMEDY, which is the part a reader of a pasted export has no other way
+        # to get: the row above names the state and the measured age, and the
+        # forced stop is the rung that acts on it.
+        caveats.append(not_answering_clause(sessions))
     if caveats:
         # ``·`` and not ``;``: the wedged clause already contains a semicolon
         # of its own, so a semicolon joiner produced two different grammatical

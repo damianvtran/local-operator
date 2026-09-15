@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
 
@@ -68,12 +69,21 @@ def resolve_peer_target(
     record has that pid does the digit string fall through to the substring
     match, so a session id or name that happens to be numeric still works.
 
-    Only ``live`` records are eligible (a ``wedged`` runtime will not service
-    the socket promptly; ``stale`` is dead) — unless ``include_wedged``,
-    which the kill switch passes: a wedged session is exactly the one a user
-    needs to be able to STOP, and the stop ladder's signal rungs are built
+    Only ``live`` records are eligible (a record whose owner has stopped
+    reporting for ``HEARTBEAT_TIMEOUT_S`` is not one a plain send should assume
+    can be reached; ``stale`` is dead) — unless ``include_wedged``, which the
+    kill switch passes: a session that is not answering is exactly the one a
+    user needs to be able to STOP, and the stop ladder's signal rungs are built
     for a runtime that will not answer. A send never wants that; a message to
-    a wedged runtime is a message nobody reads.
+    such a runtime is a message that may sit unread.
+
+    Note what that refusal is and is not. It is a rule about which target to
+    DIAL, not a claim that the owner is broken: the beat is authored by the
+    runtime's own event loop, so a busy session can read ``wedged`` too
+    (``registry.classify``). The cost of being wrong that way is bounded and
+    visible — a sender who addresses the session anyway gets the
+    unconfirmed-delivery sentence (:func:`_unanswered_dial_detail`) rather than
+    a silent loss.
 
     A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
     rather than resolved. The two name different sessions, and the precedence
@@ -120,14 +130,7 @@ def resolve_peer_target(
         for rec, state in scanned:
             if rec.pid == pid:
                 if state not in eligible:
-                    return (
-                        None,
-                        [],
-                        (
-                            f"target pid {pid} is {state}, not live "
-                            "(its owner is not responding); try again shortly"
-                        ),
-                    )
+                    return None, [], _not_dialable(f"target pid {pid}", rec, state)
                 return rec, [], ""
         return None, [], f"no session found with pid {pid}"
 
@@ -135,7 +138,7 @@ def resolve_peer_target(
         for rec, state in scanned:
             if rec.session_id == session:
                 if state not in eligible:
-                    return None, [], (f"target session {session} is {state}, not live")
+                    return None, [], _not_dialable(f"target session {session}", rec, state)
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -203,15 +206,39 @@ def resolve_peer_target(
             return (
                 None,
                 [],
-                (
-                    f"the only match for {needle_source!r} is not responding "
-                    f"(pid {wedged[0].pid}); try again shortly"
+                _not_dialable(
+                    f"the only match for {needle_source!r} (pid {wedged[0].pid})",
+                    wedged[0],
+                    "wedged",
                 ),
             )
         return None, [], f"no live session matches {needle_source!r}"
     if len(matches) > 1:
         return None, matches, ""
     return matches[0], [], ""
+
+
+def _not_dialable(label: str, record: "Any", state: str) -> str:
+    """Why a plain send will not dial this record. Never over-claims.
+
+    ``wedged`` is the record that stopped REPORTING, so the sentence gives the
+    measured age — ``registry.classify`` owns that number and the clamp around
+    it — and names neither a cause nor a schedule. The wording it replaces
+    said "its owner is not responding; try again shortly", which invented a
+    timetable: the owner may report again the moment a long turn finishes, and
+    it may never, and nothing outside the process can tell the two apart.
+
+    ``stale`` is the pid being gone, and then there is no measurement to quote.
+    Shared by all three refusal paths (exact pid, exact session id, substring)
+    so one condition reads the same way wherever a user meets it.
+    """
+    if state == "stale":
+        return f"{label} is stale (its pid no longer exists), so nothing can read it"
+    age_s = registry.classify(record, check_zombie=False).heartbeat_age_s
+    return (
+        f"{label} has not reported for {format_duration(age_s)}, so a plain send will "
+        f"not dial it; it may report again on its own"
+    )
 
 
 def resolve_cold_session(session: str) -> "str | None":
@@ -425,8 +452,11 @@ async def deliver_peer_message(
     - **No runtime, but the sender wants attention** (``wake=True``, or a
       steer) — engage a runtime and deliver over its socket. The sender is
       explicitly asking the peer to act, which cannot happen without a process.
+
+    A dial that runs out its deadline gets a sentence rather than a bare
+    timeout — see :func:`_dial_or_explain`, whose whole user-visible outcome
+    for a failed steer is that the delivery is reported as UNCONFIRMED.
     """
-    from local_operator.mobile.peer_client import send_peer_message
 
     if record is not None:
         if not getattr(record, "started", True):
@@ -445,9 +475,9 @@ async def deliver_peer_message(
             # through ``from_json``, which reads the absent key as ``True`` —
             # old peer behaviour preserved — so an old working session is
             # dialled normally, never degraded.
-            await send_peer_message(record, text=text, mode="mailbox", wake=False, sender=sender)
+            await _dial_or_explain(record, text=text, mode="mailbox", wake=False, sender=sender)
             return "delivered to the mailbox (session not started yet; no turn driven)"
-        return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
+        return await _dial_or_explain(record, text=text, mode=mode, wake=wake, sender=sender)
 
     if not wake and mode == "mailbox":
         return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)
@@ -461,6 +491,64 @@ async def deliver_peer_message(
         config_dir=config_dir(),
     )
     return outcome.detail
+
+
+async def _dial_or_explain(
+    record: "Any",
+    *,
+    text: str,
+    mode: str,
+    wake: bool,
+    sender: "dict[str, Any]",
+) -> str:
+    """Dial ``record``, turning a deadline expiry into a sentence.
+
+    The bare timeout this replaces was literally ``could not deliver: `` —
+    ``TimeoutError`` carries no message and the CLI prints its ``str`` — which
+    told a sender nothing about whether the peer was gone, refused, or simply
+    busy, on the one outcome a failed steer has (the message never landed, so
+    there is nothing else on screen to read).
+
+    Only ``TimeoutError`` is translated, and it is re-raised as the SAME class.
+    That is load-bearing rather than tidy: both surviving callers branch on the
+    exception TYPE to decide whether they may say the message did not arrive.
+    ``RuntimeError`` means the peer ANSWERED no (an older registrant, a handle
+    that cannot receive) and is rendered as "could not deliver"; the
+    ``OSError`` family means "no acknowledged result" and is rendered as "no
+    delivery confirmation ... may or may not have arrived" (``tools.builtin``
+    and ``cli.send_command``, both pinned by tests). Wrapping a timeout into a
+    ``RuntimeError`` — which an earlier draft of this function did — moves a
+    possibly-delivered steer onto the confident arm and invites the duplicate
+    it is the whole point of this sentence to prevent.
+    """
+    from local_operator.mobile.peer_client import send_peer_message
+
+    try:
+        return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
+    except TimeoutError as exc:
+        raise TimeoutError(_unanswered_dial_detail()) from exc
+
+
+def _unanswered_dial_detail() -> str:
+    """What to tell a sender whose target did not answer its socket.
+
+    DELIVERY IS UNCONFIRMED, and that is the whole point of the wording. A read
+    deadline expiring means no acknowledged result, NOT an undelivered message:
+    the op is already in the owner's socket buffer, and a loop that turns inside
+    the next second consumes it — reproduced against a real child server, where
+    a 0.2 s read deadline expired and the receiver recorded the delivered steer
+    once its loop came back. Telling the sender to retry therefore invites a
+    DUPLICATE steer or wake, which is why this says the opposite of what an
+    earlier draft of the sentence did, and why nothing here retries on its own.
+
+    It also refuses to name a cause, for the reason ``registry.classify``
+    gives: a stale heartbeat does not establish that the owner is hung.
+    """
+    return (
+        "the target did not answer its socket in 5s — delivery is UNCONFIRMED: "
+        "it may still arrive once its owner's loop turns, so do not send it "
+        "again unless you know it did not land"
+    )
 
 
 def candidate_lines(
