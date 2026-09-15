@@ -72,7 +72,7 @@ async function loadCommands() {
       `export { screenshot } from ${JSON.stringify(join(SRC, "commands", "shot.ts"))};`,
       `export { snapshot } from ${JSON.stringify(join(SRC, "commands", "snapshot.ts"))};`,
       `export { status, tabs, close } from ${JSON.stringify(join(SRC, "commands", "nav.ts"))};`,
-      `export { touchSurface, TOUCH_INTERVAL_MS } from ${JSON.stringify(join(SRC, "state.ts"))};`,
+      `export { touchSurface } from ${JSON.stringify(join(SRC, "state.ts"))};`,
       `export { requireSurface } from ${JSON.stringify(join(SRC, "cdp.ts"))};`,
       `export { withOwnership, recordAllocation } from ${JSON.stringify(join(SRC, "ownership.ts"))};`,
     ].join("\n"),
@@ -82,6 +82,47 @@ async function loadCommands() {
     entryPoints: [entry], bundle: true, platform: "node", format: "esm", outfile,
   });
   return { loaded: await import(pathToFileURL(outfile) + `?${Date.now()}`), dir };
+}
+
+/** The throttle's own interval, bundled SEPARATELY from the command entry.
+ *
+ * It cannot ride in the entry above: the pinned BASE tree has no
+ * `TOUCH_INTERVAL_MS` at all (its stamp was unthrottled), and ONE unresolvable
+ * named export fails the whole esbuild bundle — so the before/after table below
+ * could not be measured at all, and every row failed before counting anything
+ * (review R2). Only the throttle row needs the constant, so only that row pays
+ * for a second bundle, and a tree that does not export it answers `undefined`
+ * here instead of taking the file down with it. */
+async function loadTouchInterval() {
+  const dir = await mkdtemp(join(tmpdir(), "lop-ipc-budget-interval-"));
+  try {
+    const entry = join(dir, "entry.mjs");
+    await writeFile(
+      entry,
+      `export { TOUCH_INTERVAL_MS } from ${JSON.stringify(join(SRC, "state.ts"))};`,
+    );
+    const outfile = join(dir, "bundle.mjs");
+    try {
+      // `logLevel: "silent"` because the BASE tree answers this one with a
+      // missing-export error that is the expected outcome there: esbuild still
+      // throws, but the before/after run should not print a red error block in
+      // the middle of the numbers it is there to produce.
+      await build({
+        entryPoints: [entry],
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        outfile,
+        logLevel: "silent",
+      });
+    } catch {
+      return undefined;
+    }
+    const mod = await import(pathToFileURL(outfile) + `?${Date.now()}`);
+    return mod.TOUCH_INTERVAL_MS;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /** Session-storage round trips for ONE command — what the single serialized
@@ -135,14 +176,24 @@ async function drive(loaded, fixture, method, { owned = false } = {}) {
 // surface map is the only storage the command itself needs. `snapshot` is the
 // documented exception at 4, because it PUBLISHES its refs and that map is a
 // shared read-modify-write of its own (`refs`: get + set) — real work, not
-// overhead. Measured with this file against the pinned base (05e959a00), so
-// every assertion here is also the before/after:
+// overhead. Measured with THIS file against the pinned base (05e959a00), i.e. a
+// plain `LOCAL_OPERATOR_TEST_BRIDGE_SOURCE=<base>/extension/src` run of it: the
+// counting row prints all ten numbers before it asserts anything, so the before
+// column below IS that run's own `t.diagnostic` line, not a separate probe:
 //
-//   read            3 -> 1     screenshot        5 -> 1
+//   read            3 -> 1     screenshot        3 -> 1
 //   owned read      5 -> 2     owned screenshot  5 -> 2
 //   snapshot        5 -> 3     owned snapshot    7 -> 4
 //   status          3 -> 1     owned status      5 -> 2
 //   tabs            1 -> 1     owned tabs        3 -> 2
+//
+// (`screenshot`'s before is **3**, not the 5 this table first claimed — it
+// resolves no handle, so its recency write was the whole of its overhead, and
+// the head column, 1, was right — review R2.) Rows other than the counting one
+// are GUARDS, not measurements: the `requireSurface stamps nothing` row and the
+// throttle row are both expected to fail on the base tree, which is exactly what
+// they are for, and the throttle row is skipped there outright because the base
+// exports no interval to throttle to.
 //
 // `tabs` is the one row with nothing to remove: it lists surfaces from a single
 // read and never resolved a handle, so it never paid the recency write. It is
@@ -164,17 +215,23 @@ test("a drove-this-tab command costs at most three session round trips", async (
   const fixture = installCommandHost();
   const { loaded, dir } = await loadCommands();
   try {
+    // Measure ALL ten rows before asserting any of them: the numbers ARE the
+    // before/after evidence this file carries, and a base run stops at the first
+    // ceiling it exceeds — asserting inside the measuring loop printed only the
+    // rows that happened to pass, leaving the table underivable (review R2).
     const measured = {};
-    for (const [label, method, owned, ceiling] of COMMANDS) {
+    for (const [label, method, owned] of COMMANDS) {
       const { result, trips } = await drive(loaded, fixture, method, { owned });
       assert.ok(result, `${label} must answer`);
       measured[label] = trips;
-      assert.ok(
-        trips.length <= ceiling,
-        `${label} made ${trips.length} session round trips (ceiling ${ceiling}): ${trips.join(", ")}`,
-      );
     }
     t.diagnostic(`session round trips per command: ${JSON.stringify(measured)}`);
+    for (const [label, , , ceiling] of COMMANDS) {
+      assert.ok(
+        measured[label].length <= ceiling,
+        `${label} made ${measured[label].length} session round trips (ceiling ${ceiling}): ${measured[label].join(", ")}`,
+      );
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -203,7 +260,14 @@ test("requireSurface stamps nothing: the recency write left the command path", a
   }
 });
 
-test("the recency stamp is throttled to one write per interval", async () => {
+test("the recency stamp is throttled to one write per interval", async (t) => {
+  const interval = await loadTouchInterval();
+  if (interval === undefined) {
+    // The pinned base has no interval: its stamp ran on every command, which is
+    // the "before" half of the first fix rather than a failure of this file.
+    t.skip("the tree under measurement exports no TOUCH_INTERVAL_MS (unthrottled stamp)");
+    return;
+  }
   const host = installCommandHost();
   const { loaded, dir } = await loadCommands();
   try {
@@ -213,15 +277,15 @@ test("the recency stamp is throttled to one write per interval", async () => {
     await loaded.touchSurface(TAB, start);
     assert.equal(writes(), 1, "the first stamp must land");
     await loaded.touchSurface(TAB, start + 1);
-    await loaded.touchSurface(TAB, start + loaded.TOUCH_INTERVAL_MS - 1);
+    await loaded.touchSurface(TAB, start + interval - 1);
     assert.equal(writes(), 1, "stamps inside the interval must be skipped");
-    await loaded.touchSurface(TAB, start + loaded.TOUCH_INTERVAL_MS);
+    await loaded.touchSurface(TAB, start + interval);
     assert.equal(writes(), 2, "the next interval must stamp again");
     // …and it still honours the presence check: a pruned surface is never
     // resurrected by a late stamp (the m5 property the write itself must keep),
     // which here means the write does not run at all.
     delete host.session.surfaces[TAB];
-    await loaded.touchSurface(TAB, start + 2 * loaded.TOUCH_INTERVAL_MS);
+    await loaded.touchSurface(TAB, start + 2 * interval);
     assert.equal(writes(), 2, "a stamp for a pruned surface must not write");
     assert.deepEqual(host.session.surfaces, {});
   } finally {

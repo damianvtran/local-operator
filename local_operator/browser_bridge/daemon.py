@@ -135,6 +135,14 @@ PING_PROBE_TIMEOUT_S = 5.0
 #: smallest count that distinguishes "did not answer once" from "is not
 #: answering", and the strike counter resets on any frame the peer sends, so a
 #: live link can never accumulate its way to a teardown.
+#:
+#: "Consecutive" here means consecutive OBSERVATIONS, not consecutive probes: a
+#: second miss only counts when its probe began after the window of the previous
+#: one closed (`note_probe_strike`). Two sessions whose commands time out at the
+#: same moment are the shape this rule is FOR, and they produce two misses
+#: inside one window — counting those as two would spend the whole bar on one
+#: silent instant and sever, which is the single-miss teardown again (review R1:
+#: misses 0.6 ms apart, `close 4000`).
 PROBE_STRIKES_BEFORE_SEVER = 2
 #: How late one ping-tick cycle may be relative to `PING_INTERVAL_S` before the
 #: daemon says so at WARNING. A late tick is the daemon's own event loop failing
@@ -791,12 +799,20 @@ class ExtensionLink:
         # peer to speak instead of polling `last_frame_at`. Used only by the
         # liveness probe (`_peer_answers_a_solicited_ping`).
         self.frame_event = asyncio.Event()
-        # Consecutive unanswered liveness probes on THIS socket; any frame the
-        # peer sends clears it. Link-scoped rather than service-scoped on
-        # purpose: a replacement socket is a new object, so a reconnect can
-        # never inherit the strikes of the mute link it replaced. See
-        # `PROBE_STRIKES_BEFORE_SEVER` for why one miss is not enough to act on.
+        # Unanswered liveness probes on THIS socket that each observed a
+        # DISTINCT window; any frame the peer sends clears both fields.
+        # Link-scoped rather than service-scoped on purpose: a replacement
+        # socket is a new object, so a reconnect can never inherit the strikes
+        # of the mute link it replaced. See `PROBE_STRIKES_BEFORE_SEVER` for why
+        # one miss is not enough to act on and `note_probe_strike` for why the
+        # count is of windows rather than of probes.
         self.probe_strikes = 0
+        # Monotonic instant at which the window that produced the latest counted
+        # strike closed; 0.0 before any. A probe that began BEFORE this is
+        # overlap of that same observation and is not counted again — the rule
+        # that keeps N commands timing out together from spending the two-strike
+        # budget in one silent window (review R1).
+        self.probe_window_closed_at = 0.0
         self.extension_id = ""
         self.browser = ""
         # The peer's own protocol version and reported extension version, both
@@ -893,10 +909,41 @@ class ExtensionLink:
         self.silent_drop_at = time.monotonic()
         self.silent_drop_silence_s = silence_s
 
-    def note_probe_strike(self) -> int:
-        """Count an unanswered liveness probe and report the running total."""
+    def note_probe_strike(self, observed_from: float) -> tuple[int, bool]:
+        """Count an unanswered liveness probe that observed a window of its own.
+
+        ``observed_from`` is when the probe BEGAN. A miss is only counted as a
+        new strike when that instant is at or after the close of the window that
+        produced the previous one; otherwise this probe overlapped the earlier
+        observation and cannot establish anything it did not.
+
+        Without that rule the counter measures probes, not windows, and probes
+        overlap by construction under exactly the traffic the rule exists for:
+        N sessions whose commands time out at the same moment run N probes
+        inside ONE ``PING_PROBE_TIMEOUT_S`` window, so N=2 met the two-strike bar
+        on a single silent window and severed the link — the pre-fix behaviour,
+        reproduced by review R1 with two misses 0.6 ms apart (`close 4000`,
+        latched, every pending future failed). Folding them into one strike is
+        the fix; the second call returns the same total and reports that it
+        opened no window, so the caller can say so in its log line instead of
+        silently re-counting.
+
+        The boundary is the window's own close, stamped here AFTER the wait,
+        rather than the reviewer's suggested ``now - last_strike_at >=
+        PING_PROBE_TIMEOUT_S``. Both stop the concurrent burst; the elapsed gap
+        between two misses is a proxy for overlap and is wrong in the other
+        direction too — two probes that began a full interval apart but resolved
+        close together did NOT share a window, and a solicitation that could not
+        be delivered at all fails in microseconds, which an interval-long
+        required gap would read as the same window forever.
+
+        Returns ``(running total, opened_a_window)``.
+        """
+        if observed_from < self.probe_window_closed_at:
+            return self.probe_strikes, False
         self.probe_strikes += 1
-        return self.probe_strikes
+        self.probe_window_closed_at = time.monotonic()
+        return self.probe_strikes, True
 
     def clear_probe_strikes(self) -> None:
         """The peer spoke, so nothing is left to corroborate.
@@ -904,9 +951,12 @@ class ExtensionLink:
         Called when a probe is ANSWERED (the receive loop sets `frame_event` on
         every frame, not only on a pong), which is what keeps the strike count a
         measure of CONSECUTIVE misses rather than a tally: a link that answers
-        once, ever, is back to zero.
+        once, ever, is back to zero — and so is the window boundary, so the next
+        miss after a frame opens a fresh window instead of being folded into the
+        one that preceded it.
         """
         self.probe_strikes = 0
+        self.probe_window_closed_at = 0.0
 
     def clear_unproven_drop(self) -> None:
         """Forget the latched reason: a link this daemon did not sever.
@@ -1872,20 +1922,51 @@ class BridgeService:
           the COMMAND's timeout, so severing on the probe alone announced
           "the link silent for 1s" — a drop one second after the peer had spoken,
           which no reader can reconcile with a browser that is plainly alive.
-        * **Strikes.** ``PROBE_STRIKES_BEFORE_SEVER`` consecutive misses are
-          required. Link-scoped and cleared by any frame the peer sends, so a
-          link that answers even once is back to zero and a replacement socket
-          starts clean (see ``clear_probe_strikes``).
+          The guard reads ``silent_for()`` AFTER the wait, so its reach is one
+          full ping interval of silence AT THE MOMENT OF THE VERDICT — about 15 s
+          measured at probe start, since the ≤ ``PING_PROBE_TIMEOUT_S`` probe sits
+          between the two (QA Q2). That ordering is the correct one and is kept:
+          a guard measured at probe start would allow severing a peer that spoke
+          15 s before the verdict, which is the same defect with a bigger number,
+          while measuring at the verdict means the silence the reader is shown is
+          the silence the decision was made on. The effective window is stated
+          here rather than in a claim about a bare ``PING_INTERVAL_S``.
+        * **Strikes, from distinct windows.** ``PROBE_STRIKES_BEFORE_SEVER``
+          consecutive misses are required, and "consecutive" is counted over
+          observation WINDOWS, not probes: a miss is only a strike when its probe
+          began after the previous window closed (``note_probe_strike``). Link-
+          scoped and cleared by any frame the peer sends, so a link that answers
+          even once is back to zero and a replacement socket starts clean (see
+          ``clear_probe_strikes``).
 
         The silence in the returned reason is measured HERE, after the probe, so
         the number the reader is shown is the number the decision was made on —
         including the ``PING_INTERVAL_S`` guard above, which reads the same value.
         """
+        # The instant this observation BEGAN, captured before the probe so the
+        # strike can be folded into the window it actually belongs to: the answer
+        # to "is this a new observation?" is a fact about when the question was
+        # asked, not about when it gave up.
+        probed_from = time.monotonic()
         answered = await self._peer_answers_a_solicited_ping()
         silent = self.link.silent_for()
         if answered:
             return None
-        strikes = self.link.note_probe_strike()
+        strikes, fresh = self.link.note_probe_strike(probed_from)
+        if not fresh:
+            # A miss from inside the window that already struck: the peer has
+            # now been asked twice inside one silent instant, which is what
+            # CONCURRENT commands produce (review R1). It corroborates nothing
+            # the first probe did not, so the count does not move and nothing is
+            # severed — the next strike needs a window of its own.
+            logger.warning(
+                "browser bridge probe unanswered inside the window of strike %d/%d "
+                "for %s (concurrent command, not a new observation)",
+                strikes,
+                PROBE_STRIKES_BEFORE_SEVER,
+                method,
+            )
+            return None
         if silent < PING_INTERVAL_S:
             logger.warning(
                 "browser bridge probe unanswered but the peer spoke %.1fs ago "
@@ -3409,9 +3490,10 @@ class BridgeService:
             # method has, so the rule fires for the tight methods without
             # re-opening the false positive.
             #
-            # The PROBE arm is two-strike and refuses to sever at all while the
-            # peer has spoken recently — see `_probe_verdict` for both guards and
-            # the incident that produced them. The short version: one unanswered
+            # The PROBE arm is two-strike over DISTINCT observation windows and
+            # refuses to sever at all while the peer has spoken recently — see
+            # `_probe_verdict` for both guards and the incident that produced
+            # them. The short version: one unanswered
             # question used to sever the link and fail EVERY pending future on
             # that worker, so a single slow `read` answered three sessions with
             # "the extension stopped answering" and destroyed their in-flight
