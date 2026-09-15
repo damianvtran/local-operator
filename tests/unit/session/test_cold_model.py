@@ -29,7 +29,8 @@ from local_operator.session.model_selection import StoredModelSelection
 #: A direct-provider pair the SHIPPED registry names and carries a window for, so
 #: the resolution under test is answered from shipped data and never from a
 #: listing fetch (which would make this file's result depend on the network).
-DIRECT_SELECTOR = "deepseek/deepseek-flash"
+DIRECT_PROVIDER, DIRECT_MODEL = "deepseek", "deepseek-flash"
+DIRECT_SELECTOR = f"{DIRECT_PROVIDER}/{DIRECT_MODEL}"
 
 
 async def _seed_selection(config_dir: Path, selector: str, *, effort: str | None) -> None:
@@ -109,7 +110,7 @@ async def test_the_cold_state_resolves_the_saved_selection_like_the_runtime(tmp_
     from local_operator.model.configure import build_model_spec
 
     await _seed_selection(tmp_path, DIRECT_SELECTOR, effort="high")
-    runtime = build_model_spec(*DIRECT_SELECTOR.split("/"))
+    runtime = build_model_spec(DIRECT_PROVIDER, DIRECT_MODEL)
     assert runtime.display_name, "the shipped registry no longer names this pair"
     assert runtime.display_name != runtime.model_id
 
@@ -117,7 +118,7 @@ async def test_the_cold_state_resolves_the_saved_selection_like_the_runtime(tmp_
 
     assert state.selected_model is not None and state.effective_model is not None
     for spec in (state.selected_model, state.effective_model):
-        assert (spec.provider, spec.model_id) == tuple(DIRECT_SELECTOR.split("/"))
+        assert (spec.provider, spec.model_id) == (DIRECT_PROVIDER, DIRECT_MODEL)
         assert spec.display_name == runtime.display_name
         assert spec.context_window == runtime.context_window
         assert spec.context_window != ModelSpec.model_fields["context_window"].default
