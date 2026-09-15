@@ -1325,4 +1325,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Linux comm axis: this supervisor's unit names the IMAGE on macOS, and
+    # where there is no such image the process names itself (see
+    # :func:`procname.brand_this_process`; a no-op on macOS).
+    from local_operator import procname
+
+    procname.brand_this_process()
     sys.exit(main())

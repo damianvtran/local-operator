@@ -60,7 +60,6 @@ from pydantic import AnyUrl
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.callback_page import callback_response
-from local_operator.interpreter import python_argv
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -656,15 +655,31 @@ async def open_browser_quietly(url: str) -> bool:
             return False
 
     try:
+        from local_operator import procname
+        from local_operator.interpreter import SAFE_PATH_FLAG
+
+        # Named like every other process this product spawns: a user's OAuth
+        # login is exactly the moment an EDR is watching, and the child opens a
+        # browser at an arbitrary URL. `spawn_identity` supplies both axes and
+        # both rungs of the ladder — the label is argv[0] (a label with no
+        # `executable=` would be EXECUTED as a path on POSIX) and the image is
+        # the branded interpreter when one is planted.
+        argv0, image = procname.spawn_identity(procname.LABEL_OPEN_BROWSER)
         process = await asyncio.create_subprocess_exec(
-            # ``python_argv``: ``-c`` puts the cwd on ``sys.path`` too, so a
+            # ``SAFE_PATH_FLAG``, which is what ``python_argv`` contributes here:
+            # ``-c`` puts the cwd on ``sys.path`` too, so a
             # file named ``webbrowser.py`` sitting in the session's directory
             # shadows the stdlib module this snippet depends on (verified: the
             # child raises out of the stray file instead of opening a browser).
             # A user's OAuth login is not the place to execute whatever happens
-            # to share a name with a stdlib module.
-            *python_argv("-c", _BROWSER_OPEN_SNIPPET),
+            # to share a name with a stdlib module. The flag stays immediately
+            # before ``-c``: interpreter options are recognised only there.
+            argv0,
+            SAFE_PATH_FLAG,
+            "-c",
+            _BROWSER_OPEN_SNIPPET,
             url,
+            executable=image,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             # Merged: the two streams are one diagnostic here, and a single

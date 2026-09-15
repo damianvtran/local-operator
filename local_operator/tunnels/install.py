@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from local_operator import procname
+from local_operator import launchd, procname
 from local_operator.paths import config_dir
 from local_operator.tunnels import config
 
@@ -29,26 +29,101 @@ def _run(args: list[str], *, checked: bool = True) -> None:
         raise ValueError("Tunnel service action failed; check your user service manager.")
 
 
+def render_plist(config_base: Path | None = None) -> dict[str, object]:
+    """The whole supervised-unit plan, for the store ``config_base`` names.
+
+    ``config_base`` defaults to this process's config dir, which is what
+    ``install`` wants. The LaunchAgent repair passes the store recorded in the
+    plist it is replacing instead — see
+    :func:`local_operator.tunnels.config.directory`.
+
+    ``launchd_job`` rather than ``launchd_program``: ``Program`` is the branded
+    image and ``ProgramArguments[0]`` is this daemon's role label, which is what
+    stops the tunnel reading as the same bare ``Local Operator`` row as the
+    other three daemons (and, before branding, as ``python3``). macOS names a
+    background item by the basename of ``ProgramArguments[0]``, so the old
+    ``sys.executable`` here is what made installing notify that 'python3 is
+    running in the background'. The trade-off that shape accepts is recorded in
+    ``procname.launchd_job``; with no link to plant this is the same plist as
+    before.
+    """
+    base = config_base if config_base is not None else config_dir()
+    return {
+        "Label": LABEL,
+        **procname.launchd_job(
+            "local_operator.tunnels.service",
+            label=procname.branded_argv0(procname.LABEL_TUNNEL),
+        ),
+        "EnvironmentVariables": {"LOCAL_OPERATOR_CONFIG_DIR": str(base)},
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 10,
+        "StandardOutPath": str(config.directory(base) / "service.log"),
+        "StandardErrorPath": str(config.directory(base) / "service.log"),
+    }
+
+
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Rewrite this daemon's LaunchAgent when an older build wrote it.
+
+    The tunnel had no repair path at all: ``lop-update`` bounced the mobile
+    daemon and nothing else, so a plist written before branding kept running a
+    bare ``python3.14 -m local_operator.tunnels.service`` forever — measured on
+    the operator's machine as ``com.local-operator.tunnel.plist`` and pid 92821.
+
+    Two guards, both inherited from ``wakes.install`` rather than reinvented:
+    the plist must be the one the real passwd home produces (``launchctl``
+    always addresses the real user's session, whatever ``HOME`` says), and the
+    store it records must live under the real home (otherwise this would point
+    the operator's real LaunchAgent at a sandbox store that disappears).
+
+    Never raises; a repair that cannot run leaves the upgrade that called it
+    exactly as it was.
+    """
+    name = "tunnel"
+    try:
+        if sys.platform != "darwin":
+            # The systemd user unit has no plist to repair; it re-reads its unit
+            # file on every start, so it has never had this failure mode.
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = service_path()
+        if not launchd.is_own_plist(path, LABEL):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        current = launchd.load(path)
+        base = launchd.config_dir_from_plist(current) or config_dir()
+        if not launchd.config_lives_in_real_home(base):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(base))
+        if outcome.kind != "repaired":
+            return outcome
+        domain = f"gui/{os.getuid()}"
+        # bootout + bootstrap, NOT kickstart -k: a kickstart restarts the job
+        # from launchd's in-memory definition, so it would keep running the old
+        # argv after this rewrite. Measured; see :mod:`local_operator.launchd`.
+        _run(["launchctl", "bootout", f"{domain}/{LABEL}"], checked=False)
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["launchctl", "bootstrap", domain, str(path)], capture_output=True, timeout=20
+        )
+        if result.returncode:
+            detail = result.stderr.decode(errors="replace").strip()[:200]
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=f"rewrote {path} but launchctl could not load it: "
+                f"{detail or result.returncode}",
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
 def install() -> None:
     path = service_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin":
         log = config.directory() / "service.log"
         config.private_write(log, "")
-        value = {
-            "Label": LABEL,
-            # Branded interpreter image when one can be planted: macOS names
-            # this background item by the basename of ProgramArguments[0], so a
-            # bare `sys.executable` is what made installing the tunnel notify
-            # 'python3 is running in the background'. Falls back unchanged.
-            "ProgramArguments": procname.launchd_program("local_operator.tunnels.service"),
-            "EnvironmentVariables": {"LOCAL_OPERATOR_CONFIG_DIR": str(config_dir())},
-            "RunAtLoad": True,
-            "KeepAlive": {"SuccessfulExit": False},
-            "ThrottleInterval": 10,
-            "StandardOutPath": str(log),
-            "StandardErrorPath": str(log),
-        }
+        value = render_plist()
         path.write_bytes(plistlib.dumps(value))
         path.chmod(0o600)
         _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], checked=False)

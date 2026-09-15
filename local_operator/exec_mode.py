@@ -478,15 +478,16 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
 
     # Name the detached worker in the OS process listing, keyed by the job id
     # this call already prints to the user, so `ps` and `lop`'s own job output
-    # agree on one handle. Both the image and argv[0] fall back to the bare
-    # interpreter when no branded image exists.
+    # agree on one handle. `spawn_identity` supplies BOTH axes and both rungs of
+    # the ladder: argv[0] is the label even when no branded image exists, and
+    # `executable=` is always a real interpreter — a label on its own would be
+    # EXECUTED as a path on POSIX.
     from local_operator import procname
 
-    link = procname.ensure_branded_interpreter()
-    if link is not None:
-        popen_kwargs["executable"] = str(link)
-        argv = list(argv)
-        argv[0] = procname.branded_argv0(procname.LABEL_EXEC, job=job_id)
+    argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
+    argv = list(argv)
+    argv[0] = argv0
+    popen_kwargs["executable"] = executable
 
     with _open_log_file(log_path) as log_handle:
         log_handle.write(

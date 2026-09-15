@@ -60,7 +60,6 @@ import asyncio
 import logging
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -343,15 +342,12 @@ def _spawn_runtime(
     # an indistinguishable `python3.x` row in Activity Monitor. The session id is
     # already a hex handle the user sees in `lop sessions`, and it is truncated
     # to 8 so `ps -o ucomm`'s 16-char window still separates two sessions.
-    # No branded image available => the bare interpreter, exactly as before.
+    # `spawn_identity` returns BOTH axes and both rungs of the fallback ladder:
+    # the label is argv[0] even when no branded image could be planted, and
+    # `executable=` is always a real interpreter, never the label.
     from local_operator import procname
 
-    link = procname.ensure_branded_interpreter()
-    argv0 = sys.executable
-    executable: str | None = None
-    if link is not None:
-        executable = str(link)
-        argv0 = procname.branded_argv0(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
+    argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.

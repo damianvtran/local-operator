@@ -543,10 +543,14 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         spawn_options["start_new_session"] = True
-    # Brand the worker: `executable=` sets the binary image Activity Monitor
-    # reads, argv[0] sets the line `ps`/`top` show. Both degrade to today's
-    # bare interpreter when no branded image could be planted.
+    # Brand the worker on BOTH axes, and on both rungs of the ladder: `argv[0]`
+    # is always the label (what `ps`/`top` show) and `executable=` is always a
+    # real image — the branded hardlink when one is planted, `sys.executable`
+    # otherwise. It is a pair, not two independent choices: a label with no
+    # `executable=` would be EXECUTED as a path on POSIX.
     from local_operator import procname
+
+    argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id=_label_id(session_key))
 
     # R1: a dedicated pipe the worker publishes its retrieved-secret values on,
     # so the parent can scrub the worker's REAL fd-2 tail on a crash. The
@@ -582,11 +586,9 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
                 os.close(scrub_write)
             scrub_write = None
 
-    link = procname.ensure_branded_interpreter()
-    argv0 = sys.executable
-    if link is not None:
-        spawn_options["executable"] = str(link)
-        argv0 = procname.branded_argv0(procname.LABEL_EVAL, id=_label_id(session_key))
+    # `executable=` follows from the same helper: the argv-only rung is safe
+    # precisely because the image is always supplied alongside the label.
+    spawn_options["executable"] = executable
     process = await asyncio.create_subprocess_exec(
         # ``SAFE_PATH_FLAG`` even though this worker is the one child that WANTS
         # the cwd importable: this spawn passes ``cwd=`` explicitly, so without

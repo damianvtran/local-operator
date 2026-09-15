@@ -2010,7 +2010,6 @@ class MobileDaemon:
             # An observer daemon cannot adopt what it spawns (it never dials),
             # so a spawned child would be orphaned from its own control plane.
             raise RuntimeError("observer daemon cannot start sessions")
-        from local_operator.interpreter import python_argv
         from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
 
@@ -2048,14 +2047,36 @@ class MobileDaemon:
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # BOTH name axes, exactly as the viewer's own spawn in
+        # ``session/runtime/launch.py`` does — this is the PHONE-started runtime,
+        # and until now it was the one session start with no branding at all, so
+        # every session begun from the phone showed up as a bare ``python3.x``
+        # row in Activity Monitor for its whole life. The session id is truncated
+        # to 8 to match ``launch.py``, so `ps` correlates the same handle from
+        # either surface; `spawn_identity` also keeps ``executable=`` a real
+        # interpreter on the rung where no branded image could be planted.
+        from local_operator import procname
+        from local_operator.interpreter import SAFE_PATH_FLAG
+
+        argv0, executable = procname.spawn_identity(
+            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
+        )
         process = await asyncio.create_subprocess_exec(
-            # ``python_argv``: this spawn passes no ``cwd=`` either, so without
-            # the isolation flag a daemon started from a checkout of this
-            # project would run that checkout instead of the install — the same
-            # defect as the viewer's spawn in ``session/runtime/launch.py``, and
-            # harder to notice here because nobody is watching a phone daemon's
-            # version. See :mod:`local_operator.interpreter`.
-            *python_argv("-m", "local_operator.session.runtime.process"),
+            # ``python_argv``'s shape with the label in element 0: the label
+            # replaces only argv[0], and ``SAFE_PATH_FLAG`` stays at index 1
+            # because interpreter options are recognised only before ``-m``.
+            # The flag is what this spawn gets from ``python_argv``: it passes
+            # no ``cwd=`` either, so without it a daemon started from a checkout
+            # of this project would run that checkout instead of the install —
+            # the same defect as the viewer's spawn in
+            # ``session/runtime/launch.py``, and harder to notice here because
+            # nobody is watching a phone daemon's version. See
+            # :mod:`local_operator.interpreter`.
+            argv0,
+            SAFE_PATH_FLAG,
+            "-m",
+            "local_operator.session.runtime.process",
+            executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;
             # a pipe back to the daemon would die with the daemon and take
