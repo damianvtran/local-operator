@@ -15,6 +15,7 @@ The two that matter most, and why:
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 
 import pytest
@@ -349,6 +350,11 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     local_providers.validate_endpoint_setting: "http://127.0.0.1:9/v1",
     local_providers.model_overrides: '{"round-trip-probe":{"context_window":8192}}',
     settings_io._validate_openrouter_max_price: '{"prompt": 1, "completion": 2}',
+    # The desktop launcher is validated for EXECUTABILITY, not shape (UX round
+    # 1, U4), so the probe has to name a command that can really be run here.
+    # `sys.executable` is one on every machine the suite runs on; an invented
+    # name would be refused by the very check this sample exists to satisfy.
+    settings_io._validate_desktop_launch_command: f"{sys.executable} --open-session {{session}}",
 }
 
 

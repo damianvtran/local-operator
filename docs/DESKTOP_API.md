@@ -984,7 +984,13 @@ requested destination is the DESKTOP UI, and the terminal is the fallback.
    `pnpm dev` and a repository checkout are deliberately undiscoverable and fall
    through.
 3. **A running TUI viewer** — switched in place.
-4. **Nothing suitable is running** — spawn a terminal, exactly as before.
+4. **Nothing suitable is running** — open a terminal. It reports a LANDING, not
+   a spawn: the backend the registry detected is tried, then on macOS the
+   AppleScript Terminal backend, which LAUNCHES Terminal.app and needs no
+   terminal around this process — detection is the wrong question on a rung
+   that only ever runs where none is discoverable — and nothing else. A rung
+   that opened no window returns False, and `lop resume-click` then prints the
+   `lop --resume <id>` receipt rather than claiming a landing it did not make.
 
 Rung 3 is asked for "whatever is left" rather than for a named surface, which is
 what keeps the fallback identical for viewer types this build does not have; the
