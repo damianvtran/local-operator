@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/errors.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (8 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: bc3dfe611ba35b56aa12e64df6e98244039c1e9eb4eb60bad522e80bd528127d
+// Inputs sha256: a12685a9c3d3fd5d7bc11fb1084d28ca76586253cbde6da3046faae112de2b49
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
