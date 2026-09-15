@@ -35,13 +35,13 @@ from typing import Any
 import pytest
 
 from local_operator.session.runtime import process
-from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
 from local_operator.session.runtime.process import (
     _commit_to_leaving,
     _drain_for_signal,
     _should_exit,
     _work_in_flight,
 )
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 
 
 class _WorkHandle:
@@ -212,6 +212,10 @@ async def test_the_seam_is_the_same_one_the_build_drain_commits_through(
     assert seen["label"] == "stale-build"
     assert seen["cause"] == "runtime-retired"
     assert seen["stagger_s"] >= 0.0, "the build path still draws the successor spread"
+    # The build trigger publishes the FLEET half of the same commit, in its own
+    # words: "signalled" would be false here, and without a phrase the record
+    # would show an ordinary busy row while the app painted a drain notice.
+    assert seen["leaving"] == LEAVING_FOR_BUILD
 
 
 @pytest.mark.asyncio
