@@ -171,6 +171,59 @@ def _get_encoding() -> object | None:
         return _ENCODING
 
 
+def warm_tokenizer() -> None:
+    """Pay the encoding's first-use cost now, off the first turn's path.
+
+    WHY THIS EXISTS. :func:`_get_encoding` builds cl100k_base on first use:
+    tiktoken reads (or fetches) ``cl100k_base.tiktoken`` and base64-decodes
+    100,256 BPE ranks into a mergeable-ranks table. Measured on an M-series
+    box: **122 ms cold, 0.004 ms warm**. The first use is
+    ``providers.context.measure_request``, which
+    ``model.configure.SessionStreamFn.__call__`` AWAITS *before* it opens the
+    provider request — so the whole cost lands inside time-to-first-token,
+    once per process.
+
+    That "once per process" is what makes it worth moving: a TUI is one
+    process for hours, but the desktop plane spawns a fresh runtime child for
+    every session, so every attach pays it again. Warming it at boot turns a
+    first-token cost into a startup cost that overlaps construction.
+
+    Never raises. A missing ``tokenizer`` extra is a supported configuration
+    (:func:`_get_encoding` degrades to the chars/4 fallback) and a warm-up
+    must not be the thing that reports it.
+    """
+    try:
+        _get_encoding()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("tokenizer prewarm skipped", exc_info=True)
+
+
+def warm_tokenizer_in_background() -> threading.Thread | None:
+    """Run :func:`warm_tokenizer` on a daemon thread; ``None`` when already warm.
+
+    WHY A THREAD RATHER THAN A CALL. Both callers are processes whose first act
+    is to spend 600-2,400 ms constructing a session (imports, tool registry,
+    transcript). The tokenizer is not part of that work — nothing reads it
+    until the first provider request — so overlapping the two removes the
+    cost instead of relocating it. The load releases the GIL for its bulk (a
+    file read plus the base64 decode of those 100,256 ranks), so the overlap
+    is genuine rather than two threads taking turns.
+
+    The unguarded read of ``_ENCODING`` is deliberate and benign: the worst
+    case race is starting a thread that immediately finds the encoding warm
+    and returns. Taking :data:`_CACHE_LOCK` here would be the one thing that
+    could serialize this against a concurrent first estimate.
+
+    Returns the thread so a caller — or a test — can join it; ``None`` means
+    there is nothing to wait for.
+    """
+    if _ENCODING is not None or _ENCODING_FAILED:
+        return None
+    thread = threading.Thread(target=warm_tokenizer, name="lop-tokenizer-warm", daemon=True)
+    thread.start()
+    return thread
+
+
 #: Passed to every ``encode`` call. tiktoken REFUSES by default to encode text
 #: containing a special-token literal such as ``<|endoftext|>`` and raises
 #: ``ValueError``. Everything counted here is untrusted content — tool output,

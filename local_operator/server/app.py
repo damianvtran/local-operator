@@ -97,6 +97,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # this only touches the root logger, so the two do not fight.
     configure_console_logging()
 
+    # The tokenizer's first-use cost overlaps the rest of startup. This process
+    # runs sessions of its own — the stateless ``/v1/chat`` path and the
+    # scheduler's agent runs — and each of them would otherwise pay ~120 ms of
+    # BPE-table construction inside its first request, on the event loop this
+    # daemon is also serving HTTP from. Daemon thread, never raises; see
+    # ``compaction.tokens.warm_tokenizer_in_background``.
+    from local_operator.compaction.tokens import warm_tokenizer_in_background
+
+    warm_tokenizer_in_background()
+
+    # THE BYTECODE CACHE WARM, and the reason it belongs to the daemon rather
+    # than to each runtime child. Every child this daemon spawns inherits its
+    # environment, so under an interpreter that refuses bytecode writes (the
+    # desktop app's spawn environment — see ``local_operator.bytecode``) each
+    # child recompiles the whole import graph from source, measured at 749 ms
+    # inside its first turn. Only the WRITE is refused; the READ is not, so one
+    # population of the cache here removes that cost from every child that
+    # follows. The daemon is the long-lived process that can afford the one-shot
+    # subprocess; the children are not.
+    from local_operator.bytecode import warm_bytecode_cache_in_background
+
+    warm_bytecode_cache_in_background()
+
     # Initialize on startup by setting up the credential and config managers
     from local_operator.paths import config_dir as resolve_config_dir
 

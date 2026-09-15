@@ -363,3 +363,88 @@ def test_result_path_filter_allows_initial_or_cwd_only(tree, tmp_path) -> None:
     assert _allowed_source(initial, tree, initial) is True
     assert _allowed_source(tree / "pkg" / "lib.py", tree, initial) is True
     assert _allowed_source(tmp_path.parent / "secret.py", tree, initial) is False
+
+
+# --- optional-dependency resolution ------------------------------------------
+
+
+def test_availability_is_answered_without_importing(monkeypatch) -> None:
+    """The builder's question is answered by ``find_spec``, not by an import.
+
+    This is the change in one assertion. ``tools/registry.py`` imports this
+    module eagerly to fill its factory table, so a module-scope ``import
+    jedi`` put jedi's whole inference graph — 108 ms measured, against ~600 ms
+    for ``create_session`` with its own imports pre-warmed — on every session
+    construction, whether or not the model ever asked a symbol question. On the
+    desktop plane a session construction is a fresh runtime child, so that is
+    every attach.
+
+    ``jedi`` absent from the module globals AFTER the probe is the part that
+    distinguishes the two implementations: an import-based probe would have
+    written it there (``_jedi`` caches on resolution).
+    """
+    monkeypatch.delattr(lsp, "jedi", raising=False)
+    assert lsp._jedi_installed() is True
+    assert (
+        "jedi" not in lsp.__dict__
+    ), "_jedi_installed executed the import; it must resolve the spec only"
+
+
+def test_an_absent_extra_hides_the_tool_and_answers_in_words(monkeypatch, tree) -> None:
+    """``lsp.jedi = None`` is the state a host without the extra resolves to.
+
+    Two user-visible consequences, and the second is the one that needs the
+    lazy loader rather than a bare ``if jedi is None``: the tool is not
+    advertised, and a call that arrives anyway — an older tool list, a
+    registry built before the extra was uninstalled — gets a sentence rather
+    than an AttributeError out of the execute path.
+    """
+    monkeypatch.setattr(lsp, "jedi", None)
+    assert lsp.build_lsp_tool() is None
+
+    result = asyncio.run(
+        lsp.execute_lsp("call-1", {"action": "symbols", "path": "pkg/lib.py"}, context=_ctx(tree))
+    )
+    assert result.is_error is True
+    assert "jedi is not installed" in result.text
+
+
+def test_the_module_attribute_stays_resolvable(monkeypatch) -> None:
+    """``lsp.jedi`` and ``lsp.RefactoringError`` keep working lazily.
+
+    PEP 562 exists here for one reason worth pinning: this module's own suite
+    reads ``lsp.jedi`` at COLLECTION time (the file-level ``skipif``), and other
+    callers monkeypatch both names. A lazy import that broke attribute access
+    would fail the whole file at collection rather than one test, which is a
+    confusing way to learn that the import moved.
+    """
+    monkeypatch.delattr(lsp, "jedi", raising=False)
+    monkeypatch.delattr(lsp, "RefactoringError", raising=False)
+    resolved = lsp.jedi
+    assert resolved is not None, "jedi is installed in this suite, so the probe finds it"
+    assert lsp.RefactoringError is resolved.RefactoringError
+    with pytest.raises(AttributeError):
+        lsp.not_a_declared_attribute
+
+
+def test_the_exception_class_falls_back_when_jedi_is_absent(monkeypatch) -> None:
+    """The rename path's ``except`` needs SOMETHING to name when jedi is gone.
+
+    ``_rename_preview_result`` skips a candidate position by catching
+    ``jedi.RefactoringError``. That path is unreachable without jedi, and the
+    honest stand-in is a class nothing raises — never ``Exception``, which
+    would silently swallow the tool's real failures if the path ever became
+    reachable.
+    """
+    monkeypatch.setattr(lsp, "jedi", None)
+    monkeypatch.delattr(lsp, "RefactoringError", raising=False)
+    assert lsp._refactoring_error() is lsp._NeverRaised
+    assert not issubclass(lsp._NeverRaised, (ValueError, RuntimeError))
+
+
+def test_jedi_is_resolved_once(monkeypatch) -> None:
+    """One import, cached in the module global, for a whole process."""
+    monkeypatch.delattr(lsp, "jedi", raising=False)
+    first = lsp._jedi()
+    assert first is not None
+    assert lsp._jedi() is first
