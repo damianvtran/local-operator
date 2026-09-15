@@ -96,6 +96,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
 
             stream = ScriptedStream(
                 [
+                    text_turn("The goal request arrived once."),
                     text_turn("The canonical runtime answered."),
                     text_turn("The team request arrived once."),
                     text_turn("The image arrived without invented text."),
@@ -161,6 +162,25 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                 assert "Preserve one identity" in json.dumps(
                     await terminal.slash_result("goal", "")
                 )
+                # BESIDE the stored goal, the argument is an ordinary user turn.
+                # The TUI does both on one Enter, and this route is the host of the
+                # viewer that declared the receipt as its own (see
+                # ``desktop_viewer_must_submit``): setting the goal and dropping the
+                # request is the silent drop that declaration exists to prevent.
+                assert result.json()["result"]["result"]["admission"]["status"] == "admitted"
+                await next_frame(
+                    lines,
+                    lambda f: f["type"] == "event" and f["payload"].get("type") == "agent_end",
+                )
+                goal_history = await client.get(target + "/history")
+                assert goal_history.status_code == 200, goal_history.text
+                goal_entries = goal_history.json()["result"]["entries"]
+                assert (
+                    sum(row["id"] == "22222222-2222-4222-8222-222222222222" for row in goal_entries)
+                    == 1
+                )
+                assert "Preserve one identity" in json.dumps(goal_entries)
+                assert len(stream.requests) == 1, "the goal command must consume exactly one turn"
                 duplicate = await client.post(
                     target + "/commands",
                     json={
@@ -170,6 +190,12 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     },
                 )
                 assert duplicate.json()["result"]["replayed"]
+                assert len(stream.requests) == 1, "a replayed goal command must not submit a turn"
+                print(
+                    "HTTP /goal200 stores the goal AND admits the same argument as an "
+                    "ordinary user turn: one durable row under the goal, one scripted "
+                    "provider call; retry replayed without a second turn"
+                )
                 changed = await client.post(
                     target + "/commands",
                     json={
@@ -221,7 +247,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                 rows = history.json()["result"]["entries"]
                 assert sum("A canonical turn" in json.dumps(row) for row in rows) == 1
                 assert "The canonical runtime answered." in json.dumps(rows)
-                assert len(stream.requests) == 1
+                assert len(stream.requests) == 2
                 print(
                     "Prompt admission200; canonical agent_end received; one durable "
                     "user row and one real scripted provider call; retry did not "
@@ -270,7 +296,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     )
                     == 1
                 )
-                assert len(stream.requests) == 2
+                assert len(stream.requests) == 3
                 print(
                     "Owner /team attaches real registry team and admits consumed "
                     "request once; retry replayed without second turn"
@@ -305,7 +331,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     )
                     == 1
                 )
-                assert len(stream.requests) == 3
+                assert len(stream.requests) == 4
                 print(
                     "Image-only prompt admitted200 without synthetic text; "
                     "one durable user row; retry did not duplicate image"
