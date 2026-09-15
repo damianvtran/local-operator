@@ -533,3 +533,31 @@ def test_an_idle_handle_never_reaches_the_drain() -> None:
     assert _work_in_flight(_WorkHandle(busy=False)) is False
     runtime: Any = _RecordingRuntime()
     assert _should_exit(_WorkHandle(busy=False), runtime) is True
+
+
+def test_the_phrase_less_signal_frame_is_read_as_a_signal() -> None:
+    """MAJOR-1's discriminator, pinned against the producer's own label.
+
+    Every build of this branch from the work-aware SIGTERM rung through the
+    commit that added the frame's ``leaving`` key announces a signal drain with
+    ``draining=True``, this label, and NO phrase — so a viewer that read an
+    absent phrase as "the build handover" painted a signalled runtime with the
+    build sentence, both clauses false (design round 4, D9; agent review round 4,
+    MAJOR-1; UX round 4, U13). The frame's ``reason`` is that discriminator, and
+    it is the LABEL rather than the longer ``"leaving after SIGTERM"`` string:
+    ``_commit_to_leaving`` announces ``label`` as the frame's ``reason``, and the
+    longer string is the log line and the ``_Drain``'s own reason.
+
+    Pinned against ``process._SIGNAL_DRAIN_REASON`` rather than a literal, so a
+    rename at the producer fails here instead of silently sending a signalled
+    runtime back to the build story.
+    """
+    from local_operator.session.runtime.types import leaving_phrase_for_frame
+
+    assert leaving_phrase_for_frame(process._SIGNAL_DRAIN_REASON, "") == LEAVING_ON_SIGNAL
+    assert leaving_phrase_for_frame("stale-build", "0.55.6@46a4e9b") == LEAVING_FOR_BUILD
+    assert leaving_phrase_for_frame("stale-build", "") == LEAVING_FOR_BUILD
+    # A frame that names neither trigger gets nothing, and the app answers that
+    # with the sentence true of any drain.
+    assert leaving_phrase_for_frame("", "") == ""
+    assert leaving_phrase_for_frame("something a newer build invented", "") == ""

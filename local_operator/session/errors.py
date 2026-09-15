@@ -19,10 +19,17 @@ class AttachmentUnavailable(ValueError):
 class RuntimeRetiring(ValueError, RuntimeError):
     """This runtime has committed to leaving; the message was not admitted.
 
-    A DRAIN, not a failure: the runtime is handing over to a successor that
-    boots the build now on disk, and it refuses new work while it finishes what
-    is already in flight. The refusal is therefore transient and self-healing,
-    which is what the wording and the app's notice register both have to say.
+    A DRAIN, not a failure: the runtime is leaving — for a build handover it is
+    handing over to a successor that boots the build now on disk, for a
+    termination it is simply finishing what is in flight and going — and it
+    refuses new work either way while it finishes what is already in flight. The
+    refusal is therefore transient and self-healing, which is what the wording
+    and the app's notice register both have to say.
+
+    WHICH DEPARTURE IS THE SENTENCE'S OWN HALF, so it is a parameter rather than
+    a constant: the two do not describe the same thing, and only one of them has
+    a successor coming (design round 4, D10; agent review round 4, MAJOR-2). See
+    ``HEAD_SIGNALLED``.
 
     The sentence is rebuilt HERE rather than crossing the wire, so the category
     and its copy cannot drift, and an older peer that does not know the code
@@ -51,6 +58,14 @@ class RuntimeRetiring(ValueError, RuntimeError):
 
     code = "runtime_retiring"
 
+    #: The departures this refusal can describe, as the two enumerated values
+    #: that cross the transport (``error_trigger``). Enumerated for the reason
+    #: the module docstring gives for the codes: the far side rebuilds the
+    #: SENTENCE from a category, so the only thing that may ride along is a token
+    #: from a closed set, never text this side composed.
+    SIGNAL = "signal"
+    BUILD = "build"
+
     #: The sentence, in the halves a viewer needs. ``HEAD`` states the situation,
     #: ``TAIL`` names the one act left; the owner's own rendering keeps them
     #: joined by ``REFUSED``, and a viewer with a COMPOSER inserts its claim
@@ -61,10 +76,34 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: to say the operator's work is safe. Exposed rather than re-composed so the
     #: two ends cannot drift.
     HEAD = "This session is switching to a newer build; the one it loaded is gone from disk."
+    #: The same half for the OTHER departure that reaches this refusal.
+    #:
+    #: A REFUSAL IS ABOUT A DEPARTURE, and the departure is not always a build:
+    #: ``ServingSessionHandle.prompt`` refuses from ``begin_drain``, which the
+    #: SIGTERM path latches too, so a signalled runtime refused a message with
+    #: "the one it loaded is gone from disk" — a build that does not exist and is
+    #: not coming, painted under a notice that correctly said the session had
+    #: been signalled to stop (design round 4, D10; agent review round 4,
+    #: MAJOR-2). It keeps the situation clause the signal NOTICE uses so the two
+    #: rows read as one event, and drops every build claim, exactly as the signal
+    #: notice does.
+    HEAD_SIGNALLED = "This session was signalled to stop; it will not start a new turn."
     REFUSED = "The message was not admitted"
     TAIL = "send it again once the session is running again."
 
-    def __init__(self) -> None:
+    def __init__(self, trigger: str = "") -> None:
+        # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
+        # carries different sentences for the two departures, and the far side
+        # rebuilds whichever one the raiser's enumerated ``trigger`` names.
+        #
+        # AN ABSENT OR UNKNOWN TRIGGER KEEPS THE BUILD SENTENCE, deliberately
+        # rather than by omission: the raisers that cannot name one are a runtime
+        # older than the field (whose only drain IS the build handover) and the
+        # idle-exit rung, and the alternative — a third generic sentence — would
+        # take the build information away from the one case the copy was written
+        # for. The signal arm is the one that had no sentence of its own.
+        self.trigger = trigger if trigger in (self.SIGNAL, self.BUILD) else ""
+        self.HEAD = self.HEAD_SIGNALLED if self.trigger == self.SIGNAL else type(self).HEAD
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 
@@ -157,7 +196,9 @@ class MoveIndeterminate(Exception):
         )
 
 
-def admission_error(code: str, count: int | None = None) -> ValueError | None:
+def admission_error(
+    code: str, count: int | None = None, trigger: str | None = None
+) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
     ``count`` is carried as its own integer field rather than being recovered
@@ -170,11 +211,19 @@ def admission_error(code: str, count: int | None = None) -> ValueError | None:
     Anything that is not a plain non-negative ``int`` is dropped rather than
     rendered: the far side is untrusted input, and a caller that omits the
     field (an older runtime) must degrade to the countless wording, not raise.
+
+    ``trigger`` is the same idea for a different kind of value: WHICH departure
+    a retirement refusal is about, as one of the enumerated tokens on
+    :class:`RuntimeRetiring`. It is validated against those tokens here rather
+    than accepted as a string, for the reason the count is: what crosses the
+    transport must not be able to carry prose into a sentence this side builds.
+    An unknown or missing token means "this raiser cannot name its departure",
+    which is the pre-field behaviour.
     """
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == RuntimeRetiring.code:
-        return RuntimeRetiring()
+        return RuntimeRetiring(trigger=trigger if isinstance(trigger, str) else "")
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

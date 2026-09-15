@@ -390,6 +390,80 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: nothing enforces.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 
+#: The CAUSE token the SIGNAL drain commits with (``begin_drain``/
+#: ``begin_retire``): ``process._drain_for_signal`` passes it, ``_drain_for``
+#: re-passes it to the exit rung that finally disposes the runtime, and
+#: ``serving.ServingSessionHandle._retiring_refusal`` derives which departure a
+#: refusal is about from the cause the handle latched.
+#:
+#: A CONSTANT RATHER THAN THREE LITERALS, because the reader is 150 lines away in
+#: another module and the failure mode of a rename is silent: the refusal would
+#: go on describing the build handover for a signalled runtime, which is exactly
+#: the falsehood agent review round 4 (MAJOR-2) filed. It is also a
+#: ``incidents.CUT_OFF_CAUSES`` key — the same token classifies the turn this
+#: drain could not save — so the spelling is already load-bearing beyond this
+#: pair.
+SIGNAL_DRAIN_CAUSE = "runtime-shutdown"
+
+#: The ``reason`` a drain frame is announced with, as the producers write it, and
+#: neither literal is the one you would guess: ``process._commit_to_leaving``
+#: announces its ``label`` as the frame's ``reason`` (``announce(label, …)``),
+#: while the longer ``reason`` it also takes (``"leaving after SIGTERM"``,
+#: ``"retiring for <newer>"``) is the LOG line and the ``_Drain``'s own label —
+#: it is not on the wire at all. So:
+#:
+#: * ``shutdown-drain`` — ``process._SIGNAL_DRAIN_REASON``; the SIGNAL drain.
+#:   Measured across every build of this branch from the work-aware SIGTERM rung
+#:   through the fix that added the phrase key: twelve commit ranges, all
+#:   announcing ``draining=True`` and passing this label, none of them sending a
+#:   ``leaving`` key. That is the population the old fallback mislabelled.
+#: * ``stale-build`` — the build handover, from BOTH paths that raise one
+#:   (``process._begin_drain`` for the draining one, ``process._refresh_for``
+#:   for the idle one, whose frame is not draining and never reaches a reader).
+#:   This is also the label a RELEASED build announces, which is why it must keep
+#:   the build sentence; ``retiring …`` is the idle rotate op's wording
+#:   (``server.announce_retiring`` via ``_retire_if_pristine``, likewise not
+#:   draining) and is accepted for a trigger nobody has measured yet, because it
+#:   too says a successor is coming.
+_SIGNAL_REASON_LABELS = ("shutdown-drain",)
+_BUILD_REASON_LABELS = ("stale-build", "retiring")
+
+
+def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
+    """Which trigger a ``retiring`` frame's OWN WORDS establish, or ``""``.
+
+    FOR THE FRAMES THAT CARRY NO ``leaving`` PHRASE, and only for them. The
+    phrase is the primary carrier and a runtime that writes it says exactly
+    which trigger committed the drain; this answers the same question for the
+    runtimes that do not, which is one population with two members and neither
+    of them served correctly by the app's old fallback:
+
+    * a runtime older than this branch — a RELEASED build, whose only draining
+      announce is the stale-build handover. Its build sentence is true, and this
+      returns :data:`LEAVING_FOR_BUILD` for it.
+    * a build of THIS BRANCH from the work-aware SIGTERM rung through the commit
+      that added the key: those announce ``draining=True`` on BOTH triggers and
+      send no phrase, so an app that treated an absent phrase as "the build
+      handover" told a signalled runtime it was switching builds — both clauses
+      false, and the record saying the opposite at the same moment (design round
+      4, D9; agent review round 4, MAJOR-1). Their ``reason`` separates the two
+      arms, so this returns the phrase that matches the trigger that committed.
+
+    Anything this cannot place returns ``""``, which the app paints with its
+    neutral sentence: a trigger nobody has established must not inherit another
+    trigger's copy. The single reader is
+    ``AttachedSession._on_retiring_frame``.
+    """
+    words = (reason or "").strip()
+    if words.startswith(_SIGNAL_REASON_LABELS):
+        return LEAVING_ON_SIGNAL
+    if to or words.startswith(_BUILD_REASON_LABELS):
+        # ``to`` is the second, independent corroboration: a build handover
+        # normally names the successor it is leaving for, and the signal path
+        # passes none (``_drain_for_signal`` has no successor to name).
+        return LEAVING_FOR_BUILD
+    return ""
+
 
 class DiscoveryRecord(Protocol):
     """The members the shared publication path actually touches.
