@@ -3654,6 +3654,23 @@ def _move_body(cwd: str, request_id: str | None = None) -> dict[str, str]:
     return {"request_id": request_id or str(uuid.uuid4()), "cwd": cwd}
 
 
+def _error_message(response: Any) -> str:
+    """The human sentence from a refusal, in either body shape this API uses.
+
+    The ladder answers a NAMED condition with ``{"code", "message"}`` and an
+    ordinary refusal with a bare string, so a test that wants the sentence reads
+    both rather than assuming one — which is also what the desktop client does.
+    """
+    detail = response.json()["detail"]
+    return str(detail["message"]) if isinstance(detail, dict) else str(detail)
+
+
+def _error_code(response: Any) -> str | None:
+    """The machine-readable condition on a NAMED-condition refusal, else None."""
+    detail = response.json()["detail"]
+    return str(detail["code"]) if isinstance(detail, dict) else None
+
+
 def _marker_path(root: Path, session_id: str) -> Path:
     return root / "sessions" / session_id / module.DESKTOP_MARKER_NAME
 
@@ -4582,9 +4599,12 @@ async def test_a_lost_owner_answer_is_503_and_keeps_the_target_marker(move_api) 
             f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
         )
         assert response.status_code == 503, response.text
-        assert "reconcile" in response.json()["detail"]
-        # The transport detail is NOT echoed: it names sockets and control ports.
-        assert "socket closed" not in response.json()["detail"]
+        assert "reconcile" in _error_message(response)
+        # The condition is NAMED so a renderer can key on it (review round 2,
+        # N3), and the transport detail is NOT in the body: it names sockets and
+        # control ports.
+        assert _error_code(response) == "move_outcome_unknown"
+        assert "socket closed" not in response.text
         assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(after)
 
 
@@ -4645,11 +4665,189 @@ async def test_an_unconfirmed_move_is_settled_under_the_lock_before_the_next(
         refused = await client.post(
             f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
         )
-        assert refused.status_code == 409, refused.text
-        assert "could not be confirmed" in refused.json()["detail"]
+        assert refused.status_code == 503, refused.text
+        assert "could not be confirmed" in _error_message(refused)
+        assert _error_code(refused) == "move_outcome_unknown"
         assert double.ops == retired_before, "a move resolved against an unconfirmed field"
         assert bridge.cwd == str(third)
         assert json.loads(marker.read_text())["cwd"] == str(before), "the refusal mutated state"
+
+
+def _failing_rollback(monkeypatch: Any) -> None:
+    """Make the marker ROLLBACK fail, leaving the durable copy at the target.
+
+    The one injection the reviewer's N1 probe uses: the rollback writer raises, so
+    a definite refusal leaves ``desktop.json`` naming a directory the move was
+    refused for while the facade has already returned to the owner's directory.
+    """
+
+    def explode(marker: Path, data: bytes) -> None:
+        raise OSError("read-only volume")
+
+    monkeypatch.setattr(module, "write_desktop_marker_bytes", explode)
+
+
+async def _bind_refusing_client(bridge: Any) -> "MoveClient":
+    """A bound owner that DEFINITELY refuses the retire (the ``kept:`` answer)."""
+    double = MoveClient(answer="kept: this session is working right now")
+    _bind_move_client(bridge, double)
+    return double
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_a_failed_rollback_does_not_settle_as_accepted(
+    move_api, monkeypatch
+) -> None:
+    """The reviewer's N1 reproduction: two self-written copies prove nothing.
+
+    A definite refusal restores the marker; when that rollback cannot run, the
+    marker is left naming the directory the move was REFUSED for while the facade
+    goes back to the one the owner kept. The settlement used to compare the
+    marker with the bridge field — both written by the failed operation from the
+    same resolved value — so it always read "settled", and a later move then
+    resolved its target against a directory no party is in. A restart or a bridge
+    eviction reads the marker, so that copy is exactly what must not be trusted
+    on its own.
+    """
+    client, app, root = move_api
+    before, after, third = root / "before", root / "after", root / "third"
+    for directory in (before, after, third):
+        directory.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        double = await _bind_refusing_client(bridge)
+        _failing_rollback(monkeypatch)
+        marker = _marker_path(root, sid)
+
+        refused = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert refused.status_code == 503, refused.text
+        assert "could not be confirmed" in _error_message(refused)
+        assert _error_code(refused) == "move_outcome_unknown"
+        # The three copies disagree, and that is the point: the durable one is
+        # the odd one out, which is why it may not settle anything.
+        assert json.loads(marker.read_text())["cwd"] == str(after)
+        assert bridge.cwd == str(after)
+        assert bridge.remote.cwd == str(before), "the facade kept the owner's directory"
+        assert bridge.cwd_unconfirmed is True
+
+        retires = list(double.ops)
+        follow_up = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(third))
+        )
+        assert follow_up.status_code == 503, follow_up.text
+        assert "could not be confirmed" in _error_message(follow_up)
+        assert double.ops == retires, "a move proceeded on an optimistic copy"
+        assert bridge.cwd == str(after), "the refusal mutated the bridge field"
+        assert json.loads(marker.read_text())["cwd"] == str(after)
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_move_is_repaired_from_the_live_owners_record(
+    move_api, monkeypatch
+) -> None:
+    """The owner's own record settles it, and the stale durable copy is repaired.
+
+    Same failed rollback, but with a LIVE owner whose published record names the
+    directory the facade rolled back to. Both parties then agree against the
+    marker, and a move is honoured only by retiring the owner — so an owner that
+    is still live, saying it works in ``before``, never accepted the move to
+    ``after`` and the durable copy is PROVABLY stale. It is repaired rather than
+    left for the next restart to spawn a successor into.
+
+    Observable directly: the follow-up is a NO-OP ("you are already here", which
+    only holds if the base is the owner's directory) and the repaired marker is
+    what the receipt leaves behind.
+    """
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        await _bind_refusing_client(bridge)
+        # The owner's OWN account of itself. ``os.getpid()`` is alive and the
+        # heartbeat is fresh, so discovery classifies this record ``live``.
+        publish(
+            SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id=sid,
+                conversation_name="synthetic owner record",
+                cwd=str(before),
+                model_label="test/model",
+                control_port=0,
+                control_key="synthetic",
+            ),
+            root,
+        )
+        _failing_rollback(monkeypatch)
+        marker = _marker_path(root, sid)
+
+        refused = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert refused.status_code == 503, refused.text
+        assert bridge.cwd_unconfirmed is True
+
+        # The reconciled follow-up: the owner's directory is where the session
+        # is, so this is a no-op rather than a move out of a refused target.
+        settled = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(before))
+        )
+        assert settled.status_code == 200, settled.text
+        assert settled.json()["result"]["outcome"] == "unchanged"
+        assert bridge.cwd == str(before)
+        assert bridge.cwd_unconfirmed is False
+        assert json.loads(marker.read_text())["cwd"] == str(
+            before
+        ), "the durable copy was left stale"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_replacement_publication_is_not_reported_as_success(
+    move_api, monkeypatch
+) -> None:
+    """Review round 2, N4: the repaint is part of the move's success.
+
+    A move refuses while a mounted viewer cannot render the replacement, so it
+    must not answer 200 after the publication raised — that would report the
+    exact state the refusal exists to prevent. The move itself is durable by
+    then, so the honest answer is the indeterminate class: the session moved, the
+    window was not repainted, and the client reconciles.
+    """
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(before))
+    async with pool.session(sid) as bridge:
+        bridge.subscribe(frontend_replace=True)
+        double = MoveClient()
+        _bind_move_client(bridge, double)
+
+        def explode(self: Any) -> None:
+            raise RuntimeError("bridge is defunct")
+
+        monkeypatch.setattr(module.DesktopSessionBridge, "publish_frontend_replace", explode)
+        response = await client.post(
+            f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+        )
+        assert response.status_code == 503, response.text
+        assert "could not be repainted" in _error_message(response)
+        assert _error_code(response) == "move_outcome_unknown"
+        # Honest about what DID happen: the directory change is durable and the
+        # session really moved, which is why the refusal is "reconcile", not
+        # "nothing happened".
+        assert json.loads(_marker_path(root, sid).read_text())["cwd"] == str(after)
+        assert bridge.cwd == str(after)
 
 
 @pytest.mark.asyncio

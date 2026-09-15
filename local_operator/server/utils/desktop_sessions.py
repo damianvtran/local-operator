@@ -51,6 +51,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME
+from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     Transcript,
@@ -378,11 +379,15 @@ def _stage_and_replace(marker: Path, data: bytes) -> None:
     """
     staged = marker.parent / f".{marker.name}.{uuid.uuid4().hex}.tmp"
     try:
-        with open(staged, "wb") as handle:
+        # CREATED 0600, not chmodded afterwards (review round 2, N5): ``open``
+        # applies the umask, so the staging file was briefly group/other
+        # readable and its content is this session's working directory. The
+        # exclusive create also cannot collide with a concurrent writer's stage.
+        descriptor = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        staged.chmod(0o600)
         os.replace(staged, marker)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -427,29 +432,68 @@ def _same_directory(left: str, right: str) -> bool:
         return False
 
 
+def _live_owner_cwd(root: Path, session_id: str) -> str | None:
+    """The directory the LIVE owner of ``session_id`` reports, or ``None``.
+
+    Discovery IS the owner's own account of where it works: ``SessionRecord.cwd``
+    is written by the runtime process at publish and carried on every heartbeat,
+    so it is not a value this server wrote about itself. That is exactly why the
+    settlement below asks it — the copies a failed operation leaves behind are
+    all its own, and comparing them to each other can only ever confirm its own
+    belief (review round 2, N1).
+
+    A record whose pid is gone is dropped as stale, and a wedged owner still
+    holds its control socket and its directory, so it counts: the question is
+    "which directory is this session working in", not "is it healthy".
+    """
+    for record, state in registry.scan(root):
+        if state != "stale" and record.session_id == session_id:
+            return str(getattr(record, "cwd", "") or "")
+    return None
+
+
 async def _settle_unconfirmed_move(
-    bridge: DesktopSessionBridge, read_marker: Callable[[], bytes | None]
+    bridge: DesktopSessionBridge, marker_dir: Path, read_marker: Callable[[], bytes | None]
 ) -> None:
-    """Settle which directory is in force after an UNKNOWN owner outcome.
+    """Settle which directory is in force after an UNKNOWN or half-applied move.
 
-    Contract §A: an outcome whose answer never came back is NEITHER a refusal
-    nor a success, so the next operation must finish that reconciliation under
-    the move lock instead of acting on an optimistic ``_cwd``. The
-    reconciliation is an OBSERVATION, not a second protocol — the durable marker
-    is the value a successor is spawned from and the only copy of the accepted
-    target that outlives this bridge, so:
+    Contract §A: an outcome whose answer never came back, or a rollback that
+    could not run, is NEITHER a refusal nor a success, so the next operation must
+    finish that reconciliation under the move lock instead of acting on an
+    optimistic ``_cwd``.
 
-    * when it AGREES with the directory this bridge believes, the doubt is
-      settled: the durable target governs the successor and both copies give the
-      same base for a relative new target, so the move proceeds;
-    * when it DISAGREES, the two copies genuinely differ about where the session
-      works and neither may resolve a new target. That is reported for the
-      caller to reconcile — deliberately not resolved by preferring one, which
-      is how the previous behaviour overwrote a committed move with a stale one.
+    WHY THE OWNER IS ASKED, AND WHY COMPARING OUR OWN COPIES WAS NOT ENOUGH. The
+    durable marker and ``bridge.cwd`` are BOTH written by the same failed
+    operation from the same ``resolved`` value, so they agree by construction —
+    a guard comparing only those two always reads "settled" and never sees the
+    divergence it exists for. The facade is the second self-written copy, but it
+    is the one that carries the OWNER'S answer (a definite refusal restores it to
+    the directory the owner kept), so it disagrees far more often than the marker
+    does. The authoritative account of where a live session works is the owner's
+    own record, which is what :func:`_live_owner_cwd` reads.
 
-    Read through the caller's STRICT reader, so a marker that cannot be read
-    refuses with its real cause rather than being treated as a directory nothing
-    named.
+    Three outcomes, and every one of them acts only on what a party confirms:
+
+    * **The live owner confirms the facade, and the durable copy is the odd one
+      out.** A move is honoured only by retiring the owner, so an owner that is
+      still live — and whose own record names the directory the facade rolled
+      back to — never accepted it. Both parties agree against the marker, which
+      is therefore PROVABLY stale: it is repaired to the owner's directory, under
+      the move lock, through the same atomic writer the move path uses, and the
+      move proceeds. This is the case that used to leave a restart or a bridge
+      eviction spawning a successor in a directory the move was REFUSED for.
+    * **Every party agrees.** The durable target governs the successor and the
+      base a relative new target resolves against; the doubt is settled and the
+      flag clears.
+    * **Anything else** — a live owner that disagrees with the marker while the
+      facade also disagrees, an unreadable payload, an owner-side observation
+      that matches neither copy — is genuinely unresolved. It is REPORTED for the
+      caller to reconcile (503, the indeterminate class) and never resolved by
+      preferring one copy, which is how the previous behaviour overwrote a
+      committed move with a stale one.
+
+    The three readbacks are logged at the refusal, so the state that needed
+    reconciling is recorded rather than reconstructed later.
     """
     if not bridge.cwd_unconfirmed:
         return
@@ -462,13 +506,42 @@ async def _settle_unconfirmed_move(
             payload = None
         if isinstance(payload, dict):
             durable = str(payload.get("cwd", ""))
-    if durable == bridge.cwd:
+    remote = bridge.remote
+    facade = str(getattr(remote, "cwd", "") or "") if remote is not None else ""
+    owner = await asyncio.to_thread(_live_owner_cwd, bridge.root, bridge.session_id)
+    observed = f"marker={durable!r} bridge={bridge.cwd!r} facade={facade!r} owner={owner!r}"
+
+    if owner and owner == facade and owner != durable:
+        await asyncio.to_thread(
+            write_desktop_marker,
+            marker_dir,
+            Path(owner),
+            model=stored_draft_model(read_desktop_marker(marker_dir)),
+        )
+        bridge.cwd = owner
+        bridge.cwd_unconfirmed = False
+        logger.warning(
+            "unconfirmed move settled from the live owner's own record for %s: %s",
+            bridge.session_id,
+            observed,
+        )
+        return
+
+    if (
+        bool(durable)
+        and all(copy == durable for copy in (bridge.cwd, facade))
+        and (owner is None or owner == durable)
+    ):
         bridge.cwd_unconfirmed = False
         return
-    raise HTTPException(
-        409,
-        "The session's stored working directory could not be confirmed after an "
-        "interrupted move. Reconcile it before moving again.",
+
+    logger.error("unconfirmed move left unresolved for %s: %s", bridge.session_id, observed)
+    raise MoveIndeterminate(
+        observed,
+        message=(
+            "The session's working directory could not be confirmed after an "
+            "interrupted move. Reconnect, then reconcile it before moving again."
+        ),
     )
 
 
@@ -554,11 +627,21 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
                 return
             write_desktop_marker_bytes(marker_path, previous_bytes)
         except OSError as error:
+            # LOGGED HERE, where the errno and the path still exist as a cause:
+            # the class keeps the detail off the wire (it names directories), so
+            # without this the operator sees a generic "reconcile" and no trace
+            # of a failed rollback (review round 2, N3).
+            logger.error(
+                "could not restore the working-directory marker for %s: %s",
+                bridge.session_id,
+                error,
+                exc_info=True,
+            )
             raise MoveIndeterminate(
                 f"could not restore the working-directory marker for {bridge.session_id}: {error}"
             ) from error
 
-    await _settle_unconfirmed_move(bridge, lambda: read_marker())
+    await _settle_unconfirmed_move(bridge, marker_dir, lambda: read_marker())
     # The VIEWER's live value, not ``bridge.cwd``: the bridge field is written by
     # THIS function and read at `acquire()`, so after a first move it is the
     # older of the two and a relative path resolved from it would name the wrong

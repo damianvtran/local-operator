@@ -295,3 +295,33 @@ async def test_a_latch_less_owner_neither_advertises_nor_honours_the_fence() -> 
 
     latching, _ = _rig(LatchingHandle())
     assert EXCLUSIVE_MOVE_CAPABILITY in latching._record.capabilities
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_raises_after_the_latch_commits_keeps_the_fence() -> None:
+    """Review round 2, N6: ``committed`` cannot be derived from the return only.
+
+    ``request_stop`` runs AFTER ``begin_retire`` has already committed the
+    retirement latch, so a raise there must not read as "nothing committed": the
+    runtime is going away and a facade admitted now would engage the successor
+    from its own cwd, which is the one state the retained fence exists for. The
+    caller is still told the op failed — the error frame is the reply.
+    """
+
+    class Raising(LatchingHandle):
+        def request_stop(self) -> None:
+            raise RuntimeError("stop failed after the latch committed")
+
+    handle = Raising()
+    server, sent = _rig(handle)
+    viewer = _conn("attach")
+    server._clients[id(viewer.writer)] = viewer
+
+    await server._on_request({"op": "retire_now", "req": 1, "exclusive": True}, viewer)
+
+    assert handle.retirements, "the latch was never reached"
+    assert server._retirement_committed is True
+    assert server._exclusive_move_fence is viewer, "the fence was released while retiring"
+    assert [f for f in sent if f.get("op") == "ack"] == []
+    errors = [f for f in sent if f.get("op") == "error"]
+    assert errors and "stop failed" in str(errors[-1].get("message"))

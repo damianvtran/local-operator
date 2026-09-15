@@ -1163,7 +1163,7 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     #
     # 54 → 56 is the same direction twice more, from the move remediation.
     # ``supports_exclusive_move`` is asked of the OWNER ABOVE this facade —
-    # whether it can retire under the exhaustivity fence rather than ignoring the
+    # whether it can retire under the exclusivity fence rather than ignoring the
     # flag while a sibling client is attached — and an owner ``Session`` has no
     # owner above it, so the question does not exist for it at all.
     # ``set_local_cwd_callback`` installs the host that repaints after a locally
