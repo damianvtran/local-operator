@@ -93,13 +93,18 @@ async def test_real_split_child_stderr_is_scrubbed(isolated, encrypted, caplog):
         access.open_store(isolated, create=True).set("TOKEN", sentinel.encode())
     else:
         CredentialManager(isolated).set_credential("TOKEN", sentinel)
+    # The split has to land INSIDE ``STDERR_LINE_LIMIT`` (2000): everything a
+    # child writes past it is truncated before any sink sees it, so a probe that
+    # splits at 8190 passes with the whole scrub removed — it was measuring the
+    # truncation, not the redaction (agent review R-2). 37 characters of banner
+    # leave the credential's own first fragment inside the retained line.
     cfg = MCPStdioServerConfig(
         command=sys.executable,
         timeout=3000,
         env={"X": "${TOKEN}"},
         args=[
             "-c",
-            'import os,sys,time; x=os.environ["X"]; sys.stderr.write("a"*8190+x[:7]); '
+            'import os,sys,time; x=os.environ["X"]; sys.stderr.write("a"*37+x[:7]); '
             'sys.stderr.flush(); time.sleep(.02); sys.stderr.write(x[7:]+"\\n"); sys.exit(1)',
         ],
     )
@@ -111,11 +116,110 @@ async def test_real_split_child_stderr_is_scrubbed(isolated, encrypted, caplog):
     with pytest.raises(Exception) as caught:
         await asyncio.wait_for(manager._connect_server("canary", cfg), 15)
     await manager.disconnect_all()
+    # The child's own reason reached the raised error, so the assertion below is
+    # about the QUOTED TAIL and not about a transport error that happens to be
+    # secret-free: the banner is the only place those 37 characters exist.
+    assert "a" * 37 in str(caught.value), str(caught.value)
     assert sentinel not in str(caught.value)
+    assert sentinel not in _chain_text(caught.value)
     assert sentinel not in caplog.text
     assert sentinel[:7] not in caplog.text
     assert not variables.credential_env()
     assert variables.redact(sentinel) == "[redacted]"
+
+
+def _chain_text(exc: BaseException) -> str:
+    """``str()`` of an exception and everything it is chained to.
+
+    ``str()`` deliberately, and not ``repr()``/``args``: an ``MCPError`` keeps
+    its text in ``error.message`` and builds ``__str__`` from that field, so a
+    walk over ``repr`` — or over ``args``, which the scrub DOES rewrite — reads a
+    clean tuple while ``str()``, the string every sink renders, still carries the
+    credential. That gap is why the earlier guard could not see this regression
+    (agent review R-2).
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        parts.append(f"{type(node).__name__}: {node}")
+        node = node.__cause__ or node.__context__
+    return " | ".join(parts)
+
+
+#: A stdio child that answers ``initialize`` with a JSON-RPC ERROR whose message
+#: echoes the credential it was handed. That is the shape a badly behaved
+#: third-party server has, and the one an SDK ``MCPError`` keeps in
+#: ``error.message`` — so it is the shape a sink publishes verbatim unless the
+#: value was registered for scrubbing. ``tail`` also writes one line to stderr,
+#: which is what makes ``explain()`` quote a tail; without it ``explain()``
+#: hands the exception itself back, which is the case for every HTTP transport
+#: (they spawn nothing) and for a stdio child that stays quiet.
+_ECHO_CHILD = (
+    "import json,os,sys;"
+    "tail = sys.argv[1] == 'tail';"
+    "sys.stderr.write('booting canary\\n') if tail else None;"
+    "sys.stderr.flush();"
+    "req = json.loads(sys.stdin.readline());"
+    "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'error':"
+    " {'code': -32000, 'message': 'rejected credential ' + os.environ['X']}}) + '\\n');"
+    "sys.stdout.flush();"
+    "sys.exit(1)"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", [True, False], ids=["with-tail", "no-tail"])
+async def test_a_server_echoed_credential_never_reaches_a_sink(isolated, tail):
+    """A credential echoed in a JSON-RPC error is scrubbed on all three paths.
+
+    The three paths are the finding (agent review R-1): the raised exception,
+    the CAUSE it deliberately keeps as evidence, and the startup-failure text
+    that becomes ``McpStartupOutcome.failures`` — which the toast, the transcript
+    notice, ``/mcp`` and the desktop projection all render. Both arms are
+    exercised, because they fail differently: with a stderr tail the raised error
+    is rebuilt from scrubbed text and only the CHAIN leaked; without one the raw
+    exception went out, and that is every HTTP connect.
+
+    Fails with redaction removed, in every arm — that is what makes it a guard.
+    """
+    sentinel = "synthetic-echo-canary-40711"
+    access.open_store(isolated, create=True).set("TOKEN", sentinel.encode())
+    cfg = MCPStdioServerConfig(
+        command=sys.executable,
+        timeout=3000,
+        env={"X": "${TOKEN}"},
+        args=["-c", _ECHO_CHILD, "tail" if tail else "quiet"],
+    )
+    variables = VariableStore(env={})
+    manager = McpManager(
+        isolated, secret_base=isolated, register_secret=variables.register_redaction
+    )
+    manager._configs = {"canary": cfg}
+    manager._sources = {"canary": "test"}
+    with pytest.raises(Exception) as caught:
+        await asyncio.wait_for(manager._connect_server("canary", cfg), 15)
+    assert sentinel not in str(caught.value)
+    assert sentinel not in _chain_text(caught.value)
+    # The published surface: one round is what fills `startup_failures()`, which
+    # `session_factory` turns into the outcome the front ends read. Wait for it to
+    # SETTLE rather than assuming which arm the gate took: a spawn that takes
+    # longer than the 250 ms gate is deferred, and its failure is then recorded by
+    # the continuation — the same single write path, just later.
+    await manager._connect_round({"canary": cfg}, {"canary": "test"})
+    deadline = asyncio.get_running_loop().time() + 10
+    while manager.startup_settling() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    assert manager.startup_settling() is False, "the startup round never settled"
+    failures = manager.startup_failures()
+    await manager.disconnect_all()
+    # Not vacuous: the SERVER's own sentence is in there, with only the value
+    # replaced — so the round recorded this failure and not some other one.
+    assert failures["canary"].startswith("rejected credential [redacted]"), failures
+    assert sentinel not in str(failures)
+    assert variables.redact(sentinel) == "[redacted]"
+    assert not variables.credential_env()
 
 
 @pytest.mark.asyncio

@@ -12,17 +12,20 @@ spawned or sent, so a refusal leaves nothing to unwind (an OAuth server's
 proactive refresh, :func:`~local_operator.mcp.auth.ensure_mcp_oauth_fresh`, runs
 after this and is therefore skipped entirely for a server that cannot start).
 
-**The store is the one the desktop Settings surface writes.**
-``<config dir>/credentials.env`` through
-:class:`~local_operator.credentials.CredentialManager`, because the UI's
-``credentials.update``/``credentials.list`` ops are ``PATCH``/``GET
-/v1/credentials`` (``src/shared/desktop-contract.ts`` in local-operator-ui) and
-that route (``local_operator/server/routes/credentials.py``) reads and writes
-``CredentialManager``. The memory-only session credentials that ``/credential``
-collects (``VariableStore._credentials``) are deliberately NOT consulted: they
-never reach disk, so a config file referring to one could not resolve in the
-next process, and a reference that works once and then silently does not is the
-same class of failure this module removes.
+**The store is the encrypted one; the legacy file is a read-only fallback.**
+``<config dir>/secrets/store.db`` through
+:class:`~local_operator.secrets.access`, which is what the desktop MCP
+credential write (``POST /v1/desktop/sessions/{id}/mcp/credentials``) and MCP
+sign-in put values in. ``<config dir>/credentials.env`` through
+:class:`~local_operator.credentials.CredentialManager` is consulted only on
+DEFINITIVE ABSENCE from the encrypted store — the pre-migration location, for a
+machine whose credentials were entered before it — and is never written: a
+reference that resolves must not move or create the file, and a corrupt or
+unreadable store is a refusal rather than a reason to fall back. The memory-only
+session credentials that ``/credential`` collects (``VariableStore._credentials``)
+are deliberately NOT consulted: they never reach disk, so a config file referring
+to one could not resolve in the next process, and a reference that works once and
+then silently does not is the same class of failure this module removes.
 
 ``CredentialManager.get_credential`` falls back to ``os.environ`` for a key the
 file does not hold, and that fallback is deliberately not used here. Two
@@ -40,12 +43,15 @@ remote server's headers, which the allowlisted stdio child environment
 * No ``${`` anywhere: passed through untouched, and the store is never read.
 * A ``${`` that is neither a well-formed reference nor a fragment naming a key
   the store holds — ``${1BAD}``, ``${{x}}``, ``${a b}``, an unterminated
-  ``${NAME``, ``${HOME}``: passed through untouched. It is not a reference, the
-  desktop writer cannot produce one (its pattern is anchored to a whole value of
-  ``${NAME}``), and refusing it would break a project ``.mcp.json`` or an
-  imported foreign config whose child expands ``${HOME}`` itself. **The escape
-  is ``$${``**: ``$${HOME}`` passes the literal text ``${HOME}`` through, which
-  is what a value meaning a reference literally should be written as.
+  ``${NAME``: passed through untouched. It is not a reference, the desktop writer
+  cannot produce one (its pattern is anchored to a whole value of ``${NAME}``),
+  and refusing it would break a project ``.mcp.json`` or an imported foreign
+  config whose child expands variables of its own. **The escape is ``$${``**:
+  ``$${HOME}`` passes the literal text ``${HOME}`` through. A WELL-FORMED
+  reference to a name the store does not hold is NOT in this list — ``${HOME}``
+  is refused by name like any other absent key (see the paragraph after the
+  list), because nothing about where the config came from distinguishes a
+  reference from a literal.
 * A fragment whose inner text contains a name the store holds — whatever
 decorates it (see :func:`_candidate_keys`) — is REFUSED, never handed over. The
 store accepts any key (``CredentialManager.set_credential`` checks only control
@@ -66,7 +72,10 @@ this module exists to remove.
 A well-formed reference whose NAME is absent from the store, or present with an
 empty value, is REFUSED with :class:`McpSecretRefError` naming the server, the
 entry and the key — never resolved to the literal, and never downgraded to a
-warning. A bare ``$NAME`` without braces is not a reference and is untouched.
+warning. That includes a name a config written for another tool means the CHILD
+to expand, ``${HOME}``: the refusal is loud and names HOME, and ``$${HOME}`` is
+the documented way to keep it. A bare ``$NAME`` without braces is not a reference
+and is untouched.
 
 **Not resolved, deliberately:** server ``args`` (a secret in argv is
 world-readable through ``ps``, which is why the writer's reference requirement
@@ -160,12 +169,15 @@ def _unreadable(server: str, field: str, entry: str, key: str) -> McpSecretRefEr
     Distinct from :func:`_missing` on purpose: the key IS in the store, so
     "add it in Settings > API credentials" would send the user to an entry they
     already have. A value of an unexpected type used to report exactly that,
-    because "not a ``SecretStr``" and "absent" were the same branch.
+    because "not a ``SecretStr``" and "absent" were the same branch. The remedy
+    is the same one :func:`_missing` names — MCP sign-in is the surface that
+    writes THIS store; Settings > API credentials writes the provider store
+    (``docs/mcp.md``), so naming it here would point at the wrong file.
     """
     return McpSecretRefError(
         f"MCP server {server!r} cannot read {key} from the credential store for {field} "
-        f"{entry} — the stored value is not a string; re-save it in Settings > "
-        f"API credentials"
+        f"{entry} — the stored value is not a string; re-enter it through MCP "
+        f"sign-in, then reconnect"
     )
 
 
@@ -472,4 +484,9 @@ def resolve_config_secrets(
     return cfg.model_copy(update=updates)
 
 
-__all__ = ["McpSecretRefError", "has_references", "resolve_config_secrets"]
+__all__ = [
+    "McpSecretRefError",
+    "has_references",
+    "public_secret_refs",
+    "resolve_config_secrets",
+]

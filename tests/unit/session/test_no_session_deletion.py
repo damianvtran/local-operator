@@ -963,6 +963,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
         2,
     ),
+    (
+        "local_operator/mcp/credentials.py::store_credentials.persist",
+        "<path>.remove",
+        "list.remove(key) — drops a written id from the failed-ids list",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
