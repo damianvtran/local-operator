@@ -34,6 +34,7 @@ from local_operator.server.models.desktop_sessions import (
     CreatedSession,
     DraftPreviewPayload,
     HistoryPage,
+    InterruptReceipt,
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
@@ -454,6 +455,26 @@ class Warm(Input):
     applies: a client that invents an option gets a 422 naming it, instead of
     having it silently ignored and believing it took effect.
     """
+
+
+class Interrupt(Input):
+    """One field, and deliberately no ``confirmed``.
+
+    An interrupt destroys nothing: it stops the turn that is running and
+    leaves the session, its runtime, its child sessions and its process alone,
+    so it needs no confirmation to be safe. Requiring one would also make Esc
+    unusable, which is the whole point of the keystroke — the stop this route
+    replaces (``POST /v1/desktop/stop``) is confirmed precisely because it
+    ends the session.
+
+    ``request_id`` is the at-most-once key the receipt journal claims on, so a
+    retry after a lost response cannot fire a second interrupt at a turn that
+    has moved on. Declared as ``RequestID`` (the canonical UUID shape) rather
+    than ``str`` because the journal keys are session-scoped and a caller-
+    chosen free string would let two different presses collide on one row.
+    """
+
+    request_id: RequestID
 
 
 def host(request: Request) -> DesktopSessions:
@@ -1329,6 +1350,244 @@ async def warm(session_id: str, body: Warm, request: Request):
     async with errors(), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
+
+
+def _work_is_running(remote: Any) -> bool:
+    """Whether there is anything the interrupt rung would actually STOP.
+
+    WHY THIS EXISTS AT ALL, and it is not an optimisation. Everything this route
+    can stop is decided by the OWNER, but the answer the caller needs is a word —
+    ``interrupted`` or ``idle`` — and the only structured read of the owner's
+    state a follower has is its published roster. Without this, a press on a warm
+    session that was merely sitting between turns ran an abort that stopped
+    nothing and then reported ``interrupted``; that is exactly the class of
+    overstatement the abort receipt itself was rewritten to remove, and it would
+    stay invisible until something reads the field.
+
+    The terms are the RUNG's own effects, one per thing ``abort`` does:
+
+    * a live TURN — ``is_streaming``, the facade's own mirror of the canonical
+      flag, and ``activity_phase_clock``, which is non-empty from the moment a
+      turn's work begins until it ends. The second is not redundant: it covers
+      the pipeline the streaming flag has not caught up with yet, which is the
+      window a press would otherwise be swallowed in (see the LIMIT below);
+    * a PARKED GATE — the orphan card that outlived its turn, which this rung
+      settles (``_deny_pending_gates``). This term is why the predicate is not
+      "is the follower streaming": that card is precisely the case the abort's
+      deny-first ordering was added for, so a press that clears it DID do
+      something and must not be answered ``idle``;
+    * a running ``task`` JOB — a subagent, which the abort cancels;
+    * a running GOAL LOOP — which the abort cancels.
+
+    A running ``bash`` job is deliberately NOT a term. Backgrounded jobs exist to
+    outlive the turn that started them (``background=true``) and this rung never
+    touches them, so a session whose only live work is one has nothing for an
+    interrupt to stop — the receipt names those jobs as untouched, and a caller
+    that wanted them gone has the Jobs surface.
+
+    THE FIRST THREE READS ARE CLONE-FREE ON PURPOSE. ``is_streaming`` is the
+    facade's mirror, and ``pending_gate``/``activity_phase_clock`` are the store's
+    own documented copy-free seams. The roster itself is NOT: ``jobs`` is a mutable
+    container, so the store deliberately keeps handing its readers a deep copy for
+    it (``_SHAREABLE_STATE_FIELDS``), and one press therefore pays exactly one clone
+    on this path — the overwhelmingly common press (a streaming turn) pays NONE,
+    because it returns on the first read.
+
+    LIMIT, STATED RATHER THAN HIDDEN: the owner's ``_turn_lock`` flush window is
+    not visible from a follower at all, so a prompt admitted but not yet started
+    cannot be told from an idle session by reading canonical state. The activity
+    phase narrows that window to the admission-to-first-work gap, and the residue
+    is not reachable from the desktop: the button and Esc are both offered on the
+    same ``streaming`` flag this reads, so a press cannot exist in a window where
+    this predicate is false.
+
+    RACE, STATED RATHER THAN HIDDEN: the follower's roster can lag the owner by a
+    delta. Both directions are benign here. A stale ``False`` cannot swallow a
+    press the user could make, for the reason just given. A stale ``True`` at
+    worst reaches the abort a moment after the turn settled, which is the
+    pre-existing behaviour of a press racing a turn's end.
+    """
+    if remote.is_streaming:
+        return True
+    if remote.pending_gate is not None:
+        return True
+    if remote.activity_phase_clock()[0]:
+        return True
+    state = remote.frontend_state
+    # Bare attributes rather than getattr probes: the store hands out real
+    # ``JobState`` rows (``_public_job`` detaches every one), so a probe would hide
+    # a rename behind a silent ``""`` instead of failing, which is the opposite of
+    # what this file's sibling reads want.
+    if any(row.type == "task" and row.status == "running" for row in state.jobs):
+        return True
+    loop = state.loop or {}
+    return loop.get("status") in {"running", "judging"}
+
+
+def _running_work_counts(state: Any) -> tuple[int, int]:
+    """(live subagents, live backgrounded ``bash`` jobs) from a published roster.
+
+    Split by job TYPE because the two surviving kinds have different remaining
+    levers and the notice a surface writes names one of them: a ``task`` row is
+    a subagent, which the interrupt DID reach (so any row still running here
+    refused to die), while a ``bash`` row was deliberately never touched and
+    needs the Jobs surface. Collapsing them into one number would force the
+    copy to say "3 things" about two situations with two different answers.
+
+    Takes an already-read roster rather than the facade so one press reads the
+    follower's canonical state once per question — before the press for "was
+    there work", after it for "what survived" — instead of cloning it twice for
+    one of them.
+    """
+    jobs = state.jobs
+    running = [row for row in jobs if row.status == "running"]
+    children = sum(1 for row in running if row.type == "task")
+    background = sum(1 for row in running if row.type == "bash")
+    return children, background
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/interrupt",
+    response_model=CRUDResponse[InterruptReceipt],
+)
+async def interrupt(session_id: str, body: Interrupt, request: Request):
+    """Stop this session's CURRENT WORK, and leave the session running.
+
+    THE OP THE DESKTOP'S STOP BUTTON AND ESC MEAN, and the bug it fixes is
+    that they meant nothing. The renderer posted ``sessions.command`` with
+    ``command: "stop"``, which is not an ``OWNER_COMMAND``, so this API
+    answered an ``native_action`` PRESENTATION for ``POST /v1/desktop/stop``
+    and stopped no turn at all: the transport was fine and the button called
+    the wrong op. Pointing it at ``/stop`` instead would have been worse than
+    the bug — that route is the KILL SWITCH (deny gates, dispose, release the
+    writer lease, unpublish, exit the runtime), and a control that promises
+    "stop this session's current work" must not end the session.
+
+    THE RUNG IT REUSES IS THE PHONE RELAY'S. ``abort`` already means exactly
+    this on the control socket — stop the turn, cancel the children it
+    started, leave the session and its process alive, and report honestly on
+    what settled — so this route adds a way to REACH it from HTTP, not a
+    second implementation of it. The mapping is one line in
+    ``AttachedSession.interrupt`` (this route) to ``abort`` (the runtime op),
+    and the name deliberately avoids ``/abort``: on this surface ``stop``
+    already means "end the process", and a route one letter from it is a trap
+    for the next reader.
+
+    NO LADDER. A first press stops the turn and its children; a second press
+    is simply a second interrupt, a no-op because nothing is left running. The
+    keyboard's Esc ladder can afford a narrow first press because a second one
+    is offered on screen (``DOUBLE_STOP_WINDOW_S``); this surface has no such
+    offer and nothing rendering "press again", so a ladder here would be a
+    press that does nothing once and explains itself nowhere. Backgrounded
+    ``bash`` jobs are never touched — ``background=true`` exists so a build
+    outlives the turn that started it — and the receipt names them.
+
+    ``idle`` IS A SUCCESS, AND IT IS THE ANSWER FOR ANY SESSION WITH NOTHING TO
+    STOP. A cold session is NOT engaged to answer this (an interrupt is not a
+    reason to spend a process, which is what ``warm`` is for), and a warm one
+    that is merely sitting between turns is answered without dialling its owner
+    at all — see ``_work_is_running`` for the terms, and note that a parked gate
+    WITHOUT a live turn (the orphan card this release also taught ``abort`` to
+    settle) counts as work, because that press really does clear the screen. A
+    client putting an error in front of a press that had nothing to do would be
+    reporting the user's own success as a failure, and a client told
+    ``interrupted`` for a press that stopped nothing would be shown a success
+    that did not happen.
+
+    "NO OWNER" MEANS ``owner_reachable``, NOT ``is_cold``, and the difference is
+    the whole of review round 1's MAJOR-1: ``is_cold``'s third disjunct is a
+    RESYNC state which is true of a connected, SERVING session for the duration
+    of a frontend sync plus a history page load, so gating on it answered
+    ``idle`` for a live streaming turn and stopped nothing — this PR's own defect
+    class, arriving through its own new door.
+
+    RECEIPTED ``retry_safe=True``, and both halves are deliberate. Receipted,
+    because a retry after a lost response must not fire a second interrupt at a
+    turn that has since moved on — the journal replays the stored answer
+    verbatim. ``retry_safe=True``, because unlike ``/stop`` and ``/move`` the
+    operation is idempotent: "make the current turn stop" creates and destroys
+    nothing, and a pending row that never ran is re-executed to the same end.
+    That is also why this route does NOT need ``/stop``'s ``assert_admitting``
+    call before the claim (``desktop_lifecycle.stop``): its receipt is
+    ``retry_safe=False``, so a claimed-but-unrun row is INDETERMINATE for the
+    client, whereas here a retry is the remedy rather than a hazard.
+
+    THE JOURNAL'S 409 ARM CANNOT FIRE HERE, and that is a property of the body
+    rather than an omission (review round 1, MINOR-2). A receipt's fingerprint is
+    a pure function of its request body, and this body has exactly one field, so
+    the same ``request_id`` can only ever arrive with the same fingerprint —
+    which replays — or with a body the closed model refuses, which is a 422
+    before the journal is reached. ``extra="forbid"`` is what makes the second
+    case a shape error rather than a silently-ignored extra, so nothing is lost
+    by naming it plainly here instead of documenting a 409 a caller could never
+    provoke. The journal's own rule is unchanged and tested where it lives
+    (``test_receipts_survive_adapter_restart_and_reject_changed_body``).
+
+    STATUS CODES are the shared ladder's, with one shape to state because it
+    looks like a bug: an UNKNOWN session id and a MALFORMED one are both 404.
+    The id validator raises ``KeyError`` for a bad shape, and ``errors()``
+    answers that as "no such session" — deliberately not a 422, which is
+    reserved for the BODY's shape (a non-UUID ``request_id``, or any extra
+    field). 401 missing or wrong bearer, 403 a disallowed or browser-originated
+    Origin, 503 a desktop capability that is not configured or an owner that
+    cannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).
+    """
+    async with errors(), host(request).session(session_id) as bridge:
+
+        async def execute():
+            assert bridge.remote is not None
+            # NO REACHABLE OWNER is a no-op, NOT a runtime spawn — and the term is
+            # REACHABILITY, deliberately not ``is_cold``. That property's third
+            # disjunct is ``not _ready_for_events``, a RESYNC state which is true of
+            # a connected, SERVING session for the whole of a frontend sync plus a
+            # history page load: gating on it read a live streaming turn as `idle`
+            # and stopped nothing, which is this PR's own defect class arriving
+            # through its own new door (review round 1, MAJOR-1).
+            if not bridge.remote.owner_reachable:
+                return {
+                    "status": "idle",
+                    "receipt": "",
+                    "children_running": 0,
+                    "background_jobs": 0,
+                }
+            # NOTHING FOR THIS RUNG TO STOP IS THE SAME ANSWER as no owner to stop
+            # it with: ``idle``, on a 200, without dialling. That question is asked
+            # of the follower's published roster, which stays readable through a
+            # resync — the store is installed from the attach snapshot and
+            # maintained by deltas, so a mid-refresh viewer still knows whether
+            # work is running.
+            if not _work_is_running(bridge.remote):
+                # Nothing was stopped, so "what survived" is simply what is
+                # running. ``children_running`` is zero by construction (a
+                # running ``task`` job is a term above), while backgrounded
+                # ``bash`` jobs are reported TRUTHFULLY rather than zeroed: the
+                # press did not touch them, and a field that said "no jobs"
+                # beside a build still going would be a lie told on a success.
+                return {
+                    "status": "idle",
+                    "receipt": "",
+                    "children_running": 0,
+                    "background_jobs": _running_work_counts(bridge.remote.frontend_state)[1],
+                }
+            receipt = await bridge.remote.interrupt()
+            # Read AGAIN, after the press: "what survived" is a different question
+            # from "was there work", and the children settle in between.
+            children_running, background_jobs = _running_work_counts(bridge.remote.frontend_state)
+            return {
+                "status": "interrupted",
+                "receipt": receipt,
+                "children_running": children_running,
+                "background_jobs": background_jobs,
+            }
+
+        return reply(
+            await receipts(request).run(
+                session_id + ":interrupt:" + body.request_id,
+                body.model_dump(),
+                execute,
+                retry_safe=True,
+            )
+        )
 
 
 @router.post(
