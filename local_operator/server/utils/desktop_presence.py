@@ -41,8 +41,20 @@ from local_operator.session.runtime.presence import (
     delivery_dir,
     delivery_record_path,
 )
+from local_operator.session.runtime.registry import pid_alive
 
 logger = logging.getLogger(__name__)
+
+#: How long a SIBLING's record must have been silent before this publisher may
+#: unlink it (review round 2, R15).
+#:
+#: TWO full TTLs, and the multiplier is the safety argument: the reader has
+#: already stopped believing the record one TTL earlier, and the owner has missed
+#: six beats — so nothing is being taken away from a publisher that is merely
+#: slow, and a process that resumes beating simply rewrites its record through
+#: the staged ``os.replace`` below. One TTL would be the shortest thing that
+#: works and would race a sibling whose beat was delayed by a busy loop.
+DEAD_RECORD_AGE_S = 2 * PRESENCE_TTL_S
 
 
 @dataclass
@@ -230,6 +242,72 @@ class DesktopDeliveryPublisher:
 
     # -- the file ----------------------------------------------------------
 
+    def _prune_dead_records(self) -> None:
+        """Unlink the sibling records this publisher can PROVE dead (R15).
+
+        WHY A WRITER, AND WHY NOT THE READER. A reader reaps a dead record in
+        the ANSWER (``presence._load_record``), which is right — it must not
+        delete a lease that belongs to a process which may be starting up again
+        under the same pid — but it means nothing ever removes the file. The
+        repo restarts serve daemons on build drift by design, so every process
+        that dies without reaching ``close()`` leaves one behind for good, and
+        every reader pays for all of them: a readdir plus one small read each,
+        on the announce path and on every banner decision. A PUBLISHER may
+        prune, because it is the only kind of process that owns a record here
+        and it can prove death with the reader's own two rules plus an age.
+
+        TWO GUARDS, because this is the one operation in this class that can
+        take a SIBLING's lease away:
+
+        * never this publisher's own record (that is ``close``'s business), and
+        * the entry is re-identified between the decision and the unlink, so a
+          record a live sibling REPLACED in that window is left alone. The
+          staged write ends in ``os.replace``, which changes the inode, so an
+          inode/mtime change is exactly "somebody rewrote this while I was
+          reading it" — and without that check, a sweep would race the very
+          revocation the per-instance layout exists to prevent.
+
+        Nothing here touches the DIRECTORY, only individual entries, and every
+        failure is suppressed: an unlink is atomic, so a crash between two of
+        them leaves a directory the next publisher can still read and write in
+        full. An unreadable or malformed entry is left to its owner rather than
+        deleted — it is not PROVEN dead, and a reader already treats it as an
+        absent answer.
+        """
+        try:
+            entries = list(delivery_dir(self.root).glob("*.json"))
+        except OSError:
+            return
+        own = self._record_path()
+        cutoff = time.time() - DEAD_RECORD_AGE_S
+        for path in entries:
+            if path == own:
+                continue
+            try:
+                before = path.stat()
+                data: Any = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            try:
+                pid = int(data.get("pid") or 0)
+                heartbeat = float(data.get("heartbeat_at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            # The reader's two rules, with the age standing in for them: a
+            # publisher that is alive and beating every PRESENCE_BEAT_S never
+            # reaches this cutoff, and a pid that is gone prunes at once.
+            if pid > 0 and pid_alive(pid) and heartbeat >= cutoff:
+                continue
+            try:
+                after = path.stat()
+                if (after.st_ino, after.st_mtime_ns) != (before.st_ino, before.st_mtime_ns):
+                    continue
+                path.unlink()
+            except OSError:
+                continue
+
     def _write(self) -> None:
         """Materialise this instance's record, or withdraw it when nothing is left.
 
@@ -241,6 +319,12 @@ class DesktopDeliveryPublisher:
         the reader is what unions several of them. So there is no cross-process
         state to merge here, and no writer can clobber another's.
         """
+        # BEFORE the early return below: a publisher whose own claims have all
+        # gone is still the right process to sweep a sibling that died without
+        # cleaning up, so the sweep must not depend on this instance having
+        # anything to say. Best-effort throughout — a lease is chrome, and this
+        # runs inside the route's heartbeat.
+        self._prune_dead_records()
         if not self.claims:
             try:
                 self._record_path().unlink()

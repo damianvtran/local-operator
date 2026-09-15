@@ -686,11 +686,35 @@ that trusted the delta alone would miss it.
 ### The burst ceiling
 
 At most `desktop_feed.BURST_LIMIT` (3) individual banners per tick. The
-remainder is not dropped: it is announced as ONE digest frame naming the count
-(`burst_count`, `session_ids`, no single `completion_token`) so the click can
-land on the catalogue rather than on an arbitrary member. The TUI's own
-per-tick cap is the same number, asserted equal by a test rather than left to
-convention.
+remainder is not dropped: it is announced as ONE digest frame carrying
+
+- `burst_count` — the whole remainder, an absolute number rather than one
+  relative to the ceiling;
+- `session_ids` — the members, so the click can land on the catalogue rather
+  than on an arbitrary member of the set;
+- `completion_token: null` — no single completion owns the frame, so a client's
+  own claim step skips the digest itself;
+- `member_tokens` — `[{session_id, completion_token}, ...]`, the field the
+  members are arbitrated through and the marker that identifies a digest frame
+  to a client. A member is claimed one level down, through the same
+  `POST /v1/desktop/sessions/{session_id}/notified` a single banner uses,
+  immediately before the digest is delivered — never when the frame is merely
+  queued, because a client may suppress the banner by its own focus rule and a
+  claim taken then would burn a completion nothing announced. A member another
+  surface claimed first is simply not this digest's to announce, and the count
+  stays the backend's statement of what happened.
+
+A DIGEST IS EMITTED FOR ANY NON-EMPTY OVERFLOW, INCLUDING A SINGLE MEMBER: four
+completions in one tick are three individual banners plus a digest with
+`burst_count: 1` and one `member_tokens` entry. So "is this a digest?" is a
+question about `member_tokens` (or `session_ids`) being PRESENT, not about a
+count greater than one — a client that keys on the count reads the smallest
+digest as a private banner, finds no `completion_token` to claim, and takes no
+claim at all, leaving that member open for a second surface to banner a second
+time. The boundary is the smallest overflow, not the largest.
+
+The TUI's own per-tick cap is the same number, asserted equal by a test rather
+than left to convention.
 
 ## Desktop delivery presence
 
@@ -708,10 +732,38 @@ this host attempt a banner, right now?"*
 
 A ROUTE RATHER THAN A FILE THE APP WRITES. The app may be paired to a backend on
 another host, so it cannot write to that host's filesystem; the SERVER aggregates
-what its live feed subscriptions report and materialises it at
-`<config_dir>/run/desktop/delivery.json` (0700 directory, 0600 staged write),
-where every sibling process reads it. Local and remote apps then behave
-identically — which is the whole reason this is server-side.
+what its live feed subscriptions report and materialises it as ONE RECORD PER
+SERVE PROCESS at `<config_dir>/run/desktop/delivery/<instance_id>.json` (0700
+directory, 0600 staged write), which every sibling process reads and unions.
+Local and remote apps then behave identically — which is the whole reason this is
+server-side.
+
+ONE FILE PER PUBLISHER, because presence is a per-PROCESS assertion (one serve
+process owns one set of live feed subscriptions) and a single machine-wide file
+got that wrong in both directions: while every publisher wrote
+`run/desktop/delivery.json`, the last WRITER decided the whole machine's answer —
+a second server advertising `can_notify:false` revoked a live one's lease on
+every beat — and the first process to EXIT deleted the file out from under the
+other. The single file is still READ when it is present, because a sibling
+started before this change writes it and a reader that stopped looking would go
+blind to that sibling for the life of its process; **nothing writes it any
+more**, and the records directory is the contract.
+
+- Reachability (`can_notify`) and `can_notify_kinds` are UNIONED across records:
+a banner either live backend can raise does reach this machine, and intersecting
+them would let the weaker sibling veto the stronger one.
+- The window state is TAKEN, not unioned — "which conversation is on screen" has
+exactly one answer, and it comes from the freshest record that has a window (a
+windowless sibling never blanks a window that is genuinely on screen).
+- A record is believed only while its `pid` is alive and its `heartbeat_at` is
+inside `PRESENCE_TTL_S`. A reader reaps a stale record in its ANSWER and does not
+unlink it — the file belongs to a process that may be starting up again — so a
+PUBLISHER sweeps the siblings it can PROVE dead (a dead pid, or silence past
+`DEAD_RECORD_AGE_S`, twice the TTL) during its own write, re-identifying each entry
+first so it cannot unlink a record a live sibling replaced in that window.
+Without the sweep every process that died without running its exit path left a
+file behind for good, and readers paid a read for it on the announce path and on
+every banner decision.
 
 - **The lease is held against the SSE subscription.** An unknown
   `subscription_id` is a 404, and a dropped socket REVOKES its claim. A presence
@@ -797,17 +849,16 @@ completion and make both richer paths dead.
 
 ### The click ladder
 
-`lop resume-click <id>`, first rung that works:
+`lop resume-click <id>`, first rung that works. THE ORDER IS THE OPERATOR'S
+STATED REQUIREMENT rather than a preference between measurable options: the
+requested destination is the DESKTOP UI, and the terminal is the fallback.
 
-1. **A live viewer can display it** — switch it and raise its window. Among
-   viewers that are already displaying the target, prefer that one (a no-op);
-   otherwise the most recently focused; otherwise a `surface: "desktop"` record
-   as the TIEBREAK; otherwise the lowest pid. The desktop is preferred for
-   RAISING a banner, not for the landing site: a click must not yank the user
-   out of the terminal they are sitting in, nor make them wait for a window to
-   be built, when the TUI that raised the banner can switch instantly. A record
-   reporting `has_window:false` is never treated as already displaying, and is
-   always sent the switch (its app recreates the window, then navigates).
+1. **A running desktop viewer** — switch it and raise its window. A record
+   reporting `has_window:false` is a rung-1 candidate TOO: the app is alive with
+   its last window closed, and its `resume_session` recreates the window and then
+   navigates, which is exactly the "app is alive, its window is closed" click.
+   Within the chosen surface, a viewer already displaying the target is preferred
+   (a no-op switch), then the most recently focused, then the lowest pid.
 2. **The desktop app is installed but not running** — launch it with the session
    id. Discovery order: the `desktop.launch_command` setting when set (argv with
    `{session}` substituted), else `local-operator-ui` on `PATH`, else
@@ -817,14 +868,34 @@ completion and make both richer paths dead.
    starting fine, so "a child started" is not evidence that anything ran.
    `pnpm dev` and a repository checkout are deliberately undiscoverable and fall
    through.
-3. **Nothing suitable is running** — spawn a terminal, exactly as before.
+3. **A running TUI viewer** — switched in place.
+4. **Nothing suitable is running** — spawn a terminal, exactly as before.
+
+Rung 3 is asked for "whatever is left" rather than for a named surface, which is
+what keeps the fallback identical for viewer types this build does not have; the
+desktop's own preference lives in rung 1, and the surface filter is what narrows
+this rung when the launch is refused.
+
+THE DESKTOP IS A RUNG, NOT A TIE-BREAK, AND IT IS THE FIRST ONE. As a tie-break
+it only ever decided between two viewers the user had never focused, so a TUI
+focused once — ever — outranked it for good, and a terminal that happened to be
+open swallowed every click before discovery ran: the user asked for the app and
+got their terminal, decided by nothing but incidental focus history. Focus
+history is not a policy for a destination the user named.
+
+`LOCAL_OPERATOR_NO_DESKTOP_LAUNCH=1` TAKES THE APP OUT OF THE LADDER, not only
+out of the launch: rungs 1 and 2 are skipped AND rung 3 is narrowed to non-desktop
+viewers, so a running app cannot become the destination of a click whose launch
+the user forbade. With nothing else running, the click falls through to the
+terminal — the same place it lands when the launch is allowed and the app is
+absent.
 
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
-| `desktop_presence` | 1 | the backend reads `run/desktop/delivery.json` and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

@@ -861,7 +861,54 @@ def test_presence_is_read_uncached_where_the_decision_is_terminal(tmp_path):
         asyncio.run(feed.close())
 
 
-def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path):
+def test_presence_is_read_once_per_tick_not_once_per_candidate(tmp_path, monkeypatch):
+    """REVIEW ROUND 2, R14: one uncached read per candidate SET, not per candidate.
+
+    The banner gate has to read presence UNCACHED (the assertion above), and the
+    read is a `mkdir` + `chmod` + `readdir` plus one small read per record — so
+    taking it once per CANDIDATE made the scenario this channel exists for, a
+    fleet's completions landing in the same tick, pay N of them where one answer
+    serves every row. Measured by the reviewer on the pinned head: one completion
+    in a tick cost one read, twenty cost twenty.
+
+    Counted at ``read_delivery``, which is the filesystem-level read: the call
+    count alone would hide the multiplier, because on the pre-remediation code
+    the extra calls were 2 s cache HITS and cost nothing.
+    """
+    root = tmp_path
+    ids = [f"{index:012x}" for index in range(BURST_LIMIT * 5)]
+    for session_id in ids:
+        _session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    reads: list[Path | None] = []
+    real = presence_module.read_delivery
+
+    def counting(read_root=None):
+        reads.append(read_root)
+        return real(read_root)
+
+    monkeypatch.setattr(presence_module, "read_delivery", counting)
+    for session_id in ids:
+        _publish(root, session_id)
+    _tick(feed)
+    for_one_tick = len(reads)
+    frames = _queued(subscription)
+    asyncio.run(feed.close())
+
+    # The tick really did decide a banner per ceiling slot plus one digest, so
+    # the read count below cannot be low because the tick declined to work.
+    assert len(_notified(frames)) == BURST_LIMIT + 1
+    assert len(ids) > BURST_LIMIT, "the burst must exceed the ceiling to be a burst"
+    assert (
+        for_one_tick == 1
+    ), f"one tick decided {len(_notified(frames))} banners with {for_one_tick} presence reads"
+
+
+@pytest.mark.parametrize("overflow_size", [1, 3], ids=["one-member", "three-member"])
+def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path, overflow_size):
     """REVIEW ROUND 1, R8: a burst digest has to be arbitrable member by member.
 
     The digest deliberately carries no `completion_token` — no single completion
@@ -877,9 +924,17 @@ def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path):
     named, and they are NOT preclaimed. A frame merely being queued must not burn
     a completion, because the client may suppress the banner by its own focus
     rule — the claim belongs immediately before delivery, on the client.
+
+    THE ONE-MEMBER CASE IS THE BOUNDARY THE FINDING NAMED (review round 2, R11):
+    `BURST_LIMIT + 1` completions in one tick is the SMALLEST overflow, so the
+    digest frame carries exactly one member and `burst_count == 1`. A reader
+    that decides "is this a digest" from a count greater than one reads this
+    frame as a private banner, finds no `completion_token` to claim, and takes no
+    claim at all — so the boundary is pinned here rather than left to be inferred
+    from the three-member shape.
     """
     root = tmp_path
-    ids = [f"{index:012x}" for index in range(BURST_LIMIT + 3)]
+    ids = [f"{index:012x}" for index in range(BURST_LIMIT + overflow_size)]
     for session_id in ids:
         _session(root, session_id)
     feed = _feed(root)
@@ -892,6 +947,11 @@ def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path):
 
     digest = _notified(frames)[-1]["payload"]
     assert digest["completion_token"] is None
+    # The count is the whole remainder, and the two member fields agree with it
+    # at every size — which is the invariant a count-based client test needs and
+    # the reason the backend's own contract is "a digest carries member_tokens".
+    assert digest["burst_count"] == overflow_size
+    assert digest["session_ids"] == ids[BURST_LIMIT:]
     assert digest["member_tokens"] == [
         {"session_id": session_id, "completion_token": tokens[session_id]}
         for session_id in ids[BURST_LIMIT:]

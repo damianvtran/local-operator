@@ -205,6 +205,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "server does not leave a lease behind and does not delete a live "
         "sibling's",
     ),
+    (
+        "local_operator/server/utils/desktop_presence.py::"
+        "DesktopDeliveryPublisher._prune_dead_records",
+        "<path>.unlink",
+        "Sweeps a SIBLING publisher's <instance_id>.json record FILE in "
+        "run/desktop/delivery/ once it is provably dead (dead pid, or heartbeat "
+        "older than DEAD_RECORD_AGE_S), and only after re-identifying the entry "
+        "by inode/mtime so a live sibling's staged replace is never raced. The "
+        "glob is *.json inside that one directory: never a directory, never "
+        "this process's own record, never under sessions/ (review round 2, R15)",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",

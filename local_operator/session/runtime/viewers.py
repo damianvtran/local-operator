@@ -88,9 +88,10 @@ VIEWER_PROTOCOL = 1
 KNOWN_VIEWER_PROTOCOLS = frozenset({VIEWER_PROTOCOL})
 
 #: The viewer RECORD's surface names. Wire constants, not decoration: the
-#: client routes on them (a desktop viewer is preferred as a banner surface and
-#: as a tiebreak landing site) and the runtime's rung-3 probe skips a record
-#: whose surface is not a TUI. Declared here, beside the record that carries
+#: client routes on them (a desktop viewer is the click ladder's FIRST
+#: destination — UI-first, review round 1 R9 — and the surface the ladder asks
+#: about when the launch is refused, review round 2 R13) and the runtime's
+#: rung-3 probe asks for a TUI. Declared here, beside the record that carries
 #: them, so neither half spells the string on its own.
 TUI_SURFACE = "tui"
 DESKTOP_SURFACE = "desktop"

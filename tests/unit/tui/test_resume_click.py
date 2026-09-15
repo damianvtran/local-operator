@@ -155,28 +155,75 @@ def test_a_launched_app_ends_the_ladder_and_a_terminal_is_never_spawned(monkeypa
     assert no_viewer == []
 
 
-def test_a_refused_desktop_skips_both_ui_rungs_together(monkeypatch, no_viewer):
-    """``LOCAL_OPERATOR_NO_DESKTOP_LAUNCH`` has to mean "the app is not a
-    destination", not "skip the launch and let the routing rung pick the same app
-    up again" — so the viewer scan is not even asked.
+def test_a_refused_desktop_is_not_a_destination_even_when_one_is_running(monkeypatch):
+    """REVIEW ROUND 2, R13: the refusal has to remove the app from the LADDER.
+
+    ``LOCAL_OPERATOR_NO_DESKTOP_LAUNCH`` gated rungs 1 and 2 and left rung 3
+    asking "is anything running?" with no surface narrowing — and
+    ``choose_viewer`` prefers a desktop — so a RUNNING app was still the
+    destination for a click whose launch the user had forbidden. The test that
+    used to stand here asserted the CALL SHAPE (that the scan was not asked about
+    the desktop surface) and so could not see it: it stubbed the routing rung out
+    entirely.
+
+    This drives the REAL rung — ``resume_click._route_to_viewer`` ->
+    ``route_click`` -> ``choose_viewer`` — over synthetic records and asserts the
+    OUTCOME: which record a click was actually delivered to, and whether a
+    terminal was spawned instead. Only the two true boundaries are doubled, the
+    viewer scan (records rather than a directory) and the dial. The control half
+    clears the refusal visibly, the way this module opts out of it for the launch
+    rung.
     """
-    asked: list[str | None] = []
+    from local_operator.session.runtime import viewer_client
+    from local_operator.session.runtime import viewers as viewers_module
+    from local_operator.session.runtime.viewer_client import ViewerOutcome
+    from local_operator.session.runtime.viewers import (
+        DESKTOP_SURFACE,
+        TUI_SURFACE,
+        ViewerRecord,
+    )
 
-    def route(session_id, *, surface=None):
-        asked.append(surface)
-        return False
+    wanted = "a" * 12
+    desktop = ViewerRecord(pid=1, surface=DESKTOP_SURFACE, control_port=1, control_key="k" * 64)
+    tui = ViewerRecord(pid=2, surface=TUI_SURFACE, control_port=2, control_key="k" * 64)
+    monkeypatch.setattr(viewers_module, "scan_viewers", lambda root=None: [desktop, tui])
 
-    monkeypatch.setattr(resume_click, "_route_to_viewer", route)
-    monkeypatch.setenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, "1")
+    delivered: list[int] = []
+
+    async def deliver(record, session_id, **_kwargs):
+        delivered.append(record.pid)
+        return ViewerOutcome(switched=True)
+
+    monkeypatch.setattr(viewer_client, "deliver_click", deliver)
     launched: list[str] = []
     monkeypatch.setattr(
         resume_click, "_launch_desktop", lambda session_id: launched.append(session_id) or True
     )
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_spawn_terminal", lambda session_id: spawned.append(session_id) or True
+    )
 
-    assert resume_click.open_session("a" * 12) is True
-    assert asked == [None], "a refused desktop must not be asked about by surface"
+    # CONTROL: with the launch allowed, UI-first still lands on the desktop — the
+    # narrowing below must not have changed the unrestricted ladder.
+    monkeypatch.delenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, raising=False)
+    assert resume_click.open_session(wanted) is True
+    assert delivered == [desktop.pid], "the unrestricted ladder did not land on the UI"
+
+    # REFUSED, with a desktop RUNNING: the click goes to the TUI instead.
+    monkeypatch.setenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, "1")
+    delivered.clear()
+    assert resume_click.open_session(wanted) is True
+    assert delivered == [tui.pid], "a refused desktop still took the click"
+
+    # REFUSED with nothing but a desktop on the wire: the app is not a
+    # destination at all, so the ladder falls all the way through to a terminal.
+    delivered.clear()
+    monkeypatch.setattr(viewers_module, "scan_viewers", lambda root=None: [desktop])
+    assert resume_click.open_session(wanted) is True
+    assert delivered == [], "a refused desktop took the click with no TUI in sight"
+    assert spawned == [wanted]
     assert launched == []
-    assert no_viewer == ["a" * 12]
 
 
 def test_a_configured_launch_command_is_used_verbatim_with_the_session_id(monkeypatch, no_viewer):

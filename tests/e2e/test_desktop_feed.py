@@ -377,12 +377,20 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
     The desktop app is expected to publish one of these unchanged; this asserts
     the routing half works for it today, against a real endpoint on a real
     loopback port, so the UI half has something already proven to compile
-    against.
+    against. Both directions are asserted: a running desktop IS the destination
+    while the launch is allowed, and is NOT one once it is refused (review round
+    2, R13) — the second half is the reason this test can no longer inherit the
+    suite-wide refusal, because the hole it used to travel through is closed and
+    an assertion that leans on it would be asserting the defect.
     """
     from local_operator.session.runtime.viewer_server import ViewerServer
     from local_operator.session.runtime.viewers import DESKTOP_SURFACE
     from local_operator.tui import resume_click
     from local_operator.tui.resume_click import open_session
+
+    # The visible opt-out, the way the TUI's own ladder tests take theirs: this
+    # test exercises rung 1, which only EXISTS while the launch is allowed.
+    monkeypatch.delenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, raising=False)
 
     root = headless_tui_env
     switched: list[str] = []
@@ -427,6 +435,18 @@ def test_a_click_routes_to_a_running_desktop_viewer(headless_tui_env: Path, monk
         # The record's surface is what the routing preference reads.
         records = _scan(root)
         assert any(record.surface == DESKTOP_SURFACE for record in records)
+
+        # AND THE REFUSAL TAKES THE APP OUT OF THE LADDER (review round 2,
+        # R13). Measured against the SAME real endpoint rather than over
+        # synthetic records, because this server would answer the click if
+        # anything asked it: with the refusal set the click must fall through
+        # to the (doubled) spawn and this host must never see a resume.
+        monkeypatch.setenv(resume_click.DESKTOP_LAUNCH_REFUSED_ENV, "1")
+        switched.clear()
+        launched.clear()
+        assert open_session(target) is True
+        assert switched == [], "a refused desktop viewer took the click"
+        assert launched == [target]
     finally:
         server.close()
 
