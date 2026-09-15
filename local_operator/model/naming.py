@@ -219,7 +219,7 @@ def _unambiguous_name(provider: str, model_id: str, selector: str, name: str) ->
         return ""
     curated = static_models(provider).get(model_id)
     for candidate in (name, (curated.name if curated else "").strip()):
-        if not candidate or _echoes_id(candidate, model_id):
+        if not candidate or echoes_id(candidate, model_id):
             continue
         # "Unknown" is the shipped placeholder's identity, not a model. A
         # listing that leaves the name blank used to keep that word and paint
@@ -244,7 +244,7 @@ def _resells(provider: str) -> bool:
     return provider in AGGREGATOR_PROVIDERS
 
 
-def _echoes_id(name: str, model_id: str) -> bool:
+def echoes_id(name: str, model_id: str) -> bool:
     """Whether a "name" is just the id handed back.
 
     Endpoints that carry no display metadata answer with the key they were asked
@@ -252,6 +252,12 @@ def _echoes_id(name: str, model_id: str) -> bool:
     (``moonshotai/kimi-k2``) while the band would show the bare tail. Both are
     the id wearing a name's clothes: promoting either would spend the whole
     honesty budget to render the string it started from.
+
+    Public because "this spec carries no usable name" is a question a second
+    caller has to ask: the cold restore adopts a conversation's own recorded
+    display name in exactly this case, where the only name the current process
+    could resolve is the id it already had (see
+    ``AttachedSession._restored_model_specs``).
     """
     return name == model_id or name == (model_id.rpartition("/")[2] or model_id)
 

@@ -152,6 +152,99 @@ def resolve_configured_model(provider: str, model_id: str, config_dir: Path) -> 
     return FrontendModelSpec(**spec.model_dump())
 
 
+def configured_model_pair(config_dir: Path) -> tuple[str, str]:
+    """The ``(provider, model_id)`` this machine is configured for, model defaulted.
+
+    The pair alone, so the two resolvers below can share one reading of it: the
+    CONFIGURED model is both an answer in its own right (a conversation with no
+    journalled selection) and the BASE a saved selection is resolved against.
+    Falling back to the provider's own default model when config names a provider
+    but no model belongs here rather than to either caller.
+    """
+    from local_operator.config import ConfigManager
+
+    config = ConfigManager(config_dir=config_dir)
+    provider = str(config.get_config_value("hosting", "") or "")
+    model_id = str(config.get_config_value("model_name", "") or "")
+    if provider and not model_id:
+        from local_operator.model.defaults import default_model_for
+
+        model_id = default_model_for(provider) or ""
+    return provider, model_id
+
+
+def configured_base_model(config_dir: Path) -> FrontendModelSpec:
+    """The spec a runtime constructed HERE would boot on, or an empty one.
+
+    The carry source for :func:`resolve_saved_model`: ``spec_for_target`` takes the
+    spec the session currently holds and carries only the sampling choices that may
+    legitimately cross a hop, so the base has to be the CONFIGURED pair — which is
+    what ``Session.__init__`` builds before ``_restore_selected_model`` maps the
+    journal onto it.
+
+    An unreadable or empty config is the empty spec, never an error: ``spec_for_target``
+    carries nothing from a spec with no effort, which is the honest answer when this
+    machine has no opinion to carry.
+    """
+    try:
+        provider, model_id = configured_model_pair(config_dir)
+    except Exception:  # noqa: BLE001 — an unreadable config carries nothing
+        logger.debug("configured base could not be read", exc_info=True)
+        return FrontendModelSpec(provider="", model_id="")
+    return resolve_configured_model(provider, model_id, config_dir)
+
+
+def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> FrontendModelSpec:
+    """The conversation's OWN saved selection as the spec a resumed turn runs on.
+
+    WHY metadata rather than just the pair, one branch over from
+    :func:`resolve_configured_model`: this spec is what the BAND paints while the
+    conversation is still cold, and it is what the runtime compares against the
+    moment it attaches. A bare ``FrontendModelSpec(provider, model_id, effort)``
+    answers the pair and nothing else, so the first frame carried ``ModelSpec``'s
+    own defaults — a 128_000 window in place of the model's real one, and no
+    ``display_name`` at all.
+
+    Both halves of that were user-visible, and the window is the worse of the two.
+    The band's percentage is a MEASURED reading divided by the spec's window, so a
+    conversation holding 287_491 tokens against a 1_000_000 budget opened on a
+    confident ``224.6%/128k`` — and, where the receipt seed filled the numerator
+    while ``usage_seed.reading_window`` refused to vouch a denominator for an
+    unresolved spec, on ``287.5k/—`` — then healed seconds later when the runtime's
+    own spec arrived. The missing name degrades to ``naming.py``'s curated
+    registry, which can name only what the shipped rows carry, so a model they do
+    not cover (a release newer than the rows, any resold route) painted its bare id
+    until the full load finished.
+
+    ``spec_for_target`` rather than ``build_model_spec`` directly: it is the
+    derivation the failover driver and ``Session._spec_for_route`` already build a
+    resumed selection's spec with, and its own docstring is explicit that deriving
+    the display spec any other way is how the band and the wire end up disagreeing
+    about effort and the context window. Its base is
+    :func:`configured_base_model` — the same base the runtime holds when it restores
+    this selection — so the cold frame and the resumed frame agree by construction
+    rather than by coincidence.
+
+    Best-effort throughout: a resolution that raises leaves the bare pair, which is
+    the selector the band has always known how to render.
+    """
+    bare = FrontendModelSpec(
+        provider=saved.provider, model_id=saved.model_id, reasoning_effort=saved.effort
+    )
+    if not saved.provider or not saved.model_id:
+        return bare
+    try:
+        from local_operator.providers.failover import FallbackTarget, spec_for_target
+
+        resolved = spec_for_target(
+            configured_base_model(config_dir), FallbackTarget(saved.selector, saved.effort)
+        )
+    except Exception:  # noqa: BLE001 — metadata is best-effort; the pair is still an answer
+        logger.debug("saved model metadata could not be resolved", exc_info=True)
+        return bare
+    return FrontendModelSpec(**resolved.model_dump())
+
+
 def resolve_conversation_model(
     config_dir: Path,
     session_dir: Path | None = None,
@@ -190,11 +283,7 @@ def resolve_conversation_model(
     model: FrontendModelSpec | None = None
     saved: StoredModelSelection | None = None
     try:
-        from local_operator.config import ConfigManager
-
-        config = ConfigManager(config_dir=config_dir)
-        provider = str(config.get_config_value("hosting", "") or "")
-        model_id = str(config.get_config_value("model_name", "") or "")
+        provider, model_id = configured_model_pair(config_dir)
         if session_dir is not None:
             saved = read_model_selection(session_dir)
         if selection_sink is not None:
@@ -202,16 +291,16 @@ def resolve_conversation_model(
         if birth_model is not None and (saved is None or model_selection_override):
             model = FrontendModelSpec(**birth_model.model_dump())
         elif saved is not None:
-            model = FrontendModelSpec(
-                provider=saved.provider,
-                model_id=saved.model_id,
-                reasoning_effort=saved.effort,
-            )
+            # The conversation's own pair, resolved through its OWN metadata — the
+            # same treatment the configured pair below already gets, and for the
+            # same reason. Left bare, this branch handed the first cold frame the
+            # pair plus ``ModelSpec``'s defaults: no display name (so the band fell
+            # back to the curated registry, and to the BARE ID for anything it does
+            # not ship) and a 128k window standing in for the model's real one (so
+            # the band divided a measured reading by it). See
+            # :func:`resolve_saved_model`.
+            model = resolve_saved_model(saved, config_dir)
         else:
-            if provider and not model_id:
-                from local_operator.model.defaults import default_model_for
-
-                model_id = default_model_for(provider) or ""
             # The configured pair, resolved through its OWN metadata. A bare
             # ``FrontendModelSpec(provider, model_id)`` answers no ladder and no
             # level, so a reader that gates an effort reading on those fields —

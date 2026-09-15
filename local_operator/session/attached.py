@@ -1826,28 +1826,33 @@ class AttachedSession:
     def _restored_model_specs(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
-        """Model specs for the restored state, keeping the window and the
-        measured context consistent with each other.
+        """Model specs for the restored state, keeping the window, the
+        measured context and the resolved name consistent with each other.
 
-        The synthesised cold spec is built from ``config.yml``, which names the
-        provider and model but carries no metadata — so ``ModelSpec`` supplies
-        its **128k default** for ``context_window``. The restored
-        ``context_tokens`` were measured against the window the runtime
-        actually had (1M on the reference session), and the band divides the
-        restored tokens by the SPEC's window (``_context_window`` in
-        ``tui/app.py`` reads the effective spec, deliberately, because the
-        percentage predicts when the next request overflows). Dividing 322,546
-        by a defaulted 128,000 is how a resumed session painted **268.2%**
-        (design review round 1, D1) — a number that cannot be true, on the one
-        surface that exists to tell the user how much room is left.
+        The synthesised cold spec is built from ``config.yml`` and the journal,
+        which name the provider and model — and, since this process resolves the
+        pair through the catalogue (``cold_model.resolve_saved_model``), whatever
+        metadata this machine can read OFFLINE. Where that is not enough, the
+        restored state is: the session's last runtime wrote a full spec into its
+        checkpoint, and the values the conversation's own history was actually
+        measured and named against are there.
 
-        The checkpoint's own spec is the one those tokens were measured
-        against, so it is the honest denominator. Taken ONLY when the config
-        names the same model: if the user switched models since, the
-        configured spec is right and the stale window would be the wrong
-        answer in the other direction. In that case the numerator is dropped
-        instead (see ``_consistent_context``) rather than divided by a window
-        it was never measured against.
+        The WINDOW is the case this rule was written for. The restored
+        ``context_tokens`` were measured against the window the runtime actually
+        had (1M on the reference session), so dividing 322,546 by a placeholder
+        window is how a resumed session painted **268.2%** (design review round
+        1, D1) — a number that cannot be true, on the one surface that exists to
+        tell the user how much room is left. The checkpoint's own spec is the one
+        those tokens were measured against, so it is the honest denominator,
+        taken ONLY when the configured spec names the same model: if the user
+        switched models since, the configured spec is right and the stale window
+        would be the wrong answer in the other direction. In that case the
+        numerator is dropped instead (see ``_consistent_context``) rather than
+        divided by a window it was never measured against.
+
+        The NAME rides the same gate for the same reason — it is a fact about
+        THIS model that only a runtime which ran it could resolve (see the
+        adoption below for the measurement).
         """
         configured = state.selected_model
         stored = durable.selected_model
@@ -1858,24 +1863,46 @@ class AttachedSession:
         )
         if not same_model:
             return {}
-        # Fresh route metadata outranks an old owner's active window (which
-        # may predate maximum-context support or a changed opt-out setting).
-        if (
+        update: dict[str, Any] = {}
+        # Fresh route metadata outranks an old owner's active window (which may
+        # predate maximum-context support or a changed opt-out setting).
+        if not (
             configured.context_metadata_resolved
             or configured.default_context_window
             or configured.max_context_window
         ):
+            window = int(getattr(stored, "context_window", 0) or 0)
+            if window > 0:
+                update.update(
+                    {
+                        "context_window": window,
+                        "default_context_window": stored.default_context_window,
+                        "max_context_window": stored.max_context_window,
+                    }
+                )
+        # The resolved NAME, on the same terms and for a second reason: this
+        # process resolves a name only as far as the catalogue it can read OFFLINE
+        # reaches, and a listing row that answers with the id it was asked about
+        # gives it nothing — `naming.echoes_id` is the rule for that. Measured
+        # against the reference machine: `openai/gpt-6-astra` resolves here to the
+        # name `gpt-6-astra`, which that rule refuses, so the band painted the BARE
+        # ID on the first frame and healed to `GPT-6-Astra` — the name this
+        # conversation's own row carries, resolved by the runtime that was live —
+        # only when that runtime attached. The row is this model's own record of its
+        # own identity (the gate above is the same-model one), so adopting it can
+        # never assert a name onto a different model.
+        # Imported here rather than at module scope, like `_cold_wakes` below and
+        # for the same reason: `model.naming` pulls the shipped registry tables in
+        # with it, and this function only ever runs on a cold open.
+        from local_operator.model.naming import echoes_id
+
+        configured_name = str(getattr(configured, "display_name", "") or "")
+        if not configured_name or echoes_id(configured_name, configured.model_id):
+            durable_name = str(getattr(stored, "display_name", "") or "")
+            if durable_name:
+                update["display_name"] = durable_name
+        if not update:
             return {}
-        # Only the window is adopted. Everything else on the configured spec
-        # reflects THIS process's config, which is current by definition.
-        window = int(getattr(stored, "context_window", 0) or 0)
-        if window <= 0:
-            return {}
-        update = {
-            "context_window": window,
-            "default_context_window": stored.default_context_window,
-            "max_context_window": stored.max_context_window,
-        }
         return {
             "selected_model": configured.model_copy(update=update),
             "effective_model": (
