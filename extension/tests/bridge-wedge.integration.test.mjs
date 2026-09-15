@@ -19,6 +19,13 @@
  * `src/driver/deadline.ts` and are pinned there as one table. (`REAL_SETTLE`
  * stays `src/settle.ts`: that file re-exports `deadline` for this fixture's
  * alias, and keeps the `chrome.webNavigation`-bound `settle()`.)
+ *
+ * LOCAL_OPERATOR_TEST_BRIDGE_SOURCE is a REVIEW-ONLY hook: it points the module
+ * under test at another tree (the pinned base, for a before/after comparison)
+ * and is read by nothing in src/ or the build, so it cannot become a production
+ * seam. It is deliberately named outside the `CMUX_*`/`LOP_*` families the
+ * isolation wrappers scrub — a base-comparison run that inherited that scrub
+ * would silently test the checked-out tree and read as a pass.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -29,7 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SRC = resolve(HERE, "..", "src");
+const SRC = process.env.LOCAL_OPERATOR_TEST_BRIDGE_SOURCE || resolve(HERE, "..", "src");
 const REAL_SETTLE = join(SRC, "settle.ts");
 const REAL_TAB_GROUPS = join(SRC, "tab-groups.ts");
 
@@ -878,5 +885,165 @@ test("X4 a socket constructor that throws leaves the worker able to dial again",
     console.warn = realWarn;
     if (worker) await worker.close();
     delete globalThis.chrome;
+  }
+});
+
+// Microtask/I/O barriers, not elapsed-time assertions: the fixture's shortened
+// deadline is advanced explicitly, while the underlying cosmetic call remains
+// unresolved. A baseline allSettled without a deadline cannot pass these rows.
+const flushPerformance = () => new Promise(resolve => setImmediate(resolve));
+
+test("cosmetic silence cannot strand the cold worker dial", async t => {
+  const calls = [];
+  let release;
+  const stuck = new Promise(resolve => { release = resolve; });
+  installChrome({ overrides: { action: { setBadgeText: () => { calls.push("badge"); return stuck; } } } });
+  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "synthetic-fixture" }, configurable: true });
+  const wires = [];
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    readyState = 1;
+    constructor(url) { wires.push(url); queueMicrotask(() => this.onopen?.()); }
+    send() {}
+    close() {}
+  };
+  const warn = t.mock.method(console, "warn", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let worker;
+  try {
+    worker = await load(`export * from ${JSON.stringify(join(SRC, "worker.ts"))};`);
+    await flushPerformance();
+    // Every reconcile a cold start performs has ISSUED its badge write by now and
+    // none is abandoned yet (the mocked clock has not reached the fixture
+    // deadline), so this is the ABANDONED baseline. It is read off the fixture
+    // rather than pinned, because how many times startup reconciles is a fact of
+    // worker.ts's cold-start chain, not part of what this row proves.
+    const abandoned = calls.length;
+    assert.ok(abandoned, "startup reached the stalled badge");
+    assert.equal(wires.length, 0);
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(wires.length, 1, "bounded cosmetics must release the real cold-start connect");
+    assert.ok(
+      warn.mock.calls.some(({ arguments: args }) => String(args[0]).includes("badge text")),
+      "the abandoned cosmetic write must be RECORDED, not silently swallowed",
+    );
+    // Every abandoned write above coalesces into ONE follow-up reconcile
+    // (origins.ts), and a reconcile issues exactly one badge write — so the
+    // follow-up costs one write, never one per failure.
+    assert.equal(
+      calls.length,
+      abandoned + 1,
+      "the abandoned writes must cost ONE follow-up write, not one each",
+    );
+    const count = calls.length;
+    release(); await flushPerformance();
+    assert.equal(calls.length, count, "late completion must not launch retry writes");
+    // The follow-up's own write is abandoned too. It must not schedule another:
+    // it calls reconcileActionSurface directly, never updatePromptSurfaces.
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(calls.length, count, "a failed follow-up must not reschedule");
+    assert.equal(wires.length, 1);
+  } finally {
+    release(); await flushPerformance();
+    t.mock.timers.reset();
+    if (worker) await worker.close();
+  }
+});
+
+test("cosmetic silence cannot withhold an already-durable consent ACK", async t => {
+  let release;
+  const stuck = new Promise(resolve => { release = resolve; });
+  const { store, chrome } = installChrome();
+  const module = await load(`export * from ${JSON.stringify(join(SRC, "origins.ts"))};`);
+  const warn = t.mock.method(console, "warn", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const entry = await module.loaded.raiseAccessRequest(new URL("https://example.test"), "synthetic-owner");
+    chrome.action.setBadgeText = () => stuck;
+    let ack;
+    const decision = module.loaded.resolveOrigin("https://example.test", "once", entry.entryId).then(value => { ack = value; });
+    await flushPerformance();
+    assert.equal(store.accessQueue.length, 0, "queue removal persisted before cosmetics");
+    assert.equal(Object.values(store.onceGrants).length, 1, "grant committed before ACK");
+    assert.equal(Object.values(store.onceGrants)[0].requester, "synthetic-owner");
+    assert.equal(ack, undefined);
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(ack, true, "a cosmetic hang must not misreport a committed decision");
+    assert.ok(
+      warn.mock.calls.some(({ arguments: args }) => String(args[0]).includes("badge text")),
+      "the abandoned cosmetic write must be RECORDED, not silently swallowed",
+    );
+    await decision;
+    release(); await flushPerformance();
+    assert.equal(Object.values(store.onceGrants).length, 1, "no retry/double grant after late badge completion");
+  } finally {
+    release(); await flushPerformance();
+    t.mock.timers.reset();
+    await module.close();
+  }
+});
+
+test("a dropped cosmetic write is followed by one reconcile from the queue as it is now", async t => {
+  // FINDING F2. The badge is the extension's PRIMARY pending signal (worker.ts
+  // says why the OS banner is not), and a bounded cosmetic call that times out is
+  // ABANDONED, not retried. Nothing else comes back for it once the queue
+  // empties: `armNextExpiry` clears ACCESS_EXPIRY_ALARM on that transition, and
+  // the other reconcile sites are only reached on the next enqueue, decision or
+  // sweep. So without the follow-up the toolbar keeps advertising a request that
+  // is already decided — the pre-change behaviour, where the late write landed.
+  const writes = [];
+  let release;
+  const stuck = new Promise(resolve => { release = resolve; });
+  const { store, chrome } = installChrome();
+  chrome.action.setBadgeText = (arg) => {
+    writes.push(arg.text);
+    // ONLY the write whose payload is the emptied queue hangs, so the follow-up
+    // has to succeed for the badge to stop advertising the decided request.
+    return arg.text === "" ? stuck : undefined;
+  };
+  const module = await load(`export * from ${JSON.stringify(join(SRC, "origins.ts"))};`);
+  const warn = t.mock.method(console, "warn", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const entry = await module.loaded.raiseAccessRequest(new URL("https://example.test"), "synthetic-owner");
+    await flushPerformance();
+    assert.equal(writes.at(-1), "1", "the pending request is advertised");
+    let ack;
+    const decision = module.loaded.resolveOrigin("https://example.test", "once", entry.entryId).then(value => { ack = value; });
+    // The ACK is deliberately NOT awaited here: it is released by the same
+    // cosmetic deadline every other write is bounded by, so awaiting it before
+    // advancing the mocked clock deadlocks the row. Nothing else in this row may
+    // be reached before the abandoned writes have been issued either, which is
+    // what makes the baseline below a count of ABANDONED writes.
+    await flushPerformance();
+    assert.equal(store.accessQueue.length, 0, "the decision is durable");
+    assert.equal(ack, undefined, "the ACK is still held by the cosmetic lane");
+    const abandoned = writes.length;
+    assert.ok(abandoned > 1, "the decision must reconcile from more than one site for this row to exercise coalescing");
+    assert.equal(writes.at(-1), "", "every write after the advertisement carries the emptied queue");
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(ack, true, "the ACK is bounded ONCE: the follow-up is not on its lane");
+    assert.ok(
+      warn.mock.calls.some(({ arguments: args }) => String(args[0]).includes("badge text")),
+      "the dropped write must be recorded, not swallowed",
+    );
+    assert.equal(writes.length, abandoned + 1, "the abandoned writes must cost ONE follow-up write, never one each");
+    assert.equal(writes.at(-1), "", "and it carries the CURRENT queue, so the toolbar stops advertising");
+    // The follow-up read the queue AFTER the abandoned write, so it cannot
+    // restore the state that write carried: a later queue state is still the
+    // last thing on the badge, and the abandoned call's late completion cannot
+    // clobber it.
+    await module.loaded.raiseAccessRequest(new URL("https://later.test"), "synthetic-owner");
+    await flushPerformance();
+    assert.equal(writes.at(-1), "1", "the later queue state wins");
+    release(); await flushPerformance();
+    assert.equal(writes.at(-1), "1", "late completion of the abandoned write must not overtake it");
+    await decision;
+    t.mock.timers.tick(40); await flushPerformance();
+    assert.equal(writes.at(-1), "1", "and no follow-up re-runs for a reconcile that succeeded");
+  } finally {
+    release(); await flushPerformance();
+    t.mock.timers.reset();
+    await module.close();
   }
 });

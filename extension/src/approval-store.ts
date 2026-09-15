@@ -210,6 +210,33 @@ export function sweepQueue(now: number = Date.now()): Promise<QueueSnapshot> {
   });
 }
 
+/** The queue as it is NOW, for a caller that only has to RENDER it: no migration,
+ * no persist, no alarm, and no observer notification.
+ *
+ * It exists for the cosmetic surface's follow-up reconcile (origins.ts), which
+ * needs a snapshot newer than the one an ABANDONED Chrome write carried, and
+ * must not start a second sweep to get one: `sweepQueue` notifies the queue
+ * observer, and that observer is what schedules reconciliation in the first
+ * place, so a follow-up built on it would re-enter the lane it is repairing and
+ * put a second cosmetic burst on the wire for one failure. The read stays inside
+ * the mutation lane so it cannot observe a half-applied mutation, and it is a
+ * pure projection of the same helpers `normalizedLocked` uses.
+ *
+ * A queue still on an older `accessQueueVersion` is not migrated here — this is a
+ * display path, and the sweep that migrates it also announces it. */
+export function readQueueSnapshot(now: number = Date.now()): Promise<QueueSnapshot> {
+  return withSessionMutation(async () => {
+    const session = await getSession();
+    return {
+      queue: liveQueue(session.accessQueue, now),
+      results: cleanResults(session.accessResults, now),
+      onceGrants: Object.fromEntries(
+        Object.entries(session.onceGrants ?? {}).filter(([, grant]) => now < grant.expiresAt),
+      ) as OnceGrants,
+    };
+  });
+}
+
 export function enqueueAccess(
   url: URL,
   requester: string,
