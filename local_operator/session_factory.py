@@ -565,7 +565,8 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     """Render transcript entries into the LLM-visible message list.
 
     Thin alias over the engine's single converter
-    (:func:`local_operator.session.session._default_convert_to_llm`). Two
+    (:func:`local_operator.harness.render._default_convert_to_llm`, reached here
+    through ``local_operator.session.session``'s re-export). Two
     renderings of the same entry type is exactly what let the snapcompact
     path diverge — the host converter replayed the archive's full text while
     dropping the frames, so a compaction pass reduced nothing. One renderer,

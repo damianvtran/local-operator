@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import logging
 import re
 import textwrap
 import time
@@ -78,13 +79,18 @@ from local_operator.harness.reply_channel import (
     envelope_from_tool_call,
     reply_channel_tools,
 )
-from local_operator.logger import get_logger
 
 if TYPE_CHECKING:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.types import Message
 
-logger = get_logger(__name__)
+# stdlib logging rather than ``local_operator.logger``: that module imports
+# ``local_operator.paths``, which resolves the operator's config directory, and
+# the runner's import graph is held to the isolation rule in
+# ``tests/unit/evaluation/runner/test_isolation.py``. The logger OBJECT is the
+# same either way — ``get_logger`` is ``logging.getLogger`` — so records still
+# reach whatever handlers the entry point configured.
+logger = logging.getLogger(__name__)
 
 #: Frames kept verbatim in the history by default. A GUI agent reads the
 #: screen as STATE: the current frame is what it acts on and the last couple
