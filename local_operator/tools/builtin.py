@@ -12055,11 +12055,18 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
 
 #: What ``wait`` tells the model for each kind of inbound arrival that woke it,
 #: keyed by the producer's ``CustomMessage.custom_type``. Spelled as literals
-#: rather than imported: ``session.session`` and ``harness.comms`` both import
-#: this module, so naming ``PEER_MESSAGE_MESSAGE_TYPE`` / ``WAKE_PROMPT_MESSAGE_TYPE``
-#: / ``HUB_MESSAGE_TYPE`` here would be a cycle. ``test_wait_budget.py`` pins
-#: the three keys against the real constants so a rename cannot silently
-#: demote a kind to the generic fallback wording.
+#: rather than imported, which USED to be the forced choice: ``session.session``
+#: and ``harness.comms`` both import this module, so naming
+#: ``PEER_MESSAGE_MESSAGE_TYPE`` / ``WAKE_PROMPT_MESSAGE_TYPE`` /
+#: ``HUB_MESSAGE_TYPE`` here would have been a cycle. That constraint is gone
+#: (``PEER_MESSAGE_MESSAGE_TYPE`` and ``HUB_MESSAGE_TYPE`` now live in the
+#: import-free ``harness/message_types.py``, and ``WAKE_PROMPT_MESSAGE_TYPE`` in
+#: ``harness/wake.py``, which imports only stdlib and pydantic), so the literals
+#: are kept for the reason that still holds rather than that one. They are a
+#: display table keyed by the persisted wire value; ``execute_wait`` reads
+#: ``"peer_message"`` again as its generic fallback key below; and
+#: ``test_wait_budget.py`` pins the key set against the real constants, so a
+#: rename cannot silently demote a kind to the generic fallback wording.
 _ARRIVAL_NOTES: dict[str, str] = {
     "peer_message": "a message arrived from another session",
     "wake_prompt": "a scheduled wake fired — read the reminder before re-waiting",

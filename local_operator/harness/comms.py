@@ -52,6 +52,16 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, cast
 # the shared vocabulary module (see its docstring): a runner barred from
 # importing ``session.peer`` still has to render a hub or peer delivery, and
 # this module's own closure is why ``HUB_MESSAGE_TYPE`` could not stay here.
+#
+# That closure still reaches six barred modules (``paths``, ``session``,
+# ``session.attachments``, ``session.creation``, ``session.spend``,
+# ``session.transcript``), and the residual is INERT only while nothing on a
+# runner's import path imports this module -- which is true today, and is a
+# constraint someone has to keep rather than a property of the layout. The
+# isolation denylist cannot see it: no runner module imports this one, so a new
+# runner import here would quietly put those six back on an episode's path.
+# Moving a marker INTO this file is therefore never the fix -- see
+# ``harness/message_types.py``.
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,

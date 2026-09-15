@@ -127,9 +127,12 @@ async def test_an_hour_long_wait_still_returns_on_abort() -> None:
 
 
 def test_arrival_notes_name_every_producer_kind() -> None:
-    """The wording table is keyed by literal strings (importing the constants
-    would be a cycle), so a renamed message type would silently fall through
-    to the generic "a <kind> message arrived" fallback. Pin the keys."""
+    """The wording table is keyed by literal strings, so a renamed message type
+    would silently fall through to the generic "a <kind> message arrived"
+    fallback -- and ``execute_wait`` reads ``"peer_message"`` again as its own
+    fallback key. Importing the constants is no longer a cycle (they live in an
+    import-free module now), so this pin is what keeps table and vocabulary in
+    step. Pin the keys."""
     assert set(_ARRIVAL_NOTES) == {
         PEER_MESSAGE_MESSAGE_TYPE,
         WAKE_PROMPT_MESSAGE_TYPE,

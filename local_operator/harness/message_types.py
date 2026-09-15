@@ -30,8 +30,40 @@ owns one of these markers or lives in the owning package: ``local_operator.sessi
 and ``local_operator.tools`` are barred for a runner by that same denylist, so a
 marker left in either keeps ``harness/render.py`` unimportable and the hoist
 pointless. The harness is the layer both sides already share — the deliberately
-shared one, and the one the denylist allows — so the vocabulary lives here: one
-definition per marker, imported by its owner rather than defined next to it.
+shared one, and the one the denylist allows — so these seven markers live here:
+one definition each, imported by its owner rather than defined next to it.
+
+WHEN A MARKER BELONGS HERE, AND WHEN IT DOES NOT
+------------------------------------------------
+"The harness is the shared layer" is not the test, or every marker in the tree
+would move here in one sweep — including the two that are fine where they are.
+The test is the OWNER's import closure: a marker stays beside the subsystem
+that owns it while that module is clean for a runner, and moves here once it is
+not, because the renderer has to name the marker and a module the renderer may
+not import takes the renderer down with it.
+
+Both halves have a live example in this tree. ``WAKE_PROMPT_MESSAGE_TYPE``
+(``harness/wake.py``) and ``JOB_RESULT_MESSAGE_TYPE`` (``harness/jobs.py``)
+stay in their owners because those owners are clean — stdlib, pydantic and
+``harness/types.py`` — so ``harness/render.py`` imports them without leaking
+anything. ``HUB_MESSAGE_TYPE`` is the counter-example that put this module
+here: ``harness/comms.py`` imports ``session.transcript`` at module level for
+its own replay work — and reached ``session.peer`` for the marker itself until
+this module took that over — so a marker defined beside it put barred modules
+on the renderer's path: comms' own closure was 8 before this module existed,
+and is still 6 today — which is why comms itself stays off every runner import
+path.
+
+Two consequences for whoever adds the next marker:
+
+* **Judge the owner, not the marker.** Taking one marker out of a leaky module
+does not clean the module, and the next marker added beside that owner
+re-opens the hole for every renderer that names it, quietly.
+* **A same-family marker living elsewhere is not an inconsistency** until its
+owner leaks. The invariant worth checking is therefore not "every marker is
+here" but "every module the renderer imports has a clean closure" — which is
+what ``tests/unit/evaluation/runner/test_isolation.py`` asserts, and why that
+assertion rather than a grep is the guard.
 
 THE CONSTRAINT THAT KEEPS THIS MODULE USEFUL
 --------------------------------------------
