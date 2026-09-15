@@ -28,9 +28,27 @@ class SessionRow(BaseModel):
 
 
 class SessionList(BaseModel):
+    """One page of conversations, plus what could NOT be read while building it.
+
+    ``degraded`` names the live-decoration sources whose read failed for this
+    page (see ``session.catalog.DECORATION_SOURCES``), and it exists because
+    ``active: false`` on a row is ambiguous without it: those fields are
+    DEFAULTS when their source could not be read, and a defaulted verdict is
+    indistinguishable from a measured one at the client. A renderer that shows
+    "nothing is running" over it is asserting a negative the server never
+    established, which is how a swallowed failure read to the operator as "all
+    my active chats disappeared".
+
+    Empty when everything was read. Additive and defaulted, so a client that
+    ignores it behaves byte-for-byte as it does today; the field is always
+    PRESENT rather than omitted when empty, so a client can tell "nothing to
+    report" from "this server is too old to know".
+    """
+
     sessions: list[SessionRow]
     truncated: bool = False
     limit: int = 100
+    degraded: list[str] = Field(default_factory=list)
 
 
 class SessionSearchRow(BaseModel):

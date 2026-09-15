@@ -2726,7 +2726,15 @@ class DesktopSessions:
     async def list(
         self, limit: int, status_stamps: tuple[str, dict[str, int]] | None = None
     ) -> list[dict[str, Any]]:
-        """The sidebar's rows, optionally stamped with the feed's status counters.
+        """One page of rows, each carrying what could not be read about it.
+
+        The catalogue itself refuses rather than lying when the store cannot be
+        walked (``load_catalog`` is strict), so everything below is about the
+        DECORATION: a row that could not have its live state or wake index read
+        says so in ``degraded`` instead of presenting the defaults as verdicts.
+        The field is always present and always a list, so a client can read it
+        without a presence check; ``attention`` below stays sparse because it
+        is a per-row fact rather than a read-level one.
 
         ``status_stamps`` is ``(epoch, {session_id: revision})`` from the desktop
         feed, and it exists because TWO writers now ship the same fact: this row's
@@ -2737,6 +2745,12 @@ class DesktopSessions:
         hypothetical. A row whose session the feed has never published for is
         stamped with NEITHER key, and a client reads that as "no comparison
         available, take the list's value".
+
+        The two facts TRAVEL TOGETHER and neither may displace the other:
+        ``degraded`` says which read behind a row failed, the stamps say whether
+        the row predates a frame this client has already applied, and a listing
+        can be fully stamped and still be degraded — the stamps are per-row and
+        optional, the marker is per-row and always present.
 
         Additive and defaulted: nothing else that lists sessions reads it, and an
         unstamped response is byte-identical to what this returned before.
@@ -2764,6 +2778,12 @@ class DesktopSessions:
                             "team": stored.team or None if stored else None,
                         },
                         "preview": session_preview(self.root / "sessions" / entry.id),
+                        # ``_asdict`` already carried this through as a tuple;
+                        # spelled as a list here rather than left to the
+                        # serializer, because JSON has one array type and a
+                        # client deriving the listing-level ``degraded`` should
+                        # not have to handle both.
+                        "degraded": list(entry.row.degraded),
                     }
                 )
                 if f"session/{entry.id}" in attention:

@@ -17,13 +17,24 @@ transcript-directory decision, so the rule has one definition.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from local_operator.procstate import is_zombie
+
+#: Module level, not lazy, and deliberately so: this module sits on the CLI
+#: startup path, and ``session.errors`` is the one importable that costs
+#: nothing there -- the package ``__init__`` is empty and the module itself
+#: imports no stdlib and no engine. Hiding the refusal behind a function-local
+#: import would make the type unreachable to a caller that wants to catch it.
+from local_operator.session.errors import SessionStoreUnavailable
+
+logger = logging.getLogger(__name__)
 
 #: ``--resume`` with no id. A sentinel rather than a second boolean flag so the
 #: whole "which session" decision stays ONE value threaded through one parameter.
@@ -1405,8 +1416,68 @@ def _recent_sessions_with_origin(
     return _scan_sessions(config_dir, limit, revalidate=revalidate)[0]
 
 
+def _store_error_detail(error: OSError) -> str:
+    """A path-free description of a store read failure, for the log and the error.
+
+    ``str(error)`` from ``os.scandir`` carries the store's absolute path, which
+    names the operator's home directory. The log may carry it -- the chained
+    cause had it anyway -- but the exception crosses to the HTTP layer, and this
+    codebase's rule for anything that does is that no path rides along (see the
+    ``session.errors`` module docstring). So the detail is rebuilt from the
+    errno alone; a caller losing the path can still get it from ``__cause__``.
+    """
+    if error.errno is None:
+        return type(error).__name__
+    return f"[Errno {error.errno}] {error.strerror or type(error).__name__}"
+
+
+def _scanned_entries(scan: Iterable[os.DirEntry[str]]) -> Iterator[os.DirEntry[str]]:
+    """Yield ``scan``'s entries, turning a MID-SCAN failure into a typed refusal.
+
+    The constructor was guarded and the iteration was not. A ``scandir`` can
+    die after the open instead: the directory grows or rotates under the
+    2-second poll, or the same descriptor exhaustion that would have failed the
+    open arrives one ``readdir`` batch later. Unguarded, that escaped as a bare
+    ``OSError``, which no handler in ``routes/desktop_sessions.errors`` maps --
+    the ladder maps enumerated categories -- so the sidebar's primary read
+    answered a bare 500 with no sentence on it.
+
+    Always raises, in BOTH modes, unlike the failed open: a half-built listing
+    is never a valid answer to give anyone. Every caller today already sees the
+    ``OSError`` propagate, so no caller loses a result it used to get, and the
+    tolerant sites that catch ``OSError`` keep catching this (the refusal
+    subclasses ``OSError`` on purpose -- see ``SessionStoreUnavailable``).
+
+    ``iter(scan)`` rather than ``next(scan)``: the thing being wrapped is only
+    required to be ITERABLE, which is what the ``for`` loop this replaces
+    demanded. A real ``ScandirIterator`` is its own iterator and this is a
+    no-op for it, but a caller that hands in something whose ``__iter__``
+    builds a fresh generator (the suite does exactly that, to inject an inode
+    failure) would otherwise start raising ``TypeError`` on the very scan it is
+    watching.
+
+    A generator rather than a ``try`` around the loop body because that body is
+    the scan's whole per-entry algorithm: wrapping it would re-indent ~180 lines
+    and bury this one-line guard inside them.
+    """
+    entries = iter(scan)
+    while True:
+        try:
+            entry = next(entries)
+        except StopIteration:
+            return
+        except OSError as error:
+            logger.warning("session store could not be read mid-scan", exc_info=True)
+            raise SessionStoreUnavailable(_store_error_detail(error)) from error
+        yield entry
+
+
 def _scan_sessions(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    strict: bool = False,
 ) -> tuple[list[tuple[str, float, str]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
 
@@ -1416,6 +1487,18 @@ def _scan_sessions(
     the listing rather than displaying it should ask for this; see
     ``session.cleanup._picker_rows``, which is a deletion authority and must
     never decide from a speculatively-stale answer.
+
+    ``strict=True`` makes a store that exists but cannot be WALKED an error
+    (:class:`~local_operator.session.errors.SessionStoreUnavailable`) instead
+    of an empty listing, and the caller declaring it is the one whose answer a
+    UI adopts as membership — ``session.catalog.load_catalog``, which feeds the
+    desktop sidebar and the TUI's. A missing store is an empty answer in both
+    modes; see the ``FileNotFoundError`` boundary below. Left off by default
+    because the other callers document the opposite contract for good reason
+    (search, the phone's listing, the ``/resume`` picker and the retention
+    policy all answer display-only questions, where an error is worse than an
+    empty answer) and because flipping it for them is a behaviour change to
+    eight surfaces this change has no evidence about.
 
     ``hidden_names`` is every directory this scan established is NOT the user's
     own session — whether it was skipped from cache or re-read. It exists for
@@ -1462,7 +1545,30 @@ def _scan_sessions(
     hidden_names: set[str] = set()
     try:
         scan = os.scandir(config_dir / "sessions")
-    except OSError:
+    except FileNotFoundError:
+        # NO STORE YET, which is a normal, empty answer and not a failure: a
+        # fresh install, a `lop` that has never run a session, and a probe of a
+        # config dir that does not exist all land here, and every one of them
+        # must keep answering "no conversations" rather than an error. It stays
+        # an empty answer under `strict` too, for that reason.
+        return [], set()
+    except OSError as error:
+        # ANY OTHER `OSError` IS A BROKEN READ, NOT AN EMPTY STORE -- `EMFILE`
+        # under descriptor exhaustion, `EACCES`, `EIO`, and `ENOTDIR` (a
+        # `sessions` entry that is a file, not a directory: something IS there
+        # and cannot be walked, which is the opposite of absent). Reporting
+        # these as "no conversations" is the defect this boundary closes; see
+        # `SessionStoreUnavailable` for why one category is so much worse than
+        # the other at the surface that adopts the listing as membership.
+        #
+        # Logged in BOTH modes. The tolerant caller still gets the empty answer
+        # its own docstring promises, but the failure is now an incident a
+        # normal run shows: nothing at the default log level was the other half
+        # of the report, because an operator could not reconstruct afterwards
+        # why the sidebar had gone empty for a while.
+        logger.warning("session store could not be read", exc_info=True)
+        if strict:
+            raise SessionStoreUnavailable(_store_error_detail(error)) from error
         return [], set()
     cache_path = origin_cache_path(config_dir)
     cached = _load_origin_cache(cache_path)
@@ -1473,7 +1579,7 @@ def _scan_sessions(
     # that has ever existed.
     seen: set[str] = set()
     with scan:
-        for entry in scan:
+        for entry in _scanned_entries(scan):
             previous = cached.get(entry.name)
             # ---- THE ZERO-SYSCALL SKIP -------------------------------------
             # A directory already known to be hidden is dropped here, before
@@ -1778,6 +1884,21 @@ class SessionRow(NamedTuple):
     #: Empty for every construction site but the live-decorating one, exactly
     #: like the live-state fields above.
     kind: str = ""
+    #: Which live-decoration sources could NOT be read for this row, out of
+    #: ``session.catalog.DECORATION_SOURCES`` — empty for a poll that read them
+    #: all. This is the answer to a question the fields above cannot answer:
+    #: they are defaults, and a defaulted ``live_state=""``/``wakes=0`` reads
+    #: to every consumer as a confident "this session is cold", which is what
+    #: made a swallowed registry failure render as "Nothing running right now"
+    #: over a store full of running work.
+    #:
+    #: A tuple rather than one flag per source, and the fact belongs to the
+    #: READ rather than to the row: one ``registry.scan()`` answers for the whole
+    #: listing, so the value is the same on every row of a degraded poll and a
+    #: client reads it as "I could not tell", never as "this row is special".
+    #: Additive on the wire (the desktop row model passes extras through), so an
+    #: older client keeps rendering exactly as it does today.
+    degraded: tuple[str, ...] = ()
     #: Immutable conversation birth, not transcript activity or runtime start.
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0
