@@ -59,7 +59,7 @@ class FakeRegistrant:
         #: would make the announce fail into the caller's `except` and read as
         #: "not announced" rather than "announced without the fact" — which is
         #: exactly what this double did when `leaving` was introduced.
-        self.retiring: list[tuple[str, str, bool]] = []
+        self.retiring: list[tuple[str, str, bool, str]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
