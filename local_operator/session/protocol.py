@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 119 public members and a POSITIVE
+    than stylistic. This protocol carries 120 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -604,8 +604,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     118 once the same move needed ``supports_exclusive_move`` so a desktop host
     can fail CLOSED against an owner that would ignore the exclusivity flag, 119
     once it needed the ``set_local_cwd_callback`` seam the move's local
-    replacement is published through), so recompute it rather than adjusting it
-    by the size of your own change.
+    replacement is published through, 120 once the drain notice's
+    ``set_drain_callback`` joined the viewer contract), so recompute it rather
+    than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -1250,6 +1251,17 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Called when the runtime retired itself for a newer build."""
+        ...
+
+    def set_drain_callback(self, callback: Callable[[], Any] | None) -> None:
+        """Called the moment the runtime announces a departure that REFUSES work.
+
+        The sibling of :meth:`set_refresh_callback` one event earlier: that one
+        fires when the socket closes and re-engages, this one fires on the
+        ``retiring`` frame while the runtime is still working, and only when
+        the frame says the departure is draining. Viewer-only by construction —
+        an owner ``Session`` has no wire to hear the frame on.
+        """
         ...
 
     def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:

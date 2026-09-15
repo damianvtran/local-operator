@@ -8,6 +8,7 @@ import inspect
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,6 +16,7 @@ from local_operator.mobile import attach_client
 from local_operator.mobile.attach_client import (
     ACK_TIMEOUT_S,
     ASIDE_DEADLINE_S,
+    RETIRING_REASON,
     AttachClient,
     OwnerAckTimeout,
     dialable_record_exists,
@@ -216,6 +218,65 @@ async def test_prompt_ack_and_repaint_flow(config: Path) -> None:
             await asyncio.sleep(0.05)
         assert any(e.kind == "user" and e.text == "hello owner" for e in projections[-1].transcript)
         await client.detach()
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config: Path) -> None:
+    """The op is an EVENT, not only a disconnect reason (review round 4, MINOR 1).
+
+    Until this round the attach client recorded ``retiring`` as the REASON for a
+    close it had not seen yet and told the host nothing; on the drain rung the
+    EOF is ~26 s behind the frame, which is exactly why the notice the PR adds
+    landed after the refusals it exists to warn about. These are the two
+    properties the paint rests on and nothing above them — the frame reaches
+    ``on_retiring`` when it is SENT, verbatim, so the ``draining`` the runtime
+    decided crosses intact; and the same op still latches the reason the
+    re-engage path reads when the socket does close.
+
+    The frame is fed by the real emitter (``RuntimeServer.announce_retiring``),
+    not by a hand-built dict: what is under test is the pair, and a stub on
+    either side would pin the side that already works.
+    """
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        frames: list[dict[str, Any]] = []
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append, on_retiring=frames.append)
+        await client.connect(record, "sess-a")
+
+        await r.announce_retiring("stale-build", to="0.55.0@f4a70b9", draining=True)
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not frames:
+            await asyncio.sleep(0.05)
+        assert len(frames) == 1, frames
+        assert frames[0]["op"] == "retiring"
+        assert frames[0]["draining"] is True, frames[0]
+        assert frames[0]["to"] == "0.55.0@f4a70b9", frames[0]
+        assert not disconnected, "the frame is not the close, and must not be read as one"
+
+        # The idle rung sends the SAME op with no drain; the client still
+        # delivers it, because the gating belongs one level up
+        # (``AttachedSession._on_retiring_frame`` reads ``draining``), which is
+        # what makes a field-less frame from an older runtime harmless.
+        await r.announce_retiring("stale-build", to="0.55.0@f4a70b9")
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and len(frames) < 2:
+            await asyncio.sleep(0.05)
+        assert len(frames) == 2, frames
+        assert frames[1]["draining"] is False, frames[1]
+
+        # The close still carries the reason the op latched: the re-engage path
+        # is untouched by the hook.
+        r.close()
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not disconnected:
+            await asyncio.sleep(0.05)
+        assert disconnected == [RETIRING_REASON], disconnected
     finally:
         r.close()
 

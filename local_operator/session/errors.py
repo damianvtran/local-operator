@@ -16,6 +16,58 @@ class AttachmentUnavailable(ValueError):
         )
 
 
+class RuntimeRetiring(ValueError, RuntimeError):
+    """This runtime has committed to leaving; the message was not admitted.
+
+    A DRAIN, not a failure: the runtime is handing over to a successor that
+    boots the build now on disk, and it refuses new work while it finishes what
+    is already in flight. The refusal is therefore transient and self-healing,
+    which is what the wording and the app's notice register both have to say.
+
+    The sentence is rebuilt HERE rather than crossing the wire, so the category
+    and its copy cannot drift, and an older peer that does not know the code
+    still receives it as the frame's ``message``. It is also the only thing a
+    user reads about this whole mechanism, which is what makes the vocabulary
+    the contract: the owner's previous wording named an internal log token
+    (``runtime-retired``) and described the machinery ("the next engage runs
+    the new build") rather than the situation the operator is now in (design
+    round 1, D2/D3; UX round 1, U3).
+
+    It says NOTHING about where the draft is, and that is load-bearing rather
+    than modest: the same category is reached from the peer-send spool fallback
+    (a sender whose message could not be spooled), where there is no composer at
+    all. The viewer appends that claim where it IS true, the same way it does
+    for the oversize refusal one branch over.
+
+    BOTH BASES, deliberately. ``admission_error`` decodes this family as
+    ``ValueError`` (its other two categories are), and the refusal has been
+    raised as a bare ``RuntimeError`` since it existed — by the runtime's own
+    admission gates, by the peer-send spool fallback, and by every test that
+    pins them. A ``ValueError``-only class would have silently changed the catch
+    shape of a refusal three call sites already handle as ``RuntimeError``, the
+    same trap ``OwnerAckTimeout(ConnectionError, TimeoutError)`` records one
+    module over.
+    """
+
+    code = "runtime_retiring"
+
+    #: The sentence, in the halves a viewer needs. ``HEAD`` states the situation,
+    #: ``TAIL`` names the one act left; the owner's own rendering keeps them
+    #: joined by ``REFUSED``, and a viewer with a COMPOSER inserts its claim
+    #: between them instead of bolting it on after the full stop. Measured on the
+    #: appended form (design round 3, D1; UX round 3, U5): two em dashes in one
+    #: paragraph, a fragment opening after a ``.``, a strand at 100 columns and a
+    #: one-word last line (``composer``) at 60 — in the one sentence whose job is
+    #: to say the operator's work is safe. Exposed rather than re-composed so the
+    #: two ends cannot drift.
+    HEAD = "This session is switching to a newer build; the one it loaded is gone from disk."
+    REFUSED = "The message was not admitted"
+    TAIL = "send it again once the session is running again."
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
+
+
 class ProfileRegistryUnavailable(ValueError):
     code = "profile_registry_unavailable"
 
@@ -121,6 +173,8 @@ def admission_error(code: str, count: int | None = None) -> ValueError | None:
     """
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
+    if code == RuntimeRetiring.code:
+        return RuntimeRetiring()
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

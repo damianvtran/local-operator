@@ -799,6 +799,7 @@ class AttachClient:
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
+        on_retiring: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
     ) -> None:
         self._surface = surface
@@ -828,6 +829,17 @@ class AttachClient:
         self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
+        #: Fired the moment a ``retiring`` frame ARRIVES, with the frame itself.
+        #: The op also sets the disconnect reason below, and that was the whole
+        #: of its original job — but the reason is only read when the socket
+        #: CLOSES, and on the drain rung the socket stays open until the
+        #: in-flight work is done (measured 26 s). A host that wants to say
+        #: anything to the operator before then has to hear it here; the frame's
+        #: ``draining`` field is the runtime's own verdict on whether refusals
+        #: are in force, and is the only honest source for that (QA round 3,
+        #: Q-1). Deliberately separate from ``on_disconnected`` for the same
+        #: reason: they are the start and the end of a handover, not one event.
+        self._on_retiring = on_retiring
         self._frontend_epoch: str | None = None
         self._frontend_sequence: int | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -1107,6 +1119,17 @@ class AttachClient:
                     # already reads that string. The host goes cold at once
                     # and re-engages rather than chasing a record for 8 s.
                     reason = RETIRING_REASON
+                    # AND the frame is an event in its own right, straight away:
+                    # on the drain rung the EOF is NOT moments away (the runtime
+                    # stays until its work is done), and a host that only heard
+                    # the reason at the close learned of the handover after it
+                    # was over. A callback failure must not kill the pump, same
+                    # contract as the event relay above.
+                    if self._on_retiring is not None:
+                        try:
+                            self._on_retiring(frame)
+                        except Exception:  # noqa: BLE001
+                            continue
                 elif op in ("ack", "error", "result"):
                     req = frame.get("req")
                     future = self._pending.pop(req, None)
@@ -1630,6 +1653,10 @@ class AttachClient:
         ``AttachedSession`` is that case.
         """
         self._on_disconnected = lambda _reason: None
+        # The frame hook is dropped with it: an abandoned connection's frames
+        # are not this host's to hear, and a late ``retiring`` from the socket
+        # it refused to keep would paint a handover it is no longer part of.
+        self._on_retiring = None
         self.close()
 
     def close(self) -> None:
