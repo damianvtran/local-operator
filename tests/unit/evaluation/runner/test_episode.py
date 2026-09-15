@@ -952,7 +952,7 @@ class DirectProviderStream:
 
 @pytest.mark.asyncio
 async def test_a_direct_providers_table_price_reaches_the_budget_cap(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The cap fires on a table-priced spend, end to end through the real client.
 
@@ -967,7 +967,19 @@ async def test_a_direct_providers_table_price_reaches_the_budget_cap(
     is nowhere near binding -- the cap, not the step count, is what stops this
     episode. (The cap is reached at its value, ``>=``, not only exceeded: the
     next cycle would exceed it, and a budget is an authority.)
+
+    838 is DeepSeek's published PEAK table price (the registry stores peak, and
+    the schedule halves it off-peak), and the scripted usage carries no stamp of
+    its own, so the clock is FROZEN into a peak window: left to the wall clock
+    this asserts 838 at 07:00 UTC and half that for the ~79% of the week that is
+    off-peak, which is a flake rather than a test. The tariff's own window
+    behaviour is pinned in ``tests/unit/model/test_tariff.py``.
     """
+    from datetime import datetime, timezone
+
+    from local_operator.model import tariff
+
+    monkeypatch.setattr(tariff, "now_utc", lambda: datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc))
 
     adapter = FakeAdapter(tmp_path, episode_id)
     client = ProviderModelClient(

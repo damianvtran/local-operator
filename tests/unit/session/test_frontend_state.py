@@ -1568,3 +1568,113 @@ def test_a_host_with_no_directory_of_its_own_restores_the_checkpoints() -> None:
     restored = FrontendStateStore.from_checkpoint(_owner_over("s1", stored)).state
 
     assert restored.cwd == "/evidence/before"
+
+
+def test_the_at_ms_stamp_survives_the_wire_and_the_frozen_wrapper() -> None:
+    """``Usage.at_ms`` is additive and optional, and must survive both hops.
+
+    It travels the wire to the phone and back through a restore, and it is kept
+    inside the immutable snapshot a shared job hands out — the two ways a
+    recorded call reaches a pricing surface after the fact.
+    """
+    stamp = 1_700_000_000_123
+    payload = _state(
+        last_usage=FrontendUsage(input_tokens=1_000, output_tokens=0, at_ms=stamp)
+    ).model_dump(mode="json")
+    restored = FrontendSessionState.model_validate(payload)
+    assert restored.last_usage is not None
+    assert restored.last_usage.at_ms == stamp
+    assert restored.model_dump(mode="json")["last_usage"]["at_ms"] == stamp
+
+    # The frozen wrapper: a job's own usage is retained as an immutable value.
+    job = JobState.model_validate(
+        {
+            "id": "child",
+            "type": "task",
+            "usage": Usage(input_tokens=4, output_tokens=2, at_ms=stamp).model_dump(mode="json"),
+        }
+    )
+    snapshot = FrontendStateStore(_state(jobs=[job])).state
+    assert snapshot.jobs[0].usage is not None
+    assert snapshot.jobs[0].usage.at_ms == stamp
+
+    # And an old transcript that lacks the field still validates: this is a
+    # purely additive field, with no version bump and no migration.
+    legacy = _state().model_dump(mode="json")
+    legacy["last_usage"].pop("at_ms", None)
+    older = FrontendSessionState.model_validate(legacy)
+    assert older.last_usage is not None
+    assert older.last_usage.at_ms is None
+
+
+def test_a_restored_usage_prices_at_the_calls_window_not_at_the_viewers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why ``at_ms`` exists at all.
+
+    A call made at 07:00 UTC and restored at noon would be halved if it were
+    priced at view time (its token buckets never change but the window does), so
+    the restored usage must price at the window ITS OWN stamp names. This is the
+    surface that was a FLOOR before this change, not merely an approximation.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.model import tariff
+    from local_operator.model.configure import cost_for_usage
+    from local_operator.model.registry import deepseek_models
+
+    peak = datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        tariff, "now_utc", lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
+    payload = _state(
+        last_usage=FrontendUsage(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            at_ms=int(peak.timestamp() * 1000),
+        )
+    ).model_dump(mode="json")
+    restored = FrontendSessionState.model_validate(payload)
+    assert restored.last_usage is not None
+    flash = deepseek_models["deepseek-flash"]
+    assert cost_for_usage("deepseek", flash, restored.last_usage) == pytest.approx(0.30)
+
+
+def test_the_published_catalogue_carries_a_rows_schedule() -> None:
+    """MINOR 1: the follower's round trip must not drop the tariff.
+
+    `refresh_model_catalogue` serializes the owner's rows key by key for a
+    follower, and `tui/app.py` rebuilds `CatalogueEntry`s from those dicts. Without
+    `time_of_use` an attached session rendered a tariffed row at its stored PEAK
+    price with no window tag while the owner's own picker showed the rate in force
+    — the two-surface disagreement the shared renderer exists to prevent. The
+    reach is narrow (a row the follower already knows wins with its own entry), and
+    it bites exactly when the owner publishes a row the follower's list lacks,
+    which is the case this merge exists for.
+    """
+    store = FrontendStateStore(_state())
+    entry = SimpleNamespace(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        label="DeepSeek Flash",
+        context_window=1_000_000,
+        default_context_window=None,
+        max_context_window=None,
+        input_price=0.30,
+        output_price=1.20,
+        connected=True,
+        aggregated=False,
+        routed=False,
+        time_of_use="deepseek-tou",
+    )
+    store.refresh_model_catalogue([entry])
+
+    (row,) = store.state.model_catalogue
+    assert row["time_of_use"] == "deepseek-tou"
+    # An older owner (or a duck-typed entry from an embedding host) that does not
+    # publish the key reads back as None, which is the honest "no time-of-day
+    # structure known" rather than a crash or a wrong default.
+    plain = SimpleNamespace(**{k: v for k, v in vars(entry).items() if k != "time_of_use"})
+    store.refresh_model_catalogue([plain])
+    (row,) = store.state.model_catalogue
+    assert row["time_of_use"] is None

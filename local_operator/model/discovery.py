@@ -412,6 +412,16 @@ class DiscoveredModel:
     #: by ``shift+tab``, so seeding it would strand the band on a level the
     #: cycle can never return to.
     reasoning_default_effort: str | None = None
+    #: The time-of-use schedule NAME the row's prices are quoted at
+    #: (``ModelInfo.time_of_use``), inherited from the registry twin this row was
+    #: merged with and never stated by a listing — no provider publishes its
+    #: peak/off-peak structure as a per-model field. Carried here because the
+    #: DeepSeek and aggregator branches build the picker's entries from a
+    #: ``DiscoveredModel`` rather than from the registry row, so a schedule that
+    #: stopped at ``ModelInfo`` would never reach the row a user actually reads.
+    #: ``None`` (every live-only id, and every provider that has no tariff) means
+    #: the row's prices do not vary by time of day.
+    time_of_use: str | None = None
 
 
 class _ListingUnavailable(RuntimeError):
@@ -1570,6 +1580,7 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         supports_images=_stated_bool(info.supports_images),
         supports_tools=info.supports_tools,
         reasoning=info.reasoning,
+        time_of_use=info.time_of_use,
         supports_prompt_cache=bool(info.supports_prompt_cache),
     )
 
@@ -1687,6 +1698,17 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
             row.supports_tools if row.supports_tools is not None else info.supports_tools
         ),
         reasoning=row.reasoning if row.reasoning is not None else info.reasoning,
+        # From the REGISTRY, never from the listing: no provider publishes its
+        # peak/off-peak structure as a per-model field, so a live row cannot state
+        # a schedule and must not have one invented for it. This keeps the
+        # schedule attached while the price is the bundled one — and it stays
+        # attached even if a future listing starts quoting a price, which is the
+        # assumption `test_a_live_priced_deepseek_listing_keeps_its_schedule`
+        # pins so the day it stops holding the failure is a red test rather than
+        # a quiet 2x error (``time_of_use`` describes the PUBLISHED PEAK TABLE the
+        # registry prices came from; a live quote's relationship to that table is
+        # unknown).
+        time_of_use=info.time_of_use,
     )
     # Native facts beat gateway heuristics (including a real 4096 output cap).
     overrides = {field: getattr(row, field) for field in row.authoritative_fields}

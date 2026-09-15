@@ -268,6 +268,20 @@ def _merge_accounting_component(
     total.reasoning_tokens += component.reasoning_tokens
     if component.context_tokens is not None:
         total.context_tokens = component.context_tokens
+    # The moment survives a merge only while EVERY call folded into this row
+    # agrees on it (review round 1, MINOR 3). A row carrying a member's stamp is
+    # a claim that the whole subtree ran in that window, and it is false as soon
+    # as one member ran in another: a peak call plus an off-peak call summed onto
+    # the peak one's stamp was priced 0.60 where the truth is 0.45, and nothing
+    # on the row said so. Agreement keeps the exactness a single-window subtree
+    # genuinely has; disagreement drops to the aggregate's documented fallback
+    # (the wall clock), which is what a turn's own folded total already does and
+    # what the design table calls near-exact for a live child. Driving the price
+    # from ``cost_components`` — the other way to keep each call in its own
+    # window — is not available here by construction: this fold strips them, and
+    # that is what bounds a deep roster's summary.
+    if component.at_ms != total.at_ms:
+        total.at_ms = None
     if mode == "reported":
         total.usd_cost = (total.usd_cost or 0.0) + (receipt or 0.0)
     elif mode == "estimated":

@@ -31916,6 +31916,12 @@ class OperatorApp(App[None]):
                         # reason: the publisher drops aggregated rows, so no
                         # router reaches a follower through this path at all.
                         routed=bool(row.get("routed", False)),
+                        # Read back so a follower prices a tariffed row the way
+                        # the owner's picker does (review round 1, MINOR 1).
+                        # ``row.get`` rather than indexing: an older owner does
+                        # not publish the key, and ``None`` is the honest answer
+                        # for a row whose window nobody stated.
+                        time_of_use=row.get("time_of_use"),
                     )
                     for row in runtime_rows
                     if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
@@ -32020,6 +32026,7 @@ class OperatorApp(App[None]):
                 connected=entry.connected,
                 aggregated=entry.aggregated,
                 routed=entry.routed,
+                time_of_use=entry.time_of_use,
             )
         ]
 

@@ -5541,3 +5541,53 @@ async def test_the_launcher_help_is_readable_on_the_page_that_shows_it(
             # The named bin is what a user comes here to find, so the mark has
             # to land AFTER it rather than before it.
             assert "local-operator-ui" in line, line
+
+
+def test_the_suggestion_detail_never_paints_a_partial_window_word(monkeypatch) -> None:
+    """D2/D3: the dropdown's note decides its fit instead of being cut mid-token.
+
+    The list painter composes a row whole and then clips it with an ellipsis, and
+    the note now carries a window word whose length depends on the state — so the
+    off-peak rows were the ones that read `$0.15/0.6 off-…` and `$0.66/1.98 off-p…`,
+    i.e. the price lost the word that qualifies it in exactly the state where it
+    differs from the published listing. The ladder is full word, short word, no
+    word, and the provider is dropped because the label already leads with it.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.model import tariff
+    from local_operator.tui.widgets.model_picker import ModelRow
+    from local_operator.tui.widgets.settings_view import _suggestion_detail
+
+    monkeypatch.setattr(
+        tariff, "now_utc", lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
+    row = ModelRow(
+        provider="deepseek",
+        model_id="deepseek-v4-flash",
+        label="DeepSeek V4 Flash",
+        context_window=1_000_000,
+        input_price=0.30,
+        output_price=1.20,
+        time_of_use="deepseek-tou",
+    )
+    label = row.selector
+
+    # Room for the whole word: the note is the price alone, because the label IS
+    # the selector and already leads with the provider (11 cells saved, D3).
+    assert _suggestion_detail(row, label=label, room=40) == "off-peak $0.15/0.6"
+    # Not room for the whole word: the short form, still a complete word.
+    assert _suggestion_detail(row, label=label, room=15) == "off $0.15/0.6"
+    # Not room for either: the price alone, never a chopped word.
+    assert _suggestion_detail(row, label=label, room=10) == "$0.15/0.6"
+    # A label that does NOT already carry the provider keeps it, so the note can
+    # still distinguish two rows sharing a model id.
+    assert _suggestion_detail(row, label=row.model_id, room=40) == "deepseek · off-peak $0.15/0.6"
+
+    # The property itself, over every width: the word is whole or absent, and the
+    # number is ALWAYS the rate in force (never the unscaled peak figure).
+    allowed_prefixes = {"", "off ", "off-peak "}
+    for room in range(0, 45):
+        note = _suggestion_detail(row, label=label, room=room)
+        assert note.endswith("$0.15/0.6"), note
+        assert note[: -len("$0.15/0.6")] in allowed_prefixes, note
