@@ -1264,7 +1264,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         ``callback`` takes the frame's ``leaving`` phrase: the trigger's own
         words (a signal and a replaced build are two different sentences to a
-        reader), empty for a runtime older than the key.
+        reader). It is EMPTY only when the frame named no trigger at all — not
+        when the runtime predates the key, which is the older rule and the wrong
+        one: a runtime that predates ``leaving`` still hands the signal phrase
+        over for a signal drain, because its frame's ``reason``/``to`` decide
+        (``types.drain_phrase_for_frame``; agent review round 5, MINOR-2).
         """
         ...
 

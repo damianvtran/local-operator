@@ -54,6 +54,7 @@ from local_operator.session.runtime.types import (
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
+    drain_phrase_for_frame,
 )
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
@@ -840,6 +841,22 @@ class AttachClient:
         #: Q-1). Deliberately separate from ``on_disconnected`` for the same
         #: reason: they are the start and the end of a handover, not one event.
         self._on_retiring = on_retiring
+        #: The phrase THIS connection's drain published — ``LEAVING_ON_SIGNAL`` or
+        #: ``LEAVING_FOR_BUILD`` — or ``""`` while no draining frame has been
+        #: heard on it. Kept because the REFUSAL this connection is about to hand
+        #: back is decoded on this same client, and a runtime built before
+        #: ``error_trigger`` cannot say in the refusal which departure it is: the
+        #: only witness to that is the frame it published moments earlier, on
+        #: this socket. Without it the far side fell back to the build sentence
+        #: under a signal notice (agent review round 5, MINOR-1; UX round 5, U14;
+        #: design round 5, D11). Set from the frame and from nothing else, and only
+        #: from a frame that says ``draining`` — the same gate the host's notice
+        #: uses, so what the refusal quotes is what the operator was told. A
+        #: non-draining handover paints no notice and its phrase is therefore not
+        #: evidence for a refusal here; an idle handover CAN still race one, and
+        #: the raiser's own token (or the sentence that names no departure) is the
+        #: honest answer for it.
+        self._drain_phrase = ""
         self._frontend_epoch: str | None = None
         self._frontend_sequence: int | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -915,6 +932,10 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        # A reconnect dials what may be a different conversation (the welcome
+        # below fails the identity check when it is), so no phrase the previous
+        # one published may survive into this one's refusals.
+        self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
@@ -1125,6 +1146,14 @@ class AttachClient:
                     # the reason at the close learned of the handover after it
                     # was over. A callback failure must not kill the pump, same
                     # contract as the event relay above.
+                    #
+                    # REMEMBERED BEFORE IT IS ANNOUNCED, because every refusal
+                    # this connection hands back arrives after this frame and
+                    # some of them cannot name their own departure: the phrase is
+                    # the far side's evidence for the trigger (see
+                    # ``_raise_for_reply_error``).
+                    if frame.get("draining"):
+                        self._drain_phrase = drain_phrase_for_frame(frame)
                     if self._on_retiring is not None:
                         try:
                             self._on_retiring(frame)
@@ -1188,13 +1217,18 @@ class AttachClient:
 
     # -- requests ---------------------------------------------------------------
 
-    @staticmethod
-    def _raise_for_reply_error(reply: dict[str, Any]) -> None:
+    def _raise_for_reply_error(self, reply: dict[str, Any]) -> None:
         """Turn an error frame into the exception this client raises for it.
 
         Shared by every op reader, because the mapping is a protocol fact (an
         admission refusal is a typed error, anything else is the owner's own
         sentence) and a second copy of it is a second place to forget one.
+
+        AN INSTANCE METHOD BECAUSE ONE ARGUMENT IS THIS CONNECTION'S OWN: a
+        retirement refusal from a runtime older than ``error_trigger`` names no
+        departure in the frame, and the phrase this client heard on the draining
+        frame is the only thing that can place it. Passed as evidence, never as
+        text — it keys a table in ``session.errors``.
         """
         if reply.get("op") != "error":
             return
@@ -1204,6 +1238,7 @@ class AttachClient:
             str(reply.get("error_code", "")),
             reply.get("error_count"),
             reply.get("error_trigger"),
+            self._drain_phrase,
         )
         if known is not None:
             raise known
@@ -1301,16 +1336,9 @@ class AttachClient:
         finally:
             self._pending.pop(req, None)
         if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(
-                str(reply.get("error_code", "")),
-                reply.get("error_count"),
-                reply.get("error_trigger"),
-            )
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+            # The shared reader, so the phrase this connection heard is applied
+            # here too rather than only on the ops that call it as a method.
+            self._raise_for_reply_error(reply)
         return reply.get("data")
 
     async def prompt(

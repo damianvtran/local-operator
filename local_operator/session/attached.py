@@ -110,7 +110,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
-from local_operator.session.runtime.types import leaving_phrase_for_frame
+from local_operator.session.runtime.types import drain_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     ATTACHMENT_KEY,
@@ -829,8 +829,12 @@ class AttachedSession:
         #: that will be refused (UX round 3, U1; QA round 3, Q-1). It is called
         #: with the frame's ``leaving`` phrase — the trigger's own words — so a
         #: host can paint a sentence about the trigger that produced the drain
-        #: rather than about drains in general (design round 3, D6), and with
-        #: ``""`` when the runtime predates the key.
+        #: rather than about drains in general (design round 3, D6). ``""`` here
+        #: means THE FRAME NAMED NO TRIGGER AT ALL, not "a runtime older than the
+        #: key": a runtime older than the key that signal-drained hands over
+        #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
+        #: (:func:`types.drain_phrase_for_frame`) and have done since design round
+        #: 4, D9 (agent review round 5, MINOR-2).
         self._drain_callback: Callable[[str], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
@@ -5372,7 +5376,7 @@ class AttachedSession:
         field is therefore read as the idle handover, which is the pre-change
         behaviour and paints nothing, and a runtime older than ``leaving`` has
         its trigger read off the frame's ``reason``/``to`` by
-        :func:`types.leaving_phrase_for_frame`.
+        :func:`types.drain_phrase_for_frame`.
 
         THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
         ``""`` on the grounds that an absent phrase is "the build handover, the
@@ -5390,11 +5394,14 @@ class AttachedSession:
         callback = self._drain_callback
         if callback is None:
             return
-        phrase = str(frame.get("leaving") or "") or leaving_phrase_for_frame(
-            str(frame.get("reason") or ""), str(frame.get("to") or "")
-        )
         try:
-            callback(phrase)
+            # The derivation sits INSIDE the guard rather than above it: this
+            # method's stated contract is that a viewer failing to speak cannot
+            # break the pump, and a call outside the ``try`` is one that could
+            # (agent review round 5, NIT-1). The client remembers the same phrase
+            # for the refusals it decodes, from the same helper — see
+            # ``AttachClient._raise_for_reply_error``.
+            callback(drain_phrase_for_frame(frame))
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 
