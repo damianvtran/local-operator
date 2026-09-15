@@ -822,3 +822,156 @@ async def test_a_healthy_busy_session_is_still_stopped_promptly_by_the_socket_ru
         assert no_signals[0] == []
     finally:
         server.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_moves_a_stale_idle_runtime_over_the_real_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lop refresh`` against a REAL runtime: the op moves it, and it says so.
+
+    The whole acceptance argument for the rotation path is that it ends no
+    session and cuts no work, so this drives the real dial and the real op
+    rather than a stubbed reply: the runtime answers ``retiring`` and its own
+    ``request_stop`` runs, which is exactly what "moved" means.
+    """
+    handle = _RefreshableHandle(reason="")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "moved", outcome
+        assert "retiring now" in outcome.line
+        assert handle.stops == [True], "the runtime really was asked to leave"
+    finally:
+        server.close()
+
+
+def _make_stale(monkeypatch: pytest.MonkeyPatch, server: Any) -> None:
+    """The disk now carries a NEWER build than the one ``server`` booted on.
+
+    The same three inputs ``test_server_refresh`` uses, and they are the whole
+    gate: the op compares the boot stamp with the install on disk before it ever
+    asks whether the runtime is idle, so a runtime on the CURRENT build answers
+    "already current" whatever it is busy with. That ordering is what makes the
+    queued move below meaningful — the build really has moved, and the only
+    thing left is whether this runtime may leave yet.
+    """
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    server._boot_build = BuildStamp(version="0.49.8", source_ref="46a4e9b1234567")
+    monkeypatch.setattr(
+        update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.9")
+    )
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+    monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_a_busy_runtime_as_a_queued_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A busy runtime is NOT a failure: it retires by itself when its turn ends.
+
+    The move is queued rather than refused, and that is the difference from the
+    kill switch: nothing is ending this session, so its own reaper gets to
+    decide when it can leave. It also needs no bound of its own — a turn that
+    runs for an hour is simply waited out by the process that owns it.
+    """
+    handle = _RefreshableHandle(reason="busy")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "busy", outcome
+        assert "a turn in flight" in outcome.line
+        assert handle.stops == [], "a busy runtime is never retired by the ask"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_a_current_runtime_as_nothing_to_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative arm of the rotation: a matching build is left alone.
+
+    The disk still carries the build this runtime booted from, which is the
+    ordinary state of a host that has not run ``lop-update`` since — and the
+    state in which ``lop refresh`` must say "nothing to do" rather than retire
+    a working runtime for a build it is already running.
+    """
+    from local_operator import update as update_mod
+    from local_operator.update import BuildStamp
+
+    handle = _RefreshableHandle(reason="")
+    server, record = await _serve(handle)
+    same = BuildStamp(version="0.49.8", source_ref="46a4e9b1234567")
+    server._boot_build = same
+    monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: same)
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+    monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
+    try:
+        outcome = await control.refresh_session(_record_for(record), timeout_s=3.0)
+        assert outcome.method == "current", outcome
+        assert "already runs the build on disk" in outcome.line
+        assert handle.stops == []
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_reports_an_unreachable_runtime_without_failing(
+    tmp_path: Path,
+) -> None:
+    """A silent socket is reported, not fatal — and it is the partial case."""
+    record = SessionRecord(
+        pid=2**22 + 71,
+        kind="daemon",
+        session_id="silentsession",
+        conversation_name="the quiet one",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        version="0.49.8",
+    )
+    outcome = await control.refresh_session(record, timeout_s=0.2)
+    assert outcome.method == "unreachable"
+    assert "did not answer its control socket" in outcome.line
+    assert outcome.method not in control.REFRESH_SETTLED_METHODS
+    assert tmp_path.exists()  # no ambient config root is touched by the dial
+
+
+@pytest.mark.asyncio
+async def test_refresh_all_asks_only_live_sessions_and_reports_each(
+    no_signals, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--all`` walks the record set and reports per session, never signalling."""
+    handle = _RefreshableHandle(reason="busy")
+    server, record = await _serve(handle)
+    _make_stale(monkeypatch, server)
+    try:
+        live = _record_for(record, conversation_name="working")
+        ghost = _record_for(
+            record,
+            pid=2**22 + 73,
+            session_id="gonequiet",
+            conversation_name="quiet",
+        )
+        monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [live, ghost])
+        outcomes = await control.refresh_all(timeout_s=0.2, _root=tmp_path)
+        by_method = {o.method: o for o in outcomes}
+        assert by_method["busy"].session_id == live.session_id
+        assert by_method["unreachable"].session_id == ghost.session_id
+        assert no_signals[0] == [], "the rotation path signals nobody, ever"
+        summary = control.summarize_refresh(outcomes)
+        assert "1 will move when their turn ends" in summary
+        assert "1 unreachable" in summary
+    finally:
+        server.close()
+
+
+def test_summarize_refresh_on_an_empty_machine_says_so() -> None:
+    assert control.summarize_refresh([]) == "no live sessions to refresh"

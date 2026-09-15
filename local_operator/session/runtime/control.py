@@ -1344,3 +1344,215 @@ def summarize(outcomes: list[StopOutcome], *, own: StopOutcome | None = None) ->
             parts.append(f"{count} {label}")
     total = len(everything)
     return f"{total} session{'s' if total != 1 else ''}: " + ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Rotation: ask a runtime to move to the build on disk, instead of killing it
+# ---------------------------------------------------------------------------
+
+#: The op a runtime serves for "retire iff you are idle and the build on disk has
+#: moved" (``RuntimeServer._refresh_if_idle``). Deliberately the SAME op a viewer
+#: already sends (``attach_client.refresh_if_idle``, the belt for the seconds
+#: after ``lop-update``): one implementation of "move to the new build" means the
+#: rotation command and a viewer's own recovery cannot disagree about what is
+#: allowed to be retired.
+REFRESH_OP = "refresh_if_idle"
+
+#: How long to wait for that op's ack. It is a DECISION, not a turn: the runtime
+#: answers with what it decided before it disposes itself, so the budget is a
+#: round trip on a loopback socket rather than anything a session could be busy
+#: doing. ``lop refresh --timeout`` trades patience for promptness per call.
+DEFAULT_REFRESH_TIMEOUT_S = 10.0
+
+
+@dataclass
+class RefreshOutcome:
+    """What one runtime answered when it was asked to move to the build on disk.
+
+    ``method`` is the resolution, and the front ends read it rather than the
+    prose: ``moved`` (retiring now), ``busy`` (a turn is in flight; it moves
+    when that turn ends), ``current`` (already on the build on disk), ``kept``
+    (the runtime's own refusal, quoted in the line), ``unsupported`` (it
+    predates the op), ``unreachable`` (its control socket did not answer).
+    """
+
+    pid: int
+    session_id: str
+    name: str
+    method: str
+    line: str
+
+
+#: The resolutions that mean "this session is on the build on disk now, or will
+#: be as soon as its own work lets it". This is the ROTATION counterpart of
+#: ``ENDED_METHODS``: everything here needs nothing more from the caller, and
+#: the one shape that does (``unreachable``) is the partial case a front end
+#: reports as non-zero.
+#:
+#: ``busy`` and ``kept`` are settled rather than partial on purpose, and it is
+#: the whole point of the command: a busy runtime retires BY ITSELF when its turn
+#: ends (the reaper's ``_should_refresh`` branch asks ``may_refresh`` every
+#: ``BUILD_CHECK_S``), so "still busy" is a queued move, not a failure. This is
+#: why no drain bound is needed here — nothing is being killed, so a long turn
+#: can simply be waited out by the process that owns it.
+REFRESH_SETTLED_METHODS = frozenset({"moved", "busy", "current", "kept", "unsupported"})
+
+
+def _refresh_line(record: SessionRecord, running: str, method: str, detail: str) -> str:
+    """The one human receipt line for one rotation, per resolution.
+
+    Every branch names the session, its pid and the build it is running, because
+    the question the caller actually has is "which of these is still on the old
+    build, and what is it doing instead". ``running`` is the record's own build
+    stamp — the runtime's reported build, not an assumption about the disk.
+    """
+    name = record.conversation_name or record.session_id
+    where = f'"{name}" (pid {record.pid}, running {running})'
+    if method == "moved":
+        return f"{where} is retiring now for the build on disk"
+    if method == "current":
+        return f"{where} already runs the build on disk"
+    if method == "busy":
+        return f"{where} has a turn in flight — it moves when that turn ends"
+    if method == "unsupported":
+        return (
+            f"{where} cannot be asked to move{detail} "
+            "— it retires on its own when it next goes idle"
+        )
+    if method == "unreachable":
+        return f"{where} did not answer its control socket — ask it again once it is responsive"
+    return f"{where} was not moved: {detail}"
+
+
+async def refresh_session(
+    record: SessionRecord, *, timeout_s: float = DEFAULT_REFRESH_TIMEOUT_S
+) -> RefreshOutcome:
+    """Ask one live runtime to move to the build on disk. Never raises.
+
+    The non-destructive counterpart of :func:`stop_session`, and deliberately
+    NOT a signal: SIGTERM now means "leave at your next boundary, bounded",
+    which is a safe but impatient request, while this asks the runtime to judge
+    its own readiness and leaves the timing to it. That difference is the whole
+    reason this function exists — the 2026-09-14 sweep needed a build to take
+    effect NOW and reached for the only tool it had, and killing in-flight work
+    must never be the shortest path to a new build.
+
+    Identity is NOT proven first. The risks are asymmetric in exactly the
+    opposite direction from the kill ladder: a stale record's port may now be a
+    recycled stranger, but the most a stranger can be asked to do here is retire
+    ITSELF, and any runtime that answers this op does so only on its own
+    ``may_refresh`` verdict. Spending the ladder's pid-reuse proofs on a request
+    that cannot hurt anyone would make the common case (ask twelve healthy
+    runtimes to move) pay for the rare one.
+    """
+    name = record.conversation_name or record.session_id
+    running = record.version or "an unrecorded build"
+    # ``say`` is the build label the receipt quotes back: the record's stamp is
+    # what the runtime published about ITSELF, which is the fact under question.
+    reply = await _exchange(record, {"op": REFRESH_OP}, reply_timeout_s=timeout_s)
+    if reply is None:
+        method = "unreachable"
+        detail = ""
+    elif reply.get("op") != "ack":
+        # An ``error`` reply is how a runtime that predates the op answers (and
+        # how any other refusal arrives). Reachable, but not rotatable on
+        # request — quote whatever it said and stay honest about the rest.
+        method = "unsupported"
+        message = str(reply.get("message") or "").strip()
+        detail = f" ({message[:120]})" if message else ""
+    else:
+        answer = str(reply.get("detail") or "")
+        # The runtime's own vocabulary, parsed rather than re-derived: ``retiring``
+        # is the retirement it just committed to, and every other answer is one
+        # of its ``kept: <reason>`` refusals (see ``Server._retire_for``).
+        if answer.startswith("retiring"):
+            method, detail = "moved", ""
+        elif answer.startswith("kept: build on disk matches"):
+            method, detail = "current", ""
+        elif answer == "kept: busy":
+            method, detail = "busy", ""
+        else:
+            method, detail = "kept", answer.removeprefix("kept: ") or "no reason given"
+    return RefreshOutcome(
+        pid=record.pid,
+        session_id=record.session_id,
+        name=name,
+        method=method,
+        line=_refresh_line(record, running, method, detail),
+    )
+
+
+async def refresh_all(
+    *,
+    timeout_s: float = DEFAULT_REFRESH_TIMEOUT_S,
+    own_pid: int | None = None,
+    only_pids: "frozenset[int] | set[int] | None" = None,
+    _root: Path | None = None,
+) -> list[RefreshOutcome]:
+    """Ask every OTHER live runtime on this machine to move to the build on disk.
+
+    Sequential like :func:`stop_all`, and for the same reason: each dial can
+    wait out ``timeout_s`` against a runtime that has stopped answering, and a
+    fan-out would hold every one of those waits open at once. The waits here are
+    the caller's only cost — nothing is signalled, so a slow target holding up
+    the report is a delay, never a loss.
+    """
+    root = _root if _root is not None else config_dir()
+    outcomes: list[RefreshOutcome] = []
+    for record in _rotation_targets(root, own_pid=own_pid):
+        if only_pids is not None and record.pid not in only_pids:
+            continue
+        if not _same_uid(record):
+            name = record.conversation_name or record.session_id
+            outcomes.append(
+                RefreshOutcome(
+                    pid=record.pid,
+                    session_id=record.session_id,
+                    name=name,
+                    method="unreachable",
+                    line=f'"{name}" (pid {record.pid}) is not owned by this account',
+                )
+            )
+            continue
+        outcomes.append(await refresh_session(record, timeout_s=timeout_s))
+    return outcomes
+
+
+def _rotation_targets(root: Path, own_pid: int | None = None) -> list[SessionRecord]:
+    """Every live runtime this account may ask to move, in scan order.
+
+    The same record set the stop ladder targets (``_stop_targets``): ``live``
+    AND ``wedged``, because a wedged runtime is one the caller needs a truthful
+    answer about — it will simply report unreachable, which is the answer that
+    tells a user something is actually wrong. The caller's own record is
+    excluded for the same reason it is there: a process asking itself to retire
+    would be answering with the front end's own runtime.
+    """
+    return _stop_targets(root, own_pid=own_pid)
+
+
+def summarize_refresh(outcomes: list[RefreshOutcome]) -> str:
+    """The grouped one-line report ``lop refresh`` paints after the per-target lines.
+
+    Leads with what moved, because that is what the caller asked for, then what
+    will move by itself, then what needs nothing. A caller who sees
+    ``1 unreachable`` knows exactly which session to look at; a caller who sees
+    only counts of the settled ones knows the rotation is done.
+    """
+    if not outcomes:
+        return "no live sessions to refresh"
+    order: list[tuple[str, str]] = [
+        ("moved", "retiring now"),
+        ("busy", "will move when their turn ends"),
+        ("current", "already current"),
+        ("kept", "not moved (see above)"),
+        ("unsupported", "too old to ask"),
+        ("unreachable", "unreachable"),
+    ]
+    parts: list[str] = []
+    for method, label in order:
+        count = sum(1 for o in outcomes if o.method == method)
+        if count:
+            parts.append(f"{count} {label}")
+    total = len(outcomes)
+    return f"{total} session{'s' if total != 1 else ''}: " + ", ".join(parts)
