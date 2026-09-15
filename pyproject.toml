@@ -7,7 +7,7 @@ name = "local-operator"
 version = "0.55.7"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
-authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
+authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: MIT License",
