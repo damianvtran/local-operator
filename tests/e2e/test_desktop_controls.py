@@ -263,10 +263,16 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # objective and submits its argument as an ordinary user turn, and
             # the desktop host is the one that completes the receipt (see
             # ``desktop_viewer_must_submit`` in the route and
-            # ``test_desktop_goal_admission`` for the rule and its guards). The
-            # turn is counted below with every other provider call: it is one
-            # more than an attach would add, and the goal loop that follows runs
-            # after it rather than instead of it.
+            # ``test_desktop_goal_admission`` for the rule and its guards). Its
+            # turn is counted with every other provider call below.
+            #
+            # THE THREE CENSUS NUMBERS (here, and after the achieved loop and
+            # the cancelled live loop) are positional hand-counts, and each is
+            # this command's ONE turn more than it would be without it. The
+            # scripted answers above shift with it, so the next edit that adds
+            # or removes a turn must move all three — they are a census of
+            # provider calls, deliberately absolute so that an unnoticed extra
+            # turn fails here rather than passing as a proportional difference.
             goal_stored = await command("goal", "Complete two steps")
             assert goal_stored["admission"]["status"] == "admitted"
             loop_id = request_id()

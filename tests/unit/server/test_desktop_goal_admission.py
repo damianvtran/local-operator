@@ -12,15 +12,24 @@ the types out by hand as ``{"team_attached", "agent_attached"}``. #796 added
 left this third host behind: ``/goal <text>`` stored the standing goal and
 dropped the turn, with no user row and no error.
 
-So there are two guards here, deliberately of different kinds:
+So there are three guards here, deliberately of different kinds:
 
 * a BEHAVIOURAL one over the REAL router — the goal command admits its argument
   through the route, and a type added to the vocabulary tomorrow is admitted
-  without this file knowing its name; and
+  without this file knowing its name;
+* a BOUND one — the reply does not park on a running turn's durable append, and
+  says in ``admission.detail`` which of the two dispositions the caller got;
 * a STATIC one over the real source, in the spirit of
   ``tests/unit/tui/test_noop_consumers.py`` — the handler must reach its
   decision through the shared helper and must not name a receipt type itself,
   which is the shape of the defect that shipped.
+
+The pair that pins the DECISION is "every vocabulary type is completed" and
+"nothing outside the vocabulary is": the first alone is satisfied by a host that
+admits everything, which is what an unguarded inversion of ``runtime_must_
+complete`` degenerates into (it answers False both for a declared type and for a
+non-action notice), and the second alone is satisfied by the drop that started
+this.
 
 The bridge is a double (this is a route-contract test); the assembled
 HTTP + runtime path is covered end to end by
@@ -30,6 +39,7 @@ HTTP + runtime path is covered end to end by
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,7 +58,22 @@ TOKEN = "desktop-goal-admission-token"
 #: A real canonical session id shape (12 hex), the shape the pool resolves.
 SESSION = "8fd6c6a40934"
 REQUEST_ID = "22222222-2222-4222-8222-222222222222"
+#: A second id for the cells that issue two commands: the receipt store refuses
+#: one id used with two different bodies, and that rule has its own tests.
+CLEAR_ID = "33333333-3333-4333-8333-333333333333"
+#: A 2x2 PNG, real bytes because the route bounds wire images on the way to the
+#: owner (``decode_images``) and a placeholder that does not decode would leave
+#: the image clause of the decision untested. Generated once, deliberately
+#: inline: a fixture file would be a second thing to keep valid.
+PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPkEpFjYGBgYgADAALm"
+    "AEAUQs4PAAAAAElFTkSuQmCC"
+)
 ROUTE_SOURCE = Path(desktop_sessions.__file__).read_text(encoding="utf-8")
+
+
+def _wire_images() -> list[dict[str, str]]:
+    return [{"data_b64": PNG_B64, "mime_type": "image/png"}]
 
 
 def _goal_set_receipt(request: str) -> dict[str, Any]:
@@ -67,20 +92,42 @@ def _goal_set_receipt(request: str) -> dict[str, Any]:
     }
 
 
+def _agent_cleared_receipt() -> dict[str, Any]:
+    """The receipt ``serving.py::_agent_slash`` returns for ``/agent clear``.
+
+    THE REAL empty-request action receipt: ``agent_attached`` is in the
+    vocabulary, so it reaches the decision, and its ``request`` is empty because
+    a detach carries no ask. (``goal_set`` is never emitted empty — the runtime's
+    ``/goal`` returns the show notice first and the clear notice with no ``data``
+    at all — so a goal-shaped empty receipt would test a shape no owner produces.)
+    """
+    return {
+        "kind": "notice",
+        "text": "this session uses its base instructions",
+        "style": "info",
+        "data": {"type": "agent_attached", "agent": "", "request": ""},
+    }
+
+
 class FakeRemote:
     """The viewer facade the command route reads, recording every call.
 
-    Only the three members the route touches, and the admissions are recorded
-    rather than answered away: "did the host submit the request" is the whole
-    question these tests ask, and a double that admitted silently would answer
-    it vacuously.
+    The members the route touches, and the admissions are recorded rather than
+    answered away: "did the host submit the request, and how" is the whole
+    question these tests ask, and a double that admitted silently would answer it
+    vacuously. ``park`` is the one control a test needs beyond that: an unset
+    event makes the owner's ack hang forever, which is how the "does not park"
+    cells drive the reply that has to come back without it.
     """
 
     def __init__(self, receipt: dict[str, Any]) -> None:
         self.receipt = receipt
         self.binds = 0
+        self.is_streaming = False
+        self.park: asyncio.Event | None = None
         self.routed: list[tuple[str, str]] = []
         self.admissions: list[tuple[str, str]] = []
+        self.steered: list[bool] = []
 
     async def bind_runtime(self) -> None:
         self.binds += 1
@@ -89,9 +136,13 @@ class FakeRemote:
         self.routed.append((command, args))
         return dict(self.receipt)
 
-    async def admit_prompt(self, text: str, *, command_id: str, images: Any = None):
+    async def admit_prompt(self, text: str, *, command_id: str, images: Any = None, steer=False):
         self.admissions.append((text, command_id))
-        return ("prompt admitted", False)
+        self.steered.append(steer)
+        if self.park is not None:
+            await self.park.wait()
+        # The two details the real owner answers with, verbatim.
+        return ("steering queued" if steer else "prompt admitted", False)
 
 
 class FakePool:
@@ -143,10 +194,21 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         yield client, remote
 
 
-async def _goal(client: AsyncClient, args: str, *, request_id: str = REQUEST_ID):
+async def _goal(
+    client: AsyncClient,
+    args: str,
+    *,
+    request_id: str = REQUEST_ID,
+    images: list[dict[str, str]] | None = None,
+):
     return await client.post(
         f"/v1/desktop/sessions/{SESSION}/commands",
-        json={"request_id": request_id, "command": "goal", "args": args},
+        json={
+            "request_id": request_id,
+            "command": "goal",
+            "args": args,
+            "images": images or [],
+        },
     )
 
 
@@ -198,36 +260,124 @@ async def test_the_receipt_keeps_its_goal_metadata_beside_the_admission(desktop)
 
 
 @pytest.mark.asyncio
-async def test_a_goal_receipt_without_a_request_starts_no_turn(desktop) -> None:
-    """``/goal clear``'s shape: a typed receipt with nothing to submit.
+async def test_a_goal_arriving_mid_turn_takes_the_steering_path(desktop) -> None:
+    """A turn already running takes the text the way both other hosts take it.
 
-    The goal mutation still landed on the runtime, so the receipt is returned
-    unchanged; admitting an empty string would be a turn with no text.
+    The TUI's ``_submit_prompt`` and ``serving.py::_complete_unconsumed_action``
+    both steer when the session is streaming, and ``/goal <text>`` typed mid-turn
+    in the terminal behaves that way, so the desktop host must not invent a third
+    answer. It is also what keeps this reply OFF the running turn's ack: ``steer``
+    answers on queue insertion where ``prompt`` waits for the durable append.
     """
     client, remote = desktop
-    remote.receipt = {
-        "kind": "notice",
-        "text": "goal cleared",
-        "style": "info",
-        "data": {"type": "goal_set", "stored": "", "request": ""},
-    }
+    remote.is_streaming = True
+
+    response = await _goal(client, "Preserve one identity")
+
+    assert response.status_code == 200, response.text
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["status"] == "admitted"
+    assert remote.steered == [True]
+    # The owner's own ack, which says the text joined the work in flight rather
+    # than starting a turn — the disposition ``status`` cannot carry.
+    assert admission["detail"] == "steering queued"
+
+
+@pytest.mark.asyncio
+async def test_a_parked_ack_does_not_park_the_reply(desktop) -> None:
+    """THE REGRESSION CELL: the reply must not wait for the owner's ack.
+
+    The ack resolves on the owner's DURABLE APPEND, which the drain performs only
+    when it reaches the command — so awaiting it while a turn runs parks this
+    reply for the whole of that turn, past the client's 15 s ``ACK_TIMEOUT_S``.
+    The caller was then told the owner was unavailable while the goal was set and
+    the turn queued, and a retry under the same id read as indeterminate.
+
+    Driven with an ack that never resolves at all: the reply coming back is the
+    proof, since an implementation that awaited it would never return. The ten
+    seconds are the TEST's deadlock guard, not a product bound — the assertion
+    is on the reply's presence and wording, never on how long it took.
+    """
+    client, remote = desktop
+    remote.park = asyncio.Event()
+
+    response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
+
+    assert response.status_code == 200, response.text
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["status"] == "admitted"
+    # No turn was running, so this is the "handed over" phrase, not the queued
+    # one: the two must not be confused in either direction.
+    assert admission["detail"] == desktop_sessions.HANDED_OVER_ADMISSION_DETAIL
+    assert remote.admissions == [("Preserve one identity", REQUEST_ID)]
+    # Release the parked ack so the detached task is not left pending at teardown.
+    remote.park.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_parked_ack_mid_turn_is_reported_as_queued(desktop) -> None:
+    """And the queued phrase when a turn WAS running behind the parked ack.
+
+    The distinction is the point of the two phrases: a renderer that promises
+    "sends when this step finishes" needs the queued one, and the same status
+    word covers both.
+    """
+    client, remote = desktop
+    remote.is_streaming = True
+    remote.park = asyncio.Event()
+
+    response = await asyncio.wait_for(_goal(client, "Preserve one identity"), timeout=10)
+
+    admission = response.json()["result"]["result"]["admission"]
+    assert admission["detail"] == desktop_sessions.QUEUED_ADMISSION_DETAIL
+    assert remote.steered == [True]
+    remote.park.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_clear_carries_no_request_and_starts_no_turn(desktop) -> None:
+    """THE REAL empty-request case: ``agent_attached`` from ``/agent clear``.
+
+    A detach is a receipt with no action behind it — the type IS in the
+    vocabulary (so it reaches this decision), and the request is empty. Nothing
+    is submitted with or without images: the body's staged images are the
+    CALLER's, not the receipt's, so admitting them would open an image-only turn
+    nobody asked for, as a paid provider call and a durable row.
+    """
+    client, remote = desktop
+    remote.receipt = _agent_cleared_receipt()
 
     response = await _goal(client, "clear")
 
     assert response.status_code == 200, response.text
-    # ``admission`` is a declared field of the receipt and serialises as null:
-    # the absence of an admission is what says no turn was started.
+    # The null says no admission was made. It is a DECLARED field of the response
+    # WRAPPER (``OwnerCommandResult.admission``), which is where the null shape
+    # comes from; the route writes an extra key onto a dump whose model allows
+    # extras, so an absent key and a null are the same thing to a reader and the
+    # null is what a client sees.
     assert response.json()["result"]["result"]["admission"] is None
     assert remote.admissions == []
 
+    with_images = await _goal(client, "clear", request_id=CLEAR_ID, images=_wire_images())
+
+    assert with_images.status_code == 200, with_images.text
+    assert with_images.json()["result"]["result"]["admission"] is None
+    assert remote.admissions == [], (
+        "an action-less receipt must not open a turn on the strength of the "
+        "caller's staged images"
+    )
+
 
 @pytest.mark.asyncio
-async def test_a_status_notice_is_not_treated_as_an_action(desktop) -> None:
-    """The show form: ``/goal`` with no argument carries no receipt type.
+async def test_a_status_notice_with_images_still_starts_no_turn(desktop) -> None:
+    """The show form, with an image staged: still not an action.
 
-    A string a picker or listing happens to call ``request`` is not proof that
-    a turn was asked for, which is why the decision keys on the typed
-    discriminator rather than on the presence of the key.
+    This is the cell that fails for an implementation which admits whenever the
+    receipt type is merely not-declared-by-the-runtime: ``runtime_must_complete``
+    answers False for a typeless notice too, so the bare inversion would open a
+    turn here — a paid provider call for ``/goal`` alone with a pasted image.
     """
     client, remote = desktop
     remote.receipt = {
@@ -237,7 +387,30 @@ async def test_a_status_notice_is_not_treated_as_an_action(desktop) -> None:
         "data": {"goal": "Preserve one identity"},
     }
 
-    response = await _goal(client, "")
+    response = await _goal(client, "", images=_wire_images())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["result"]["admission"] is None
+    assert remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_outside_the_vocabulary_never_opens_a_turn(desktop) -> None:
+    """And a typed receipt that is not an action receipt at all.
+
+    A type outside ``SLASH_ACTION_RECEIPTS`` is not this host's to complete —
+    the runtime never stood down for it, so admitting here would be the second
+    submission of a command a future client declares as its own.
+    """
+    client, remote = desktop
+    remote.receipt = {
+        "kind": "block",
+        "text": "",
+        "style": "info",
+        "data": {"type": "session_listing", "request": "not an action"},
+    }
+
+    response = await _goal(client, "", images=_wire_images())
 
     assert response.status_code == 200, response.text
     assert response.json()["result"]["result"]["admission"] is None
@@ -261,6 +434,13 @@ async def test_a_type_added_to_the_shared_vocabulary_is_completed_here(
     the route to admit it. A route that spells the types out by hand fails here
     on the type the author of the NEXT entry would have forgotten, rather than
     months later in a bug report about a dropped request.
+
+    WHAT IT PINS, exactly: that the decision is not a STALE LIST. It is
+    satisfied by an implementation that admits everything, which is why its
+    partner cell — nothing outside the vocabulary admits, with images staged —
+    is asserted beside it rather than assumed. The monkeypatched name is in the
+    tuple on purpose: with the vocabulary gate in front of the predicate, an
+    added name stays completable by a host that declares the whole list.
     """
     from local_operator.session.runtime import types as runtime_types
 
@@ -332,24 +512,48 @@ def _functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctio
     }
 
 
-def test_the_command_handler_decides_through_the_shared_helper() -> None:
-    """The static half: the handler may not name a receipt type itself.
+def _called_names(node: ast.AST) -> set[str]:
+    """The names CALLED anywhere under ``node``.
 
-    The behavioural cells above prove what the route does TODAY; this one holds
-    the SHAPE that made the defect reachable — a local tuple of type names
-    beside a shared vocabulary that grew without it. Anything the handler
-    compares a receipt type against is therefore either the shared helper or
-    nothing, and re-hardcoding the names fails here.
+    Structural rather than textual, deliberately: the first version of these
+    cells searched the handler's source segment for the helper's NAME, and a
+    COMMENT naming the helper satisfies a string search — a guard that a rewrite
+    can talk its way past. Only a real call is a real call.
+    """
+    return {
+        child.func.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+
+
+def _loaded_names(node: ast.AST) -> set[str]:
+    """The module-level names READ anywhere under ``node``."""
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def test_the_command_handler_routes_its_decision_through_the_helper() -> None:
+    """The static half: the handler decides through the helper, not by name.
+
+    WHAT THIS CAN AND CANNOT SEE. It holds the SHAPE that made the defect
+    reachable — a local tuple of type names beside a shared vocabulary that grew
+    without it — by requiring a real CALL to the helper and refusing any receipt
+    type spelled out in the handler. It cannot see whether the decision is
+    right: a handler that admitted unconditionally and happened to call the
+    helper would pass here. That half is the behavioural pair above, which is
+    why "nothing outside the vocabulary admits" exists as a cell rather than as
+    a remark.
     """
     tree = ast.parse(ROUTE_SOURCE)
-    functions = _functions(tree)
-    handler = functions["command"]
-    body = ast.get_source_segment(ROUTE_SOURCE, handler) or ""
+    handler = _functions(tree)["command"]
 
-    assert "desktop_viewer_must_submit" in body, (
-        "the desktop command route no longer reaches its completion decision "
-        "through desktop_viewer_must_submit; a hand-written set of receipt types "
-        "is how /goal <text> lost its turn"
+    assert "desktop_viewer_must_submit" in _called_names(handler), (
+        "the desktop command route no longer CALLS desktop_viewer_must_submit; a "
+        "hand-written set of receipt types is how /goal <text> lost its turn"
     )
     named = sorted(
         {
@@ -368,22 +572,26 @@ def test_the_command_handler_decides_through_the_shared_helper() -> None:
 def test_the_shared_helper_is_derived_from_the_shared_vocabulary() -> None:
     """And the helper itself stays a reading of the ONE rule.
 
-    ``runtime_must_complete`` is that rule, and the vocabulary is the list it is
-    applied to: a helper that consulted anything else (a private set, a
-    configuration flag) would answer for this host while the runtime answered
-    for the shared seam.
+    ``runtime_must_complete`` is that rule and the vocabulary is the list it is
+    applied to. Both clauses are asserted separately because they are the two
+    halves the review separated: membership in the vocabulary is "is this an
+    action receipt at all" (the half whose absence made the inversion admit
+    every notice), and the shared predicate is "did the client declare it". A
+    helper that consulted anything else — a private set, a configuration flag —
+    would answer for this host while the runtime answered for the shared seam,
+    and would still leave the runtime completing a subset a future client
+    declares.
     """
     from local_operator.session.runtime.types import runtime_must_complete
 
     tree = ast.parse(ROUTE_SOURCE)
     helper = _functions(tree)["desktop_viewer_must_submit"]
-    body = ast.get_source_segment(ROUTE_SOURCE, helper) or ""
 
-    assert "SLASH_ACTION_RECEIPTS" in body, (
+    assert "SLASH_ACTION_RECEIPTS" in _loaded_names(helper), (
         "desktop_viewer_must_submit must read the shared vocabulary "
         "(SLASH_ACTION_RECEIPTS), not a list of its own"
     )
-    assert "runtime_must_complete" in body, (
+    assert "runtime_must_complete" in _called_names(helper), (
         "the completion decision must be the shared rule, so this host and the "
         "runtime cannot answer differently about the same receipt"
     )

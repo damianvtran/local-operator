@@ -528,10 +528,25 @@ The command endpoint now accepts every shared canonical command and alias.
 Runtime controls return actual SlashResult data; native/interactive controls return
 typed destination, arguments and form/source/submit metadata, never fake execution
 success. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for all 35 rows and explicit
-frontend responsibilities. On a `team_attached` or `agent_attached` result, the
-runtime's `data.request` plus images is admitted **once by the bridge**
-under the original request UUID; an added `result.admission` records that fact.
-The renderer must not independently re-submit that consumed request.
+frontend responsibilities.
+
+**Every action receipt the desktop viewer declares is admitted here, once.** The
+runtime defers that submit to the client whose auth frame declared the receipt
+type (`SLASH_ACTION_RECEIPTS`), and the desktop viewer declares all of them, so
+the bridge admits the request — for `team_attached`, `agent_attached` **and
+`goal_set`** — under the original request UUID, with the body's images, and
+records it in `result.admission`. The renderer must not independently re-submit
+that consumed request. A receipt whose `data.request` is empty carries no action
+(a detach, a listing, a status), and staged images do not turn one into a turn.
+
+`admission.status` is `admitted`, and `admission.detail` says which of two
+dispositions the caller got: the owner's own acknowledgement (`prompt admitted`,
+`steering queued`) when it arrived in time, `queued behind the turn already
+running` when a turn was in flight, or `admitted; the owner's acknowledgement was
+still in flight` when it was not. Set `/goal <text>` while a turn is running
+therefore behaves as it does on one Enter in the terminal: the text is steered
+into the turn in flight rather than parked, and the reply is never withheld for
+the running turn's duration.
 
 ### Admission and retry semantics
 
