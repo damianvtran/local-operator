@@ -97,6 +97,12 @@ def main(port: int = DEFAULT_PORT) -> int:
 
 
 if __name__ == "__main__":
+    # Linux comm axis: the LaunchAgent/unit names the IMAGE on macOS and this
+    # daemon's `comm` has to be set by the process itself there (see
+    # :func:`procname.brand_this_process`; a no-op on macOS).
+    from local_operator import procname
+
+    procname.brand_this_process()
     # ``python -m local_operator.mobile.service`` is what the LaunchAgent
     # runs: re-entering the installed package means an upgrade changes what
     # the supervised process runs with no reinstall step.

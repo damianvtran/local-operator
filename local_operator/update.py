@@ -44,11 +44,11 @@ from importlib.metadata import (
     version,
 )
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import SAFE_PATH_FLAG
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,24 @@ class UpdateError(Exception):
 #: successful-upgrade path. The daemon itself is not waited on.
 _MOBILE_RESTART_TIMEOUT_S = 30.0
 
+#: Bound on the child that repairs the OTHER supervised daemons. Larger than the
+#: mobile bounds because it is one child doing four plists, each with a
+#: bootout/bootstrap pair; still bounded so a hung ``launchctl`` cannot stall a
+#: successful upgrade.
+_DAEMON_REFRESH_TIMEOUT_S = 60.0
+
+#: The supervised daemons a combined release must leave branded, as the plist
+#: filenames that prove each one is installed. Labels are repeated here rather
+#: than imported for the same reason ``_mobile_plist_path`` is: importing
+#: ``mobile.install`` pulls Starlette into the updater, and this probe runs in
+#: the CLI and in the TUI's update worker.
+_DAEMON_PLIST_LABELS = (
+    "com.local-operator.mobile",
+    "com.local-operator.browser",
+    "com.local-operator.tunnel",
+    "com.local-operator.wakes",
+)
+
 #: Default loopback probe used only for the unsupervised warning. Must
 #: match ``mobile.daemon.DEFAULT_PORT``; do not import that module here.
 _MOBILE_HEALTHZ = "http://127.0.0.1:4098/healthz"
@@ -98,6 +116,25 @@ class MobileRefresh:
 
     kind: MobileRefreshKind
     error: str = ""
+
+
+@dataclass(frozen=True)
+class DaemonRefresh:
+    """One daemon group's outcome, already rendered for the upgrade summary.
+
+    Both callers (the CLI's ``lop update`` and the TUI's ``/update``) print the
+    same sentences from this, so one outcome cannot be described two ways. The
+    lines are rendered where the outcome is KNOWN — the mobile half from
+    :class:`MobileRefresh`, the rest from the new wheel's own report — because
+    only that side can tell a repaired plist from an untouched one.
+
+    ``name`` is for the reader of a failure, not for printing: every sentence
+    already names its daemon.
+    """
+
+    name: str
+    lines: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -934,11 +971,32 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     return max(0.0, time.time() - max(mtimes))
 
 
-def installer_argv(
+def installer_invocation(
     kind: InstallKind,
     *,
     executable: str | None = None,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
+    """``(argv, executable)`` for the installer of ``kind``.
+
+    Returned as a PAIR because the two are not independent: ``executable`` is
+    the image to run the argv with, or ``None`` when argv[0] already is the
+    image. A caller that took the argv alone and passed no ``executable=`` would
+    have POSIX ``execve`` the argv[0] string, and for the pip path that string is
+    a label with spaces in it.
+
+    UV, PIPX (and any future git/pipx-shaped installer) keep their own argv[0]
+    and get ``None``: they are third-party binaries, they are named already, and
+    replacing their argv[0] would both mislabel the row and lose the binary the
+    user's PATH resolves.
+
+    The PIP path is OURS, and it is the EDR profile the operator has already
+    been bitten by: an interpreter named ``python3.x`` performing a network
+    install from a process the user did not start. Its argv[0] is therefore the
+    role label and its image is the interpreter — the same pairing
+    ``secrets/client.py`` uses for the broker. ``executable=`` is honoured for
+    the argv-only case the pip kind had before, so a caller pinning an
+    interpreter still pins it.
+    """
     if kind is InstallKind.UV_TOOL:
         # Re-install with --force rather than `uv tool upgrade`:
         # `uv tool upgrade` fails when installed from a temporary git snapshot
@@ -946,12 +1004,29 @@ def installer_argv(
         # version pin (`specifier = "==..."` in uv-receipt.toml causes "Nothing to upgrade").
         # `uv tool install --force local-operator` always fetches and replaces with
         # the latest PyPI distribution regardless of previous installation receipt.
-        return ["uv", "tool", "install", "--force", "local-operator"]
+        return ["uv", "tool", "install", "--force", "local-operator"], None
     if kind is InstallKind.PIPX:
-        return ["pipx", "upgrade", "local-operator"]
+        return ["pipx", "upgrade", "local-operator"], None
     if kind is InstallKind.PIP:
-        return [executable or sys.executable, "-m", "pip", "install", "-U", "local-operator"]
+        from local_operator import procname
+
+        argv0, image = procname.spawn_identity(procname.LABEL_INSTALL)
+        return [argv0, "-m", "pip", "install", "-U", "local-operator"], executable or image
     raise UpdateError(f"no installer for {kind.value}")
+
+
+def installer_argv(
+    kind: InstallKind,
+    *,
+    executable: str | None = None,
+) -> list[str]:
+    """The installer's argv alone, for callers that only print or compare it.
+
+    Spawning callers use :func:`installer_invocation`: printing an argv is a
+    legitimate use of the list on its own, running one is not, because the pip
+    path's argv[0] is a label and needs the interpreter beside it.
+    """
+    return installer_invocation(kind, executable=executable)[0]
 
 
 def installer_label(kind: InstallKind) -> str:
@@ -1012,11 +1087,13 @@ def git_snapshot_notice() -> str:
     return "this runtime was built from git; " "lop update will replace it with the PyPI wheel"
 
 
-def _run_installer(argv: list[str]) -> int:
+def _run_installer(argv: list[str], *, executable: str | None = None) -> int:
     import subprocess
 
     # stderr/stdout pass through: the installer is what the user is watching.
-    completed = subprocess.run(argv, check=False)
+    # ``executable`` is what makes a labelled argv[0] runnable at all — without
+    # it POSIX would try to exec the label itself (see ``installer_invocation``).
+    completed = subprocess.run(argv, check=False, executable=executable)
     return int(completed.returncode)
 
 
@@ -1053,9 +1130,13 @@ def perform_upgrade(
         raise UpdateError(
             unknown_refusal(prefix=str(prefix) if prefix else None, executable=executable)
         )
-    argv = installer_argv(detected, executable=executable)
-    runner = run or _run_installer
-    code = runner(argv)
+    argv, image = installer_invocation(detected, executable=executable)
+    if run is not None:
+        # The injected runner sees the argv alone: it is a seam for tests and for
+        # callers that observe the installer, not a way to spawn anything.
+        code = run(argv)
+    else:
+        code = _run_installer(argv, executable=image)
     if code != 0:
         raise UpdateError(f"installer exited {code}")
 
@@ -1112,8 +1193,8 @@ def _mobile_healthz_answers() -> bool:
         return False
 
 
-def _mobile_restart_argv() -> list[str] | None:
-    """Argv for the *new* distribution's ``mobile restart``.
+def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
+    """``(argv, executable)`` for the *new* distribution's ``mobile restart``.
 
     ``sys.executable -m local_operator.cli`` is the post-upgrade
     interpreter — the same interpreter the LaunchAgent's ProgramArguments
@@ -1124,18 +1205,28 @@ def _mobile_restart_argv() -> list[str] | None:
     build while reporting success. If this interpreter is gone after the
     upgrade, the refresh fails honestly and the copy names the recovery.
 
-    ``python_argv`` (not a bare ``-m``), because the sentence above is only
-    true with it. :func:`refresh_mobile_after_upgrade` runs this argv with no
-    ``cwd=``, so the child inherits the directory the update was started from —
-    ``update.py``'s own ``lop update`` and the in-TUI ``/update`` worker both
-    run with a user or session cwd. When that directory is a checkout of this
-    project, ``-m`` puts it on ``sys.path`` ahead of site-packages and the
+    ``SAFE_PATH_FLAG``, written literally rather than through
+    ``python_argv`` (this argv's ``argv[0]`` is a label, and ``python_argv``
+    builds an interpreter-first argv), because the sentence above is
+    only true with it. :func:`refresh_mobile_after_upgrade` runs this argv with
+    no ``cwd=``, so the child inherits the directory the update was started
+    from — ``update.py``'s own ``lop update`` and the in-TUI ``/update`` worker
+    both run with a user or session cwd. When that directory is a checkout of
+    this project, ``-m`` puts it on ``sys.path`` ahead of site-packages and the
     bounce restarts the daemon through the CHECKOUT: pre-upgrade code, running
     under the post-upgrade interpreter, reporting success. See
     :mod:`local_operator.interpreter`.
+
+    The argv[0] is the role label and the interpreter travels BESIDE it, as in
+    :func:`installer_invocation`: this is a process the product spawns, and
+    naming every such process is the point of the change this belongs to. A
+    daemon bounce is also the kind of activity an EDR watches.
     """
     if sys.executable and Path(sys.executable).exists():
-        return python_argv("-m", "local_operator.cli", "mobile", "restart")
+        from local_operator import procname
+
+        argv0, image = procname.spawn_identity(procname.LABEL_MOBILE_RESTART)
+        return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", "mobile", "restart"], image
     return None
 
 
@@ -1158,14 +1249,16 @@ def refresh_mobile_after_upgrade() -> MobileRefresh:
             if _mobile_healthz_answers():
                 return MobileRefresh(kind="unsupervised")
             return MobileRefresh(kind="skipped")
-        argv = _mobile_restart_argv()
-        if argv is None:
+        invocation = _mobile_restart_invocation()
+        if invocation is None:
             return MobileRefresh(
                 kind="failed",
                 error="this interpreter vanished after the upgrade",
             )
+        argv, executable = invocation
         completed = subprocess.run(
             argv,
+            executable=executable,
             check=False,
             capture_output=True,
             text=True,
@@ -1184,30 +1277,287 @@ def refresh_mobile_after_upgrade() -> MobileRefresh:
         return MobileRefresh(kind="failed", error=str(exc))
 
 
-def _print_cli_mobile_refresh(result: MobileRefresh) -> None:
+def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
+    """``(argv, executable)`` for the *new* distribution's daemon repair.
+
+    Same argument as :func:`_mobile_restart_invocation`, and it matters more
+    here: the repair RENDERS a plist, so running it in-process would render it
+    with THIS process's already-imported (pre-upgrade) modules and write the
+    previous build's plist shape — a no-op wearing the costume of a fix. The
+    child is started from the wheel the installer just wrote, which is also why
+    the installers are imported inside :func:`daemons_refresh_command` rather
+    than here.
+
+    No PATH ``lop`` fallback, for the reason recorded on the mobile argv: a PATH
+    hit can be a different installation entirely.
+    """
+    if sys.executable and Path(sys.executable).exists():
+        from local_operator import procname
+
+        argv0, image = procname.spawn_identity(procname.LABEL_DAEMONS_REFRESH)
+        return (
+            [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", "update", "--refresh-daemons"],
+            image,
+        )
+    return None
+
+
+def _installed_daemon_plists() -> list[Path]:
+    """The supervised daemons that are installed, as plist paths.
+
+    A pure filesystem probe that decides whether the repair is worth a child
+    process at all, and it is deliberately built from ``Path.home()``: with
+    ``HOME`` redirected — a test, a sandbox — it finds nothing and the whole
+    repair is inert before a single ``launchctl`` is reached. The installers
+    have their own, stronger identity guard; this one only has to be cheap and
+    safe, because it runs on every upgrade.
+    """
+    directory = Path.home() / "Library" / "LaunchAgents"
+    found: list[Path] = []
+    for label in _DAEMON_PLIST_LABELS:
+        try:
+            path = directory / f"{label}.plist"
+            if path.exists():
+                found.append(path)
+        except OSError:  # noqa: PERF203 — a probe must not fail an upgrade
+            continue
+    return found
+
+
+def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
+    """Repair the supervised daemons ``lop-update`` used to leave behind.
+
+    THE GAP THIS CLOSES: ``lop-update`` bounced mobile and touched nothing else,
+    so the browser bridge, the tunnel and (until a session wrote a wake) the
+    wakes supervisor kept running a plist written by whatever build installed
+    them. On a machine installed before branding, that is a permanent
+    ``python3.14`` row in Activity Monitor — the colleague's symptom.
+
+    One child for all of them, because the child is the only place the NEW
+    wheel's renderers exist, and because four children would pay four
+    interpreter startups on every upgrade. Never raises: the upgrade already
+    succeeded, so the worst outcome here is a warning.
+    """
+    name = "service daemons"
+    if not _installed_daemon_plists():
+        return DaemonRefresh(name)
+    import subprocess
+
+    invocation = _daemon_refresh_invocation()
+    if invocation is None:
+        return DaemonRefresh(
+            name,
+            warnings=(
+                "warning: this interpreter vanished after the upgrade, so the "
+                "installed daemons were not refreshed; run lop browser restart, "
+                "lop mobile restart and lop tunnel restart to pick it up",
+            ),
+        )
+    argv, executable = invocation
+    try:
+        completed = subprocess.run(
+            argv,
+            executable=executable,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_DAEMON_REFRESH_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return DaemonRefresh(name, warnings=("warning: daemon refresh timed out",))
+    except Exception as exc:  # noqa: BLE001 — a failed repair must not fail the update
+        warning = f"warning: could not refresh installed daemons: {exc}"
+        return DaemonRefresh(name, warnings=(warning,))
+    lines = tuple(line for line in (completed.stdout or "").splitlines() if line.strip())
+    if completed.returncode != 0:
+        tail = (completed.stderr or completed.stdout or "").strip()
+        detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
+        warning = f"warning: could not refresh installed daemons: {detail}"
+        return DaemonRefresh(name, warnings=(warning,))
+    warnings = tuple(line for line in (completed.stderr or "").splitlines() if line.strip())
+    return DaemonRefresh(name, lines=lines, warnings=warnings)
+
+
+def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
+    """The mobile bounce as a summary entry, in the sentences it always used.
+
+    Moved out of the CLI's own printer unchanged, so the U1/U2 copy below lives
+    in one place whatever prints it.
+    """
     if result.kind == "restarted":
-        print("mobile daemon restarted — refresh the phone UI")
-    elif result.kind == "failed":
+        return DaemonRefresh("mobile", lines=("mobile daemon restarted — refresh the phone UI",))
+    if result.kind == "failed":
         # U1: name the recovery, not just the failure — the update itself
         # succeeded, so the only action left is the bounce the update could
         # not perform.
-        print(
-            f"warning: mobile daemon did not restart: {result.error}; run lop mobile restart",
-            file=sys.stderr,
+        return DaemonRefresh(
+            "mobile",
+            warnings=(
+                f"warning: mobile daemon did not restart: {result.error}; "
+                "run lop mobile restart",
+            ),
         )
-    elif result.kind == "unsupervised":
+    if result.kind == "unsupervised":
         # U2: no LaunchAgent owns this daemon, so `lop mobile restart` is not
         # the fix — that path is launchd-only. The operator of a foreground
         # serve must stop and relaunch the process they started.
-        print(
-            "warning: a mobile daemon is running unsupervised; "
-            "stop and relaunch the foreground lop mobile serve process to pick up the new UI",
-            file=sys.stderr,
+        return DaemonRefresh(
+            "mobile",
+            warnings=(
+                "warning: a mobile daemon is running unsupervised; stop and "
+                "relaunch the foreground lop mobile serve process to pick up the new UI",
+            ),
         )
+    return DaemonRefresh("mobile")
 
 
-def update_command(*, check: bool = False) -> int:
-    """``lop update`` / ``lop update --check``. See the architect table for codes."""
+def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
+    """Every supervised daemon this build knows, refreshed with the NEW wheel.
+
+    Order is load-bearing. The service child runs FIRST because it REWRITES
+    plists; the mobile bounce that follows is a ``mobile restart``, so running it
+    first would restart mobile from the previous plist and then restart it again
+    — the second start being the only one on the new definition. "First" here
+    means "before", not "printed first": the service lines are printed ahead of
+    the mobile line for the same reason.
+
+    Never raises. A daemon that did not restart is a warning on a successful
+    upgrade, which is the same disposition mobile has always had.
+
+    This is the entry point ``lop update`` prints from. The TUI composes the two
+    halves itself (:func:`refresh_service_daemons_after_upgrade` and
+    :func:`refresh_mobile_after_upgrade`) because it renders the mobile outcome
+    as its own notice with a token, before relaunching.
+    """
+    services = refresh_service_daemons_after_upgrade()
+    mobile = _mobile_daemon_refresh(refresh_mobile_after_upgrade())
+    return [services, mobile]
+
+
+def _print_daemon_refreshes(refreshes: Sequence[DaemonRefresh]) -> None:
+    """Report each daemon's outcome in the upgrade summary."""
+    for refresh in refreshes:
+        for line in refresh.lines:
+            print(line)
+        for warning in refresh.warnings:
+            print(warning, file=sys.stderr)
+
+
+def _repair_refusal() -> str | None:
+    """Why this process must not rewrite the installed daemons, or ``None``.
+
+    TWO QUESTIONS, and the second is the invariant this guard exists for: a
+    repair may change how a daemon is NAMED, never WHICH INSTALL it runs.
+
+    1. **Is this an installation at all?** An editable or unknown install is
+       refused outright — that is the incident this guard came from, where a
+       worktree venv rewrote the operator's four live plists to point at
+       itself.
+    2. **Is it the SAME installation the plists already run?** A durable
+       install — a uv tool, pipx — IS the interpreter ``lop`` runs from, so it
+       may repair what it owns. Anything else (a hand-made venv with a PyPI
+       install, a second tool env) is refused unless its prefix is the prefix
+       the installed plists already record, so that such a venv cannot repoint
+       the operator's daemons at itself and then be deleted.
+
+    Prefix equality, not path equality, is the test: a stale plist recording
+    ``<prefix>/bin/python3`` and the branded shape recording
+    ``<prefix>/bin/Local Operator`` are the SAME install.
+    """
+    kind = install_kind()
+    if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
+        return (
+            "installed daemons are only refreshed by an installed "
+            "distribution; this is a source checkout, so nothing was touched"
+        )
+    if kind in (InstallKind.UV_TOOL, InstallKind.PIPX):
+        return None
+    from local_operator import launchd
+
+    mine = Path(sys.prefix).resolve()
+    others: list[str] = []
+    for path in _installed_daemon_plists():
+        recorded = launchd.recorded_install_prefix(launchd.load(path))
+        if recorded is not None and recorded != mine:
+            others.append(f"{path.name} runs {recorded}")
+    if others:
+        return (
+            f"the installed daemons belong to another installation "
+            f"({'; '.join(others)}), so this one ({mine}) left them alone; "
+            "upgrade from that installation to repair them"
+        )
+    return None
+
+
+def daemons_refresh_command() -> int:
+    """``lop update --refresh-daemons``: the repair, run under the NEW wheel.
+
+    Internal, and spawned by :func:`refresh_service_daemons_after_upgrade`
+    rather than invoked by hand (it is reachable by hand for a machine whose
+    upgrade predates this fix). Prints one line per daemon that CHANGED and one
+    warning per daemon that could not be repaired; silent when everything is
+    already current, because that is the normal state of a machine and this runs
+    on every upgrade.
+
+    The installer imports are function-local: ``mobile.install`` imports the
+    Starlette daemon, and this module is imported by the TUI, so a module-level
+    import would put the web stack in every session. In THIS process that cost
+    is correct — it is a short-lived child whose entire job is the repair.
+
+    RUNS ONLY FROM AN INSTALLED DISTRIBUTION, which is the same refusal
+    ``perform_upgrade`` makes for the upgrade itself, applied at the point that
+    WRITES. A source checkout must never rewrite an installed daemon: the
+    ``Program`` these plists record is an INTERPRETER, so a repair from a
+    worktree points the operator's daemons at that worktree's own venv —
+    reproduced exactly that way during this change's development, from a
+    worktree, against the live LaunchAgents (all four were restored afterwards).
+    The visible entry points cannot reach this state (an editable install is
+    refused before the refresh), but the hidden flag can, and the guard belongs
+    where the writing happens rather than in the caller.
+    """
+    refusal = _repair_refusal()
+    if refusal is not None:
+        # A refusal is printed rather than silent: it is the difference between
+        # "nothing needed repairing" and "this process is not allowed to".
+        print(f"warning: {refusal}", file=sys.stderr)
+        return 0
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.mobile import install as mobile_install
+    from local_operator.tunnels import install as tunnel_install
+    from local_operator.wakes import install as wakes_install
+
+    refreshers = (
+        mobile_install.refresh_plist_if_stale,
+        browser_install.refresh_plist_if_stale,
+        tunnel_install.refresh_plist_if_stale,
+        wakes_install.refresh_plist_if_stale,
+    )
+    for refresh in refreshers:
+        # Every one of these is no-raise by contract, so no guard is needed here
+        # and a failure in one daemon cannot stop the next.
+        outcome = refresh()
+        line = outcome.summary()
+        if line:
+            print(line)
+        warning = outcome.warning()
+        if warning:
+            print(warning, file=sys.stderr)
+    return 0
+
+
+def update_command(*, check: bool = False, refresh_daemons: bool = False) -> int:
+    """``lop update``, ``lop update --check`` and the internal daemon repair.
+
+    ``--refresh-daemons`` is not an upgrade: it is the repair step that the
+    upgrade path runs in a CHILD process from the newly installed wheel, so that
+    the plists it renders are this build's and not the previous one's. See
+    :func:`daemons_refresh_command`. It is checked before the PyPI call because
+    it must work on any machine, including one whose network is down, and it
+    never reports a version. See the architect table for the other codes.
+    """
+    if refresh_daemons:
+        return daemons_refresh_command()
+
     result = check_latest(force=True)
     if result.latest is None:
         print("could not reach PyPI to learn the latest version", file=sys.stderr)
@@ -1245,5 +1595,5 @@ def update_command(*, check: bool = False) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"installed {installed}")
-    _print_cli_mobile_refresh(refresh_mobile_after_upgrade())
+    _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return 0

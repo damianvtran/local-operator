@@ -1139,4 +1139,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # The Linux comm axis (see :func:`procname.brand_this_process`): macOS names
+    # this worker from the image its parent exec'd it through, Linux has no such
+    # image, so the process has to name itself. Called in the ``__main__``
+    # branch rather than inside ``main()`` because ``main()`` is callable
+    # in-process (the suite calls it), and a comm set on the CALLER's thread
+    # would outlive the call.
+    from local_operator import procname
+
+    procname.brand_this_process()
     main()

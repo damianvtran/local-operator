@@ -899,6 +899,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print installed vs PyPI; do not install",
     )
+    # Hidden (``SUPPRESS``): nobody types this, and it is not an upgrade — it is
+    # the repair step ``lop update`` runs in a CHILD process from the newly
+    # installed wheel, so that the LaunchAgent plists it renders come from THIS
+    # build rather than from the pre-upgrade modules the parent still holds in
+    # memory. Without the child, a repair renders the previous build's plist
+    # shape and silently changes nothing. See ``update.daemons_refresh_command``.
+    update_parser.add_argument(
+        "--refresh-daemons",
+        dest="refresh_daemons",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     exec_parser = subparsers.add_parser(
         "exec",
@@ -6915,7 +6927,10 @@ def main() -> int:
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command
 
-            return update_command(check=bool(getattr(args, "check", False)))
+            return update_command(
+                check=bool(getattr(args, "check", False)),
+                refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+            )
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory

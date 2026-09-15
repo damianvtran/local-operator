@@ -567,10 +567,12 @@ class TestLaunchdPrograms:
 
         Each of these was the documented anti-pattern before this change; a
         revert would restore "python3 is running in the background" with no
-        test failing anywhere else.
+        test failing anywhere else. Both axes are asserted: ``Program`` is the
+        branded image, ``ProgramArguments[0]`` is that daemon's role label.
         """
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
         sentinel = tmp_path / "bin" / procname.BRAND
@@ -580,14 +582,142 @@ class TestLaunchdPrograms:
 
         # `render_plist` is typed `dict[str, object]`, so the element type is
         # narrowed here rather than indexed straight off an `object`.
-        for rendered in (
-            mobile_install.render_plist(1),
-            browser_install.render_plist(1),
-            wakes_install.render_plist(tmp_path),
-        ):
-            program = rendered["ProgramArguments"]
+        rendered = {
+            "mobile": mobile_install.render_plist(1),
+            "browser": browser_install.render_plist(1),
+            "wakes": wakes_install.render_plist(tmp_path),
+            "tunnel": tunnel_install.render_plist(),
+        }
+        first_rows = set()
+        for name, plist in rendered.items():
+            program = plist["ProgramArguments"]
+            assert plist["Program"] == str(sentinel), name
             assert isinstance(program, list)
-            assert program[0] == str(sentinel)
+            assert program[0].startswith(procname.BRAND), (name, program[0])
+            first_rows.add(program[0])
+        # The point of the change: four daemons, four distinguishable rows.
+        assert len(first_rows) == 4, first_rows
+
+
+class TestSpawnIdentity:
+    """``(argv[0], executable)`` — the pairing that makes every spawn named.
+
+    A PAIR, and only a pair: on POSIX ``Popen(argv=[…])`` with
+    ``executable=None`` EXECUTES ``argv[0]``, so a spawn site that decorated
+    ``argv[0]`` with a label on its own would ask the kernel to run a file named
+    ``Local Operator [eval] session=…``. The other half of the contract is the
+    one CI taught: the label is applied ONLY alongside a branded image, because
+    a labelled ``argv[0]`` empties the child's ``sys.executable`` on Linux (see
+    ``tests/unit/test_spawn_naming_fallback.py``).
+    """
+
+    def test_pairs_the_label_with_the_branded_image(self, branded):
+        argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id="abcd1234")
+        assert argv0 == "Local Operator [session] id=abcd1234"
+        assert executable == str(branded)
+
+    def test_without_an_image_the_label_is_withheld(self, monkeypatch):
+        """Rung 2, and the reason it is not "argv-only labelling".
+
+        The row stays ``python3.x`` here. Labelling it would look better in
+        ``ps`` and cost the child its interpreter identity on Linux, which is a
+        trade this project does not make: see the module ladder and the
+        Linux-executed child test in ``test_spawn_naming_fallback.py``.
+        """
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+        assert argv0 == sys.executable
+        assert executable is None
+
+    def test_the_pair_actually_runs(self, monkeypatch):
+        """The pairing is EXECUTED, not merely returned — and the child is whole.
+
+        Both halves at once: the argv/``executable=`` pair starts the
+        interpreter, and the child that comes out of it can still say which
+        interpreter it is (the property Linux loses to a label).
+        """
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+        result = subprocess.run(
+            [argv0, "-c", "import sys; print(sys.executable or 'missing')"],
+            executable=executable,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        # realpath, not string equality: a platform is free to report the image
+        # it resolved, and the property under test is that the child HAS a
+        # working interpreter rather than which spelling of it came back.
+        assert os.path.realpath(result.stdout.strip()) == os.path.realpath(sys.executable)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX execve semantics")
+    def test_a_label_without_an_image_cannot_be_executed(self):
+        """The hazard the pairing exists for, demonstrated rather than assumed."""
+        with pytest.raises(OSError):
+            subprocess.run(
+                [procname.branded_argv0(procname.LABEL_EVAL, id="deadbeef"), "-c", "pass"],
+                timeout=30,
+            )
+
+    def test_a_failing_probe_withholds_the_label_too(self, monkeypatch):
+        """No-raise applies to the probe too: a failed probe is rung 2, not a label."""
+
+        def explode():
+            raise RuntimeError("no stat")
+
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", explode)
+        argv0, executable = procname.spawn_identity(procname.LABEL_SERVE, port=1)
+        assert argv0 == sys.executable
+        assert executable is None
+
+
+class TestLaunchdJob:
+    """``Program`` + role label: the shape three daemons could not be told apart in."""
+
+    ROLES = (
+        (
+            "mobile",
+            "local_operator.mobile.service",
+            procname.LABEL_MOBILE,
+            {"port": 4098},
+            ["--port", "4098"],
+        ),
+        (
+            "browser",
+            "local_operator.browser_bridge.daemon",
+            procname.LABEL_BROWSER,
+            {"port": 4099},
+            ["--port", "4099"],
+        ),
+        ("tunnel", "local_operator.tunnels.service", procname.LABEL_TUNNEL, {}, []),
+        ("wakes", "local_operator.wakes.supervisor", procname.LABEL_WAKES, {}, []),
+    )
+
+    @pytest.mark.parametrize("role,module,template,fields,extra", ROLES)
+    def test_program_key_carries_the_image_and_argv_the_label(
+        self, role, module, template, fields, extra, branded
+    ):
+        label = procname.branded_argv0(template, **fields)
+        job = procname.launchd_job(module, *extra, label=label)
+        assert job["Program"] == str(branded), role
+        assert job["ProgramArguments"] == [label, "-m", module, *extra], role
+
+    def test_no_branded_image_means_the_pre_branding_plist(self, monkeypatch):
+        """Rung 3 is byte-for-byte what these installers wrote before."""
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        job = procname.launchd_job(
+            "local_operator.wakes.supervisor", label="Local Operator [wakes]"
+        )
+        assert job == {
+            "ProgramArguments": [sys.executable, "-m", "local_operator.wakes.supervisor"]
+        }
+        assert "Program" not in job
+
+    def test_the_label_is_optional(self, branded):
+        job = procname.launchd_job("local_operator.wakes.supervisor")
+        assert isinstance(job["ProgramArguments"], list)
+        assert job["ProgramArguments"][0] == procname.BRAND
 
 
 class TestResumeExecutableRegression:

@@ -20,8 +20,16 @@ ORIGIN_ISSUER = "https://tunnels.radienthq.com"
 _HOST = re.compile(r"[a-z0-9]+-(?:lop|oc)\.radienthq\.com\Z")
 
 
-def directory() -> Path:
-    return config_dir() / "tunnel"
+def directory(base: Path | None = None) -> Path:
+    """This store's directory.
+
+    ``base`` exists for ONE caller: the LaunchAgent repair renders the unit the
+    plist on disk already names, which is the store recorded in that plist
+    rather than whatever this process's environment happens to point at — a
+    repair brings a unit up to date IN PLACE, it does not migrate it. Every
+    other caller keeps reading the ambient config dir.
+    """
+    return (base if base is not None else config_dir()) / "tunnel"
 
 
 def private_write(path: Path, value: str, *, exclusive: bool = False) -> bool:
