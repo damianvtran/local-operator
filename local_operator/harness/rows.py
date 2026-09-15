@@ -41,7 +41,7 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
@@ -530,6 +530,7 @@ def assistant_stop_notice(
     has_tool_calls: bool,
     stop_reason: str | None,
     provider_payload: dict[str, Any] | None,
+    cut_tool_call: bool | None = None,
 ) -> tuple[str, NoticeSeverity] | None:
     """The notice an assistant turn's ``stop_reason`` demands, or ``None``.
 
@@ -564,6 +565,34 @@ def assistant_stop_notice(
     is no answer on that turn to cut off, and saying there is puts a false row
     directly beneath the failed call card that already says the arguments were
     cut (design round 1, D3).
+
+    The third arm — a call in flight, no prose — is ARM-AWARE, through
+    ``cut_tool_call``, and has to be: the limit has two arms (a call whose
+    arguments it CUT mid-dictation, and a call that arrived complete in a turn
+    it ended before it could run), and the row a resume paints for the call
+    already distinguishes them (``output_limit_call_receipt``). A single
+    notice line covering both therefore names a cause the row right above it
+    contradicts: measured on this branch, a length-stopped turn whose every
+    call arrived complete read "tool call cut off at the output limit" under a
+    card that said "turn cut off at the output limit before this call ran" —
+    the false-cause class this PR exists to remove, surviving on the reader's
+    two surfaces at once (design round 1, D1; QA Q-R2-1; review round 2,
+    MINOR-2).
+
+    ``True`` means "at least one call in this turn had its arguments cut",
+    which is what that CALL's own row then says too; ``False`` and ``None``
+    both take the arm-neutral line. ``None`` is "this host cannot tell" — a
+    legacy transcript whose results predate ``OUTPUT_LIMIT_KEY``, or a call
+    whose result never reached the transcript — and an arm-neutral sentence is
+    the only honest one there, because a notice may not claim a cut nobody
+    established. Every in-tree caller reads the arm off the turn's own results;
+    the default exists so a host with no results to read still gets a true line
+    rather than a false one.
+
+    The notice states the TURN and the row states the CALL. That division is
+    what keeps the sentence the operator reads painted once (design round 1,
+    D2): the per-call receipt is owned by the call's own row
+    (``output_limit_call_receipt``) and nothing here repeats it.
 
     Returning ``None`` means "this turn needs no notice", which is the
     ordinary case. Every surface must call this — the phone had no
@@ -609,19 +638,22 @@ def assistant_stop_notice(
         if text:
             return "answer cut off at the output limit", "warning"
         if has_tool_calls:
-            return _CUT_CALL_RECEIPT, "warning"
+            # The arm comes from the caller, which read it off the turn's own
+            # results; see the docstring. ``mid tool call`` is the cut claim,
+            # and it is made only where a call really was cut.
+            return (_CUT_CALL_NOTICE if cut_tool_call else _LIMIT_ENDED_TURN_NOTICE), "warning"
         return "no answer: the model spent its whole output budget", "warning"
     if not text and not has_tool_calls and stop_reason in ("error", "aborted"):
         return ("turn failed" if stop_reason == "error" else "interrupted"), "error"
     return None
 
 
-#: The receipt for a call the OUTPUT LIMIT cut mid-arguments. Named rather than
-#: spelled twice because TWO surfaces say it about one event: the turn notice
-#: above (``assistant_stop_notice``), and the failed-call card a resume paints
-#: for the call itself (``output_limit_call_receipt`` below). A cut call used to
-#: read one way in the notice and another on its own row, which is the
-#: two-voices class this module exists to keep closed.
+#: The receipt for a call the OUTPUT LIMIT cut mid-arguments. OWNED by the
+#: call's own row (``output_limit_call_receipt`` below): the card body on the
+#: TUI, the row's error line on the phone. It is deliberately NOT the turn
+#: notice's line too — see ``_CUT_CALL_NOTICE`` below for why one event painting
+#: one sentence twice (the notice sits two rows under the card) is the thing to
+#: avoid (design round 1, D2).
 _CUT_CALL_RECEIPT = "tool call cut off at the output limit (nothing ran)"
 
 #: The receipt for the OTHER limit arm: a call whose arguments arrived COMPLETE
@@ -633,7 +665,82 @@ _CUT_CALL_RECEIPT = "tool call cut off at the output limit (nothing ran)"
 #: Operator voice, not model voice: it is a RECEIPT for someone reconstructing
 #: what happened, so it says what did not happen and stops there. No imperative,
 #: no "reply with the call", no instruction the loop means for the model.
-_LIMIT_ENDED_TURN_RECEIPT = "turn ended at the output limit before this call ran"
+#:
+#: ``cut off``, not ``ended``, is this family's verb for an involuntary end at
+#: the generation bound (``answer cut off at the output limit`` above, the
+#: stranded card's own "cut off", the live notice's "turn cut off"): the TURN is
+#: the subject and the limit did cut it off, so the family word is the true one
+#: and this arm's precision rides in the clause that follows it, not in the verb
+#: (design round 1, D4).
+_LIMIT_ENDED_TURN_RECEIPT = "turn cut off at the output limit before this call ran"
+
+#: The TURN's own line for a length stop with a call in flight — the notice's,
+#: never a row's. Two variants, because a turn can genuinely dictate one call to
+#: completion and die writing a second, and the current one then says so:
+#: ``mid tool call`` is the cut claim and is made only where a call really was
+#: cut, while the sentence WITHOUT it is true of both arms, which is what makes
+#: it the safe one for a mixed turn.
+#:
+#: These are the notice's own sentences rather than the receipts' (design round
+#: 1, D1 and D2 are one decision): the receipt the operator reads for a call is
+#: on the call's own row above, and a turn-level notice that repeated it verbatim
+#: painted one sentence twice on one screen. What a notice adds that no row can
+#: is the turn ITSELF — that the conversation stopped here — and that is what
+#: these say.
+_CUT_CALL_NOTICE = "turn cut off at the output limit mid tool call — nothing ran"
+_LIMIT_ENDED_TURN_NOTICE = "turn cut off at the output limit — nothing ran"
+
+
+def output_limit_cut_call(details: Mapping[str, Any] | None) -> bool:
+    """Whether this result belongs to a call the OUTPUT LIMIT cut MID-ARGUMENTS.
+
+    The arm question, asked where the other half of it lives: the marker
+    (``harness.types.OUTPUT_LIMIT_KEY``) the loop stamps on the synthetic result
+    it appends for a call the length arm kept from running.
+
+    A host asks this about each call of a length-stopped turn to answer
+    ``assistant_stop_notice``'s ``cut_tool_call`` — the folds have the turn's
+    messages in hand and the notice has none, which is why the question is a
+    function here rather than a branch inside the notice.
+
+    ``False`` is the answer for everything that is not the cut arm, including a
+    result carrying no marker at all (a transcript written before the marker
+    existed) and a result this fold never saw. The caller is asking "may I claim
+    the limit cut this?", and the honest answer for a result that does not say
+    so is no: the notice's arm-neutral line is true either way, while a claim
+    the record does not support is the defect this family exists to remove.
+    """
+    from local_operator.harness.types import OUTPUT_LIMIT_ARGUMENTS, OUTPUT_LIMIT_KEY
+
+    if not isinstance(details, Mapping):
+        return False
+    return details.get(OUTPUT_LIMIT_KEY) == OUTPUT_LIMIT_ARGUMENTS
+
+
+def turn_cut_tool_call(calls: Iterable[Any], results: Mapping[str, Any]) -> bool:
+    """Whether any call of a turn was cut mid-arguments by the OUTPUT LIMIT.
+
+    The question ``assistant_stop_notice(cut_tool_call=...)`` asks, answered
+    from the turn's OWN results so neither host has to guess it from the turn's
+    shape. ``results`` maps a call id to whatever settled it — a tool message in
+    the phone's history fold, the session's result object in the TUI's replay
+    fold — and both carry ``provider_payload``, which is where the marker rides.
+
+    A call with NO entry in ``results`` is UNKNOWN, not cut: the fold may be
+    looking at a page of history whose tail was capped, or at a conversation
+    that predates the marker. Unknown takes the notice's arm-neutral line, which
+    is true either way; see :func:`output_limit_cut_call` for why the answer
+    errs toward "no" rather than toward the more dramatic claim.
+    """
+    for call in calls:
+        settled = results.get(getattr(call, "id", "") or "")
+        if settled is None:
+            continue
+        payload = getattr(settled, "provider_payload", None)
+        details = payload.get("details") if isinstance(payload, Mapping) else None
+        if output_limit_cut_call(details):
+            return True
+    return False
 
 
 def output_limit_call_receipt(details: Mapping[str, Any] | None) -> str | None:

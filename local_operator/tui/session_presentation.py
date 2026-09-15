@@ -830,6 +830,7 @@ def project_settled_rows(
         gate_timeout_notice,
         is_harness_chrome,
         is_harness_notice_row,
+        turn_cut_tool_call,
         user_row_text,
     )
     from local_operator.tui.app import (
@@ -1161,6 +1162,14 @@ def project_settled_rows(
                 has_tool_calls=bool(tool_calls),
                 stop_reason=getattr(message, "stop_reason", None),
                 provider_payload=getattr(message, "provider_payload", None),
+                # The limit's ARM, from the turn's OWN results: this fold has
+                # them (`results` is keyed by call id), and without it the
+                # notice names a cause the call's own row contradicts -- a
+                # length-stopped turn whose every call arrived complete read
+                # "tool call cut off at the output limit" under a card saying
+                # "turn cut off at the output limit before this call ran"
+                # (design round 1, D1; QA Q-R2-1; review round 2, MINOR-2).
+                cut_tool_call=turn_cut_tool_call(tool_calls, results),
             )
             if notice is not None:
                 reason, severity = notice

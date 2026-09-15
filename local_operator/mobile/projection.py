@@ -45,6 +45,7 @@ from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
     output_limit_call_receipt,
+    turn_cut_tool_call,
     user_row_text,
     wake_receipt_headline,
 )
@@ -703,6 +704,19 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
     # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
     tool_rows: dict[str, TranscriptEntry] = {}
     tool_args: dict[str, dict[str, Any]] = {}
+    # tool_call_id -> the result that settled it, indexed UP FRONT. The
+    # turn-level notice is decided on the ASSISTANT message, which this linear
+    # fold reaches before the results that answer it, and the notice needs the
+    # limit's arm to avoid naming a cause the call's own row contradicts
+    # (design round 1, D1). One extra pass over the history, no extra state.
+    # ``isinstance(Message)``, not a bare attribute read: a history holds
+    # ``CustomMessage`` rows too (hub steers, gate timeouts), and those carry no
+    # ``role`` or ``tool_call_id`` at all.
+    settled: dict[str, AgentMessage] = {
+        message.tool_call_id: message
+        for message in history
+        if isinstance(message, Message) and message.role == "tool" and message.tool_call_id
+    }
     # Message ids whose assistant turn opened a bang-mode (`! cmd`) command,
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
@@ -907,6 +921,11 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 has_tool_calls=bool(message.tool_calls),
                 stop_reason=getattr(message, "stop_reason", None),
                 provider_payload=message.provider_payload,
+                # The arm, from this turn's OWN results (design round 1, D1):
+                # the notice may say the limit cut a call only when a call in
+                # this turn says so, or it names a cause the row two rows below
+                # contradicts.
+                cut_tool_call=turn_cut_tool_call(message.tool_calls, settled),
             )
             if notice is not None:
                 # A refused, failed or interrupted turn. The phone had no
@@ -949,7 +968,15 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
                 details = _tool_row_details(
                     tool_args.get(message.tool_call_id or "", {}),
-                    result_text,
+                    # The receipt belongs to the row's error line and NOWHERE
+                    # else on this surface: passing it here as well put the
+                    # identical sentence in the red paragraph above the args and
+                    # in the sunken output block below them, so one tap showed
+                    # one sentence twice (design round 1, D5). Nothing ran for
+                    # this call, so it has no output to expand — the arguments
+                    # still do, and that is what an operator opening the row is
+                    # reading for.
+                    "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
                 )
                 # The expansion flag is set on the CALL and must survive the

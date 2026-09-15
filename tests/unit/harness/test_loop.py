@@ -479,11 +479,17 @@ async def test_length_pairs_but_does_not_execute():
     # turn (review round 1, F1 == QA Q1).
     assert tool_messages[0].text == LENGTH_ENDED_CALL_RESULT_TEXT
     # And the user is told the limit was hit, on the surface that renders the
-    # loop's own events.
+    # loop's own events — with the arm this turn is actually in. `args="{}"`
+    # PARSES, so nothing here was cut, and the line used to claim otherwise: it
+    # read "mid tool call … re-emit the call in smaller pieces" over a model
+    # whose own result said "Its arguments arrived complete, so there is nothing
+    # here to shrink. Re-issue this call as it is." — one event described two
+    # ways, the false-cause class this PR removes (design round 1, D1; QA
+    # Q-R2-1; review round 2, MINOR-2).
     assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
-        "the model hit the output limit mid tool call "
+        "the model hit the output limit before the call ran "
         "— nothing was executed; re-asking it to "
-        "re-emit the call in smaller pieces"
+        "re-issue the call as it is"
     ]
 
 
@@ -529,8 +535,9 @@ async def test_length_arms_are_distinguished():
     context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
     loop = AgentLoop()
 
-    async for _ in loop.run([Message.user("go")], context, make_config(stream), None):
-        pass
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
 
     # No arm executes: the batch is paired with placeholders either way.
     assert executed == []
@@ -566,17 +573,44 @@ async def test_length_arms_are_distinguished():
     # strings: model-directed prose must not reach the row (review round 1, F2).
     receipts = [output_limit_call_receipt(d) for d in details]
     assert receipts == [
-        "turn ended at the output limit before this call ran",
-        "turn ended at the output limit before this call ran",
+        "turn cut off at the output limit before this call ran",
+        "turn cut off at the output limit before this call ran",
         "tool call cut off at the output limit (nothing ran)",
     ]
     assert all(r not in (TRUNCATED_RESULT_TEXT, LENGTH_ENDED_CALL_RESULT_TEXT) for r in receipts)
-    # The cut call's own row and the turn's notice use the same words, which is
-    # the whole reason the receipt is named rather than spelled twice -- a cut
-    # call used to read one way in the notice and another on its row.
-    assert assistant_stop_notice(
-        text="", has_tool_calls=True, stop_reason="length", provider_payload=None
-    ) == (receipts[2], "warning")
+    # The RECEIPT belongs to the call's own row, and the turn's notice is a
+    # different sentence about a different subject -- not a second copy of it.
+    # Both used to be the same string, which put one sentence twice on one
+    # screen: the row two rows under the failed call card, byte-identical to it
+    # (design round 1, D2). The notice states the TURN; the row states the CALL.
+    cut_notice = assistant_stop_notice(
+        text="",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+        cut_tool_call=True,
+    )
+    complete_notice = assistant_stop_notice(
+        text="",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+        cut_tool_call=False,
+    )
+    assert cut_notice is not None and complete_notice is not None
+    assert cut_notice == ("turn cut off at the output limit mid tool call — nothing ran", "warning")
+    assert complete_notice == ("turn cut off at the output limit — nothing ran", "warning")
+    assert not {cut_notice[0], complete_notice[0]} & set(receipts)
+    # A MIXED turn takes the cut line, and takes it truthfully: a call in this
+    # turn really was cut mid-dictation, which is the whole of that clause's
+    # claim, and the complete calls' rows stay precise about themselves. It is
+    # also what the loop itself announced on this same turn, which is the point
+    # — the live notice and the fold now read one body of evidence.
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit mid tool call "
+        "— nothing was executed; re-asking it to "
+        "re-emit the call in smaller pieces"
+    ]
 
     # Every other result keeps its own text: the substitution is keyed on the
     # marker, not on the shape of an error row.
