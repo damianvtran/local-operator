@@ -188,7 +188,7 @@ def is_harness_chrome(text: str) -> bool:
 def is_harness_injection(row: Any) -> bool:
     """Whether this row was minted BY the harness from a ``CustomMessage``.
 
-    :func:`~local_operator.session.session._default_convert_to_llm` renders a
+    :func:`~local_operator.harness.render._default_convert_to_llm` renders a
     harness aside — a model-switch notice, a session incident, a wake
     delivery, a gate timeout — into a plain ``Message(role="user")`` and
     stamps ``provider_payload["harness_injected"]`` on it, so the row is
