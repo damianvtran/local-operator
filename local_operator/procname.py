@@ -70,6 +70,13 @@ instead: measured +30-36 ms against a ~1100 ms ``lop --version`` baseline (~3%),
 and it fails safe — link missing or broken means no re-exec, the process is
 alive, and it repairs the link for next time.
 
+A THIRD CONSUMER MAKES THIS MANDATORY RATHER THAN MERELY SAFE. The desktop app
+(``~/local-operator-ui``, ``src/main/backend/owned-serve-launch.ts``) locates
+the ``lop`` console script by requiring its SHEBANG to end in ``python``
+(``consoleInterpreter()``) and refuses a launcher it cannot resolve that way.
+A shebang pointing at the branded link would therefore break that app's managed
+backend on every machine, including ones where the link is perfectly healthy.
+
 NEVER ``chmod``/``chown`` THE PLANTED LINK
 ------------------------------------------
 A hardlink is not a copy: it is a second NAME for the interpreter's inode, and
@@ -95,8 +102,40 @@ a stamp is a second source of truth that can itself go stale.
 
 EVERY FUNCTION HERE IS NO-RAISE BY CONTRACT, in the style of ``proc.py``. This
 is decoration on a process listing: no failure of it may ever stop a session
-from starting. The fallback ladder is hardlink+symlink → argv-only labelling →
-exactly today's behaviour, and every rung is a silent no-op on failure.
+from starting. The fallback ladder is hardlink+symlink → the unbranded
+interpreter → exactly today's behaviour, and every rung is a silent no-op on
+failure.
+
+THE LADDER, AND WHERE EACH RUNG IS IMPLEMENTED
+----------------------------------------------
+- **Rung 1 — the image AND the argv row.** ``ensure_branded_interpreter()``
+  plants the hardlink; :func:`spawn_identity` hands a spawn site the label for
+  ``argv[0]`` and the link for ``executable=``.
+- **Rung 2 — the interpreter, unlabelled.** With no link,
+  :func:`spawn_identity` returns ``(sys.executable, None)``: ``argv[0]`` stays
+  the interpreter path and NO label is applied, so the row is ``python3.x``,
+  exactly as it was before this module existed.
+- **Rung 3 — nothing.** :func:`launchd_job` falls back to the plist shape every
+  installer wrote before branding (no ``Program`` key), and
+  :func:`brand_this_process` is a no-op off Linux.
+
+**THE ARGV-ONLY RUNG THIS MODULE USED TO PROMISE IS DELIBERATELY NOT
+IMPLEMENTED, and the reason is measured.** A label is not free: on Linux
+CPython derives ``sys.executable`` from ``argv[0]``, so a labelled ``argv[0]``
+leaves the child with ``sys.executable == ""``. CI reproduced it on
+ubuntu/py3.12 — the eval worker's own broker spawn, ``secrets/client.py:298``,
+dies with ``PermissionError: [Errno 13] Permission denied: ''``, four tests on
+one cause — and the same breakage reaches any user cell doing
+``subprocess.run([sys.executable, …])``. macOS hides it completely: it resolves
+the interpreter from the EXECUTED IMAGE, so the identical child reports a real
+``sys.executable`` there, which is why this shipped once and only failed on
+Linux. A label that costs the child its interpreter identity is not a naming
+improvement, so the label rides with the image or not at all.
+
+Linux therefore names this product on the ``comm`` axis — set in-process by
+:func:`brand_this_process`, 15 bytes, brand only — and the argv axis belongs to
+rung 1, where the image already carries the interpreter. No half-renamed rows:
+where the product cannot be named on either axis, the row says ``python3.x``.
 """
 
 from __future__ import annotations
@@ -194,6 +233,21 @@ LABEL_SERVE = "{brand} [serve] port={port}"
 #: `comm` truncates at 15 bytes, which made every branded child identical in
 #: that listing. A daemon that can outlive its starter has to say what it is.
 LABEL_BROKER = "{brand} [secret broker] store={digest}"
+#: The four remaining self-spawns that are not a running service, added when the
+#: acceptance bar became "every process this product spawns is named": an EDR
+#: quarantines an UNNAMED interpreter doing something sensitive, and each of
+#: these does something sensitive from a process the user never sees.
+#:
+#: ``[install] pip`` installs over the network; ``[mobile restart]`` runs the
+#: post-upgrade bounce; ``[daemons] refresh`` rewrites LaunchAgents and restarts
+#: the daemons; ``[open] browser`` opens an OAuth URL in a browser. All four are
+#: short-lived, which is exactly why they were easy to miss — and why they are
+#: also the rows an operator reading `ps` at the wrong moment would find
+#: unexplained rather than harmless.
+LABEL_INSTALL = "{brand} [install] pip"
+LABEL_MOBILE_RESTART = "{brand} [mobile restart]"
+LABEL_DAEMONS_REFRESH = "{brand} [daemons] refresh"
+LABEL_OPEN_BROWSER = "{brand} [open] browser"
 
 
 def safe_field(value: object, limit: int = 24) -> str:
@@ -433,7 +487,8 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
 
     ``EXDEV`` (cross-device) is an EXPECTED outcome, not an error: an
     interpreter on a different filesystem from the venv simply cannot be
-    hardlinked, and the caller falls back to argv-only labelling.
+    hardlinked, and the caller falls back to rung 2 — the interpreter, with no
+    label on either axis (see the ladder in the module docstring).
     """
     tmp = link.with_name(f".{BRAND}.{os.getpid()}.tmp")
     try:
@@ -593,6 +648,20 @@ def is_own_launch() -> bool:
     pytest, an embedder, or ``python -c`` it is something else entirely, so the
     process correctly declines to replace itself. ``-m local_operator.cli`` is
     also accepted: that is a documented way to launch the app.
+
+    **THE ``-c`` LAUNCHER SHAPE IS A DELIBERATE NON-GOAL — do not "fix" it by
+    accepting it.** The desktop app (``~/local-operator-ui``,
+    ``src/main/backend/owned-serve-launch.ts``) starts its managed backend as
+    ``python3 -c "from local_operator.cli import main; main()" serve --port <n>``
+    and then verifies that the process it spawned is the one serving by asking
+    the SAME ``-c`` string to report its own ``sys.executable``; a mismatch
+    raises "its base interpreter … is not the serving process" and the app
+    refuses to start its backend. A re-exec through the branded hardlink makes
+    ``sys.executable`` become ``<prefix>/bin/Local Operator``, so every one of
+    those probes would fail and the desktop app would be dead on every machine.
+    The measurement on the operator's machine is a live unbranded row
+    (``python3.14 -c …``, parent ``/Applications/Local Operator.app``), and
+    that row is the CORRECT outcome of this guard, not a gap in it.
     """
     try:
         argv = sys.orig_argv
@@ -662,22 +731,123 @@ def reexec_branded(label: str | None = None) -> None:
         logger.debug("branded re-exec skipped", exc_info=True)
 
 
+def spawn_identity(label: str, **fields: object) -> tuple[str, str | None]:
+    """``(argv[0], executable)`` for a child this product spawns.
+
+    The two independent name axes of the module docstring, in one call, so no
+    spawn site can implement half of them:
+
+    - ``argv[0]`` is the rendered label — what ``ps -o args``, ``top -o
+      command`` and ``pgrep -f`` read — and it is a label ONLY alongside a
+      branded image (below);
+    - ``executable`` is the branded hardlink when one is planted (what Activity
+      Monitor reads, via ``p_comm``), and ``None`` otherwise.
+
+    WHY THE LABEL RIDES WITH THE IMAGE, measured on CI rather than reasoned:
+    on Linux CPython derives ``sys.executable`` from ``argv[0]``, so a labelled
+    ``argv[0]`` leaves the child with an EMPTY ``sys.executable``. That is not
+    cosmetic — ``secrets/client.py`` spawns the broker with
+    ``executable=sys.executable`` and dies with ``PermissionError: [Errno 13]
+    Permission denied: ''``, and so does any eval cell doing
+    ``subprocess.run([sys.executable, …])``. Rung 2 is precisely the rung
+    WITHOUT an image, so there is nothing to buy that cost back. macOS cannot
+    show this (it resolves the interpreter from the executed image), which is
+    why it must be pinned by a Linux-executed child test rather than by a
+    parent-side assertion: see ``tests/unit/test_procname_linux.py``.
+
+    ``None`` rather than ``sys.executable`` for the image is deliberate: it
+    says "no branded image" to the caller, which keeps ``executable=`` set only
+    when it names the link — the invariant ``tests/unit/test_exec_mode.py``
+    pins — and ``subprocess`` treats ``None`` exactly as an unset keyword.
+
+    On POSIX the pairing is also load-bearing for rung 1: ``Popen(argv=[…])``
+    with ``executable`` unset EXECUTES ``argv[0]``, so a label returned without
+    the image would look for a file literally named ``Local Operator [session]
+    id=…``. Callers must pass both halves straight through; no call site should
+    decorate ``argv[0]`` itself.
+
+    Never raises: a name is decoration, and no spawn may fail for one.
+    """
+    try:
+        link = ensure_branded_interpreter()
+    except Exception:  # noqa: BLE001 — a name is decoration, never a failure
+        link = None
+    if link is None:
+        # Rung 2 — see the module ladder: no label, because a labelled argv[0]
+        # costs the child its sys.executable on Linux and there is no image
+        # here to restore it.
+        return sys.executable, None
+    return branded_argv0(label, **fields), str(link)
+
+
+def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, object]:
+    """The ``Program``/``ProgramArguments`` pair for a LaunchAgent.
+
+    THE PLIST HALF OF THE BRANDING, and the reason every launchd daemon used to
+    collapse to one indistinguishable ``Local Operator`` row: with only
+    ``ProgramArguments`` set, launchd uses element 0 as BOTH the image and
+    argv[0], so the two name axes of this module cannot be separated and the
+    installer had to choose the image (``launchd_program``).
+
+    Setting ``Program`` to the branded link and ``ProgramArguments[0]`` to the
+    role label separates them, and launchd then executes ``Program`` while
+    passing the whole array as argv. Measured on the operator's machine
+    (macOS, launchd, scratch label, ``Program`` = the planted hardlink,
+    ``ProgramArguments[0]`` = a label):
+
+    .. code-block:: text
+
+        launchctl list              -> pid present
+        ps -o comm=                 -> Local Operator [        (16-char cut)
+        ps -o ucomm=                -> Local Operator
+        ps -o args=                 -> Local Operator [label probe] role=test -c …
+
+    TRADE-OFF, recorded because it cannot be measured on a developer machine
+    (``sfltool dumpbtm`` needs admin) and was decided rather than discovered:
+    macOS Background Task Management names a login item by the basename of
+    ``ProgramArguments[0]``. With this shape the notification and the Login
+    Items row therefore read the ROLE label — "Local Operator [mobile daemon]
+    port=4098" — instead of a bare "Local Operator". That is strictly more
+    informative and still unmistakably ours; what it is not is verified against
+    BTM's own output. The alternative (keep element 0 an image path) is the
+    status quo that cannot tell two daemons apart.
+
+    ``label`` is a RENDERED argv[0] (``branded_argv0(LABEL_MOBILE, port=…)``),
+    not a template; ``None`` degrades to the bare brand. Falls back to exactly
+    the pre-branding plist — ``launchd_program``'s argv, no ``Program`` key —
+    when no branded image can be planted, so rung 3 of the ladder is the shape
+    these installers already shipped.
+    """
+    try:
+        link = ensure_branded_interpreter()
+    except Exception:  # noqa: BLE001
+        link = None
+    if link is None:
+        return {"ProgramArguments": launchd_program(module, *args)}
+    return {
+        "Program": str(link),
+        "ProgramArguments": [branded_argv0(label) if label else BRAND, "-m", module, *args],
+    }
+
+
 def launchd_program(module: str, *args: str, label: str | None = None) -> list[str]:
     """``ProgramArguments`` for a LaunchAgent that runs ``python -m <module>``.
 
-    THE SECOND HALF OF THE OPERATOR'S COMPLAINT. macOS's Background Task
-    Management names a non-bundle login item by the **basename of
-    ``ProgramArguments[0]``** — not ``Label``, not the plist filename, not
-    ``CFBundleName``. The documented anti-pattern is exactly what these plists
-    used to do, ``[sys.executable, "-m", module]``, which is why installing a
-    daemon raised "python3 is running in the background" and why System
-    Settings > Login Items listed a bare ``python3``. Pointing element 0 at the
-    branded hardlink makes both read "Local Operator".
+    THE FALLBACK RUNG of :func:`launchd_job`, and the shape every installer in
+    this project used before it: element 0 is a real image path, because
+    without a ``Program`` key launchd uses it as both the image and argv[0].
+
+    macOS's Background Task Management names a non-bundle login item by the
+    **basename of ``ProgramArguments[0]``** — not ``Label``, not the plist
+    filename, not ``CFBundleName``. The documented anti-pattern is exactly what
+    these plists used to do, ``[sys.executable, "-m", module]``, which is why
+    installing a daemon raised "python3 is running in the background" and why
+    System Settings > Login Items listed a bare ``python3``. Pointing element 0
+    at the branded hardlink makes both read "Local Operator".
 
     ``label`` is not passed as argv[0] here the way a ``Popen`` label is:
-    launchd uses ``ProgramArguments[0]`` as BOTH the image to execute and
-    argv[0] (there is no ``Program`` key set), so the two axes collapse into
-    one string and it must remain a real executable path.
+    the two axes collapse into one string and it must remain a real executable
+    path. Callers that want the label want :func:`launchd_job`.
 
     Falls back to ``sys.executable`` when no branded image exists, which is
     byte-for-byte the plist these installers wrote before.
@@ -733,6 +903,14 @@ def brand_this_process(label: str | None = None) -> None:
     Linux must set ``comm`` itself because ``prctl`` does not survive the exec.
     One helper so a spawn site does not have to know which axis its platform
     uses.
+
+    ``label`` is accepted and ignored on purpose: Linux ``comm`` is capped at
+    15 bytes, so only ``BRAND`` (14) fits and a role label would be truncated
+    into an unreadable prefix. On Linux this is the ONLY naming axis the
+    product has, because the argv label belongs to rung 1 and a branded image
+    cannot be planted there (see the module ladder); ``/proc/<pid>/cmdline``
+    therefore shows the plain interpreter argv, and ``comm``/``ps -o comm``
+    shows the product name.
     """
-    del label  # reserved: Linux comm is capped at 15 bytes, so only BRAND fits
+    del label  # Linux comm is capped at 15 bytes, so only BRAND fits
     set_process_name()
