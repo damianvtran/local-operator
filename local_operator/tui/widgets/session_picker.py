@@ -86,6 +86,7 @@ from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.paths import config_dir
 
 # The row's searchable text (``fork_haystack``) and the search itself both live
@@ -322,6 +323,22 @@ OUTER_INSET_ROWS = SCREEN_INSET + PICKER_INSET_ROWS
 #: part of the panes' column budget and is charged against their row budget here
 #: instead of being folded into the inset above.
 FILTER_ROWS = 1
+
+#: The most characters one paste contributes to the filter query.
+#:
+#: A bound on COST, not on display: the row ellipsises past its own width anyway,
+#: and a session NAME is capped at :data:`NAME_MAX` characters, so nothing past
+#: this could have matched one. What it bounds is the soft tier, whose cost is
+#: linear in the query's TOKEN count — measured on a 300-session / 725 KB digest
+#: store, 16 tokens cost 26 ms, 1,235 cost 1.98 s and 11,111 cost 17.7 s, against
+#: a shipped store of ~640 sessions and ~180k digest tokens. Typing cannot reach
+#: those numbers: it pays for the search a character at a time and the user stops
+#: long before. A clipboard dump arrives all at once, and the search runs on the
+#: UI thread inside the repaint, so an unbounded one freezes a modal whose only
+#: exit is a key that frozen loop never reads. 200 characters is ~30 tokens —
+#: the same order as ``sanitize_prompt_line``'s 500, and well past any phrase a
+#: body search wants.
+PASTE_QUERY_MAX_CHARS = 200
 
 #: Rows between the bottom of the panes' text and the box the real-stylesheet
 #: height test measures (``.session-picker``'s own ``region``), MEASURED as
@@ -1700,6 +1717,48 @@ class SessionPickerScreen(ModalScreen[str | None]):
             event.stop()
             event.prevent_default()
             self.set_query(self._query + char)
+
+    def on_paste(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A bracketed paste into the filter.
+
+        A clipboard drop arrives as ONE ``Paste`` event, never as the keystrokes
+        ``on_key`` collects, and nothing on this screen can hold focus — so
+        Textual routes the paste to the screen (``App.on_event`` forwards it to
+        ``focused or screen``) and, with no handler here, drops it: the filter
+        stays empty and the list stays unfiltered, with nothing on screen to say
+        why. Pasting a session name or id copied out of another terminal is the
+        gesture this filter exists for.
+
+        The payload needs three things a keystroke never does:
+
+        * **Control sequences stripped.** ``on_key`` admits printable characters
+          only, so this is the ONE route by which an escape sequence can reach
+          ``_query`` — and the filter row paints ``_query`` verbatim into a
+          ``Text`` the terminal then interprets (measured: a pasted
+          ``\\x1b[31m`` survives into the compositor's strip). ``key_prompt``
+          strips for the same reason.
+        * **Whitespace collapsed to single spaces.** The row is ``FILTER_ROWS``
+          tall with ``overflow="ellipsis"``, so a newline would paint a second
+          line no layout budgeted for; and the needle would match nothing,
+          because ``filter_rows`` takes ONE exact substring — measured,
+          ``"parser\\ncrash"`` admits 0 rows where ``"parser crash"`` admits the
+          row it was pasted for. Collapsing keeps the words apart, which is what
+          makes the paste still match. Deleting the newlines instead would join
+          them into ``"parsercrash"``, which matches nothing either.
+        * **Length bounded** — see :data:`PASTE_QUERY_MAX_CHARS`.
+
+        Appends, like every typed character does, rather than replacing what the
+        user already typed.
+        """
+        raw = getattr(event, "text", "") or ""
+        text = " ".join(strip_control_sequences(raw).split())[:PASTE_QUERY_MAX_CHARS]
+        # Stopped whether or not anything survived the strip: the gesture was
+        # addressed to this modal, and a whitespace-only paste bubbling on past
+        # it serves nothing.
+        event.stop()
+        event.prevent_default()
+        if text:
+            self.set_query(self._query + text)
 
     # -- mouse ---------------------------------------------------------------
     # The wheel moves the cursor a row at a time, which scrolls the window with

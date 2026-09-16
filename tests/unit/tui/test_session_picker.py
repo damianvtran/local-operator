@@ -44,6 +44,7 @@ from local_operator.tui.widgets.session_picker import (
     NAME_MIN_CELLS,
     OUTER_INSET_COLS,
     OUTER_INSET_ROWS,
+    PASTE_QUERY_MAX_CHARS,
     PICKER_MIN_WIDTH,
     STACK_BELOW_COLS,
     SessionPickerScreen,
@@ -722,6 +723,177 @@ async def test_backspace_widens_the_filter_again() -> None:
         await pilot.pause()
         assert screen.filter_query == "pa"
         assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+class _PasteProbeHost(_PickerHost):
+    """A host that records every ``Paste`` that escapes the modal.
+
+    ``Paste`` bubbles (``textual.events.Paste(Event, bubble=True)``), so a
+    handler that forgot ``event.stop()`` would hand the gesture to whatever sits
+    above the screen. This probe is the only place in the suite that can SEE
+    that: the real ``OperatorApp`` has no paste handler of its own and nothing
+    on a modal screen can hold focus, so an unstopped paste is DROPPED rather
+    than misdelivered — invisible to an assertion on the composer.
+    """
+
+    def __init__(self, rows: list[SessionRow], digests: dict[str, str] | None = None) -> None:
+        super().__init__(rows, digests)
+        self.escaped: list[str] = []
+
+    def on_paste(self, event) -> None:  # type: ignore[no-untyped-def]
+        self.escaped.append(event.text)
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_session_name_filters_the_list() -> None:
+    """The gesture the filter exists for: a name copied out of another terminal.
+
+    A clipboard drop arrives as ONE ``Paste`` event, which ``on_key`` never sees
+    — it collects printable keystrokes. With no paste handler the modal is
+    routed the event and drops it, so the filter stays empty and the list stays
+    unfiltered, with nothing on screen to say why.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_newline_never_reaches_the_one_row_filter() -> None:
+    """A clipboard copy routinely carries a trailing newline; the row cannot.
+
+    The filter row is ``FILTER_ROWS`` tall with ``overflow="ellipsis"``, so a
+    newline in the query paints a second line no layout budgeted for — and the
+    needle stops matching anything, because ``filter_rows`` takes ONE exact
+    substring.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser crash\n"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert "\n" not in screen.render_footer_for_test()
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_line_paste_collapses_to_a_needle_that_still_matches() -> None:
+    """Collapsing to spaces, not deleting: the words have to stay apart.
+
+    Measured against the real matcher — ``"parser\ncrash"`` admits 0 rows and
+    so does the deleted form ``"parsercrash"``, while the collapsed
+    ``"parser crash"`` admits the row the paste was copied from.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser\ncrash\r\n"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_appends_to_the_filter_rather_than_replacing_it() -> None:
+    """Every typed character appends; a paste is more characters."""
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("p")
+        app.post_message(events.Paste("arser crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_is_stopped_at_the_modal_and_a_blank_one_changes_nothing() -> None:
+    """One gesture, one owner — including a gesture that carries nothing.
+
+    The blank half is not padding: a handler that returned early on empty text
+    BEFORE stopping would let a whitespace-only paste bubble on past the modal,
+    which is the same leak with nothing to show for it.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PasteProbeHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert app.escaped == [], "the modal handed the paste on past itself"
+
+        app.post_message(events.Paste("  \n\t "))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash", "a blank paste moved the filter"
+        assert app.escaped == [], "a blank paste is still addressed to the modal"
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_escape_sequence_never_reaches_the_terminal() -> None:
+    """``on_key`` admits printable characters only, so paste is the ONE route in.
+
+    The filter row paints ``_query`` verbatim into a ``Text`` the terminal then
+    interprets: measured on the compositor, an unstripped ``\\x1b[31m`` survives
+    into the painted strip. Read off the compositor rather than off the accessor
+    for that reason — the accessor cannot show what the terminal is handed.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser\x1b[31m crash"))
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert screen.filter_query == "parser crash"
+    assert "\x1b" not in painted, repr(painted)
+    assert "\x1b" not in screen.render_footer_for_test()
+    assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_clipboard_dump_is_bounded_rather_than_freezing_the_modal() -> None:
+    """The soft tier's cost is linear in the query's TOKEN count.
+
+    Measured on a 300-session store: 16 tokens cost 26 ms, 1,235 cost 1.98 s and
+    11,111 cost 17.7 s — and the search runs on the UI thread inside the
+    repaint. Typing cannot reach those numbers; a clipboard dump arrives all at
+    once. This pins the bound, not the timing (the suite asserts no wall-clock
+    ceilings): without the slice the query is half a megabyte long.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("word " * 100_000))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(screen.filter_query) == PASTE_QUERY_MAX_CHARS
+        assert screen.filter_query.startswith("word word")
 
 
 @pytest.mark.asyncio
