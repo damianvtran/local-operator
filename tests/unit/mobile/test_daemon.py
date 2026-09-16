@@ -13,7 +13,13 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, SessionTable, _dial, build_app
+from local_operator.mobile.daemon import (
+    MobileDaemon,
+    SessionEntry,
+    SessionTable,
+    _dial,
+    build_app,
+)
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     SessionProjection,
@@ -1618,9 +1624,10 @@ async def test_a_phone_listing_keeps_the_rows_it_read_when_the_store_goes_unread
     table.invalidate_summaries_cache()
     second = await table.summaries()
 
-    assert {row["session_id"] for row in second} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}, (
-        "an unreadable store must not be published as an empty conversation list"
-    )
+    assert {row["session_id"] for row in second} == {
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+    }, "an unreadable store must not be published as an empty conversation list"
     assert table.listing_degraded() == ["sessions"]
 
     # And the healing is real: once the read works again the marker clears, so a
@@ -1675,8 +1682,8 @@ async def test_the_store_failure_is_a_ttl_paced_retry_not_a_rescan_per_repaint(
     """
     import errno
 
-    from tests.unit.session.test_catalog_read_failures import _failing_open
     from local_operator import resume as resume_module
+    from tests.unit.session.test_catalog_read_failures import _failing_open
 
     cfg = tmp_path / "config"
     store = _listing_rows(cfg, "aaaaaaaaaaaa")

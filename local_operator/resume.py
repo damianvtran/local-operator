@@ -2345,9 +2345,7 @@ def recent_session_rows(
     ``strict=True`` and keeps the last listing it did read.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime, origin in _recent_sessions_with_origin(
-        config_dir, limit, strict=strict
-    ):
+    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit, strict=strict):
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
