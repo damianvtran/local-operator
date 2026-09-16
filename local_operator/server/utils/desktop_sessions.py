@@ -2723,7 +2723,27 @@ class DesktopSessions:
 
         return await asyncio.to_thread(read)
 
-    async def list(self, limit: int) -> list[dict[str, Any]]:
+    async def list(
+        self, limit: int, status_stamps: tuple[str, dict[str, int]] | None = None
+    ) -> list[dict[str, Any]]:
+        """The sidebar's rows, optionally stamped with the feed's status counters.
+
+        ``status_stamps`` is ``(epoch, {session_id: revision})`` from the desktop
+        feed, and it exists because TWO writers now ship the same fact: this row's
+        ``status`` and the feed's ``session_status`` frame. A response computed
+        before a frame this client already applied would otherwise clobber it —
+        and the in-app marker effect fires a list on exactly the transition the
+        frames speed up, so the race is the normal path rather than a
+        hypothetical. A row whose session the feed has never published for is
+        stamped with NEITHER key, and a client reads that as "no comparison
+        available, take the list's value".
+
+        Additive and defaulted: nothing else that lists sessions reads it, and an
+        unstamped response is byte-identical to what this returned before.
+        ``SessionRow`` is ``extra="allow"``, so the two keys serialize without a
+        model change.
+        """
+
         def rows() -> list[dict[str, Any]]:
             entries = load_catalog(self.root, limit=limit)[:limit]
             attention: dict[str, dict[str, Any]] = {}
@@ -2748,6 +2768,12 @@ class DesktopSessions:
                 )
                 if f"session/{entry.id}" in attention:
                     row["attention"] = attention[f"session/{entry.id}"]
+                if status_stamps is not None:
+                    epoch, revisions = status_stamps
+                    revision = revisions.get(entry.id)
+                    if revision is not None:
+                        row["status_epoch"] = epoch
+                        row["status_revision"] = revision
                 result.append(row)
             return result
 

@@ -629,7 +629,17 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     # a bare 500. The decoration is already omitted per row inside `list()`;
     # this ladder covers anything else the pool can raise.
     async with errors():
-        rows = await host(request).list(limit + 1)
+        # THE STATUS STAMPS, read WITHOUT constructing the feed. `getattr`
+        # rather than `feed(request)` is deliberate: `feed()` BUILDS the
+        # singleton (and the poller that comes with it), so calling it here
+        # would make every list request start a feed on a backend the desktop
+        # app has not opened — and would make the app's first list the reason a
+        # machine-wide poller exists. A backend that never opened the feed has
+        # no counters, and the rows are simply unstamped, which is the same
+        # contract an older backend's rows carry.
+        engine = getattr(request.app.state, "desktop_feed", None)
+        stamps = engine.status_stamps() if engine is not None else None
+        rows = await host(request).list(limit + 1, status_stamps=stamps)
         return reply({"sessions": rows[:limit], "truncated": len(rows) > limit, "limit": limit})
 
 
