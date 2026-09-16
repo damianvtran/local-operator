@@ -350,6 +350,12 @@ def proves_a_move(boot: "BuildStamp", on_disk: "BuildStamp") -> bool:
         # uv-tool tree is still advanced in place by ``uv tool install --force``
         # has exactly that shape — and acting on it retires a running runtime
         # onto the older build (review round 1, R-3).
+        #
+        # This covers VERSION-orderable lags only. A lag by commit alone (equal
+        # version, older ref) is still a move here: the ref cannot be ordered
+        # without asking git, and refusing every different ref would break the
+        # same-version rebuild the ref comparison exists to detect (see
+        # ``is_older``).
         return False
     if on_disk.source_ref:
         return True
@@ -363,8 +369,17 @@ def is_older(candidate: "BuildStamp", than: "BuildStamp") -> bool:
     builds from ``main`` while ``pyproject.toml`` still names the last release, so
     two genuinely different builds routinely share one version string. Equal
     versions therefore answer ``False`` — "not older", because the direction is
-    unknown rather than backwards — and that is the case the ref comparison in
-    :func:`proves_a_move` exists for.
+    unknown rather than backwards.
+
+    WHAT THAT LEAVES UNSHIELDED, stated here because the prose elsewhere ("a
+    lagging pointer no longer retires a live runtime onto it") is narrower than
+    this function: an EQUAL version with a differing ref still reads as a move, so
+    a pointer lagging by commit alone is still followed. Deliberate, not
+    overlooked — that shape is this host's ordinary one (a rebuild of the same
+    version is exactly what the ref comparison exists to detect), and abstaining
+    on it would leave the fleet that cannot order refs permanently unconverged,
+    which is a worse failure than following a hand-run downgrade of an unchanged
+    version. Review round 2, R2-3.
 
     WHERE THE ORDER MATTERS (review round 1, R-3). Under the pre-generation
     layout a differing stamp could only mean "the tree this process holds was

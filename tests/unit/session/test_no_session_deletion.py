@@ -953,6 +953,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     (
         "local_operator/update.py::_rebind_scripts",
+        "<path>.unlink",
+        "<gen>/…/bin/<script>.rebind-<pid> temp FILE, unlinked when its rename fails",
+    ),
+    (
+        "local_operator/update.py::_rebind_scripts",
         "os.rename",
         "<gen>/…/bin/<script>.rebind-<pid> FILE -> the script; only text FILES under bin/",
     ),

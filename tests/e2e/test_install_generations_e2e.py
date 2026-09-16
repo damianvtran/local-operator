@@ -106,29 +106,48 @@ def _stable() -> Path:
     return update_mod.stable_root()
 
 
-def _linked_generation(name: str, venv: Path) -> Path:
-    """A generation whose venv is a symlink to ``venv``, plus uv's bin shims.
+def _plain_generation(name: str, venv: Path) -> Path:
+    """One generation as a REAL directory, with its site-packages linked.
 
     Written by hand rather than through ``install_into_generation`` because what
     it stands for is "a build that was installed HERE some time ago": the cells
     that start from it are about a runtime already running out of one.
 
-    The symlink is what makes these cells cheap, and it has one visible
-    consequence worth stating: ``process_install_root()`` resolves symlinks, so
-    a runtime launched from here records the CHECKOUT's venv as its install
-    root. The cells below assert the launch path (which names this generation)
-    rather than the record's resolved root, because a real generation is a real
-    directory and resolving it is a no-op there.
+    THE VENV DIRECTORY IS REAL, and that is load-bearing rather than tidy.
+    ``process_install_root()`` resolves symlinks, so a generation whose venv is a
+    symlink into this checkout makes ``SessionRecord.install_root`` the CHECKOUT's
+    venv whichever interpreter launched the child — the premise assertion in the
+    busy-runtime cell then passes for a child started from the fallback too, i.e.
+    it cannot fail for the property it names (review round 2, R2-1, measured on a
+    host with both shapes side by side). With a real directory the resolution is a
+    no-op, ``sys.prefix`` names the generation, and the assertion discriminates.
+
+    Only the parts the cells touch are real: ``pyvenv.cfg`` and a ``bin/python3``
+    symlink to this process's interpreter (so the child is cheap and gets a real
+    stdlib), a console script per entry point, and ``lib/python*/site-packages``
+    linked to ``venv``'s so the child really imports this distribution and its
+    dependencies.
     """
     generation = update_mod.generations_dir() / name
-    (generation / "tools").mkdir(parents=True, exist_ok=True)
+    install_root = generation / "tools" / "local-operator"
+    (install_root / "bin").mkdir(parents=True, exist_ok=True)
     (generation / "bin").mkdir(parents=True, exist_ok=True)
-    os.symlink(venv, generation / "tools" / "local-operator")
+    # ``pyvenv.cfg`` beside the interpreter is what makes CPython call this
+    # directory the prefix; the interpreter and stdlib themselves stay the real
+    # ones.
+    (install_root / "pyvenv.cfg").write_text(
+        f"home = {Path(sys.executable).parent}\n", encoding="utf-8"
+    )
+    os.symlink(sys.executable, install_root / "bin" / "python3")
     for entry in ("lop", "local-operator"):
-        os.symlink(
-            generation / "tools" / "local-operator" / "bin" / entry,
-            generation / "bin" / entry,
-        )
+        script = install_root / "bin" / entry
+        script.write_text(f"#!{install_root / 'bin' / 'python3'}\n", encoding="utf-8")
+        script.chmod(0o755)
+        os.symlink(script, generation / "bin" / entry)
+    site_packages = next(Path(venv).glob("lib/python*/site-packages"))
+    linked = install_root / "lib" / site_packages.parent.name / "site-packages"
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(site_packages, linked)
     return generation
 
 
@@ -301,18 +320,21 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     incident — the two tokens the 2026-09-15 deaths were recorded under.
 
     The child is launched through ``<gen>/tools/local-operator/bin/python3``
-    (see :func:`_spawn`), so its ``sys.prefix`` is the generation. That the spawn
-    NAME is a concrete generation path is asserted where it is observable on both
-    platforms — :func:`test_an_engage_after_a_flip_lands_on_the_generation_current_names`,
-    whose child is a shim that prints the path it was executed from — because a
-    real interpreter's own path is not readable portably once it is running
-    (``ps`` prints argv, and Linux's ``/proc/<pid>/exe`` resolves the symlinked
-    venv away to the base interpreter).
+    (see :func:`_spawn`), and the tree it started from is asserted from the
+    child's OWN report — ``SessionRecord.install_root``, which the runtime stamps
+    with ``sys.prefix`` — rather than from ``ps``, whose argv is not always in the
+    image and whose ``/proc/<pid>/exe`` resolves a venv away to the base
+    interpreter on Linux. That comparison is only evidence because
+    :func:`_plain_generation` builds a REAL directory: with the venv symlinked
+    into this checkout, both launch paths report the checkout's venv and the
+    assertion passes for the wrong reason (review round 2, R2-1). The spawn NAME
+    itself is asserted in
+    :func:`test_an_engage_after_a_flip_lands_on_the_generation_current_names`.
     """
     config = headless_tui_env
     session_id = "genbusy001"
     directory = _seed(config, session_id)
-    first = _linked_generation("20260101T000000Z-old", Path(sys.prefix))
+    first = _plain_generation("20260101T000000Z-old", Path(sys.prefix))
     update_mod.flip_pointer(first)
     update_mod.write_stable_launchers(first)
 
@@ -325,7 +347,10 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
         # ``SessionRecord.install_root`` with the tree it imports from
         # (``sys.prefix``), so this line says "the process really was started out
         # of THIS generation" — the sentence the removed assertion tried to make
-        # and could not, portably (review round 1, R-4).
+        # (review round 1, R-4). It can FAIL for a child started from anywhere
+        # else because the generation is a real directory (review round 2, R2-1):
+        # ``tests/unit/test_install_generations.py`` proves the two launch paths
+        # report different roots, which is what makes this line evidence.
         launched_from = (first / "tools" / "local-operator").resolve()
         assert Path(record.install_root).resolve() == launched_from, record.install_root
         site_packages = next(launched_from.glob("lib/python*/site-packages"))
@@ -386,7 +411,7 @@ def test_an_unwatched_runtime_keeps_its_pid_and_is_not_recorded_as_gone(
     config = headless_tui_env
     session_id = "genidle001"
     _seed(config, session_id)
-    first = _linked_generation("20260101T000000Z-old", Path(sys.prefix))
+    first = _plain_generation("20260101T000000Z-old", Path(sys.prefix))
     update_mod.flip_pointer(first)
     update_mod.write_stable_launchers(first)
 

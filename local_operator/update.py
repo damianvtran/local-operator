@@ -1482,10 +1482,11 @@ def _may_name_the_shim() -> bool:
 
     TWO SHAPES QUALIFY, and the second is the one review round 1 (R-2) found
     missing: a process that already runs out of a generation (the ordinary case),
-    and an INSTALLED distribution that is not one yet — a uv-tool or pipx tree on
-    a machine whose pointer has already moved to a generation, which is exactly
-    the post-migration state. In that state the shim exists and names the current
-    build, so a unit rendered against it runs the machine's install; keeping the
+    and an INSTALLED distribution that is not one yet — ``uv tool``, pipx or pip
+    (every kind except ``editable``/``unknown``) on a machine whose pointer has
+    already moved to a generation, which is exactly the post-migration state. In
+    that state the shim exists and names the current build, so a unit rendered
+    against it runs the machine's install; keeping the
     legacy venv in the plist instead would name the tree that is no longer
     current.
 
@@ -1595,7 +1596,7 @@ def _atomic_symlink(link: Path, target: Path) -> bool:
         return False
 
 
-def _rebind_scripts(install_root: Path, source_root: Path) -> list[Path]:
+def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], list[Path]]:
     """Point a COPIED tree's own scripts at itself instead of at the original.
 
     THE MIGRATION'S ONE REWRITE, and without it the migration does not work at
@@ -1625,19 +1626,31 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> list[Path]:
     is a script ``lop`` cannot execute and the pointer is about to name this
     tree. Bytes, not text: nothing here decodes or re-encodes a file it does not
     change.
+
+    RETURNS WHAT IT COULD NOT REWRITE rather than only logging it, because the
+    caller's promise IS this rewrite: a migration that flipped the pointer with a
+    console script still naming the legacy venv would print "copied … into …" and
+    hand the operator the R-1 symptom (review round 2, R2-4). The one caller
+    fails the migration on a non-empty second element.
     """
     bin_dir = install_root / ("Scripts" if os.name == "nt" else "bin")
     if not bin_dir.is_dir():
-        return []
+        return [], []
     spellings = {str(source_root), str(_real(source_root))}
     replacements = [(spelling.encode(), str(install_root).encode()) for spelling in spellings]
     rewritten: list[Path] = []
+    failed: list[Path] = []
     for entry in sorted(bin_dir.iterdir()):
         if entry.is_symlink() or not entry.is_file():
             continue
         try:
             data = entry.read_bytes()
-        except OSError:  # pragma: no cover — unreadable means nothing to rewrite
+        except OSError:
+            # A file this process cannot read is very likely one it cannot
+            # rewrite either, so it is reported rather than skipped: the caller
+            # decides what a partial migration means, and "silently unchanged" is
+            # the one answer it must not get.
+            failed.append(entry)
             continue
         if b"\x00" in data[:4096]:
             continue
@@ -1646,17 +1659,25 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> list[Path]:
             patched = patched.replace(old, new)
         if patched == data:
             continue
+        staged = entry.with_name(f"{entry.name}.rebind-{os.getpid()}")
         try:
             mode = entry.stat().st_mode
-            staged = entry.with_name(f"{entry.name}.rebind-{os.getpid()}")
             staged.write_bytes(patched)
             os.chmod(staged, mode & 0o7777)
             os.rename(staged, entry)
-        except OSError:  # pragma: no cover — best effort, never fail the migration
+        except OSError:
+            # The temp goes with the failure: ``bin/`` is meant to be a closed
+            # set, and a ``.rebind-<pid>`` left inside a generation is litter in
+            # the one directory a future reader globs (review round 2, R2-5).
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — nothing further to do about it
+                pass
             logger.warning("could not rebind %s to %s", entry, install_root, exc_info=True)
+            failed.append(entry)
             continue
         rewritten.append(entry)
-    return rewritten
+    return rewritten, failed
 
 
 def _link_generation_bin(generation: Path) -> None:
@@ -1890,7 +1911,22 @@ def clone_into_generation(
     # ``_rebind_scripts``), so they are re-pointed at the copy before anything
     # executes them — and before the pointer flip below, which is what makes
     # ``~/.local/bin/lop`` mean the generation afterwards.
-    _rebind_scripts(install_root, origin)
+    #
+    # A PARTIAL REWRITE FAILS THE MIGRATION. This is a one-time step whose entire
+    # promise is that the copy runs from the copy, so flipping the pointer with a
+    # console script still naming the legacy venv would print success and hand
+    # the operator exactly the symptom R-1 exists to remove (review round 2,
+    # R2-4). Nothing has been flipped or linked yet, so the copy is removed and
+    # the machine is left as it was.
+    _rewritten, unrepointed = _rebind_scripts(install_root, origin)
+    if unrepointed:
+        _remove_tree(generation)
+        raise UpdateError(
+            "could not re-point "
+            + ", ".join(sorted(path.name for path in unrepointed))
+            + f" in {install_root}; the migration was abandoned before the pointer moved, "
+            "so this machine is unchanged"
+        )
     # No installer ran, so this tree has no ``bin`` of its own: lay one down
     # before anything points through it (see ``_link_generation_bin``).
     _link_generation_bin(generation)

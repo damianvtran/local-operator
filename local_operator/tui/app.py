@@ -27706,7 +27706,9 @@ class OperatorApp(App[None]):
             from local_operator import update as update_mod
 
             on_disk = update_mod.disk_build()
-            # NOT when the pointer names an OLDER build than this window loaded.
+            # NOT when the pointer names an OLDER build than this window loaded
+            # (by version; a same-version different-commit pointer IS announced —
+            # see ``buildwatch.is_older``).
             # The notice below says "was updated after this window opened" and
             # offers ``/reload``, and a lagging pointer — a migrated host whose
             # legacy uv-tool tree is still advanced in place — would be announced

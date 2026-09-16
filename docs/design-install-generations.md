@@ -98,6 +98,13 @@ rewrites the source root out of every text file under the copy's `bin/`
 pointer is flipped, and `test_the_migrated_launcher_runs_the_generation_not_the_source`
 executes the chain to prove it.
 
+**A copy that cannot be fully re-pointed fails the migration.** The rewrite
+reports the scripts it could not change, and `clone_into_generation` refuses with
+none of them silently left behind: nothing is linked or flipped, the copy is
+removed, and the refusal names the files. A "successful" migration whose console
+script still executed the legacy venv would be R-1's symptom with a success
+message, which is worse than a refusal (review round 2, R2-4).
+
 ## 3. Install, flip, prune
 
 ### 3.1 One install, six steps
@@ -285,8 +292,13 @@ layout, and every installer then keeps **exactly** the plist it shipped before.
 A SOURCE CHECKOUT never names the shim either: a dev tree must not point the
 operator's daemons at anything (`update._may_name_the_shim`, the same rule as
 `_repair_refusal`).
-That gate matters: a source checkout must never rewrite the operator's plists,
-and a pip/pipx install has no pointer to name.
+That gate matters: a source checkout must never rewrite the operator's plists.
+An INSTALLED tree that is not yet a generation — `uv tool`, pipx or pip — does
+name the shim, but only on a machine that already has a pointer, which is the
+post-migration state: a unit rendered there must run the machine's install
+rather than the legacy venv the tree happens to sit in (`_may_name_the_shim`
+admits every kind except `editable`/`unknown`, and the source-checkout rule above
+is why `editable` is one of them).
 
 ## 6. CLI
 

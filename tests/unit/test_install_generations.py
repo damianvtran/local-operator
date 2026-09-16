@@ -21,6 +21,7 @@ future edit could quietly remove:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -117,6 +118,83 @@ def _build_tree(venv: Path, bin_dir: Path, version: str) -> None:
         f"{name} = local_operator.cli:main\n" for name in ("lop", "local-operator")
     )
     (dist / "entry_points.txt").write_text(entry_points, encoding="utf-8")
+
+
+#: What the child prints: the same call a runtime makes to stamp
+#: ``SessionRecord.install_root``. Run in a child rather than imported here
+#: because the value under test is what a RUNNING process reports.
+_REPORT_INSTALL_ROOT = (
+    "from local_operator.update import process_install_root as reported; print(reported())"
+)
+
+
+def _real_generation(name: str, version: str = "0.55.10") -> Path:
+    """A generation whose venv directory is REAL, as a real install's is.
+
+    ``_build_tree`` writes the tree uv would leave — which includes a real
+    ``pyvenv.cfg`` and ``bin/python3`` — and its ``site-packages`` is then
+    replaced by a symlink to this checkout's, so a child launched from here
+    imports this distribution and its dependencies the way a real one does. The
+    VENV DIRECTORY itself is what must stay real: ``process_install_root()``
+    resolves symlinks, and a generation reached through one reports the tree it
+    points at instead of itself (review round 2, R2-1).
+    """
+    generation = update_mod.generations_dir() / name
+    install_root = generation / "tools" / "local-operator"
+    _build_tree(install_root, generation / "bin", version)
+    site_packages = next(install_root.glob("lib/python*/site-packages"))
+    shutil.rmtree(site_packages)
+    os.symlink(next(Path(sys.prefix).glob("lib/python*/site-packages")), site_packages)
+    return install_root
+
+
+def _reported_root(interpreter: Path, cwd: Path) -> Path:
+    """``process_install_root()`` exactly as a child of ``interpreter`` reports it.
+
+    ``__PYVENV_LAUNCHER__`` is stripped unconditionally rather than checked for:
+    this machine's ``lop`` exports it to its children, and an inherited value
+    makes a macOS child report the launcher's prefix instead of its own
+    (``docs/design-install-generations.md`` §3.2). ``cwd`` is the temp directory
+    the caller owns, so neither child can satisfy the import by accident through
+    ``sys.path[0]`` pointing at the checkout.
+    """
+    env = {key: value for key, value in os.environ.items() if key != "__PYVENV_LAUNCHER__"}
+    done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [str(interpreter), "-c", _REPORT_INSTALL_ROOT],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=env,
+        cwd=cwd,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return Path(done.stdout.strip())
+
+
+class TestTheRecordedInstallRoot:
+    """``install_root`` is evidence only when the generation it names is real.
+
+    The e2e busy-runtime cell asserts its premise from ``SessionRecord.install_root``
+    — the child's own ``sys.prefix`` — because that is the one reading a
+    mis-launched child cannot fake. It can only fail for that, though, if the two
+    launch paths report DIFFERENT roots, which is the property this test measures
+    directly and cheaply: two short-lived interpreters, no TUI, no daemon.
+    """
+
+    def test_a_real_generation_reports_itself_where_the_checkout_does_not(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        install_root = _real_generation("20260101T000000Z-old")
+        from_generation = _reported_root(install_root / "bin" / "python3", tmp_path)
+        from_checkout = _reported_root(Path(sys.executable), tmp_path)
+        assert from_generation == install_root.resolve(), from_generation
+        assert from_checkout == Path(sys.prefix).resolve(), from_checkout
+        assert from_generation != from_checkout, (
+            "a generation whose venv is a symlink into the checkout resolves to the "
+            "same tree whichever interpreter started the child, so the e2e premise "
+            "assertion would pass for a mis-launched child (R2-1)"
+        )
 
 
 def _install(version: str = "0.52.0", commit: str = "", ref: str = "") -> Path:
@@ -350,6 +428,30 @@ class TestInstallIntoGeneration:
         with pytest.raises(UpdateError):
             update_mod.install_into_generation(runner=_explode, version="0.52.0")
         assert list(update_mod.generations_dir().iterdir()) == []
+
+    def test_a_script_that_cannot_be_repointed_fails_the_migration(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """R2-4: the migration's one promise is that the copy runs from the copy.
+
+        A copy whose ``lop`` could not be re-pointed must not flip the pointer and
+        report success: the operator would be left running the legacy venv through
+        a "successful" migration, which is R-1's symptom with a success message.
+        The copy is removed on the way out, so the machine is as it was.
+
+        Permissions, rather than a monkeypatched ``_rebind_scripts``, because the
+        failure being tested is exactly the one a real migration meets.
+        """
+        if getattr(os, "geteuid", lambda: 1)() == 0:  # pragma: no cover — root ignores the mode
+            pytest.skip("file modes do not bind this process")
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        os.chmod(legacy / "bin" / "lop", 0o000)
+        with pytest.raises(UpdateError) as refused:
+            update_mod.clone_into_generation(legacy)
+        assert "lop" in str(refused.value), refused.value
+        assert not update_mod.pointer_path().is_symlink(), "the pointer must not move"
+        assert not list(update_mod.generations_dir().glob("*")), "no half-built generation"
 
     def test_a_flip_that_cannot_happen_is_a_refusal_and_leaves_no_tree(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
@@ -656,6 +758,13 @@ class TestMigration:
         replaced a working ``lop`` with a dangling symlink while printing nothing
         but success: the unit tests passed, the copy printed, and
         ``lop --version`` said "No such file or directory".
+
+        THIS TEST IS ABOUT THE CHAIN'S SHAPE, not about what the chain executes: it
+        asserts the launcher resolves through the pointer to the generation's own
+        script and that the script is a real file. The executing half — that the
+        script then runs from the copy — is
+        :meth:`test_the_migrated_launcher_runs_the_generation_not_the_source`, which
+        reads the prefix the script reports (review round 2, R2-6).
         """
         legacy = tmp_path / "legacy-venv"
         _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
