@@ -19,7 +19,9 @@ without ever reading it, and what the store does and does not protect against.
 
 A session credential is injected into every `bash` child's environment, so it
 is already `$NAME` there and needs nothing from you. Everything below is about
-the long-term store.
+the long-term store. The sharpest instance of the provider-key row is the
+QwenCloud console ticket — plaintext, captured by the *user* from a browser,
+and never yours to read; `guide://qwencloud` carries the capture ritual.
 
 ## From bash
 
