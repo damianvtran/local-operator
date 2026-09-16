@@ -370,6 +370,9 @@ def scan(
     root: Path | None = None,
     dirname: str = RUN_DIRNAME,
     parse: Callable[[dict[str, Any]], T] = SessionRecord.from_json,
+    *,
+    check_zombie: bool | None = None,
+    reap: bool = True,
 ) -> list[tuple[T, str]]:
     """Read every record in one namespace, classifying each as ``live`` /
     ``wedged`` / ``stale``.
@@ -381,8 +384,9 @@ def scan(
       claim that the process is dead.
     - ``live``: pid alive and heartbeating.
 
-    Unparseable records are deleted, not moved: a torn file has no pid to key
-    a sidecar on and nothing an "why did this die" reader could use.
+    Unparseable records are deleted, not moved, when this call sweeps: a torn
+    file has no pid to key a sidecar on and nothing an "why did this die"
+    reader could use. ``reap=False`` leaves it alone too (see below).
 
     It stays the one implementation of the state rule — the tuple shape is
     deliberate, because ~15 call sites read it positionally and most want
@@ -402,6 +406,29 @@ def scan(
     cause was on disk a moment earlier. The move is a rename within the run
     directory, so it costs the same unlink it replaced; see
     :data:`REAPED_DIRNAME` for why the sidecar is invisible to discovery.
+
+    TWO ADDITIVE SWITCHES, both keyword-only and both defaulting to what this
+    function has always done, because one reader cannot pay for them and must
+    not inherit them by accident:
+
+    * ``check_zombie`` is handed straight to :func:`classify`. ``None`` keeps
+      the classifier's DERIVED policy (probe only where the answer changes
+      what a user is told), which is what every existing caller means; a
+      caller that already knows its verdicts must match another reader's — the
+      desktop feed's, which shares its rows with ``decorate_rows`` — passes it
+      through rather than re-deciding it here.
+    * ``reap=False`` is READER MODE: this function removes nothing at all.
+      The default is the reaping behaviour every discovery caller wants; the
+      desktop feed passes ``False`` because it is a READER that must leave
+      ``run/mobile`` byte-identical, and a sweep running at 1 Hz on the feed's
+      poller would unlink another process's evidence behind its back (see
+      :data:`REAPED_DIRNAME` for why that evidence matters). It covers the
+      proven-dead record — whose verdict comes back either way, because
+      reaping is a SIDE EFFECT of the classification and never an input to it
+      — and the unparseable file above, which is deleted only when this
+      function was called to sweep. A record that is skipped is simply absent
+      from the return value; the caller sees the same state it would have seen
+      one sweep later, with nothing removed in between.
     """
     directory = run_dir(root, dirname)
     out: list[tuple[T, str]] = []
@@ -410,10 +437,15 @@ def scan(
         try:
             record = parse(json.loads(path.read_text()))
         except (OSError, ValueError, TypeError):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            # READER MODE REMOVES NOTHING (see ``reap`` below), including a file
+            # it could not parse: a reader that deleted what it could not read
+            # would be the only mutator on this path, and the record is the one
+            # artifact a later "why did this die" question is answered from.
+            if reap:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             continue
         # The zombie probe is the CLASSIFIER's policy now, not this
         # function's: it costs a `ps` fork on macOS, so it is spent only on
@@ -425,8 +457,8 @@ def scan(
         # invocation) fork-free. The reaping stays HERE, because it is this
         # function's contract with its callers rather than a fact about the
         # record.
-        verdict = classify(record, now=now)
-        if not verdict.pid_alive:
+        verdict = classify(record, now=now, check_zombie=check_zombie)
+        if not verdict.pid_alive and reap:
             _reap_dead_record(directory, path, record.pid)
         out.append((record, verdict.state))
     return out
