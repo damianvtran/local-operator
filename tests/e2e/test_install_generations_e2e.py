@@ -294,6 +294,15 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     is flipped onto it. Asserted on what the operator would have lost: the same
     pid, a turn that finishes, and NO ``runtime-killed`` / ``install-mid-update``
     incident — the two tokens the 2026-09-15 deaths were recorded under.
+
+    The child is launched through ``<gen>/tools/local-operator/bin/python3``
+    (see :func:`_spawn`), so its ``sys.prefix`` is the generation. That the spawn
+    NAME is a concrete generation path is asserted where it is observable on both
+    platforms — :func:`test_an_engage_after_a_flip_lands_on_the_generation_current_names`,
+    whose child is a shim that prints the path it was executed from — because a
+    real interpreter's own path is not readable portably once it is running
+    (``ps`` prints argv, and Linux's ``/proc/<pid>/exe`` resolves the symlinked
+    venv away to the base interpreter).
     """
     config = headless_tui_env
     session_id = "genbusy001"
@@ -306,10 +315,6 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     try:
         record = _wait_for_record(config, session_id)
         assert record.pid == child.pid
-        # The process really was started out of THIS generation (the interpreter
-        # path is the generation's own), which is what makes the flip below a
-        # handover rather than a rewrite of a tree in use.
-        assert f"generations/{first.name}/" in _command_of(child.pid)
 
         sent = _wake(config, session_id, BUSY_TEXT)
         assert sent.returncode == 0, sent.stdout + sent.stderr
@@ -452,14 +457,6 @@ def test_an_engage_after_a_flip_lands_on_the_generation_current_names(
         assert path.endswith(f"generations/{name}/tools/local-operator/bin"), path
         assert "current" not in path, path
     assert update_mod.current_generation() == second
-
-
-def _command_of(pid: int) -> str:
-    """The command line a running process was started with."""
-    out = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=30
-    )
-    return out.stdout.strip()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
