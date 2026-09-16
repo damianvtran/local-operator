@@ -4662,7 +4662,11 @@ async def test_the_move_route_is_advertised_by_session_move_only(move_api) -> No
     # that cannot consume it must keep its move controls disabled even here.
     assert features["session_move"] == 2
     assert features["frontend_replace"] == 1
-    assert features["commands"] == 1
+    # 2 since the messages endpoint's slash policy was narrowed to accept a
+    # message that merely BEGINS with a command word (a whole-draft command is
+    # still refused). Unrelated to move, which is the point of the assertion: no
+    # other key in this map is bumped to advertise a route.
+    assert features["commands"] == 2
     assert features["session_catalogue"] == 3
 
 
@@ -6201,3 +6205,239 @@ def test_a_stamped_page_still_names_a_failed_attention_read(tmp_path, monkeypatc
     assert row["degraded"] == ["attention"], "and so does the marker beside it"
     assert "attention" not in row
     assert calls["n"] == 2, "the catalogue's read succeeded; the second one is the failure"
+
+
+#: Drafts a user may legitimately SEND as a message. Every one of them opened
+#: with a slash token and was refused by the blanket `lstrip().startswith("/")`
+#: test this PR replaces — the operator's own three-line report is the last row.
+#:
+#: The prose side of every SHAPE is here too: a sentence after a selector
+#: (`/usage more prose`), a provider id nobody knows, an MCP invocation with a
+#: tail. Those are the rows that say the narrowing did not go too far.
+MESSAGE_DRAFTS = [
+    "/compact hello",
+    "/usage more prose",
+    "/mcp logout seems to cause a crash",
+    "/login zzz",
+    "/mcp zzz",
+    "/team ops fix this\nand then ship it",
+    "/usage\nfix it",
+    "/compact\nhello",
+    "/team ops\n",
+    "/compact\n   ",
+    # The criterion's prose side: the command drops this text (`context`), and the
+    # word/argument split is the tokenizer's, so a CR separator is not a word end.
+    "/context x",
+    "/usage\rfix it",
+    "/tema",
+    "/etc/hosts is wrong",
+    "/tmp/test\n\nThe above is a test file path",
+    "fix this /usage",
+    "hello\n/team ops",
+    "what does /usage mean?",
+    (
+        "/mcp logout seems to cause a crash on the TUI,\n"
+        "can you review and fix that issue,\n"
+        "replicate it and then fix and test end to end"
+    ),
+]
+
+#: Drafts that, as a WHOLE, are a command and so belong on the command endpoint.
+#: TWO facts separate these from the list above, and the second is this PR's
+#: round-1 MAJOR: an argument the composer can COMPLETE (`consumes_prompt`, a
+#: picker value), and an argument the desktop VALIDATES or FORWARDS without one
+#: (`argument_shape` — `/mcp logout`, `/login openai`, `/rename x`, `/usage on`).
+#: A client whose command surface is off plans `send` for everything, so a
+#: control accepted here would spend a paid turn on it.
+COMMAND_DRAFTS = [
+    # the completable half
+    "/compact",
+    "/usage",
+    "/model gpt-5",
+    "/theme dark",
+    "/effort high",
+    "/approvals plan",
+    "/goal ship it",
+    "/team ops fix this",
+    "/team",
+    "/mcp",
+    "  /compact",
+    # the validated/forwarded half — the 17 rows of the round-1 MAJOR
+    "/mcp logout",
+    "/login openai",
+    "/logout openai",
+    "/provider openai",
+    "/accounts x",
+    "/rename x",
+    "/rename my thing",
+    "/resume abc",
+    "/new foo",
+    "/reload abc",
+    "/settings foo",
+    "/search foo",
+    "/usage on",
+    "/skills x",
+    "/analytics view",
+    "/move ~/x",
+    "/move ~/my folder",
+    # `/fast maybe` is in here as well as in the predicate table: the shape is WORD
+    # with an empty vocabulary, so ONE token is the command whatever the token says
+    # and the picker's on/off list is presentation the route does not enforce.
+    "/fast maybe",
+    "/stop now",
+    "/fast on",
+]
+
+
+def test_the_messages_route_accepts_prose_that_opens_with_a_command_word(monkeypatch):
+    """The admission boundary, through the ROUTE rather than the model.
+
+    A 422 here means the body validator refused the draft; anything else means it
+    was admitted and the request went on to the session lookup, which answers 404
+    for the deliberately non-existent session used below. That 404 is therefore
+    the POSITIVE evidence this test needs — asserting merely `!= 422` would also
+    pass on a 500.
+
+    Asserting through the route matters because the composer plans the same draft
+    in another process: a draft planned as prose and refused here is refused
+    forever, with no resend that clears it, which is exactly the operator's
+    report. The `COMMAND_DRAFTS` half is the mirror obligation — a whole-draft
+    text the desktop would EXECUTE as a command must not become a message.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "policy-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    headers = {"Authorization": "Bearer policy-token"}
+    body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+
+    with TestClient(app) as client:
+        for text in MESSAGE_DRAFTS:
+            response = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/messages",
+                headers=headers,
+                json={**body, "text": text},
+            )
+            assert response.status_code == 404, (
+                text,
+                response.status_code,
+                response.text,
+            )
+        for text in COMMAND_DRAFTS:
+            response = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/messages",
+                headers=headers,
+                json={**body, "text": text},
+            )
+            assert response.status_code == 422, (text, response.status_code, response.text)
+
+
+def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypatch):
+    """The route's refusal and the admission rule must not drift.
+
+    Both read the same per-shape validators in `slash_commands`
+    (`command_argument_refusal` for the route, `command_argument_is_used` for the
+    messages endpoint), and this drives the ROUTE so the assertion would fail if a
+    later edit grew a second inline test on either side — the shape of the
+    round-1 MAJOR, where `/mcp logout` and `/login openai` were accepted as
+    messages while the route still ran them.
+
+    A VALID argument reaches the session lookup and answers 404 (the probe session
+    does not exist); an invalid one is refused with 422 before any lookup.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.slash_commands import (
+        command_argument_is_used,
+        slash_command_for,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "policy-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    headers = {"Authorization": "Bearer policy-token"}
+
+    # The shapes the command route validates. `credential` is here because the
+    # route refuses typed args for it outright — its shape is NONE, so the
+    # admission rule agrees.
+    cases = [
+        ("mcp", "logout"),
+        ("mcp", "logout seems to cause a crash"),
+        ("mcp", "zzz"),
+        ("mcp", "add my-server"),
+        ("login", "openai"),
+        ("login", "zzz"),
+        ("logout", "openai"),
+        ("credential", "sk-secret"),
+    ]
+
+    with TestClient(app) as client:
+        for command, args in cases:
+            spec = slash_command_for("/" + command)
+            assert spec is not None
+            used = command_argument_is_used(spec, args)
+            granted = (
+                client.post(
+                    "/v1/desktop/sessions/0badc0ffee00/commands",
+                    headers=headers,
+                    json={
+                        "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "command": command,
+                        "args": args,
+                    },
+                ).status_code
+                != 422
+            )
+            assert granted == used, (command, args, granted, used)
+
+
+def test_the_route_forwards_a_selector_the_admission_rule_calls_prose() -> None:
+    """The two questions differ ON PURPOSE for a selector, and that is pinned.
+
+    `command_argument_is_used` answers "would this whole draft have been a
+    control", where a sentence after `/usage` is prose. The command route answers
+    "is this a well-formed argument", and for a selector it forwards whatever it
+    is given (`selection=args`) — so `/usage more prose` still opens the panel on
+    `/commands` today. Tightening the route to match the admission rule would be
+    a second user-visible change in a PR about the messages endpoint, so the
+    asymmetry is asserted rather than left to be rediscovered: if a later edit
+    makes the route refuse it, this fails and says which change to make instead.
+    """
+    from local_operator.server.utils.desktop_commands import native_action
+    from local_operator.slash_commands import (
+        command_argument_is_used,
+        slash_command_for,
+    )
+
+    spec = slash_command_for("/usage")
+    assert spec is not None
+    assert command_argument_is_used(spec, "more prose") is False
+    # The route's own path for it: a native action, forwarding the text verbatim.
+    action = native_action(spec, "0123456789ab", "more prose")
+    assert action["data"]["selection"] == "more prose"
+
+
+def test_the_refusal_message_is_the_one_the_ui_can_act_on():
+    """The 422 is now reachable only from a client bug or a version skew.
+
+    After this narrowing a correct renderer never reaches it — the planner runs a
+    whole-draft command as `whole` — so the sentence must name the command and
+    the remedy rather than describe every leading slash as a command.
+
+    Asserted at the MODEL, not through the response body: the app's
+    validation-error shaper replaces the body of every `/v1/desktop/` 422 with
+    `{"detail": "The request has invalid fields."}` (`app.py`), so this string
+    never reaches the wire and a test asserting it on the response would pass for
+    the wrong reason. It is pinned because it is the sentence a CALLER of an
+    in-process prompt gets — the desktop renderer classifies on the payload it
+    sent and shows its own copy, so nothing user-facing depends on this text.
+    """
+    with pytest.raises(ValueError, match="/compact is a command, not a message"):
+        Prompt.model_validate(
+            {
+                "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "text": "/compact",
+            }
+        )

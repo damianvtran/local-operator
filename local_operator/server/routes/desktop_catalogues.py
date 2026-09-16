@@ -29,6 +29,29 @@ class CommandMetadata(BaseModel):
     arguments: Literal["none", "optional", "required"]
     echo: bool
     consumes_prompt: bool
+    #: Whether text after this command's word is an ARGUMENT the command owns on
+    #: the DESKTOP (see ``SlashCommand.prefixes_text``). ADDITIVE with a default,
+    #: so a response produced before this field existed still validates — the
+    #: renderer ignores the key or falls back to its own derivation.
+    prefixes_text: bool = False
+    #: The SHAPE the trailing text must have for the desktop to use it as this
+    #: command's argument — ``none`` (no source at all: the booleans below are
+    #: false and no shape applies), ``word`` (one selector token), ``provider``
+    #: (one token naming a provider), ``subcommand`` (``<sub> [name]``, the MCP
+    #: shape) or ``any`` (the command owns its text, whatever it says). See
+    #: ``ArgumentShape``.
+    #:
+    #: PRECEDENCE, published so a consumer may read this field alone OR OR it with
+    #: the two booleans and be right either way: ``consumes_prompt`` and
+    #: ``prefixes_text`` decide FIRST, and a row they carry publishes ``any`` here
+    #: rather than ``none`` — so ``none`` always means "no source at all", never
+    #: "ask the booleans". Additive with a default like ``prefixes_text``.
+    argument_shape: Literal["none", "word", "provider", "subcommand", "any"] = "none"
+    #: The vocabulary ``argument_shape``'s first token must come from; empty
+    #: means any word. Carried so a renderer reproduces the endpoint's answer
+    #: (``/login openai`` is a command, ``/login zzz`` is a message) without a
+    #: second copy of the provider or subcommand list.
+    argument_words: list[str] = Field(default_factory=list)
     destination: str
     execution: Literal["owner", "native"]
 

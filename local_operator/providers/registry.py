@@ -576,6 +576,19 @@ def get_provider_definition(provider_id: str) -> ProviderDefinition | None:
     return _BY_ID.get(_ALIASES.get(provider_id, provider_id))
 
 
+def known_provider_ids() -> tuple[str, ...]:
+    """Every id :func:`get_provider_definition` answers for, aliases included.
+
+    Public because the desktop catalogue PUBLISHES this vocabulary to a renderer
+    that has to reproduce the same lookup: the admission rule refuses a
+    whole-draft ``/login <id>`` only when the id resolves, so a renderer holding
+    just the primary ids would plan a message for an alias the backend still
+    runs the command for. One alias exists today (``noop`` -> ``test``); the
+    point is that it is derived here rather than hand-listed on the wire.
+    """
+    return tuple(sorted(set(_BY_ID) | set(_ALIASES)))
+
+
 def list_login_providers() -> list[ProviderDefinition]:
     """Providers offering interactive login or server setup, in registry order."""
     return [p for p in PROVIDER_REGISTRY if p.login is not None or p.local_setup]

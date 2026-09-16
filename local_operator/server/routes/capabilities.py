@@ -29,7 +29,18 @@ async def capabilities():
             "features": {
                 "auth": 1,
                 "settings": 1,
-                "commands": 1,
+                # 2 narrows the messages endpoint's slash policy: it now accepts a
+                # message that merely BEGINS with a command word (`/mcp logout
+                # seems to cause a crash` is prose), while a text that as a whole
+                # IS a command is still refused so a control can never become
+                # paid model chat. A BUMP rather than a new key, by the rule
+                # `session_catalogue` states below: nothing is gated on it — no
+                # surface is withheld — and its only consumer is the refusal
+                # alert's remedy, which differs by whether the backend can reach
+                # that refusal at all. A renderer on < 2 keeps the sentence and
+                # offers the backend update; on >= 2 the refusal means a client
+                # bug, so the sentence stands alone.
+                "commands": 2,
                 "catalogues": 1,
                 "profile_catalogue": 1,
                 "team_catalogue": 1,
