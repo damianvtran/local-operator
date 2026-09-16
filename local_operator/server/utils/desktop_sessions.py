@@ -38,7 +38,7 @@ from local_operator.resume import (
 )
 from local_operator.server.models.desktop_sessions import MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
-from local_operator.session.attached import AttachedSession
+from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
@@ -987,10 +987,51 @@ class DesktopSessionBridge:
             # state, and sending the sync payload keeps this frame's ``frontend``
             # field the same shape as the bootstrap snapshot's.
             "frontend.replace",
-            {"frontend": self.state(), "cold": self.remote.is_cold},
+            {"frontend": self.state(), **self._cold_fields()},
         )
 
-    async def acquire(self) -> AttachedSession:
+    def _cold_fields(self) -> dict[str, Any]:
+        """The cold contract as the wire states it — see ``docs/DESKTOP_API.md``.
+
+        ``cold`` is the boolean every existing renderer reads; ``cold_reason`` is
+        the TOKEN that says which of the three cases it is, and ``attaching`` says
+        an authenticated dial is retained and its canonical state has not arrived
+        yet. Computed together, deliberately, so no frame can state one and
+        contradict another — a frame claiming ``cold: false`` while a dial sat
+        unsynced is the exact conflation these tokens exist to remove.
+
+        Three facts the bridge can actually establish, and no copy: the token is
+        the contract and the sentence belongs to the surface (the same discipline
+        the routes' error ``code`` already follows). ``no-runtime`` for a facade
+        with no remote at all; otherwise the facade classifies it (see
+        ``AttachedSession.cold_reason``), defaulting to ``no-runtime`` for a cold
+        facade no read has classified — which is what makes the field safely
+        ADDITIVE for a reader that predates it, since
+        ``cold ? "no-runtime" : null`` is the documented fallback.
+        """
+        remote = self.remote
+        if remote is None:
+            return {"cold": True, "cold_reason": "no-runtime", "attaching": False}
+        return {
+            "cold": remote.is_cold,
+            "cold_reason": remote.cold_reason,
+            "attaching": remote.attaching,
+        }
+
+    async def acquire(self, *, read: bool = False) -> AttachedSession:
+        """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``read`` is the READ envelope, and it is a property of the ROUTE rather
+        than of the facade: reading state must never be able to fail because an
+        existing runtime was too busy to answer, because the durable answer is on
+        disk in the same process (``snapshot``/``history``). Read mode therefore
+        bounds its one attempt at ``READ_ATTACH_BUDGET_S`` and answers cold when
+        it does not land, keeping the authenticated dial for the rollover. The
+        CONTROL envelope (the default) is unchanged: one attempt on the foreground
+        envelope, and a raise the route ladder turns into a named refusal — a
+        write that was not admitted must say so rather than be reported as a
+        served read.
+        """
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
@@ -1062,7 +1103,7 @@ class DesktopSessionBridge:
                         remote.subscribe(self._event),
                         remote.subscribe_frontend(self._frontend).unsubscribe,
                     ]
-                await self.remote.attach_existing()
+                await self.remote.attach_existing(budget=READ_ATTACH_BUDGET_S if read else None)
                 if self.attention_task is None:
                     self.attention_task = asyncio.create_task(self._poll_attention())
                 return self.remote
@@ -1218,6 +1259,15 @@ class DesktopSessionBridge:
         # Trajectories are intentionally opt-in on the runtime and absent here;
         # large roster/usage fields still pass through the shared wire budget.
         payload = update.model_dump(mode="json")
+        # THE COLD PAIR RIDES THIS FRAME TOO, and it is the frame that makes the
+        # difference: a read that attached cold and retained its dial learns the
+        # owner came back through the ROLLOVER this store publishes on
+        # ``_install_frontend(..., publish=True)`` (a new epoch, full changes). A
+        # renderer told only by the opening snapshot would keep painting the
+        # cold/attaching row over a live conversation for the rest of its life.
+        # Additive: the same three fields the snapshot carries, so a renderer that
+        # knows the pair reads it here and one that does not ignores them.
+        payload.update(self._cold_fields())
         # Receipt revisions outlive a runtime epoch. Only the independent durable
         # projection below may update them; a delayed runtime delta must not undo
         # a read made through another process while this stream stays mounted.
@@ -1469,7 +1519,7 @@ class DesktopSessionBridge:
             "payload": {
                 "frontend": state,
                 "history": history,
-                "cold": self.remote is None or self.remote.is_cold,
+                **self._cold_fields(),
             },
         }
 
@@ -2826,8 +2876,18 @@ class DesktopSessions:
         return await asyncio.to_thread(rows)
 
     @contextlib.asynccontextmanager
-    async def session(self, session_id: str) -> AsyncIterator[DesktopSessionBridge]:
+    async def session(
+        self, session_id: str, *, read: bool = False
+    ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``read`` says the caller is READING state (``snapshot``, ``history``,
+        ``events``, the ``/watch`` presence beat), and it is threaded down to
+        ``bridge.acquire(read=True)`` so the one attempt to attach to an existing
+        owner is bounded and its failure is a cold answer rather than a refusal.
+        It belongs to the door rather than to a flag each route sets on its own:
+        the envelope is a property of WHAT THE CALLER IS DOING, and this method is
+        where every desktop route already declares that.
 
         THE GATE IS HERE, AT THE DOOR, AND THAT IS THE WHOLE MECHANISM (review
         round 2, MAJOR-1). Every desktop route obtains its bridge here and this
@@ -2942,7 +3002,7 @@ class DesktopSessions:
                 self.assert_admitting()
             # Reserve under the pool lock; eviction must not remove a bridge
             # between lookup and its first acquire.
-            await bridge.acquire()
+            await bridge.acquire(read=read)
         try:
             yield bridge
         finally:
