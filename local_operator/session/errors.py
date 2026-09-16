@@ -272,6 +272,68 @@ class MoveIndeterminate(Exception):
         )
 
 
+class SessionStoreUnavailable(OSError):
+    """The session store could not be walked, so no listing built from it is true.
+
+    THE FAILURE THIS EXISTS TO STOP: an unreadable store being reported as an
+    EMPTY one. ``resume._scan_sessions`` answered ``[]`` for any ``OSError``
+    raised by the ``sessions/`` directory -- ``EMFILE``/``ENFILE`` under file
+    descriptor exhaustion, ``EACCES``, ``EIO``, ``ENOTDIR`` -- so the desktop
+    list route answered ``200 {"sessions": [], "truncated": false}`` to a
+    client that cannot tell that from "you have no conversations". The sidebar
+    adopts that answer as MEMBERSHIP and replaces what it is showing, so a
+    transient descriptor exhaustion emptied the operator's visible catalogue
+    for as long as it lasted, with nothing in the response and nothing at the
+    default log level to say why.
+
+    WHY AN ``OSError`` SUBCLASS rather than a plain ``Exception``: every call
+    site that already TOLERATES an unreadable store -- the phone daemon's
+    search, the CLI's ``/resume`` picker, the retention policy -- tolerates it
+    with ``except OSError``, and a parallel hierarchy would silently change
+    their catch shape. Subclassing leaves those tolerances exactly as they
+    were, while giving the sites that must NOT tolerate it (the catalogue and
+    the phone's durable listing, whose answers a UI adopts as membership)
+    something typed to catch and map to a retryable sentence instead of an
+    empty listing.
+
+    The message names no directory: this one is not echoed to a client -- the
+    list route answers with its own vetted 503 sentence, the rule the module
+    docstring sets for every category here -- and the cause (which does carry
+    the path) rides along as ``__cause__`` for the log.
+
+    THE CODE IS THE POINT OF CARRYING IT, not decoration. The route answers
+    this as a 503, and the desktop app puts a ``GET /v1/desktop/sessions`` with
+    ``limit=1`` on its identity probe -- the question "is the daemon at this
+    address usable with my credential?". A client that can only see the status
+    has to read every non-2xx as a refusal, and a transient store blip then
+    reads as a capability 403 on a daemon whose credential was never in
+    question, which in the app's attach path means declining a live daemon and
+    spawning a second one over it. With the code the rule is the cheap one: 401
+    and 403 mean the credential was refused, ANY other answered status means a
+    daemon answered. Same shape and same reason as ``DaemonRetiring`` and
+    ``MoveIndeterminate`` above -- a named retryable condition, not a status a
+    caller has to guess from.
+
+    It is inert until a client reads it: the classification is the client's
+    half, and it lands with the app (``local-operator-ui``, where only 401/403
+    count as "this credential is refused"). What this side owes is the field.
+
+    ``session_store_unavailable`` rather than the shorter ``store_unavailable``
+    for the two reasons this family already states one of: the token has to be
+    unique in the vocabulary a client keys on, and the MCP credentials tool
+    already answers ``store_unavailable`` for a failure to write a SECRET -- a
+    different store entirely, and one a client that switched on the bare token
+    would be right to try handling the same way. The ``<subsystem>_unavailable``
+    spelling is the sibling's (``profile_registry_unavailable``).
+    """
+
+    code = "session_store_unavailable"
+
+    def __init__(self, detail: str = "") -> None:
+        self.detail = detail
+        super().__init__("The session store could not be read" + (f": {detail}" if detail else "."))
+
+
 def admission_error(
     code: str,
     count: int | None = None,

@@ -67,7 +67,7 @@ from local_operator.server.utils.desktop_sessions import (
 )
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
-from local_operator.session.errors import MoveIndeterminate
+from local_operator.session.errors import MoveIndeterminate, SessionStoreUnavailable
 from local_operator.session.frontend_state import (
     FrontendSync,
     SlashResult,
@@ -877,6 +877,58 @@ async def errors() -> AsyncIterator[None]:
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
         raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
+    except SessionStoreUnavailable as error:
+        # The catalogue refused to answer, most often because the store's
+        # ``sessions/`` directory could not be walked at all (descriptor
+        # exhaustion, an I/O error, a permissions change).
+        #
+        # 503 rather than 500, because neither the code nor the operator can
+        # act on it: it is transient by construction and the correct client
+        # behaviour is to keep the rows it already has and retry the poll. The
+        # alternative this replaces was not an error at all — the route
+        # answered ``200 {"sessions": []}`` and the sidebar, which adopts that
+        # answer as MEMBERSHIP, wiped its visible catalogue until the next poll
+        # succeeded. An empty list is a statement about the operator's
+        # conversations; this sentence is a statement about the read, which is
+        # the only true one available here.
+        #
+        # WHICH ARM THIS SITS AMONG is the only ordering constraint, and it is
+        # satisfied by sitting above the catch-alls: no arm above matches an
+        # ``OSError``, and the generic arms BELOW would report a store it could
+        # not walk as a missing session. It is the third arm, not the first.
+        #
+        # THE BODY IS AN OBJECT BECAUSE THE STATUS ALONE MISLEADS ON THE ONE
+        # ROUTE THAT IS ALSO A PROBE. ``GET /v1/desktop/sessions?limit=1`` is
+        # what the desktop app asks to decide whether the daemon at an address
+        # is usable with its credential, and a client that reads every non-2xx
+        # as "refused" turns this transient store failure into a capability 403
+        # on a daemon whose credential was never in question — which its attach
+        # path answers by declining the live daemon and spawning a second one
+        # over it. ``code`` is what removes the guess: 401/403 mean the
+        # credential was refused, any other ANSWERED status means a daemon
+        # answered. Same named-condition shape as ``DaemonRetiring`` above and
+        # ``MoveIndeterminate`` below, for the same reason.
+        #
+        # THE CODE IS INERT UNTIL A CLIENT READS IT, and that half is not in
+        # this repository: the classification lands in the app (the change that
+        # makes only 401/403 mean "credential refused"). Nothing here depends
+        # on it — an older client ignores the object's extra structure exactly
+        # as it ignored nothing before, since it read ``detail`` as a string.
+        #
+        # The sentence is composed HERE rather than taken from the exception:
+        # a store error's own text can name the operator's home directory, the
+        # rule this ladder applies to every other category (see the
+        # ConnectionError arm below).
+        raise HTTPException(
+            503,
+            {
+                "code": error.code,
+                "message": (
+                    "Conversations could not be read right now. "
+                    "This recovers on its own; retry in a moment."
+                ),
+            },
+        ) from None
     except KeyError:
         raise HTTPException(
             404, "Requested session, profile, team or subscription not found"
@@ -953,7 +1005,8 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
-    # this ladder covers anything else the pool can raise.
+    # this ladder covers anything else the pool can raise — including the store
+    # it could not walk, which is now a typed 503 rather than an empty 200.
     async with errors():
         # THE STATUS STAMPS, read WITHOUT constructing the feed. `getattr`
         # rather than `feed(request)` is deliberate: `feed()` BUILDS the
@@ -966,7 +1019,29 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
         rows = await host(request).list(limit + 1, status_stamps=stamps)
-        return reply({"sessions": rows[:limit], "truncated": len(rows) > limit, "limit": limit})
+        sessions = rows[:limit]
+        # The sources that could not be read for THIS page. Lifted from the rows
+        # rather than plumbed beside them: every row of a poll carries the same
+        # verdict (one registry scan answers for the whole listing), so the
+        # listing-level statement is derivable, and a second channel through
+        # `list()` would be one more thing a caller can forget to pass. Sorted
+        # so the set is stable across polls, and computed over what is actually
+        # sent — a degraded row beyond the page says nothing about this answer.
+        #
+        # The stamps and this marker are INDEPENDENT facts about the same rows
+        # and neither may displace the other: a stamp answers "is this row newer
+        # than the frame you already applied" for a session the feed publishes,
+        # the marker answers "was every read behind this row the one that
+        # produced it" — a listing can be fully stamped and still be degraded.
+        degraded = sorted({source for row in sessions for source in row.get("degraded") or ()})
+        return reply(
+            {
+                "sessions": sessions,
+                "truncated": len(rows) > limit,
+                "limit": limit,
+                "degraded": degraded,
+            }
+        )
 
 
 @router.get("/v1/desktop/sessions/search", response_model=CRUDResponse[SessionSearch])

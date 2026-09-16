@@ -13,7 +13,13 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
+from local_operator.mobile.daemon import (
+    MobileDaemon,
+    SessionEntry,
+    SessionTable,
+    _dial,
+    build_app,
+)
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     SessionProjection,
@@ -269,7 +275,10 @@ def test_http_gate_and_login_flow() -> None:
 
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
-    assert authed.json() == {"sessions": []}
+    # The listing carries the durable-read marker beside the rows (present on
+    # every frame, empty when everything was read). Asserted in full rather than
+    # by key so a field appearing here is a decision this test sees.
+    assert authed.json() == {"sessions": [], "degraded": []}
 
     logout = client.get("/logout")
     assert logout.status_code == 303
@@ -1563,3 +1572,291 @@ def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
     daemon.table.entries[old.pid] = SessionEntry(old)
     rows = daemon.table._merge_summaries({})
     assert rows[0]["leaving"] == "", rows[0]
+
+
+# --- the phone's listing: membership, so an unreadable store is not an empty one --
+
+
+def _listing_rows(cfg, *session_ids: str):
+    """One user-visible session per id, with the activity the scan requires.
+
+    Built through the catalogue suite's own helpers so this file and that one
+    agree about what a listable session IS, rather than this one growing a
+    second opinion about it.
+    """
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    return _store(cfg, *session_ids)
+
+
+@pytest.mark.asyncio
+async def test_a_phone_listing_keeps_the_rows_it_read_when_the_store_goes_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    """The wipe this repairs, on the surface whose client replaces the whole list.
+
+    The phone's home screen does ``sessions = payload.sessions`` — MEMBERSHIP,
+    not a merge — so a durable half that answers "zero conversations" for a
+    store it could not read empties the operator's history with nothing to say
+    why. The rows it already had are the true answer; they are what this serves.
+
+    The failure is injected at the REAL seam (``os.scandir`` of the store), and
+    the second read is forced through ``invalidate_summaries_cache`` — the path
+    a structural change takes — because that is the state where the fresh cache
+    is gone and only the last listing that was actually read can answer.
+    """
+    import errno
+    import os
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    real_scandir = os.scandir
+
+    table = SessionTable()
+    first = await table.summaries()
+    assert {row["session_id"] for row in first} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert table.listing_degraded() == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EIO, "Input/output error"))
+    table.invalidate_summaries_cache()
+    second = await table.summaries()
+
+    assert {row["session_id"] for row in second} == {
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+    }, "an unreadable store must not be published as an empty conversation list"
+    assert table.listing_degraded() == ["sessions"]
+
+    # And the healing is real: once the read works again the marker clears, so a
+    # client keyed on it cannot latch a stale "couldn't refresh".
+    #
+    # The seam is healed by hand rather than with ``monkeypatch.undo()``: undo
+    # drops EVERY patch on this fixture, including the config-dir isolation this
+    # suite runs under, and the next read would then walk the operator's real
+    # store.
+    monkeypatch.setattr(os, "scandir", real_scandir)
+    table.invalidate_summaries_cache()
+    third = await table.summaries()
+    assert {row["session_id"] for row in third} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert table.listing_degraded() == []
+
+
+@pytest.mark.asyncio
+async def test_a_cold_listing_against_an_unreadable_store_says_so(tmp_path, monkeypatch) -> None:
+    """Nothing to serve is still not a verdict about the operator's conversations.
+
+    A daemon that has never read the store has no rows to keep, so the frame is
+    empty — but the marker rides with it, which is what lets a client say
+    "couldn't read" instead of rendering "no conversations" over a read that
+    never happened.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+
+    table = SessionTable()
+    rows = await table.summaries()
+
+    assert rows == []
+    assert table.listing_degraded() == ["sessions"]
+
+
+@pytest.mark.asyncio
+async def test_the_store_failure_is_a_ttl_paced_retry_not_a_rescan_per_repaint(
+    tmp_path, monkeypatch
+) -> None:
+    """A store that stays unreadable must not be rescanned on every repaint.
+
+    The live-projection push path repaints the list ~30x/s. If a FAILED attempt
+    left the timestamp unset, every one of those would re-walk a store that
+    just failed to walk, on the single daemon loop — the starvation the TTL
+    cache exists to prevent, reintroduced by the error path.
+    """
+    import errno
+
+    from local_operator import resume as resume_module
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    _failing_open(monkeypatch, store, OSError(errno.EIO, "Input/output error"))
+
+    calls = {"n": 0}
+    real_rows = resume_module.recent_session_rows
+
+    def counting_rows(directory, limit=None, *, strict=False):
+        calls["n"] += 1
+        return real_rows(directory, limit, strict=strict)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
+
+    table = SessionTable()
+    await table.summaries()
+    assert calls["n"] == 1
+    calls["n"] = 0
+    for _ in range(30):
+        table.notify_list_changed()
+        await table.summaries()
+    assert calls["n"] == 0, "a failed read must back off for the TTL, not retry per repaint"
+
+
+def test_the_listing_route_publishes_the_marker_beside_the_rows(tmp_path, monkeypatch) -> None:
+    """The wire half: the marker and the rows travel together, on both transports.
+
+    ``/api/sessions`` and the ``sessions`` event frame are built by ONE function
+    (``_list_frame``) because the phone's home screen reads the SSE one, and a
+    marker present on only one of two spellings of the same answer is a marker
+    that screen never sees. Pinned on the JSON route, which is the same payload.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions").json()
+    assert {row["session_id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EMFILE, "Too many open files"))
+    daemon.table.invalidate_summaries_cache()
+    broken = client.get("/api/sessions").json()
+
+    assert {row["session_id"] for row in broken["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert broken["degraded"] == ["sessions"]
+
+
+def test_the_history_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
+    """The phone's other conversation list, and the same rule.
+
+    ``/api/sessions/past`` is a second listing of the operator's conversations,
+    so a store it cannot walk may not reach it as "there are none" either. Its
+    previous shape was worse than the home listing's: ``except Exception:
+    return []`` laundered EVERY failure into an empty history, bugs included.
+
+    Whose list this is, stated correctly because the first draft of this
+    docstring was not: the shipped history screen is ``mobile/web/src/screens/
+    past-sessions.tsx`` and it renders ``searchSessions(query)``, i.e.
+    ``/api/sessions/search`` — pinned separately below. ``api.ts``'s
+    ``getPastSessions`` helper has no call site anywhere in the tree, so this
+    route is a listing with no shipped renderer of its own; it is still a
+    listing, and the rule is about the wire, not about who reads it today.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions/past").json()
+    assert {row["id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+    broken = client.get("/api/sessions/past").json()
+
+    assert broken["sessions"] == []
+    assert broken["degraded"] == ["sessions"]
+
+
+def test_a_non_store_failure_on_the_history_route_is_not_laundered(tmp_path, monkeypatch) -> None:
+    """The half of the removal that the store test above cannot pin.
+
+    ``_past_sessions`` dropped its ``except Exception: return []`` because it
+    swallowed defects along with ``EACCES``, and the test above asserts only the
+    GRACEFUL half (``[], ["sessions"]``). Without this pin a future refactor can
+    put the broad catch back and stay green, which is how the laundering
+    returned the first time. A failure that is not the store read reaches the
+    request as a failure.
+    """
+    cfg = tmp_path / "config"
+    _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    class _NotAStoreRead(Exception):
+        """A defect in the row builder: exactly what may not be laundered."""
+
+    def exploding_recent_session_rows(config_dir, limit=None, **kwargs):
+        raise _NotAStoreRead("row builder bug")
+
+    # Patched at the module the route imports FROM at call time, so the real
+    # store never has to be broken to reach this arm.
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", exploding_recent_session_rows)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    with pytest.raises(_NotAStoreRead):
+        client.get("/api/sessions/past")
+
+
+def test_the_search_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
+    """The listing the shipped history screen ACTUALLY renders, and the marker.
+
+    ``mobile/web/src/screens/past-sessions.tsx`` runs ``searchSessions("")`` on
+    mount and then replaces its whole list with ``r.sessions`` — membership, not
+    a merge — so this route's empty answer is the same claim the two listing
+    routes had to stop making. Round 2 found it answering ``200`` with
+    ``keys=['query', 'sessions']`` and no marker at all for a store it could not
+    read, which is how the screen came to say "no past sessions yet" about a
+    history nobody had read.
+
+    The marker is the phone's own ``DEGRADED_DURABLE_LISTING`` word, the same
+    one the home listing and the history route use, so a renderer keys on one
+    vocabulary. Recording what the SCREEN should do with it (a "couldn't load"
+    state instead of that empty text) is a user-visible design round of its own
+    and is deferred on the PR rather than guessed at here.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions/search", params={"q": ""}).json()
+    assert {row["id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    # A store that READS, queried for something absent: still no marker. Or the
+    # marker would mean "this search found nothing", and every miss on a healthy
+    # phone would render as a failed read.
+    miss = client.get("/api/sessions/search", params={"q": "zzzz-no-such-session"}).json()
+    assert miss["sessions"] == []
+    assert miss["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+    broken = client.get("/api/sessions/search", params={"q": ""}).json()
+
+    assert broken["sessions"] == []
+    assert broken["degraded"] == ["sessions"], (
+        "the screen the operator actually looks at must be able to tell an "
+        "unreadable store from an empty one"
+    )
