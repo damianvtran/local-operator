@@ -7,8 +7,9 @@ import asyncio
 import inspect
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Coroutine
 
 import pytest
 
@@ -100,6 +101,91 @@ def _marker(config: Path, session_id: str, pid: int) -> None:
     d = config / "sessions" / session_id
     d.mkdir(parents=True, exist_ok=True)
     (d / ".session.pid").write_text(str(pid))
+
+
+# How long a structural wait here may take before the assertion, not the clock,
+# decides. It is a backstop for a wedged setup — every wait below is released by an
+# observed fact (the lock took, the send queued), never by this number elapsing.
+_STRUCTURAL_WAIT_S = 5.0
+
+
+def _lock_waiters(lock: asyncio.Lock) -> list[Any]:
+    """The tasks queued on ``lock``, read from the lock itself.
+
+    ``asyncio.Lock`` exposes no public "is anybody waiting" view, so this reads the
+    implementation's ``_waiters``. It is the structural fact this file needs: "the
+    send is genuinely blocked behind a holder", as opposed to "a broadcast probably
+    happened to be in flight". If a future CPython renames it the read degrades to
+    an empty list, which FAILS the assertion it feeds (a loud failure) rather than
+    passing it (a silent one).
+    """
+    return list(getattr(lock, "_waiters", None) or [])
+
+
+async def _on_runtime_loop(r: RuntimeServer, coro: Coroutine[Any, Any, Any]) -> Any:
+    """Drive a runtime-owned coroutine from the runtime's OWN loop.
+
+    ``RuntimeServer.start()`` hosts the runtime on a dedicated thread with its own
+    loop, and the send path owns objects that belong to that loop — ``conn.writer``
+    and ``conn.send_lock``. Awaiting such a coroutine from the TEST's loop is the
+    defect that cancelled ten CI shard jobs (runs from 2026-09-15T22:49Z on): with
+    ``send_lock`` contended, the test loop parks a waiter future of its own and the
+    owner's ``Lock.release()`` completes it from the wrong thread, whose callback is
+    scheduled with plain ``call_soon`` — no self-pipe write — so a loop already in
+    ``select()`` is never woken and the await never returns. ``_send_to`` now refuses
+    the cross-loop call outright; this is how a test is supposed to reach it.
+    """
+    loop = r._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
+
+async def _announce_under_a_held_send_lock(r: RuntimeServer, reason: str, **fields: Any) -> None:
+    """``announce_retiring`` on the owner's loop, driving the CONTENDED lock branch.
+
+    The park these tests were involved in exists only on the contended branch: an
+    uncontended lock takes the fast path, creates no waiter, and cannot park
+    anything. So the lock is held FOR REAL, by a coroutine on its own loop, and the
+    announce is only released once its send has visibly queued behind that holder —
+    a structural handshake (``_lock_waiters``) rather than a sleep long enough to
+    usually overlap, which is how a test gets to look green while the branch it
+    exists for is never taken.
+    """
+    loop = r._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    conn = next(c for c in r._clients.values() if c.kind == "attach")
+    acquired = threading.Event()
+    release = threading.Event()
+
+    async def hold() -> None:
+        async with conn.send_lock:
+            acquired.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+    holder = asyncio.run_coroutine_threadsafe(hold(), loop)
+    try:
+        took = await asyncio.get_running_loop().run_in_executor(
+            None, acquired.wait, _STRUCTURAL_WAIT_S
+        )
+        assert took, "the runtime loop never took send_lock"
+        sent = asyncio.run_coroutine_threadsafe(r.announce_retiring(reason, **fields), loop)
+        try:
+            deadline = asyncio.get_running_loop().time() + _STRUCTURAL_WAIT_S
+            while asyncio.get_running_loop().time() < deadline and not _lock_waiters(
+                conn.send_lock
+            ):
+                await asyncio.sleep(0.01)
+            assert _lock_waiters(conn.send_lock), (
+                "the send never queued behind the holder, so the contended branch "
+                "was not exercised"
+            )
+        finally:
+            release.set()
+        await asyncio.wrap_future(sent)
+    finally:
+        release.set()
+        holder.cancel()
 
 
 @pytest.fixture
@@ -238,7 +324,9 @@ async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config
 
     The frame is fed by the real emitter (``RuntimeServer.announce_retiring``),
     not by a hand-built dict: what is under test is the pair, and a stub on
-    either side would pin the side that already works.
+    either side would pin the side that already works. It is driven on the
+    OWNER'S loop and under a held ``send_lock`` — see
+    :func:`_announce_under_a_held_send_lock` for why both of those matter.
     """
     handle = FakeHandle("sess-a")
     r = RuntimeServer(handle, kind="tui")
@@ -250,7 +338,7 @@ async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config
         client = AttachClient(lambda p: None, disconnected.append, on_retiring=frames.append)
         await client.connect(record, "sess-a")
 
-        await r.announce_retiring("stale-build", to="0.55.0@f4a70b9", draining=True)
+        await _announce_under_a_held_send_lock(r, "stale-build", to="0.55.0@f4a70b9", draining=True)
         deadline = asyncio.get_running_loop().time() + 5
         while asyncio.get_running_loop().time() < deadline and not frames:
             await asyncio.sleep(0.05)
@@ -264,7 +352,7 @@ async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config
         # delivers it, because the gating belongs one level up
         # (``AttachedSession._on_retiring_frame`` reads ``draining``), which is
         # what makes a field-less frame from an older runtime harmless.
-        await r.announce_retiring("stale-build", to="0.55.0@f4a70b9")
+        await _on_runtime_loop(r, r.announce_retiring("stale-build", to="0.55.0@f4a70b9"))
         deadline = asyncio.get_running_loop().time() + 5
         while asyncio.get_running_loop().time() < deadline and len(frames) < 2:
             await asyncio.sleep(0.05)
@@ -335,7 +423,7 @@ async def test_a_pre_key_drain_frame_places_the_refusal_the_raiser_could_not_nam
 
         async def announce(reason: str, **fields: Any) -> dict[str, Any]:
             before = len(frames)
-            await r.announce_retiring(reason, **fields)
+            await _on_runtime_loop(r, r.announce_retiring(reason, **fields))
             deadline = asyncio.get_running_loop().time() + 5
             while asyncio.get_running_loop().time() < deadline and len(frames) == before:
                 await asyncio.sleep(0.05)
