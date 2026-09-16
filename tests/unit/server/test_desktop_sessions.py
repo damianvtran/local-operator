@@ -6084,3 +6084,52 @@ async def test_a_healthy_listing_declares_nothing_degraded(draft_api) -> None:
     result = answer.json()["result"]
     assert result["degraded"] == []
     assert [row["degraded"] for row in result["sessions"]] == [[]]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_second_attention_read_is_named_not_published_as_a_verdict(
+    draft_api, monkeypatch
+) -> None:
+    """The route's OWN attention read is a decoration too, and it failed silently.
+
+    ``load_catalog`` reads this store for each row's ``unseen`` mark and this
+    route reads it again to build the wire's per-row ``attention`` object, so
+    the two can fail independently — a transient ``SQLITE_BUSY`` on the second
+    is the realistic shape, and it is the one reproduced here.
+
+    What the route did with it was the defect: ``contextlib.suppress`` left the
+    key off the row and the listing said ``degraded: []``, i.e. "everything
+    about this page was read", while a client renders an absent ``attention``
+    as "nothing unread". Same confidently-wrong negative as the swallowed reads
+    this change exists to stop, one read further out.
+    """
+    import sqlite3
+
+    from local_operator.session.attention import AttentionStore
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+
+    real = AttentionStore.state_many
+    calls = {"n": 0}
+
+    def flaky(self, identities):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, identities)
+
+    monkeypatch.setattr(AttentionStore, "state_many", flaky)
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    # The catalogue's own read is first and the route's is second; if that order
+    # ever changes this test injects the failure somewhere else, and it should
+    # fail loudly rather than pass for the wrong reason.
+    assert calls["n"] == 2, "the route reads attention once, after the catalogue's read"
+    result = answer.json()["result"]
+    assert result["degraded"] == ["attention"]
+    assert [row["degraded"] for row in result["sessions"]] == [["attention"], ["attention"]]
+    assert "attention" not in result["sessions"][0]
