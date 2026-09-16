@@ -2230,11 +2230,13 @@ async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
     [
         (None, None),
         (_NameManager([]), None),
-        # The wiring's deliberate EMPTY outcome (the MCP package would not
-        # import) is recorded and still not a failure: a host that never used
-        # MCP must not be told MCP is broken. Pinned here so the arm the code
-        # comment names cannot be dropped by a later predicate change
-        # (review round 2, R2-NIT-2).
+        # A record that coexists with a manager and names NO failure — the
+        # ordinary arm at ``session_factory.py:2462-2469``, which a host with no
+        # MCP config reaches as ``configured=()`` / ``failures={}``. (The
+        # import-gap arm at ``2377`` records an empty outcome too, but it returns
+        # BEFORE any manager exists, so it cannot produce this pair.) Pinned so a
+        # later predicate change cannot drop the arm (review round 2, R2-NIT-2;
+        # citation corrected in review round 3, NIT-1).
         (_NameManager([]), McpStartupOutcome()),
     ],
     ids=["no-manager", "zero-name-manager", "deliberate-empty-outcome"],
@@ -2249,9 +2251,9 @@ async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(
     has not run yet (no boot record at all), a host that really asked for
     nothing — including the zero-name manager, which is the same answer the real
     one gives when no config file names a server (QA round 1, row 3) — and the
-    recorded-but-empty outcome the MCP import gap produces. An empty roster with
-    a failure on the boot record is a different answer entirely; see the two
-    tests below.
+    recorded-but-empty outcome the ordinary wiring arm produces. An empty roster
+    with a failure on the boot record is a different answer entirely; see the
+    three tests below.
     """
     from local_operator.session.frontend_state import SlashResult
 
@@ -2264,6 +2266,33 @@ async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(
     assert result.kind == "notice"
     assert result.text == "no MCP servers configured."
     assert result.style == "info"
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_but_empty_discovery_message_is_still_a_failure() -> None:
+    """MEMBERSHIP decides, not the value (review round 3, MINOR-1).
+
+    ``session_factory`` stores ``str(entry.get("error", ...))`` with no falsy
+    filter, and ``str(exc)`` is ``""`` for an exception raised with no args — so
+    a record can carry the discovery key with an empty message. Testing the
+    VALUE fell through to the empty-state sentence and had `/mcp list` deny a
+    failure it was holding; the fallback keeps that arm non-empty and says what
+    is missing rather than inventing a cause.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: ""})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "MCP discovery failed" in result.text
+    assert "no error detail was recorded" in result.text
+    assert result.style == "warning"
 
 
 @pytest.mark.asyncio

@@ -93,15 +93,23 @@ def _mcp_boot_discovery_failure(session: Any) -> str | None:
 
     Only the synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY`
     entry is read, because this is asked when the roster came back EMPTY, and a
-    PER-SERVER entry cannot describe that state honestly. A fresh boot cannot
-    produce the pair: ``_connect_round`` assigns ``_configs`` BEFORE validating
-    (``mcp/manager.py:2032``), so a server that fails keeps its name and the
-    roster is not empty. A STALE record can: ``/mcp remove`` reloads the manager
-    into an empty roster without rewriting ``session.mcp_startup`` — only the
-    boot wiring and its settle sink write that, and the sink fires only when a
-    round deferred something. Reporting "MCP server github failed" there would
-    name a server the session no longer configures, where the empty sentence is
-    the true one (review round 2, R2-MINOR-1).
+    PER-SERVER entry cannot describe that state honestly. A config change
+    produces the pair that way: ``/mcp remove`` reloads the manager into an empty
+    roster while nothing rewrites ``session.mcp_startup`` — only the boot wiring
+    and its settle sink write that, and the sink fires only when a round
+    deferred something — so reporting its stale entry would name a server the
+    session no longer configures (review round 2, R2-MINOR-1).
+
+    A fresh boot CAN produce the pair too, and the reference is a pathological
+    config rather than a stale one (QA round 2; reproduced here):
+    ``json.loads`` raises ``RecursionError`` on a deeply nested document, and
+    ``mcp/config.py::_read_json`` catches only ``OSError``/``ValueError``/
+    ``UnicodeDecodeError`` — so the raise escapes the reader, reaches the
+    discovery wrapper's own ``except Exception`` (``mcp/__init__.py:145-149``),
+    and comes back as the manager with an EMPTY roster plus the synthetic entry
+    ``session_factory`` keys as ``discovery``, on a boot where ``_connect_round``
+    never assigned ``_configs``. Both routes want the same answer, which is why
+    this keys on the roster rather than on how the emptiness arose.
 
     The predicate this matches is the startup TOAST's, not the band's:
     ``discovery_failed=not outcome.configured and outcome.failed``
@@ -114,10 +122,17 @@ def _mcp_boot_discovery_failure(session: Any) -> str | None:
 
     outcome = getattr(session, "mcp_startup", None)
     failures = getattr(outcome, "failures", None) or {}
-    message = failures.get(MCP_DISCOVERY_KEY)
-    if not message:
+    if MCP_DISCOVERY_KEY not in failures:
         return None
-    return f"MCP discovery failed: {message}"
+    # MEMBERSHIP decides, then the value is read: a present-but-EMPTY message is
+    # still a failure on the record — ``str(exc)`` is ``""`` for an exception
+    # raised with no args, and ``session_factory`` stores it with no falsy
+    # filter — so testing the VALUE fell through to the empty-state sentence and
+    # had ``/mcp list`` deny a failure it was holding (review round 3,
+    # MINOR-1). The fallback keeps that arm non-empty and says what is missing
+    # rather than inventing a cause.
+    detail = failures[MCP_DISCOVERY_KEY] or "no error detail was recorded"
+    return f"MCP discovery failed: {detail}"
 
 
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:

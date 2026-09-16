@@ -37925,8 +37925,18 @@ class OperatorApp(App[None]):
                         "no stored credential — /mcp login <name> authorizes a server"
                     )
                 else:
+                    # The step must WORK, or the user complies and lands back
+                    # here: the in-TUI `/mcp add <name> <url>` writes no `auth`
+                    # block by design and the slash grammar has no `--oauth`
+                    # token, so a server it creates is still not OAuth-capable
+                    # and this same empty list returns. The CLI's `--oauth` flag
+                    # is the only path that writes the block — the sibling hint
+                    # in `mcp/verbs.py:240-246` says so for the same reason — so
+                    # that is what this names, and it stays short because the
+                    # flag has to survive the notice's 60-column truncation
+                    # (design round 3, D7).
                     editor.picker.set_notice(
-                        "no OAuth server configured — /mcp add <name> <url> configures one"
+                        "no OAuth server configured — lop mcp add --oauth adds one"
                     )
                 # An empty list must say WHY, in the list's own place — the rule
                 # `/logout`'s picker follows (its `reason`), and the store branch
