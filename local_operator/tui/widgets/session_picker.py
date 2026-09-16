@@ -222,15 +222,18 @@ PREVIEW_FR = 2
 
 #: Stacked-layout row split: a fraction with clamps, not a fixed count. A fixed
 #: preview height either starves the list on a 24-row terminal or wastes half
-#: of a 50-row one.
+#: of a 50-row one. ``PREVIEW_MIN`` is 3 header lines + 1 rule + body — below
+#: it the pane shows metadata and no conversation; fewer than ``LIST_MIN``
+#: rows is a menu, not a list.
 #:
-#: ``PREVIEW_MIN`` is 3 header lines + 1 rule + body — below it the pane shows
-#: metadata and no conversation, which is not a preview. Past ``PREVIEW_MAX``
-#: the list starves for no gain, since the pane scrolls anyway. Fewer than
-#: ``LIST_MIN`` rows is a menu, not a list.
+#: Stacked the PREVIEW takes the majority share (T3): at a third plus a 14-row
+#: cap the list hoarded 41 of 55 content rows on a 60-row terminal. The cap
+#: went with the third — ``PREVIEW_MAX`` has no reader left once the share is
+#: proportional, and an unread cap is an invitation to re-cap, so it is deleted.
 PREVIEW_MIN = 8
-PREVIEW_MAX = 14
 LIST_MIN = 6
+LIST_FR_STACKED = 3
+PREVIEW_FR_STACKED = 7
 
 #: How stale a live marker may be while the picker is open. The spinner keeps
 #: advancing at ``SPINNER_INTERVAL_S`` (motion), but the DATA behind the markers
@@ -663,7 +666,9 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
         list_width = inner_w - 2
         preview_width = inner_w - 2
         if cols_h >= LIST_MIN + PREVIEW_MIN:
-            preview_rows = min(PREVIEW_MAX, max(PREVIEW_MIN, cols_h // 3))
+            preview_rows = cols_h * PREVIEW_FR_STACKED // (LIST_FR_STACKED + PREVIEW_FR_STACKED)
+            preview_rows = min(preview_rows, cols_h - LIST_MIN)
+            preview_rows = max(preview_rows, PREVIEW_MIN)
         elif cols_h >= LIST_MIN + PREVIEW_DRAW_MIN:
             preview_rows = cols_h - LIST_MIN
         else:
