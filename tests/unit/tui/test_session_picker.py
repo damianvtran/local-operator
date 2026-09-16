@@ -369,6 +369,14 @@ def test_the_repaint_signature_covers_every_field_the_rows_render() -> None:
     # And the drain, for the same reason one step removed: a signal can land
     # while the list is open, and the row's own words change when it does.
     assert "leaving" in covered
+    # And the exclusion this change ADDED and argued for, pinned by name because
+    # the argument is what makes the exclusion safe: `degraded` reports that a
+    # decoration read failed, and nothing on THIS screen paints it, so a row
+    # whose decoration status changed is the same row on screen. The day a TUI
+    # surface renders it the field moves into `_SIGNATURE_FIELDS` — and without
+    # this assertion that move (and its opposite) would be silent, which is the
+    # escape the partition alone cannot catch.
+    assert "degraded" in excluded
 
 
 def test_a_draining_record_reaches_the_catalogue_row_and_its_words(
