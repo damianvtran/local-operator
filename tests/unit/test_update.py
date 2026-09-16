@@ -602,6 +602,30 @@ def test_main_dispatches_install_verbs(
         assert seen[0][1] == {"keep": update_mod.DEFAULT_KEEP_GENERATIONS}
 
 
+def test_main_refuses_a_non_numeric_keep_without_naming_a_python_symbol(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R7-2: ``--keep foo`` printed ``invalid _generation_count value: 'foo'``.
+
+    That is argparse's own template for a ``ValueError`` escaping the ``type=``
+    callable, and it renders the FUNCTION'S NAME — a Python symbol on a CLI
+    surface the generation PR had just cleaned of exactly that (design review D5
+    removed the neighbouring one, a quoted ``None`` in the help text). The exit
+    code and the usage line are unchanged: this is a bad option, not a crash.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "install", "prune", "--keep", "foo"])
+    with pytest.raises(SystemExit) as refused:
+        main()
+    assert refused.value.code == 2
+    captured = capsys.readouterr()
+    assert "_generation_count" not in captured.err, captured.err
+    assert "expected a whole number, got 'foo'" in captured.err, captured.err
+    assert "usage: lop install prune" in captured.err, captured.err
+    assert captured.out == ""
+
+
 def test_main_dispatches_install_prune_keep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
