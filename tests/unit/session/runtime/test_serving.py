@@ -2224,39 +2224,75 @@ async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
     assert result.data == {"type": "mcp"}
 
 
+@pytest.mark.parametrize(
+    "manager",
+    [None, _NameManager([])],
+    ids=["no-manager", "zero-name-manager"],
+)
 @pytest.mark.asyncio
-async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer() -> None:
-    """The one state that MAY say this: no manager and no boot failure named.
+async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(manager: Any) -> None:
+    """The states that MAY say this, both with NO boot failure recorded.
 
-    Two states reach here — a session whose wiring has not run yet (no boot
-    record at all) and a host whose MCP package would not import (an outcome
-    the wiring records as EMPTY on purpose, because a machine that never used
-    MCP must not be told MCP is broken). A session whose discovery RAISED is a
-    third state with the same absent manager and a very different answer; it is
-    the next test down.
+    Two shapes reach here and both are genuinely empty: a session whose wiring
+    has not run yet (no boot record at all) and a host that really asked for
+    nothing — including the zero-name manager, which is the same answer the
+    real one gives when no config file names a server (QA round 1, row 3). A
+    third shape — an empty roster with a failure on the boot record — is a
+    different answer entirely and is the test below.
     """
     from local_operator.session.frontend_state import SlashResult
 
     handle, session = make_handle()
-    assert session.mcp_manager is None
+    session.mcp_manager = manager
 
     result = await handle._slash_result("mcp", "list", SlashResult)
 
     assert result.kind == "notice"
     assert result.text == "no MCP servers configured."
+    assert result.style == "info"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_failure_when_the_roster_is_empty() -> None:
+    """The REACHABLE hard-failure shape — empty roster, manager present.
+
+    ``discover_and_load_mcp_tools`` never raises for a discovery failure: it
+    catches, logs, and returns the manager alongside a synthetic
+    ``{"path": ".mcp.json"}`` error entry, which ``session_factory`` keys as
+    ``discovery`` (``mcp/__init__.py:145-149``). So the state a user actually
+    reaches is a MANAGER whose roster came back empty plus a boot record that
+    says why, and keying the honest answer on ``manager is None`` missed it
+    (QA round 1, Q2 — where this branch probe returned the old sentence).
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "the config layer could not be read"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "the config layer could not be read" in result.text
+    assert result.style == "warning"
 
 
 @pytest.mark.asyncio
 async def test_a_routed_mcp_listing_names_a_discovery_failure_instead_of_denying_it() -> None:
-    """`manager is None` is not an empty roster (review round 1, MAJOR-1).
+    """A discovery RAISE is the other shape that reaches the failure answer.
 
-    ``wire_mcp_into_session`` never assigns ``mcp_manager`` when discovery
-    RAISES; it records the exception on the boot record instead, and that
-    session is a machine which HAS an MCP setup that could not be read. The old
-    guard answered "no MCP servers configured." there — the operator's reported
+    ``wire_mcp_into_session`` never assigns ``mcp_manager`` when its own call
+    raises, and records the exception on the boot record instead; that session
+    is a machine which HAS an MCP setup that could not be read. The old guard
+    answered "no MCP servers configured." there — the operator's reported
     sentence in the state where it is least true. The band refuses to say it
     (``_mcp_status`` reads ``startup.failed`` for exactly this reason), so the
-    slash answer must not either.
+    slash answer must not either. The reachable sibling of this state keeps the
+    same answer: see the zero-name-manager test above.
     """
     from local_operator.session.frontend_state import SlashResult
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
