@@ -142,6 +142,11 @@ local-operator credential update OPENROUTER_API_KEY
 local-operator login-status
 ```
 
+This block is where a credential gets *configured*; one the **user** captures
+from a browser is documented in its own guide — read `guide://qwencloud` for the
+QwenCloud console ticket behind `/usage` rather than restating its capture
+ritual here.
+
 ## Configure quota-aware account and model fallback
 
 Fallback order lives under `values.retry.fallbackChains`, and the routing engine
