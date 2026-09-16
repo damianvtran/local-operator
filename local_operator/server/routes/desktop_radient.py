@@ -6,6 +6,8 @@ Workspace consent is deliberately NOT here: effective MCP grants own that flow.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -28,6 +30,52 @@ from local_operator.server.utils.desktop_auth import DesktopAuth
 
 router = APIRouter(tags=["Desktop Radient"], dependencies=[Depends(require_desktop)])
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
+
+#: How many agent ids one `agents.statuses` request may name.
+#:
+#: The op exists so a page of cards costs ONE renderer round trip, and its
+#: fan-out is bounded by this number rather than by whatever a caller sends: the
+#: hub's page size is 12, so 32 leaves room for a larger page without letting a
+#: single request become an unbounded burst of upstream traffic.
+STATUS_BATCH_LIMIT = 32
+
+#: How many of those upstream reads are in flight at once.
+#:
+#: Each read is a tiny GET, so the cost of opening all of them at once is a
+#: burst against a shared API rather than a local one; six keeps the batch
+#: comfortably inside a single page's latency budget while staying a polite
+#: client.
+STATUS_BATCH_CONCURRENCY = 6
+
+#: The same shape `Identifier` enforces, compiled for use on a comma-joined list.
+STATUS_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def status_ids(body: RadientRequest) -> list[str]:
+    """The agent ids one `agents.statuses` request names.
+
+    Ids arrive as one comma-joined query value rather than as a JSON list,
+    because the closed vocabulary's `query` is a flat string map and widening it
+    to carry a typed list would widen every op's surface for one op's sake.
+
+    De-duplicated and kept in the caller's order, so a status report is keyed by
+    id and the caller never has to pair a positional list with its input.
+
+    Raises:
+        ValueError: no ids, more than ``STATUS_BATCH_LIMIT``, or an id that is
+            not the shape the rest of this module accepts as an identifier — see
+            the call site in ``validate_request`` for why the last one is a
+            refusal rather than a skip.
+    """
+    raw = str(body.query.get("agent_ids", ""))
+    ids = list(dict.fromkeys(part for part in (chunk.strip() for chunk in raw.split(",")) if part))
+    if not ids:
+        raise ValueError("Choose at least one agent")
+    if len(ids) > STATUS_BATCH_LIMIT:
+        raise ValueError(f"Read at most {STATUS_BATCH_LIMIT} agent statuses at once")
+    if any(STATUS_ID.match(agent_id) is None for agent_id in ids):
+        raise ValueError("Invalid agent identifier")
+    return ids
 
 
 class RadientRequest(Input):
@@ -52,6 +100,16 @@ class RadientRequest(Input):
         "agents.favourited",
         "agents.favourite_count",
         "agents.download_count",
+        # The viewer's own like/favourite state for a whole page of agents.
+        #
+        # `agents.liked` and `agents.favourited` answer that question for one
+        # agent each, and the desktop hub needs it for every card it paints —
+        # which is what made a twelve-card page cost twenty-four requests before
+        # it finished painting. This op is the same information for a bounded list
+        # of ids in one call, so the renderer asks once. It is ADDITIVE: a UI
+        # newer than its server gets a 404 for the unknown operation, which the
+        # hub reads as "no viewer state to show" rather than as a failure.
+        "agents.statuses",
         "comments.list",
         "comments.create",
         "comments.update",
@@ -89,12 +147,23 @@ class RadientRequest(Input):
             }
             if self.operation in {"agents.list", "account.agents"}
             else (
-                {"page", "per_page"}
-                if self.operation == "comments.list"
+                {"agent_ids"}
+                if self.operation == "agents.statuses"
                 else (
-                    {"start_date", "end_date", "application_id", "usage_type", "provider", "rollup"}
-                    if self.operation == "usage"
-                    else set()
+                    {"page", "per_page"}
+                    if self.operation == "comments.list"
+                    else (
+                        {
+                            "start_date",
+                            "end_date",
+                            "application_id",
+                            "usage_type",
+                            "provider",
+                            "rollup",
+                        }
+                        if self.operation == "usage"
+                        else set()
+                    )
                 )
             )
         )
@@ -114,6 +183,12 @@ class RadientRequest(Input):
             "annual",
         }:
             raise ValueError("Choose daily, monthly or annual usage")
+        if self.operation == "agents.statuses":
+            # Validated here rather than at the fan-out, because these ids become
+            # upstream path segments: a malformed one must be refused before a
+            # request is built from it, and the bound must be the caller's to
+            # read in the error rather than a surprise inside the loop.
+            status_ids(self)
         allowed: set[str] = set()
         if self.operation in {"agents.create", "agents.update"}:
             allowed = {
@@ -162,6 +237,13 @@ class RadientRequest(Input):
 
 def endpoint(body: RadientRequest) -> tuple[str, str]:
     op = body.operation
+    if op == "agents.statuses":
+        # The one operation whose real work is several upstream calls, so this
+        # pair is NOMINAL: it exists because `validate_request` asks for the
+        # method to decide whether a request id is required, and the route
+        # dispatches this op before it builds anything from a path. The reads it
+        # actually makes are built by `agent_statuses`.
+        return "GET", "/agents/statuses"
     if op in {"account", "prices", "provision"}:
         return (
             ("POST", "/provision")
@@ -252,10 +334,106 @@ def public_data(value: Any, secrets: list[str]) -> Any:
     return value
 
 
+async def agent_statuses(body: RadientRequest, auth: DesktopAuth) -> dict[str, Any]:
+    """The viewer's like and favourite state for a bounded list of agents.
+
+    THE ONE OP THAT MAKES SEVERAL UPSTREAM CALLS, and the reason is the shape of
+    what it is asked: `GET /agents/{id}/like` and `/agents/{id}/favourite` answer
+    for ONE agent each, and the desktop hub needs the answer for every card it
+    paints. Served one id at a time from the renderer, a twelve-card page costs
+    twenty-four round trips through this proxy and two more waves of them (after
+    first paint, and again on every window focus). Served here, it costs one,
+    with the fan-out inside a process that already holds the credential and a
+    connection pool to Radient.
+
+    What keeps it from being a general-purpose proxy: the vocabulary is still
+    closed, the ids are bounded by ``STATUS_BATCH_LIMIT``, the only upstream
+    paths reachable are the two status reads below, and nothing a caller sends
+    is interpolated into a URL without matching ``STATUS_ID``.
+
+    The result is keyed by agent id, and every id the caller named is present.
+
+    Raises:
+        HTTPException: 409 when no Radient credential is stored, the upstream
+            status (401/403/429) when Radient refuses the whole batch, and 502
+            when the upstream could not be reached or answered invalidly.
+    """
+    ids = status_ids(body)
+    access = await auth.store.get_oauth_access("radient")
+    if access is None:
+        raise HTTPException(409, "Sign in to Radient to access your account")
+    token = access.access_token
+    base = base_url()
+    headers = {"Authorization": "Bearer " + token}
+    statuses: dict[str, dict[str, bool]] = {
+        agent_id: {"liked": False, "favourited": False} for agent_id in ids
+    }
+    limiter = asyncio.Semaphore(STATUS_BATCH_CONCURRENCY)
+
+    async def read(client: httpx.AsyncClient, agent_id: str, suffix: str, key: str) -> None:
+        async with limiter:
+            response = await client.get(f"{base}/agents/{agent_id}/{suffix}", headers=headers)
+        if response.status_code in {401, 403, 429}:
+            # The credential was refused, or this account is being asked to slow
+            # down. That is the batch's answer rather than one id's, and the
+            # caller's move is to sign in again or to wait - not to render a page
+            # of "nothing known".
+            raise HTTPException(response.status_code, "Radient could not complete this operation")
+        if response.is_redirect:
+            # Same classification as the single-op path above: a redirect says the
+            # base address is wrong rather than that this agent has no relation,
+            # so it is the batch's failure and not an absent answer.
+            raise HTTPException(502, "Radient returned an unexpected redirect")
+        if response.status_code != 200:
+            # A per-agent refusal (an agent delisted while the page was open, a
+            # private one) leaves that id at "not liked, not favourited". That is
+            # the state a client that knows nothing renders, and the one state
+            # whose toggle is still correct: the like and favourite endpoints
+            # answer an already-present relation with `already_liked` /
+            # `already_favourited` rather than with a conflict.
+            return
+        # 200 with NO document is this endpoint's "no relation": the handler
+        # answers empty content when the account holds no like, so the presence
+        # of a body is the flag rather than any field inside it.
+        statuses[agent_id][key] = bool(response.content.strip())
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        outcomes = await asyncio.gather(
+            *(
+                read(client, agent_id, suffix, key)
+                for agent_id in ids
+                for suffix, key in (("like", "liked"), ("favourite", "favourited"))
+            ),
+            # `return_exceptions` so one refused id cannot leave the rest of the
+            # batch running unattended: the batch is reported as a whole.
+            return_exceptions=True,
+        )
+    for outcome in outcomes:
+        if isinstance(outcome, HTTPException):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            raise HTTPException(
+                502, "Radient is unavailable or returned an invalid response"
+            ) from None
+    return {
+        "data": {
+            "msg": "Agent statuses read",
+            "result": {"statuses": statuses},
+        }
+    }
+
+
 @router.post("/v1/desktop/radient", response_model=CRUDResponse[Result])
 async def radient(
     body: RadientRequest, request: Request, auth: DesktopAuth = Depends(get_desktop_auth)
 ):
+    if body.operation == "agents.statuses":
+        # Dispatched before `endpoint` builds a path, because this op's real work
+        # is the bounded fan-out above rather than one upstream call. It is a
+        # read, so it takes no receipt.
+        async with errors():
+            return reply(await agent_statuses(body, auth))
+
     method, path = endpoint(body)
 
     async def execute():
