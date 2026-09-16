@@ -853,7 +853,11 @@ def installed_build(prefix: str | Path | None = None) -> BuildStamp:
 
 
 def classify_import_failure(
-    exc: BaseException, module: str, *, boot: BuildStamp | None
+    exc: BaseException,
+    module: str,
+    *,
+    boot: BuildStamp | None,
+    recorded_boot: BuildStamp | None = None,
 ) -> str | None:
     """Name a mid-install import as ``install-mid-update``, or ``None``.
 
@@ -873,6 +877,22 @@ def classify_import_failure(
 
     ``module`` is what the CALLER was importing, used when the exception itself
     names nothing (some wrappers drop ``name``).
+
+    ``recorded_boot`` IS THE DURABLE SECOND OPINION, consulted ONLY when the
+    live stamp is unavailable. ``session/runtime/journal.py`` publishes a boot
+    record per runtime (``run/host/<pid>.json``) holding the build that process
+    was born on, and which survives precisely the case this function exists to
+    name: an install torn badly enough that ``installed_build()`` — which reads
+    the dist-info directory and ``.lop-source`` off the very tree being
+    replaced — cannot answer. Before this, that case fell to ``boot is None``
+    and the tear was reported as a genuine packaging bug.
+
+    The live stamp still WINS whenever it is readable, and not as a matter of
+    taste: it is the same process's own reading at the same instant, while the
+    recorded one is a snapshot from boot time. Consulting the record first would
+    make a process that has legitimately been re-pointed at a new install
+    compare against a stale baseline. When neither is readable the answer stays
+    ``None``, which is the legacy path unchanged.
     """
     if not isinstance(exc, ImportError):
         return None
@@ -884,6 +904,8 @@ def classify_import_failure(
         or "local_operator" in text
     ):
         return None
+    if boot is None:
+        boot = recorded_boot
     if boot is None:
         return None
     try:
