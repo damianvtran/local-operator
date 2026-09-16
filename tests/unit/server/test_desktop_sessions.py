@@ -6133,3 +6133,71 @@ async def test_a_failed_second_attention_read_is_named_not_published_as_a_verdic
     assert result["degraded"] == ["attention"]
     assert [row["degraded"] for row in result["sessions"]] == [["attention"], ["attention"]]
     assert "attention" not in result["sessions"][0]
+
+
+def test_a_stamped_page_still_names_a_failed_attention_read(tmp_path, monkeypatch) -> None:
+    """Two independent facts about one row, and the ONE response that carries both.
+
+    ``DesktopSessions.list`` grew two unrelated things on two branches: this
+    branch made a row carry ``degraded`` (and the listing derive its own marker
+    from the rows), and the sidebar-latency work made it carry the feed's
+    ``status_epoch``/``status_revision`` stamps. Rebasing the first onto the
+    second merged them in one method, and the failure mode of that kind of
+    resolution is silent: a merge that keeps the stamps and drops the marker (or
+    the reverse) leaves every OTHER test green, because each fact has its own
+    test that only ever exercises its own fact.
+
+    So this is deliberately the only test in the tree that asserts both at once:
+    a page computed with the feed's real stamps AND with the second attention
+    read failing returns rows that are stamped and still name the read that
+    failed. A listing can be fully stamped and be degraded; neither fact may
+    displace the other.
+    """
+    import asyncio
+    import sqlite3
+
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+    from local_operator.session.attention import AttentionStore
+
+    # The feed helpers live with the feed's own tests; imported rather than
+    # copied so this file cannot drift into a second opinion about how a
+    # stamped revision is produced.
+    from tests.unit.server.test_desktop_feed import (
+        _feed,
+        _listable_session,
+        _record_publish,
+        _tick,
+    )
+
+    sid = "e3" * 6
+    _listable_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    feed.subscribe()
+    _record_publish(tmp_path, sid, pending="approval")
+    _tick(feed)
+    stamps = feed.status_stamps()
+    assert stamps[1].get(sid), "the feed has a revision for this session to stamp"
+
+    real = AttentionStore.state_many
+    calls = {"n": 0}
+
+    def flaky(self, identities):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, identities)
+
+    monkeypatch.setattr(AttentionStore, "state_many", flaky)
+
+    try:
+        rows = asyncio.run(DesktopSessions(tmp_path).list(50, status_stamps=stamps))
+    finally:
+        asyncio.run(feed.close())
+
+    row = next(entry for entry in rows if entry["id"] == sid)
+    assert row["status_epoch"] == feed.epoch, "the stamp survives the composition"
+    assert row["status_revision"] == stamps[1][sid]
+    assert row["degraded"] == ["attention"], "and so does the marker beside it"
+    assert "attention" not in row
+    assert calls["n"] == 2, "the catalogue's read succeeded; the second one is the failure"
