@@ -16,6 +16,7 @@ from starting when it is not.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 from unittest import mock
@@ -1459,6 +1460,67 @@ def test_the_sampling_policy_answers_per_family(provider, model_id, temperature,
     spec = configure_mod.build_model_spec(provider, model_id)
     assert spec.temperature == temperature
     assert spec.top_p == top_p
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        # OpenRouter's canonical id.
+        "minimax/minimax-m3",
+        # The harness's own normalised spelling, verbatim from a sealed run's
+        # manifest (``route_id: openrouter:minimax_sminimax-m3``). A table that
+        # matched only the dotted form would leave the campaign route -- the
+        # only route that ever produced this defect -- undeclared.
+        "minimax_sminimax-m3",
+        # A vendor-style spelling, matched like every other family rule here.
+        "MiniMax-M3",
+    ],
+)
+def test_the_boundary_marker_table_declares_the_minimax_template_token(model_id: str) -> None:
+    """The token is DECLARED, on the model, and only for the family that emits it.
+
+    Keyed on the model id rather than the provider for the reason the sampling
+    table states: the chat template belongs to the weights, so the same token
+    leaks on the direct route and through an aggregator, and a provider-keyed row
+    would fix one route and leave the rest carrying the defect. Everything this
+    table does NOT list gets an empty tuple, which is what keeps the strip a
+    declaration rather than a global licence.
+    """
+
+    assert configure_mod.build_model_spec("openrouter", model_id).reasoning_boundary_markers == (
+        "</mm:think>",
+    )
+    for other in ("anthropic/claude-opus-5", "google/gemini-3-flash", "gpt-5"):
+        assert configure_mod.build_model_spec("openrouter", other).reasoning_boundary_markers == ()
+
+
+def test_the_boundary_marker_table_moves_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A table edit must reach the spec, or the tolerance is dead on arrival.
+
+    Mirrors ``test_the_hint_is_derived_from_the_schema``: one source, and a
+    reader that would otherwise keep its own copy of the answer. The strip reads
+    this field and nothing else, so a row added to the table without the
+    derivation moving is an absorbed token that is still being refused --
+    exactly the state the defect is in.
+    """
+
+    model = "minimax/minimax-m3"
+    assert configure_mod.build_model_spec("openrouter", model).reasoning_boundary_markers
+
+    monkeypatch.setattr(
+        configure_mod,
+        "_REASONING_BOUNDARY_MARKERS",
+        ((re.compile(r"minimax"), ("<|end_of_thinking|>",)),),
+    )
+    assert configure_mod.build_model_spec("openrouter", model).reasoning_boundary_markers == (
+        "<|end_of_thinking|>",
+    )
+
+    # The degenerate case, which is the one a fallback bug hides in: a table
+    # that declares nothing must leave the spec declaring nothing rather than
+    # falling back to some other row's markers.
+    monkeypatch.setattr(configure_mod, "_REASONING_BOUNDARY_MARKERS", ())
+    assert configure_mod.build_model_spec("openrouter", model).reasoning_boundary_markers == ()
 
 
 @pytest.mark.parametrize(

@@ -18,13 +18,19 @@ The list is never truncated to hide models. A catalogue is only useful if the
 model you are hunting for is reachable, so overflow scrolls and filtering is
 fuzzy over the string the user can actually see (``provider/id``) — type
 ``opus``, ``anthropic/``, or ``anthopus`` and all three converge.
+
+The ROW and its RANKING now live in ``local_operator/model/ranking.py`` and are
+re-exported below. They left because the phone's model sheet needs the same
+order and cannot afford to import textual to get it; what stayed here is the
+presentation (``format_window``, ``format_price_pair``), which is written in
+``rich.Text`` and has no meaning off a terminal.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import math
 import re
+from datetime import datetime
 from typing import Callable
 
 from rich.cells import cell_len
@@ -33,8 +39,37 @@ from rich.text import Text
 from textual.app import NoScreen
 from textual.widgets import Static
 
+from local_operator.model.ranking import (
+    _MINOR_VERSION_PATTERN,
+    _VERSION_PATTERN,
+    ModelRow,
+    _score,
+    _version_key,
+    rank_rows,
+)
+from local_operator.model.tariff import scale_at, window_label
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+#: Re-exported so every importer of this module keeps working after the ranking
+#: moved to ``model/ranking.py``: ``tui/app.py``, ``settings_view``, ``editor``
+#: and three test modules all name these here, and the move was made to let the
+#: MOBILE daemon rank without importing textual — not to churn the TUI's own
+#: call sites. The private names are listed too because the tests that pin the
+#: measured regressions (kimi-k2, first-number-not-largest) reach for them.
+__all__ = [
+    "MAX_VISIBLE_ROWS",
+    "PERSIST_HINT_PREFIX",
+    "ModelPicker",
+    "ModelRow",
+    "_MINOR_VERSION_PATTERN",
+    "_VERSION_PATTERN",
+    "_score",
+    "_version_key",
+    "format_price_pair",
+    "format_window",
+    "rank_rows",
+]
 
 #: Cursor glyph and its gutter. Identical to the command picker's and the
 #: session picker's, because all three lists appear in the same place and a
@@ -124,70 +159,17 @@ _FIRST_VALUE_END = re.compile(r", | — ")
 #: part being chosen.
 _NUMBERS_MIN_WIDTH = 56
 
+#: Below this PICKER width the full window word is paid for out of the model id:
+#: measured at 56-65 cells (design round 1, D4), where ``off-peak``'s 8 cells turned
+#: ``deepseek-v4-flash-vision-exp`` into ``…-flash-vis…`` on a row that fitted in
+#: full before. The id is what the user is choosing and is recoverable from
+#: nothing else on the row; the word is recoverable from the number beside it, so
+#: the schedule's SHORT form is painted in that band instead. Above it there is
+#: room for the whole word, and the whole word is the honest one.
+_SHORT_WINDOW_MIN_WIDTH = 66
+
 #: Marker on the row that is the session's current model.
 _CURRENT_MARK = "●"
-
-#: Version-shaped numbers inside a model id: `4`, `4.1`, `2.5`, the `2` in `k2`,
-#: the `3` in `qwen3:8b`.
-#:
-#: The lookbehind excludes digits and dots ONLY. Excluding word characters as well
-#: looked tidier and silently broke every id that glues the version to a letter —
-#: `kimi-k2` matched nothing at all, so its version came from the `0905` serial and
-#: `kimi-k2-0905` outranked `kimi-k3`. The dot is what stops a decimal's own
-#: fraction being counted a second time as a standalone number.
-_VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+(?:[.]\d+)?)")
-
-#: A dash followed by a SHORT run of digits is a minor version (`opus-4-1` = 4.1),
-#: rewritten to a decimal before the version scan. Capped at two digits on purpose:
-#: `sonnet-4-20250514` is a dated snapshot, and reading it as 4.20250514 would put
-#: it above every real version in the catalogue.
-_MINOR_VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+)-(\d{1,2})(?![\d])")
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelRow:
-    """One offerable model.
-
-    ``connected`` is the provider's credential state, not the model's. The app
-    filters unreachable rows out before they get here — a picker is a list of
-    choices — so a False row is one of the two the filter deliberately keeps: the
-    session's CURRENT model when its provider stopped being usable, or every row
-    at once when the credential store could not be read. Both need to look
-    different from a model that will run, which is what this flag drives (dim id,
-    `login required` where the numbers go, and last place in the ranking).
-    Choosing one starts a login instead of a switch — see
-    :meth:`ModelPicker.highlighted`.
-    """
-
-    provider: str
-    model_id: str
-    #: The model's display name, already through ``model/naming.py``'s honesty
-    #: rule upstream — so it is either a name that identifies this model alone or
-    #: the selector itself, never a name two models answer to. Empty means the
-    #: caller had none; the row then shows its selector and nothing more.
-    label: str = ""
-    context_window: int = 0
-    default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
-    max_context_window: int | None = dataclasses.field(default=None, kw_only=True)
-    input_price: float = 0.0
-    output_price: float = 0.0
-    connected: bool = True
-    #: True when this row comes from a RESELLER rather than the model's own
-    #: provider. Set by the caller, which is the only layer that knows the
-    #: registry; the picker only needs it as a sort rung.
-    aggregated: bool = False
-    #: This row is a META-ROUTE — a router whose price is the price of whichever
-    #: model it dispatches to. Set by the caller from the listing that said so
-    #: (``CatalogueEntry.routed``), never inferred here: the renderer cannot
-    #: tell a router's unknown price from any other unknown one, and deciding it
-    #: from the id in this layer would be the second, divergent statement of the
-    #: rule that :func:`format_price_pair`'s docstring exists to warn against.
-    routed: bool = False
-
-    @property
-    def selector(self) -> str:
-        """``provider/id`` — what ``/model`` takes and what the user types."""
-        return f"{self.provider}/{self.model_id}"
 
 
 def format_window(tokens: int) -> str:
@@ -235,7 +217,16 @@ def format_window(tokens: int) -> str:
 ROUTED_PRICE_LABEL = "usage-based"
 
 
-def format_price_pair(input_price: float, output_price: float, *, routed: bool = False) -> str:
+def format_price_pair(
+    input_price: float,
+    output_price: float,
+    *,
+    routed: bool = False,
+    tariff: str | None = None,
+    moment: datetime | None = None,
+    window: bool = True,
+    short_window: bool = False,
+) -> str:
     """``$3/15`` per million, ``free``, ``usage-based`` for a router, else ``""``.
 
     FOUR states, and the split matters. A provider that quotes no pricing is NOT
@@ -264,6 +255,44 @@ def format_price_pair(input_price: float, output_price: float, *, routed: bool =
     prints it. It is checked FIRST because it is a statement about the endpoint
     rather than about a number, so it cannot be outvoted by a zero a stale
     listing happens to quote.
+
+    ``tariff`` names the time-of-use schedule the two prices are quoted at
+    (:func:`local_operator.model.tariff.window_label`), and it changes WHAT the
+    two numbers mean: the stored prices are the schedule's PEAK rates, so the
+    numbers rendered are the rates IN FORCE at ``moment`` — a DeepSeek row read
+    during an off-peak hour shows the half it actually costs, where printing the
+    stored peak figure would overstate it by 2x for ~79% of the week. The
+    window's name travels with them because a price that halves every few hours
+    without saying why is worse than no label at all.
+
+    The name goes BEFORE the price, not after it (design round 1, D1). The run is
+    right-aligned as one unit, so a trailing word — not the price — becomes what
+    sits on the column's right edge, and the price's own right edge goes ragged:
+    measured, tariffed rows ended 7-9 cells left of untariffed ones, and the same
+    row shifted 2 cells when the window flipped. Leading, the tag hangs left of
+    the column exactly as the ``1m``/``64k`` window column already does, and every
+    price keeps ending on the cell it always did.
+
+    ``short_window`` selects the schedule's abbreviated form for a caller that has
+    MEASURED its own width budget (``_SHORT_WINDOW_MIN_WIDTH``), and ``window=False``
+    drops the word entirely for a caller that has measured that even the short one
+    will not fit — the price is STILL scaled either way, because a row that cannot
+    afford the word must not silently go back to advertising the stored peak rate.
+    Both decisions belong to the caller because only it knows how many cells it
+    has.
+
+    The tag is part of the NUMBERS RUN, which the row drops as one unit when the
+    width cannot hold it (``_NUMBERS_MIN_WIDTH``) — so a narrow frame loses the
+    numbers and their label together rather than the label being silently
+    stripped from a number the user would then misread as the current rate.
+
+    The scaling is applied to the NUMBERS, never to the formatted string. A
+    stated zero (``free``) and an unknown price (the ``-1.0`` sentinel) are both
+    returned BEFORE any of this and stay unscaled and untagged: `0.5 × unknown`
+    is not a price, and a row whose prices nobody quoted must not carry a tag
+    implying we priced something. So does a name this build does not ship — an
+    unknown schedule scales by 1.0 and prints no label, per the tariff module's
+    "never invent a discount" rule.
     """
     if routed:
         return ROUTED_PRICE_LABEL
@@ -271,7 +300,16 @@ def format_price_pair(input_price: float, output_price: float, *, routed: bool =
         return ""
     if input_price == 0 and output_price == 0:
         return "free"
-    return f"${_trim_price(input_price)}/{_trim_price(output_price)}"
+    label = window_label(tariff, moment, short=short_window)
+    # The scale is applied whether or not the word is painted: the window decides
+    # WHAT the number is, the word only says so. A caller that dropped the word
+    # and kept the peak figure would be showing the listing rather than the rate.
+    scale = scale_at(tariff, moment)
+    if scale != 1.0:
+        input_price *= scale
+        output_price *= scale
+    pair = f"${_trim_price(input_price)}/{_trim_price(output_price)}"
+    return f"{label} {pair}" if window and label is not None else pair
 
 
 def _is_parenthesised_tail(name: str) -> bool:
@@ -340,116 +378,6 @@ def _trim_price(value: float) -> str:
     exponent = math.floor(math.log10(abs(value)))
     decimals = max(0, 2 - exponent)
     return f"{round(value, decimals):.{decimals}f}".rstrip("0").rstrip(".")
-
-
-#: `(tier, -score, version_key, row)` — the shape `rank_rows` sorts.
-_RankEntry = tuple[tuple[int, int], int, tuple[float, float, str], "ModelRow"]
-
-
-def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
-    """Rows matching ``query``, best first, matched on the DISPLAYED string.
-
-    Matching what the user can see (``provider/id``) rather than the id alone is
-    what lets bare names, provider prefixes and scoped queries all flow through
-    one matcher.
-
-    SUBSTRING matches win outright when there are any; the subsequence matcher is
-    the fallback. Ordering it the other way round is technically a superset and
-    practically much worse: ``opus`` is a subsequence of
-    ``anthropic/claude-sonnet-4`` (o and p from "anthropic", u from "claude", s
-    from "sonnet"), so a user typing the name of one model got a list led by a
-    different one. Keeping the fallback is what still resolves ``anthopus`` and
-    ``sonnet4``, which are the typo and elision cases fuzzy matching exists for.
-
-    Two tiers come before the score. Connected rows outrank unconnected ones,
-    because a model you can use right now beats one that needs a login and
-    interleaving them scatters the usable rows through a list of locked ones. Then
-    DIRECT providers outrank aggregators: `openrouter/anthropic/claude-opus-5` and
-    `anthropic/claude-opus-5` are the same model, and after logging in to Anthropic
-    the direct route is the one the user meant.
-    """
-    needle = query.strip().lower()
-    if not needle:
-        return sorted(
-            rows,
-            key=lambda row: (not row.connected, row.aggregated, row.provider, _version_key(row)),
-        )
-    exact: list[_RankEntry] = []
-    fuzzy: list[_RankEntry] = []
-    for row in rows:
-        target = row.selector.lower()
-        score = _score(target, needle)
-        if score is None:
-            continue
-        entry = (
-            (0 if row.connected else 1, 1 if row.aggregated else 0),
-            -score,
-            _version_key(row),
-            row,
-        )
-        (exact if needle in target else fuzzy).append(entry)
-    pool = exact or fuzzy
-    pool.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [item[3] for item in pool]
-
-
-def _version_key(row: ModelRow) -> tuple[float, float, str]:
-    """Sort key placing the NEWEST-looking model first within its tier.
-
-    Alphabetical order on model ids is actively wrong for this catalogue:
-    `claude-opus-4-1` sorts before `claude-opus-5` and `gpt-4o` before `gpt-5.4`,
-    so a plain sort leads every family with its oldest member — the one a user is
-    least likely to be reaching for.
-
-    The version is the FIRST number in the id, not the largest. Taking the largest
-    looked equivalent and was not: `kimi-k2-0905` carries 2 and 905, so it scored
-    905 and led a list in which `kimi-k3` came ninth. Every id in this catalogue
-    puts the family version first and its serials, dates and parameter counts
-    after, so position is the reliable signal and magnitude is not.
-
-    Three rungs:
-
-    1. **version**, descending — the first number, with a SHORT run after a dash
-       folded in as a minor (`claude-opus-4-1` reads 4.1 and beats
-       `claude-opus-4`). The run has to be short, or `claude-sonnet-4-20250514`
-       would read as 4.20250514 and outrank every real version in the list.
-    2. **remaining numbers**, descending — the dates and serials rung 1 ignores.
-       Two snapshots of one model (`-20250514` vs `-20260101`, `-0905` vs bare)
-       differ only here, and the later one is what a user wants.
-    3. **id**, ascending, so ids with no numbers at all stay in a stable,
-       predictable order rather than an arbitrary one.
-    """
-    normalized = _MINOR_VERSION_PATTERN.sub(r"\1.\2", row.model_id)
-    numbers = [float(match) for match in _VERSION_PATTERN.findall(normalized)]
-    version = numbers[0] if numbers else 0.0
-    return (-version, -max(numbers[1:], default=0.0), row.model_id)
-
-
-def _score(target: str, needle: str) -> int | None:
-    """Subsequence score, or None when ``needle`` is not a subsequence.
-
-    Density is what the score measures: consecutive matched characters are worth
-    double, so ``opus`` scores ``claude-opus-5`` far above a model that merely
-    happens to contain o, p, u and s in order. An exact substring therefore always
-    wins, without needing a separate substring pass.
-    """
-    if not needle:
-        return 0
-    score = 0
-    previous = -2
-    index = 0
-    for char in needle:
-        found = target.find(char, index)
-        if found < 0:
-            return None
-        score += 2 if found == previous + 1 else 1
-        previous = found
-        index = found + 1
-    # A match that starts at the beginning is a prefix, which is the strongest
-    # signal a short query can carry.
-    if target.startswith(needle):
-        score += len(needle)
-    return score
 
 
 class ModelPicker(Static):
@@ -763,7 +691,9 @@ class ModelPicker(Static):
         line.append(f"{_CURSOR} " if selected else " " * _GUTTER_CELLS, style=cursor_style)
 
         numbers = (
-            self._numbers(row) if width >= _NUMBERS_MIN_WIDTH else self._window(row, compact=True)
+            self._numbers(row, width=width)
+            if width >= _NUMBERS_MIN_WIDTH
+            else self._window(row, compact=True)
         )
         mark = f" {_CURRENT_MARK}" if row.selector == self._current else ""
         reserved = _GUTTER_CELLS + _EDGE_MARGIN + cell_len(numbers) + cell_len(mark)
@@ -848,17 +778,28 @@ class ModelPicker(Static):
             line.append(numbers, style=number_style)
         return _pad_to(line, width, bg)
 
-    def _numbers(self, row: ModelRow) -> str:
+    def _numbers(self, row: ModelRow, *, width: int | None = None) -> str:
         """The right-hand metadata run: context window, then price.
 
         Assembled as one string rather than as padded columns because the window
         is filtered: per-window column alignment would make the numbers jump
         every time the user typed a character, and a stable right EDGE reads
         better than columns that only line up sometimes.
+
+        ``width`` is the picker width the run is painted at, and it is what
+        chooses the schedule's LONG or SHORT word (``_SHORT_WINDOW_MIN_WIDTH``).
+        Omitted — as the annotation-room reservation below does — the run is sized
+        for the LONG form, so the reservation stays the widest the run can ever
+        be and a shrinking window never hands the annotation the cells it freed.
         """
         if not row.connected:
             return "login required"
-        parts = [part for part in (self._window(row), self._price(row)) if part]
+        short_window = width is not None and width < _SHORT_WINDOW_MIN_WIDTH
+        parts = [
+            part
+            for part in (self._window(row), self._price(row, short_window=short_window))
+            if part
+        ]
         return "  ".join(parts)
 
     def _window(self, row: ModelRow, *, compact: bool = False) -> str:
@@ -883,8 +824,18 @@ class ModelPicker(Static):
         # Preserve the existing narrow-row layout for models without two limits.
         return "" if compact else format_window(row.context_window)
 
-    def _price(self, row: ModelRow) -> str:
-        return format_price_pair(row.input_price, row.output_price, routed=row.routed)
+    def _price(self, row: ModelRow, *, short_window: bool = False) -> str:
+        # ``tariff=row.time_of_use`` is what makes the column show the rate in
+        # FORCE; ``moment`` is left to the schedule's own clock (the frame is
+        # painted at open, so "now" is the honest instant — the picker does not
+        # repaint on a timer, which is fine for a row a user reads for seconds).
+        return format_price_pair(
+            row.input_price,
+            row.output_price,
+            routed=row.routed,
+            tariff=row.time_of_use,
+            short_window=short_window,
+        )
 
     def _footer_rows(self, width: int) -> list[Text]:
         """Count/status rows with the persistent-default instruction protected.

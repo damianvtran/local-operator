@@ -29,17 +29,31 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator import slash_commands as slash_module
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.harness.types import Message, TextContent
+from local_operator.incidents import format_model_switch_message
 from local_operator.session import naming
+from local_operator.session.runtime import serving as serving_module
+from local_operator.slash_commands import SLASH_COMMANDS
+from local_operator.tui import app as app_module
 from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
+from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
+from tests.unit.tui.test_app_pilot import (
+    FakeSession,
+    _factory,
+    _set_editor_line,
+    _transcript_text,
+)
 
 
 class _GatedSession(FakeSession):
@@ -325,6 +339,42 @@ async def test_the_band_is_named_from_the_opener_before_any_provider_call() -> N
         assert app._status._conversation_name == "Fix the login flow"
         assert app._provisional_name == ""
         session.gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_harness_injected_row_does_not_become_the_provisional_title() -> None:
+    """The provisional label is read from the conversation's first USER row.
+
+    A session resumed from a transcript an older build wrote can begin with a
+    leaked failover notice — the rendered copy of a live-only ``CustomMessage``,
+    stamped ``harness_injected``. Titling the tab "[model switch] You are now
+    running as …" is the user-visible form of that leak. The scan keys on the
+    stamp through the shared decision in ``harness/rows.py``, the same one
+    ``history_window.opener_text`` makes, so the tab and the picker row agree.
+    """
+    app, session = await _boot()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        session._history = [
+            Message(
+                role="user",
+                content=[
+                    TextContent(
+                        text=format_model_switch_message(
+                            "zai/glm-5.3", "anthropic/claude-opus-5", transient=True
+                        )
+                    )
+                ],
+                provider_payload={RENDERED_INJECTION_KEY: True},
+            ),
+            Message.user("why does the resume picker show an empty conversation?"),
+        ]
+        app._restore_resumed_name(session)
+
+        assert app._provisional_name == naming.provisional_title(
+            "why does the resume picker show an empty conversation?"
+        )
+        assert "[model switch]" not in app._provisional_name
 
 
 @pytest.mark.asyncio
@@ -1093,6 +1143,230 @@ async def test_refresh_title_asks_even_about_a_low_signal_newest_message() -> No
     assert result.changed
 
 
+@pytest.mark.asyncio
+async def test_an_on_demand_refresh_asks_with_its_own_prompt_and_a_tail_heavy_sample() -> None:
+    """The defect: this path asked with the ANTI-DRIFT prompt and its sampling.
+
+    ``THEME_SYSTEM_PROMPT`` instructs the model to repeat the current title
+    verbatim unless the subject moved, which is correct for the automatic path
+    and made this one answer "the name still fits" to nearly everything — both
+    the sentinel and a restatement fold to ``TITLE_UNCHANGED``, so the command
+    did nothing. The on-demand path now asks its own question, over a sample
+    weighted 4:1 toward the recent turns it is being asked about.
+    """
+    captured: list[tuple[str, str]] = []
+
+    async def answer(system: str, prompt: str) -> str:
+        captured.append((system, prompt))
+        return "<title>Billing importer rewrite</title>"
+
+    turns = _turns(*[f"turn {index}" for index in range(14)])
+    await naming.refresh_title("Fix the login flow", answer, turns=turns)
+
+    system, prompt = captured[0]
+    assert system is naming.REFRESH_SYSTEM_PROMPT
+    assert system != naming.THEME_SYSTEM_PROMPT
+    assert "Repeat it verbatim" not in system
+
+    # The 8-turn tail reaches back further than the automatic 4 did.
+    assert "turn 13" in prompt and "turn 7" in prompt and "turn 6" in prompt
+    # The head is kept at 2, so the opener still distinguishes "the same work,
+    # further along" from a genuine pivot. Asserted on the RENDERED turn: a bare
+    # "turn 1" is a substring of "turn 10".."turn 13", all of which are in the
+    # tail, so it would pass even with no head at all.
+    assert "<assistant>\nturn 1\n</assistant>" in prompt
+    # ...and the middle is dropped, with the gap marked.
+    assert "turn 4" not in prompt
+    assert "<elided/>" in prompt
+
+
+@pytest.mark.asyncio
+async def test_the_automatic_retitle_keeps_the_anchored_prompt_and_its_sampling() -> None:
+    """The anti-drift path is deliberately untouched, and this pins it.
+
+    Its prompt and its head-heavy sample are the fix for the drift regression
+    above; the on-demand refresh needed the opposite weighting, and got it
+    through new parameters that DEFAULT to the automatic constants. This is the
+    test that fails if a later change to the on-demand path reaches this one.
+    """
+    captured: list[tuple[str, str]] = []
+
+    async def capture(system: str, prompt: str) -> str:
+        captured.append((system, prompt))
+        return "<title/>"
+
+    turns = _turns(*[f"turn {index}" for index in range(14)])
+    await naming.generate_retitle(
+        "Fix the login flow", "and now the importer", capture, turns=turns
+    )
+
+    system, prompt = captured[0]
+    assert system is naming.THEME_SYSTEM_PROMPT
+    # Head 3 — the opener states what the session is FOR...
+    assert "turn 2" in prompt
+    # ...against a 4-turn tail, which turn 9 sits outside of.
+    assert "turn 9" not in prompt
+
+
+def test_the_refresh_prompt_carries_a_tie_break_toward_the_standing_name() -> None:
+    """Without this rule the command never settles.
+
+    Removing the anti-drift anchor removed every reason to PREFER the standing
+    name, and a 12-round real-model probe (each stored title fed back as the
+    next anchor, on work that was still the same work) repainted 8 times across
+    6 distinct titles and never converged, every title a fair name for the same
+    session. With the tie-break the same probe repaints twice and then holds.
+
+    Pinned on the CLAUSE rather than on the constant, because every other
+    assertion on this prompt compares it to itself: deleting the tie-break
+    leaves the whole suite green and silently reintroduces the churn. Asserted
+    by substring, following the `"Repeat it verbatim" not in system` precedent
+    above, so a reword of the surrounding sentences does not fail it.
+    """
+    prompt = naming.REFRESH_SYSTEM_PROMPT
+    assert "no more accurate" in prompt
+    assert "keep <current-title>" in prompt
+    # ...and it is a TIE-break, not the anchor instruction that caused the
+    # original defect. The fresh judgement has to stay decisive wherever the
+    # standing name is stale, so the prompt still says the anchor is not a name
+    # to keep.
+    assert "not a name to keep" in prompt
+    assert "Repeat it verbatim" not in prompt
+
+
+def test_the_refresh_prompt_does_not_assume_a_session_is_named() -> None:
+    """This caller runs on unnamed sessions; ``generate_retitle`` does not.
+
+    ``refresh_title`` drops the "a current title is required" gate, so a session
+    whose opening naming call failed reaches this prompt with no
+    ``<current-title>`` in the data at all. A tie-break written as though the
+    tag were always there would be an instruction about nothing on exactly the
+    sessions a user reaches for this command on.
+    """
+    assert "<current-title>, when present," in naming.REFRESH_SYSTEM_PROMPT
+
+    # The claim the qualifier rests on: with no anchor the tag really is absent
+    # from the envelope, rather than present and empty.
+    context = naming.build_theme_context(
+        _turns("add a web_fetch tool"),
+        "",
+        current_title="",
+        head_turns=naming.REFRESH_HEAD_TURNS,
+        tail_turns=naming.REFRESH_TAIL_TURNS,
+    )
+    assert context
+    assert "<current-title>" not in context
+
+
+def test_the_automatic_prompt_did_not_inherit_the_tie_break() -> None:
+    """The two prompts stayed different, which is the point of the change.
+
+    ``generate_retitle`` keeps its own anchor instruction; a tie-break leaking
+    into it would be a second, weaker way of saying what "Repeat it verbatim"
+    already says there.
+    """
+    assert "no more accurate" not in naming.THEME_SYSTEM_PROMPT
+    assert "Repeat it verbatim" in naming.THEME_SYSTEM_PROMPT
+    assert naming.REFRESH_SYSTEM_PROMPT != naming.THEME_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_a_topic_shift_after_a_fresh_judgement_reports_a_refresh() -> None:
+    """What the command is for: the subject moved, and the receipt says so.
+
+    The stub asserts WHICH question it was asked, not only what it answered.
+    It used to ignore ``system``/``prompt`` entirely, which made it pass on the
+    unfixed tree as well — the old anti-drift prompt produced this same verdict
+    here, so a stub that reads nothing pinned nothing about the judgement being
+    FRESH. Now the revert (``refresh_title`` asking with
+    ``THEME_SYSTEM_PROMPT``) fails this test, which is the guarantee its name
+    claims.
+    """
+    seen: list[tuple[str, str]] = []
+
+    async def moved(system: str, prompt: str) -> str:
+        seen.append((system, prompt))
+        return "<title>Billing importer rewrite</title>"
+
+    turns = _turns(
+        "fix the login redirect loop",
+        "done — the redirect chain terminates now",
+        "different thing: the billing importer drops rows",
+        "found it — the CSV reader swallows the last chunk",
+        "rewrite the importer to stream instead",
+        "streaming now, no row loss",
+    )
+    result = await naming.refresh_title("Fix the login flow", moved, turns=turns)
+    assert result == naming.TitleRefresh(naming.TITLE_REFRESHED, "Billing importer rewrite")
+    assert result.changed
+
+    # It was asked the ON-DEMAND question, not the anti-drift block.
+    system, prompt = seen[0]
+    assert system == naming.REFRESH_SYSTEM_PROMPT
+    assert system != naming.THEME_SYSTEM_PROMPT
+    # ...and the standing name travelled in the DATA as the anchor the verdict
+    # is about, so "moved" is a judgement of that title rather than a guess.
+    assert "<current-title>\nFix the login flow\n</current-title>" in prompt
+    assert "billing importer drops rows" in prompt
+
+
+@pytest.mark.asyncio
+async def test_an_equal_title_after_a_fresh_judgement_still_folds_to_unchanged() -> None:
+    """The fold stays, and staying is the point.
+
+    A verbatim restatement reached AFTER a genuine reconsideration is an honest
+    answer, and the user is owed it. What the new prompt removes is its being
+    the DEFAULT answer — previously the model was instructed to produce it.
+
+    Like its sibling above, this asserts the question that was asked as well as
+    the verdict: `TITLE_UNCHANGED` is what BOTH prompts produce when the model
+    restates, so a stub reading neither argument pins nothing.
+    """
+    seen: list[tuple[str, str]] = []
+
+    async def restates(system: str, prompt: str) -> str:
+        seen.append((system, prompt))
+        return "<title>Fix the login flow</title>"
+
+    result = await naming.refresh_title(
+        "Fix the login flow", restates, turns=_turns("fix the login redirect loop", "done")
+    )
+    assert result.outcome == naming.TITLE_UNCHANGED
+    assert result.title == "Fix the login flow"
+
+    system, prompt = seen[0]
+    assert system == naming.REFRESH_SYSTEM_PROMPT
+    assert "<current-title>\nFix the login flow\n</current-title>" in prompt
+
+
+@pytest.mark.asyncio
+async def test_the_argument_picker_offers_the_flag_spelling() -> None:
+    """The row teaches `--refresh`, the shape every other command uses.
+
+    The bare word keeps parsing and keeps finding this row (as an alias), but
+    the flag is what lands in the buffer. Asserted through `parse_title_arg`
+    as well as by name: a row the picker offers that does not reach the refresh
+    branch is the failure a name-only assertion would miss.
+    """
+    app, _session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/title ")
+        for _ in range(6):
+            await pilot.pause()
+
+        rows = editor.picker.suggestions()
+        assert len(rows) == 1, "the title argument list is one row"
+        name, choice = rows[0]
+        assert name == "--refresh"
+        assert isinstance(choice, ArgumentChoice), "the picker is not in argument mode"
+        assert choice.detail == "resumes auto-naming"
+        assert "refresh" in choice.aliases
+        # The row is RUNNABLE: what it submits reaches the refresh branch.
+        assert naming.parse_title_arg(name) == (True, "")
+
+
 def test_release_user_set_is_the_only_way_the_latch_reopens() -> None:
     """``set`` only ever turns the flag ON, which is right as precedence and
     wrong as a life sentence. One caller reopens it, and only on request."""
@@ -1110,6 +1384,88 @@ def test_release_user_set_is_the_only_way_the_latch_reopens() -> None:
     # Idempotent: a second release on an already-open latch reports that it
     # held nothing rather than raising.
     assert name.release_user_set() is False
+
+
+@pytest.mark.asyncio
+async def test_typing_the_advertised_flag_runs_the_refresh_and_writes_a_receipt() -> None:
+    """The whole seam, from the keystrokes a user actually makes.
+
+    Every part of this is pinned somewhere already — the parser takes
+    ``--refresh``, the picker offers it, the handler asks with the refresh
+    prompt — and nothing pinned them TOGETHER. A parser that accepted the flag
+    while dispatch routed it to the "set the title to these words" branch would
+    pass every one of those tests and rename the conversation to "--refresh".
+    So this types the line into the editor and presses enter.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        now = await _named(app, session, "fix the login redirect loop")
+        now[0] += 1
+        session.grow_transcript(3)
+
+        session.title = "<title>Billing importer rewrite</title>"
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/title --refresh")
+        await pilot.press("enter")
+        await _settle()
+
+        # The refresh branch ran, and asked with the on-demand prompt.
+        assert len(session.completions) == 2, "the flag spelling spent no call"
+        system, _data = session.completions[1]
+        assert system == naming.REFRESH_SYSTEM_PROMPT
+        # ...and the user is told what happened, on the surface they typed into.
+        assert session.conversation_name == "Billing importer rewrite"
+        assert "title refreshed: Billing importer rewrite" in _transcript_text(app)
+
+
+def test_every_advertised_surface_teaches_the_same_spelling() -> None:
+    """Four surfaces, one spelling, and that agreement IS the change.
+
+    A user who meets `--refresh` in `/help`, `refresh` in a notice and
+    `--refresh` in the picker learns that the command has three spellings and
+    no rule. The bare words all still PARSE (pinned in
+    ``test_title_refresh_qa``); what is pinned here is what the product SAYS,
+    which is the part that drifts when a fifth surface is added later.
+
+    Enumerated per surface, rather than as one whole-file substring count:
+
+    * the `/help` row is pinned by EXACT equality, so a reword fails here;
+    * the picker row is pinned on the row it builds;
+    * the three runtime notices are one census of the canonical invocation, so
+      adding a surface or reverting one to the bare word moves a number.
+
+    What this still cannot see, stated rather than assumed: a fifth surface
+    teaching the capability in words that avoid the canonical clause entirely
+    (a notice saying "ask for a fresh name" without naming the command).
+    Catching that needs each notice pinned where it RENDERS, which the three
+    notice sites do not do yet.
+    """
+    entry = next(c for c in SLASH_COMMANDS if c.name == "rename")
+    assert entry.description == "Name this conversation, or /title --refresh"
+    assert naming.parse_title_arg("--refresh") == (True, "")
+
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+    serving_source = Path(serving_module.__file__).read_text(encoding="utf-8")
+    slash_source = Path(slash_module.__file__).read_text(encoding="utf-8")
+
+    # The picker teaches the ARGUMENT rather than the invocation — the command
+    # name is already in the buffer when the row is offered — so it is the one
+    # surface that names the flag alone. Its BEHAVIOUR (the row boots, is
+    # offered, and what it submits reaches the refresh branch) is pinned by
+    # ``test_the_argument_picker_offers_the_flag_spelling``.
+    assert 'name="--refresh",' in app_source
+    assert 'aliases=("refresh",),' in app_source
+
+    # One entry per surface that teaches the INVOCATION. A reword that keeps
+    # `--refresh`, a revert to the bare word, or a new surface all move these
+    # numbers, so the agreement is counted rather than asserted at itself.
+    census = {
+        "slash_commands.py": slash_source.count("/title --refresh"),
+        "app.py": app_source.count("/title --refresh"),
+        "serving.py": serving_source.count("/title --refresh"),
+    }
+    assert census == {"slash_commands.py": 1, "app.py": 2, "serving.py": 1}, census
 
 
 # -- the theme sampler and the drift regression it fixes ----------------------
@@ -1179,6 +1535,26 @@ def test_build_theme_context_samples_head_and_tail_with_an_elision_marker() -> N
     assert "<elided/>" in context
     # ...and the newest message rides the tail.
     assert "the newest thing" in context.rsplit("<elided/>", 1)[-1]
+
+
+def test_build_theme_context_defaults_to_the_automatic_sampling() -> None:
+    """The default IS the automatic behaviour, by construction.
+
+    The ratio became a parameter because the two callers ask different
+    questions of the same trajectory. Pinned as an identity rather than as two
+    numbers that happen to agree, so the drift-resistant caller cannot be
+    changed by editing the signature's defaults.
+    """
+    turns = [_turn("user" if i % 2 == 0 else "assistant", f"turn {i}") for i in range(12)]
+    assert naming.build_theme_context(turns, "x", current_title="T") == (
+        naming.build_theme_context(
+            turns,
+            "x",
+            current_title="T",
+            head_turns=naming.THEME_HEAD_TURNS,
+            tail_turns=naming.THEME_TAIL_TURNS,
+        )
+    )
 
 
 def test_build_theme_context_appends_the_newest_message_as_the_tail() -> None:
@@ -1419,7 +1795,7 @@ async def test_a_refresh_retitles_a_session_the_growth_gate_would_decline() -> N
 
         assert len(session.completions) == 2, "the refresh spent no call"
         system, data = session.completions[1]
-        assert system == naming.THEME_SYSTEM_PROMPT
+        assert system == naming.REFRESH_SYSTEM_PROMPT
         assert "<current-title>\nFix the login flow\n</current-title>" in data
         assert session.conversation_name == "Billing importer rewrite"
         assert app._status is not None

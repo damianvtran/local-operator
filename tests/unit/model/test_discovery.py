@@ -2415,3 +2415,102 @@ def test_a_router_listing_row_is_not_where_cache_support_comes_from() -> None:
     merged = merge_models(discovery._static_rows("radient"), live)
 
     assert merged[0].supports_prompt_cache is False
+
+
+def test_offered_model_ids_is_the_catalogues_answer_or_no_answer(tmp_path, monkeypatch) -> None:
+    """The set a caller may REFUSE a pair on, and the providers with no set at all.
+
+    ``None`` is the load-bearing half. Two provider shapes cannot be enumerated
+    without the network — an aggregator with no cached document, and a local
+    endpoint whose ids live behind a configured server — and a caller that read
+    "not in the set" as "does not exist" would refuse exactly the picks the
+    model picker had just offered it. So the contract is: a set when the
+    catalogue is knowable offline, ``None`` when it is not, and a caller accepts
+    the pair in the second case.
+
+    The scope sweep is pinned here too, on a document a real fetch WROTE rather
+    than on a hand-built one: an account-scoped catalogue is keyed per account,
+    so a set built only from the plain reader would refuse every id the
+    ChatGPT-login catalogue had just offered. The payload below is what the
+    transport really stores; only its KEY is relocated to the account-scoped
+    name ``invalidate_documents`` documents (``openai.oauth.<hash>.listing``),
+    and the unscoped document is dropped so nothing else can answer for it.
+    """
+    monkeypatch.setattr(discovery, "default_cache_dir", lambda: tmp_path)
+
+    # A fixed provider's catalogue IS the registry until a listing says more.
+    shipped = discovery.offered_model_ids("anthropic")
+    assert shipped is not None and "claude-opus-5" in shipped
+    assert "claude-opus-9" not in shipped
+
+    # Nothing to enumerate offline: an aggregator on a cold cache, a local
+    # endpoint, and an id the registry does not know at all.
+    assert discovery.offered_model_ids("openrouter") is None
+    assert discovery.offered_model_ids("ollama") is None
+    assert discovery.offered_model_ids("not-a-provider") is None
+
+    client = _StubClient([_Response(200, {"data": [{"id": "gpt-6-account-only"}]})])
+    available_models("openai", api_key="sk-api", client=client, cache_dir=tmp_path)
+    unscoped = tmp_path / "openai.listing.json"
+    assert unscoped.exists(), "the fixture depends on a real listing document being written"
+    (tmp_path / "openai.oauth.deadbeef.listing.json").write_text(unscoped.read_text())
+    unscoped.unlink()
+
+    served = discovery.offered_model_ids("openai")
+    assert served is not None
+    assert "gpt-6-account-only" in served, "an account-scoped document was not swept"
+    assert set(static_models("openai")) <= served, "static rows must survive a listing's answer"
+
+
+def test_a_registry_schedule_survives_the_merge_and_is_never_invented() -> None:
+    """The time-of-use schedule rides from the registry row to the picker's row.
+
+    For DeepSeek this hop is the ONLY one the user's `/model` frame takes (the
+    app paints `initial_catalogue`, which for a direct provider is
+    `merge_models` over the bundled rows), so a schedule that stopped at
+    `ModelInfo` would never reach the price column it exists for.
+
+    A listing cannot state a schedule -- no provider publishes its peak/off-peak
+    structure as a per-model field -- so a live-only id must come out with none
+    rather than inheriting one from the id's neighbourhood.
+    """
+    static = static_models("deepseek")
+    from_static = {row.id: row for row in merge_models(static, None)}
+    assert from_static["deepseek-flash"].time_of_use == "deepseek-tou"
+    assert from_static["deepseek-v4-pro"].time_of_use == "deepseek-tou"
+    assert from_static["deepseek-chat"].time_of_use is None
+
+    merged = {
+        row.id: row
+        for row in merge_models(
+            static,
+            [DiscoveredModel(id="deepseek-flash"), DiscoveredModel(id="deepseek-brand-new")],
+        )
+    }
+    assert merged["deepseek-flash"].time_of_use == "deepseek-tou"
+    assert merged["deepseek-brand-new"].time_of_use is None
+
+
+def test_a_live_priced_deepseek_listing_keeps_its_schedule() -> None:
+    """Pins TODAY's behaviour so the day it stops being right is a red test.
+
+    `time_of_use` describes the PUBLISHED PEAK TABLE the registry prices came
+    from. If DeepSeek ever starts quoting prices in `/models`, the merge lets
+    that live price beat the bundled one, and the live number's relationship to
+    the published table — peak? off-peak? something else? — is unknown, so
+    pairing it with the schedule could double-discount or no-discount it. That
+    branch is not worth building speculatively; this test is the alarm instead.
+    """
+    static = static_models("deepseek")
+    live = DiscoveredModel(
+        id="deepseek-flash",
+        input_price=0.11,
+        output_price=0.44,
+        authoritative_fields=("input_price", "output_price"),
+    )
+    row = next(r for r in merge_models(static, [live]) if r.id == "deepseek-flash")
+    assert row.input_price == 0.11, "the live price did not win — assumption changed"
+    assert row.time_of_use == "deepseek-tou", (
+        "a live-priced listing lost (or gained) a schedule: decide which price table "
+        "`time_of_use` now describes before relaxing this"
+    )

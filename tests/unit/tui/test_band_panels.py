@@ -20,6 +20,7 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.naming import ConversationName
@@ -154,6 +155,33 @@ class FakeSession:
 
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
 
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
@@ -329,6 +357,13 @@ class _Job:
         # — so a test that does not think about them gets the common case.
         self.agent_role: str | None = "task"
         self.effort: str | None = None
+        # Mirrors ``AsyncJob.cut_off_cause``: a token from
+        # ``incidents.CUT_OFF_CAUSES`` when a runtime death cut this child's run
+        # off, ``""`` when it ended any other way. Declared rather than set ad
+        # hoc because the dock ROW reads it to choose its word (design round 2,
+        # D8), so a fixture that forgets it would be answering "no cut-off"
+        # through a ``getattr`` default instead of through the model's own.
+        self.cut_off_cause: str = ""
 
 
 @pytest.fixture(autouse=True)
@@ -1207,7 +1242,28 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
 
             def without_inset(self: Any) -> None:
                 original(self)
-                self.query_one("#band").remove_class("has-slot")
+                # Same guard the real `_sync_band_inset` carries, and for the
+                # same reason: this runs on every band refresh INCLUDING the
+                # ones during boot, before `#band` is composed. The production
+                # method swallows that (`except Exception: return`, "never
+                # raises"), so a wrapper that queries unguarded raises
+                # `NoMatches` out of a path the app treats as normal — which
+                # surfaces as a boot-timing flake here rather than as a defect
+                # in the app. Measured on a loaded host: the unguarded shape
+                # fails intermittently with `NoMatches` on a screen still
+                # classed `boot boot-card`.
+                #
+                # NARROWER than the production method's bare `except
+                # Exception`, deliberately. There the breadth is the point (a
+                # status surface must not be able to take the app down); here
+                # the only expected failure is the not-yet-composed query, and
+                # a test double that swallowed anything else would hide the
+                # defect it exists to expose.
+                try:
+                    band = self.query_one("#band")
+                except NoMatches:  # not composed yet (early boot)
+                    return
+                band.remove_class("has-slot")
 
             app._sync_band_inset = without_inset.__get__(app)  # type: ignore[method-assign]
         async with app.run_test(size=(100, height)) as pilot:
@@ -2416,6 +2472,74 @@ def test_the_paused_word_matches_the_state_the_phone_already_shows() -> None:
 
     assert "parked" in get_args(SubagentStatus)
     assert status_glyph("cancelled", paused=True)[1] != status_glyph("cancelled")[1]
+
+
+@pytest.mark.asyncio
+async def test_the_dock_names_a_cut_off_child_as_cut_off() -> None:
+    """Design round 2, D8: two rows that differ in fact must not be identical.
+
+    A restored child whose run a runtime death cut off carries
+    ``status == "interrupted"`` — that is the only word the ROSTER has for a run
+    that never settled — so the dock painted it exactly like a child the user
+    stopped on purpose, while the cause that had just reached the wire
+    (``AsyncJob.cut_off_cause``) rendered nowhere. The row now says ``cut off``,
+    the word the live notice and the stranded tool card already use;
+    ``interrupted`` stays reserved for a recorded deliberate stop, which is why
+    the control below must keep it.
+    """
+    from local_operator.tui.widgets.subagent_panel import (
+        GLYPH_INTERRUPTED,
+        status_glyph,
+    )
+
+    session = FakeSession()
+    now = time.time()
+    cut = _Job("cut", "draft the memo", status="interrupted")
+    cut.cut_off_cause = "owner-lost"
+    cut.restored = True
+    cut.settled_at = now
+    stopped = _Job("stopped", "rank the leads", status="interrupted")
+    stopped.restored = True
+    stopped.settled_at = now
+    jobs = [cut, stopped]
+    session.jobs = _fake_jobs(*jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        for _ in range(4):
+            await pilot.pause()
+        rendered = {
+            job_id: compose_row(
+                facts=row_facts(
+                    panel._jobs_by_id[job_id],
+                    fallback_id=job_id,
+                    current=False,
+                    paused=job_id in panel._paused_ids,
+                ),
+                stats=JobStats(),
+                spinner_glyph="⣾",
+                width=100,
+                rung=0,
+                column=40,
+                clock=6,
+                role_column=0,
+            ).plain
+            for job_id in panel._rows
+        }
+
+    assert "cut off" in rendered["cut"], rendered["cut"]
+    assert "interrupted" not in rendered["cut"], (
+        f"a cut-off child is still named by the word reserved for a deliberate "
+        f"stop: {rendered['cut']}"
+    )
+    assert "interrupted" in rendered["stopped"], rendered["stopped"]
+    # The GLYPH and the INK are shared, and that is the design round's placement
+    # call: ``↺`` already means "rehydrated and resumable", which is true of
+    # both, and the tone is carried by the notice that named the cause. Only the
+    # word splits.
+    assert status_glyph("interrupted", cut_off=True)[0] == GLYPH_INTERRUPTED
+    assert status_glyph("interrupted", cut_off=True)[2] == status_glyph("interrupted")[2] == "muted"
 
 
 @pytest.mark.asyncio

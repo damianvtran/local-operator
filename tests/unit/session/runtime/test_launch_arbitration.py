@@ -312,6 +312,191 @@ async def test_engaging_during_construction_waits_instead_of_spawning(
 
 
 @pytest.mark.asyncio
+async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
+    fleet: FakeRuntimeFleet, tmp_path: Path
+) -> None:
+    """A corpse is not a constructor: engage must spawn, and the spawn must win.
+
+    The loop reads "a lease with no record" as someone mid-construction and
+    waits for their record rather than spawning a doomed twin. That reading was
+    wrong for a claim whose owner had exited without being reaped — the pid is
+    still in the process table, so signal 0 called it a live constructor — and
+    the cost was the whole deadline (30 s) followed by a failure naming nobody,
+    which is the phone's first message to such a session never starting a
+    runtime. With the owner proven dead the loop spawns, and that candidate's
+    real ``acquire_session_lease`` takes the claim over.
+
+    Recovery is on the FIRST pass, and that is the point of deferring only on the
+    dense grid rather than on elapsed time: a holder nobody can prove live yet is
+    proven dead immediately, so this pays neither the old 30 s wait nor a
+    window-sized stall. The 15 s cap is only a hang guard.
+    """
+    from tests.unreaped import unreaped_child
+
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    fleet.loop = asyncio.get_running_loop()
+    with unreaped_child() as zombie_pid:
+        (session_dir / ".execution-lease").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "session_id": SESSION_ID,
+                    "generation": "d" * 32,
+                    "pid": zombie_pid,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        (session_dir / ".session.pid").write_text(str(zombie_pid), encoding="utf-8")
+
+        # Shorter than the loop's own 30 s deadline: if the corpse is read as a
+        # constructor, this raises TimeoutError rather than passing late.
+        await asyncio.wait_for(
+            engage_runtime(SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path),
+            timeout=15,
+        )
+
+    assert fleet.winners == 1, "the zombie's claim was never taken over"
+    assert fleet.losers == 0, "the corpse was read as a live contender"
+    assert fleet.deferred == [True]
+
+
+def _count_every_corpse_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count calls to the zombie probe from EVERY module that has bound it.
+
+    Patching one caller is not enough, and that is a finding rather than a
+    nicety: the loop asks the same question twice per pass — once through
+    ``find_runtime_record``'s owner lookup and once through ``_lease_holder`` —
+    so a counter wired to one of them reports a fork-free grid while the other
+    forks (QA round 2, Q1). The carriers are discovered by identity from
+    ``sys.modules`` after the two modules are imported explicitly, so the
+    instrument names what it counts, and a third binding site would be counted
+    the day it is written. Residual, and deliberately visible: a module that
+    binds the probe for the FIRST time after this call would not be counted,
+    which is why the expected carriers are asserted below.
+
+    Counts INVOCATIONS, not forks: on Linux ``is_zombie`` answers from ``/proc``
+    without forking, but the expensive question is asked either way, and that is
+    the thing a dense grid must not do.
+    """
+    from local_operator import procstate
+    from local_operator import resume as resume_module  # binds the probe too
+    from local_operator import session_lease as lease_module  # and so does this
+
+    real = procstate.is_zombie
+    calls: list[int] = []
+
+    def counting(pid: int) -> bool:
+        calls.append(pid)
+        return real(pid)
+
+    holders = []
+    for module in list(sys.modules.values()):
+        try:
+            if getattr(module, "is_zombie", None) is real:
+                holders.append(module)
+        except Exception:  # noqa: BLE001 — a module with a raising __getattr__
+            continue
+    names = {module.__name__ for module in holders}
+    assert {
+        lease_module.__name__,
+        resume_module.__name__,
+    } <= names, f"not every carrier is imported, so this counter is partial: {sorted(names)}"
+    for module in holders:
+        monkeypatch.setattr(module, "is_zombie", counting)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_the_dense_starting_window_pays_no_corpse_probe(tmp_path: Path, monkeypatch) -> None:
+    """The proofs are DEFERRED so the densest cadence stays fork-free (MAJOR-1).
+
+    A claim that is held while no record exists is read as a construction in
+    flight, and the loop then polls every 10 ms against a published budget of
+    23-30 µs per iteration (``_poll_delay``). Proving that a holder is a corpse —
+    rather than a pid signal 0 merely accepts — costs a `ps` fork measured at
+    2.4-4.6 ms across runs on this class of host: 24-46% of the dense period,
+    paid straight out of the dead time the dense grid exists to remove. So the
+    grid asks only the cheap question, and this pins it: a live holder that never
+    publishes may cost ONE pass's worth of proof (the pass that first observes
+    the holder, before any grid is in force) and nothing thereafter, however long
+    the loop stays inside that grid.
+
+    The deferral is a LATENCY trade and never a safety one — only the spawned
+    child's ``acquire_session_lease`` may take a claim, and it always demands the
+    proof — so the tests around this one show both other ends: a corpse's claim
+    IS taken over, and the proof IS spent once the grid goes coarse.
+    """
+    probes = _count_every_corpse_probe(monkeypatch)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # A LIVE holder that never publishes: the loop's STARTING branch. The
+    # deadline is shorter than the window on purpose, so every pass under test is
+    # a dense one.
+    holder = acquire_session_lease(session_dir)
+    try:
+        with pytest.raises(TimeoutError):
+            await engage_runtime(
+                SESSION_ID,
+                str(tmp_path),
+                WarmErrand(),
+                config_dir=tmp_path,
+                deadline_s=1.0,
+            )
+    finally:
+        holder.release()
+
+    # TWO probes is exactly one pass's worth: the first pass is not yet a DENSE
+    # one (nothing was believed to be constructing until it observed the holder),
+    # and it spends the proof on both of its probes. Every pass after it is dense
+    # and spends none — a grid that forked per pass would have made ~200 calls in
+    # this second, which is the number QA round 2 measured before this fix.
+    assert len(probes) <= 2, f"a dense pass spent the corpse proof: {probes[:5]}"
+    assert _CONSTRUCTING_WINDOW_S > 1.0, "this test's deadline must sit inside the window"
+
+
+@pytest.mark.asyncio
+async def test_the_corpse_proof_is_spent_once_the_grid_goes_coarse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half of the trade: the deferral is keyed to the CADENCE.
+
+    If it were keyed to elapsed time instead, the loop would keep asking the
+    cheap question while it waits for a construction that never comes — and a
+    corpse's claim would then be waited on rather than proven dead, which is the
+    wedge this branch exists to remove. So the proof must appear as soon as the
+    grid is the coarse one, and at the COARSE rate: a handful of probes across
+    0.6 s, not the ~60 passes a 10 ms grid would make.
+    """
+    probes = _count_every_corpse_probe(monkeypatch)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    holder = acquire_session_lease(session_dir)
+    try:
+        with pytest.raises(TimeoutError):
+            await engage_runtime(
+                SESSION_ID,
+                str(tmp_path),
+                WarmErrand(),
+                config_dir=tmp_path,
+                deadline_s=_CONSTRUCTING_WINDOW_S + 0.6,
+            )
+    finally:
+        holder.release()
+
+    assert probes, "the proof was never spent: a corpse would be waited on, not recovered"
+    # Two probes per pass on the coarse grid (discovery + lease), ~5 passes in
+    # 0.6 s; a dense grid would be ~60 passes.
+    assert len(probes) <= 25, f"{len(probes)} probes in a 0.6 s coarse tail is still a dense fork"
+
+
+@pytest.mark.asyncio
 async def test_warm_errand_defers_materialisation_and_others_do_not(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
@@ -521,6 +706,90 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
     assert "x.py" not in raised.value.actionable
 
 
+def test_spawn_runtime_carries_a_chosen_birth_effort_to_the_child(tmp_path, monkeypatch) -> None:
+    """The chosen REASONING LEVEL reaches the child's environment with the pair.
+
+    Same reason as the argv test above: every other caller monkeypatches
+    ``_spawn_runtime`` away, so the line that exports the birth selection is
+    pinned by nothing while the whole suite stays green. The level must ride the
+    ENVIRONMENT (the child is CONSTRUCTED on it, so its first state, its first
+    provider call and the selection row it journals at admission all agree)
+    rather than being applied afterwards over the model RPC, which would leave
+    the child briefly on the model's seeded default.
+
+    The inherited-value half is not decoration: a cell run from inside another
+    session inherits that session's spawn flags, and a stale
+    ``LOP_MOBILE_CHILD_EFFORT`` would silently level a fresh conversation from a
+    sibling that finished hours ago (the failure AGENTS.md records for these
+    prefixes costing two QA rounds a false result).
+    """
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: list[dict[str, str]] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded.append(kwargs.get("env") or {})
+        return _Popen()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("LOP_MOBILE_CHILD_EFFORT", "stale-from-a-sibling")
+    monkeypatch.setenv("LOP_MOBILE_CHILD_PROVIDER", "stale")
+
+    chosen = ModelSpec(provider="deepseek", model_id="deepseek-flash", reasoning_effort="max")
+    force = launch_module._spawn_runtime(
+        "sess-effort1",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=chosen,
+        model_selection_override=True,
+    )
+    capture = getattr(force, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # No level chosen (the CLI's ``--model`` birth, every older caller): the key
+    # must be ABSENT, not empty, or the child would be handed a blank level.
+    plain = launch_module._spawn_runtime("sess-effort2", str(tmp_path), defer_materialise=True)
+    capture = getattr(plain, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # A pick that named a MODEL and no LEVEL (review round 1, R1): the pair rides,
+    # the level does not — and the inherited ``stale-from-a-sibling`` above must
+    # not survive it either, or a conversation born on "this model, no level"
+    # silently inherits a sibling's reasoning level instead of resolving the
+    # machine's configured ``model_effort``.
+    pair_only = launch_module._spawn_runtime(
+        "sess-effort3",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=ModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        model_selection_override=True,
+    )
+    capture = getattr(pair_only, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    assert recorded[0]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
+    assert recorded[0]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
+    assert recorded[0]["LOP_MOBILE_CHILD_EFFORT"] == "max"
+    assert recorded[0]["LOP_MODEL_SELECTION_OVERRIDE"] == "1"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[1]
+    assert recorded[2]["LOP_MOBILE_CHILD_MODEL"] == "deepseek-flash"
+    assert recorded[2]["LOP_MOBILE_CHILD_PROVIDER"] == "deepseek"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in recorded[2]
+    assert "LOP_MOBILE_CHILD_PROVIDER" not in recorded[1]
+    assert "LOP_MODEL_SELECTION_OVERRIDE" not in recorded[1]
+
+
 def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     tmp_path, monkeypatch
 ) -> None:
@@ -543,6 +812,13 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     a clean merge can drop either half independently: the flag must sit at index
     1 (interpreter options are only recognised BEFORE `-m`), and argv[0] carries
     the process label whenever a branded image exists.
+
+    `start_new_session` is asserted here for the same reason and one stronger
+    one: it is the DETACHMENT contract. It is what makes the runtime a separate
+    session and group leader, so a terminal teardown cannot reach it — the
+    invariant ``test_runtime_detachment`` pins on a real process. Dropping the
+    kwarg is a one-word diff that no other test would catch, and its symptom
+    (sessions dying with the interface) is exactly the operator's report.
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
@@ -564,6 +840,9 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
         # No `cwd=` is the whole reason the flag is required: the child would
         # otherwise inherit the viewer's directory and import a checkout there.
         recorded["cwd"] = kwargs.get("cwd", _MISSING)
+        # The detachment contract: see the docstring. Recorded as-is (not
+        # defaulted) so its ABSENCE is a recorded fact too.
+        recorded["start_new_session"] = kwargs.get("start_new_session")
         return _Popen()
 
     monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
@@ -584,6 +863,11 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     # Still no `cwd=`: if one is ever added the flag stops being the thing that
     # protects the import, and this assertion should be revisited deliberately.
     assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"
+    assert recorded["start_new_session"] is True, (
+        "the spawn in launch.py lost `start_new_session=True`, so the runtime "
+        "is no longer its own session/group leader and an interface teardown "
+        f"can signal it; kwargs={recorded!r}"
+    )
 
     # argv[0] is the process LABEL when a branded image exists (`executable=`
     # then carries the real image), and the bare interpreter when it does not.
@@ -945,9 +1229,20 @@ async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
     # function-local import in the loop, so it is patched at its source module.
     monkeypatch.setattr(
         "local_operator.mobile.attach_client.find_runtime_record",
-        lambda config_dir, session_id: (record, os.getpid()),
+        # Mirrors the real signature, including the probe-mode keyword the loop
+        # passes on every call. A double that accepts fewer arguments than the
+        # function under test fails the moment the call shape changes, which is
+        # the point: the loop asks two probes per pass and both carry it.
+        lambda config_dir, session_id, **_probe: (record, os.getpid()),
     )
-    monkeypatch.setattr(launch_module, "_lease_holder", lambda config_dir, session_id: os.getpid())
+    monkeypatch.setattr(
+        launch_module,
+        "_lease_holder",
+        # Mirrors the real signature, including the probe-mode keyword the loop
+        # passes: a double that accepted fewer arguments than the function under
+        # test would fail the moment the loop's call shape changed.
+        lambda config_dir, session_id, **_probe: os.getpid(),
+    )
 
     dials = 0
 

@@ -111,7 +111,7 @@ async def test_the_transcript_row_shows_the_typed_line_not_the_block(workspace) 
     Without it a one-line question about a file paints as the whole file.
 
     NAMING is deliberately not cited as a second reason. It does not read this
-    text: `_submit_prompt` titles from `named = typed or text` (`app.py:20413`)
+    text: `_submit_prompt` titles from `named = typed or text` (`app.py:23987`)
     and nothing in `session/naming.py` calls `user_row_text`. The transcript-row
     reason is sufficient on its own, and a load-bearing comment that states
     something false is a defect in this repo, not a nit.
@@ -306,7 +306,7 @@ async def test_expansion_is_awaited_outside_the_turn_lock(workspace) -> None:
     refactor cannot quietly return it to measuring nothing.
     """
     session = FakeSession()
-    # The real session's lock is `asyncio.Lock` (`session/session.py:2305`); the
+    # The real session's lock is `asyncio.Lock` (`session/session.py:2327`); the
     # fake needs the same TYPE, not a stand-in, because the detector's
     # `isinstance` check is what decides whether a reading is taken at all.
     # Set on the FAKE rather than declared on it: `test_app_pilot.FakeSession`
@@ -484,8 +484,8 @@ async def test_the_aside_DECLINES_a_sensitive_path_and_still_asks_the_question(
 
     `_expand_references` passes a gate that DECLINES rather than the interactive
     one, because awaiting the interactive gate from the aside worker cancels
-    that worker: `request_tool_approval` closes the aside (`app.py:16909`) and
-    `_close_aside` cancels the group the worker runs in (`app.py:29786`). The
+    that worker: `request_tool_approval` closes the aside (`app.py:20177`) and
+    `_close_aside` cancels the group the worker runs in (`app.py:34020`). The
     failure that produced was a question discarded in silence, so the property
     asserted FIRST here is that the question survives at all.
     """

@@ -10,9 +10,15 @@ Since 0.46.0 every fresh `lop` is a **viewer**: the TUI holds a cold
 (`python -m local_operator.session.runtime.process`, spawned from
 `sys.executable` — `local_operator/session/runtime/launch.py:210-211`) owns the
 real `Session`. Two long-lived populations therefore coexist on one host —
-TUIs and runtimes — while `lop-update` replaces the on-disk uv-tool install
-under them, often several times a day. Skew happens in both directions and
-nothing today detects it.
+TUIs and runtimes — while an install lands under them, often several times a
+day. Skew happens in both directions and nothing today detects it.
+
+> Amended by the install-generation layout
+> (`docs/design-install-generations.md`): an install no longer rewrites the tree
+> a process holds — each build has its own generation and `current` is a pointer
+> — so "an install lands under them" now means the POINTER moved. The skew this
+> document detects is unchanged; see §6 item 9 for what a mixed-generation fleet
+> makes of it.
 
 The Sep 5 incident is the concrete shape:
 
@@ -502,7 +508,10 @@ drifted TUI resumes the same session on the new build.
 6. **Lazy-import Frankenstein.** A days-old TUI that lazily imports a module
    *after* `lop-update` mixes builds inside one process. A detects the
    precondition at the next adopt/engage and names `/reload`; nothing can make
-   the already-loaded modules young again. Not made worse by this PR.
+   the already-loaded modules young again. Not made worse by this PR — and under
+   the generation layout (§6.9) the precondition itself is unreachable for a
+   generation process, whose tree is never rewritten. It still applies to a
+   pip/pipx install and to a process started before the machine migrated.
 7. **Post-release noise.** Every resident runtime predates the `version`
    field when this ships, so the C "predates build reporting" notice fires
    once per (session, TUI process) during the first attach window. It is
@@ -512,6 +521,31 @@ drifted TUI resumes the same session on the new build.
    not action-carrying — no completion can trigger for it. `SessionRecord`
    additive fields are invisible to older daemons by the existing
    `from_json` filter.
+
+9. **Mixed generations become a steady state** (added by the install-generation
+   layout, `design-install-generations.md`). Each build lives in its own tree and
+   `current` is a pointer resolved at exec, so a runtime that loaded build N
+   keeps reading build N while new engagements construct on build N+1. The skew
+   this document exists to detect becomes the NORMAL case rather than the
+   accident, and the honest consequences are:
+
+   * a viewer and its runtime can differ by a generation for as long as the
+     runtime stays busy — already handled (A names `/reload`, B repairs across
+     it, C names a runtime that is behind), and now expected rather than
+     exceptional;
+   * the retirement path is CONVERGENCE, not safety: a runtime leaves when it is
+     idle because that is when it costs nothing, not because its files are about
+     to disappear (`design-runtime-autorefresh.md` §3.2, amended);
+   * two generations built from the SAME commit carry identical stamps (version
+     and ref both equal), so the watch sees no move and that runtime converges
+     on its next natural turnover instead. That is accepted: the fleet is not
+     required to be single-build, only to keep working — and a rebuild of one
+     commit is exactly the case where the two builds are interchangeable.
+   * the disk half of every comparison is the POINTER
+     (`update.disk_build`), never this process's own tree: a watch that compared
+     a process against its own generation would report "no move" forever, and one
+     that read the pointer's marker with this process's version would invent a
+     build that never existed (`update.disk_build`'s docstring).
 
 ## 7. PR shape
 

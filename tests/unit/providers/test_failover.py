@@ -4,8 +4,10 @@ streaming with fake clients/auth."""
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import random
+import ssl
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
@@ -16,9 +18,11 @@ import httpx
 import pytest
 
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamUsageEvent,
@@ -46,6 +50,7 @@ from local_operator.providers.failover import (
     connectivity_backoff_delay_ms,
     expand_fallback_candidates,
     expand_fallback_targets,
+    is_aggregator_upstream_stream_failure,
     is_auth_error,
     is_connectivity_loss,
     is_direct_credential_rotation_error,
@@ -546,6 +551,307 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -> None:
+    """The bound follows the model swap instead of riding the primary's ask.
+
+    The hop used to be ``model_copy(update={"model": spec})``, and ``model_copy``
+    cannot re-run the validator -- so the primary's fill went onto a fallback that
+    publishes a smaller ceiling (34 shipped rows publish under 20,000; here
+    4,096), which is an ask above the target's own published maximum and a
+    provider-dependent 400 where main re-read the spec (review M1 / QA Q5). The
+    reverse direction is the same defect: a small model's ask stayed on a large
+    fallback where a fresh request carries the contract's own. The small-to-big
+    half is pinned at the contract (``tests/unit/harness/test_types.py``); this
+    drives the direction a real chain walk takes.
+    """
+    seen: list[tuple[str, int | None]] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        def wrapper(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            seen.append((request.model.model_id, request.max_tokens))
+            if spec.model_id == "gpt-4o":
+                return ScriptedClient(ProviderError(500, "boom", retryable=True)).stream(
+                    request, api_key
+                )
+            return ScriptedClient(
+                [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+            ).stream(request, api_key)
+
+        return _FnClient(wrapper)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-3-haiku-20240307"]},
+        }
+    }
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    # The primary names no ask of its own and advertises a capability-shaped
+    # ceiling, so the contract bounds it at the policy; the fallback's own
+    # published 4,096 is the smaller limit and must be what goes out, not the
+    # primary's 131,072.
+    primary = ChatRequest(
+        model=ModelSpec(
+            provider="openai",
+            model_id="gpt-4o",
+            context_window=1_047_576,
+            max_output_tokens=1_047_576,
+        )
+    )
+    got = [event async for event in stream_with_failover(primary, auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # The primary is retried on its own credential before the chain moves, so the
+    # two routes are grouped rather than indexed.
+    assert {ask for model_id, ask in seen if model_id == "gpt-4o"} == {DEFAULT_TURN_OUTPUT_TOKENS}
+    assert [ask for model_id, ask in seen if model_id == "claude-3-haiku-20240307"] == [4_096]
+
+
+class _FailsAfter:
+    """Emits scripted events, then dies mid-stream (a pre-content death)."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        for event in self._events:
+            yield event
+        raise ProviderError(500, "boom", retryable=True)
+
+
+@pytest.mark.parametrize(
+    ("leading", "walks_chain"),
+    [
+        ([], True),
+        ([StreamStartEvent(response_id="r1")], True),
+        ([StreamReasoningDelta(delta="weighing the options")], True),
+        (
+            [StreamStartEvent(response_id="r1"), StreamReasoningDelta(delta="weighing")],
+            True,
+        ),
+        # Usage is accounting, not content: it renders nothing, joins no
+        # transcript, and its consumers are documented as firing once per
+        # provider call -- so a lone usage event cannot be a reason not to
+        # retry. It is the shape an OpenAI-compatible aggregator produces when
+        # it reports accounting before any content, and the write that used to
+        # make a trivially retryable pre-content 5xx look like a mid-stream cut.
+        ([StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))], True),
+        (
+            [
+                StreamStartEvent(response_id="r1"),
+                StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0)),
+            ],
+            True,
+        ),
+        # The control: a VISIBLE delta is output the caller can see, so the
+        # attempt must not be replayed. Without this row, a carve-out that
+        # swallowed every event would pass every row above.
+        ([StreamTextDelta(delta="half an answer")], False),
+    ],
+    ids=[
+        "nothing",
+        "start",
+        "reasoning",
+        "start-and-reasoning",
+        "usage",
+        "start-and-usage",
+        "visible-text",
+    ],
+)
+async def test_a_pre_content_failure_after_a_non_content_event_still_walks_the_chain(
+    leading: list[Any], walks_chain: bool
+) -> None:
+    """What gates a retry is output the caller has SEEN, and these events are not.
+
+    ``forwarded_any`` means exactly that: the caller has seen output that cannot
+    be un-shown, so replaying the attempt would stream it twice. Only the events
+    in ``_RETRY_SAFE_STREAM_EVENTS`` fail that test — a boundary marker, the
+    model's private reasoning, and the provider's token accounting — and each
+    one is exempt for its own reason, spelled out there.
+
+    What this test protects is the CLASS of mistake rather than one instance of
+    it: each carve-out was added after the same bug was found in the wild, one
+    event type at a time, so the rows below are the members that exist plus the
+    control that must never move. A new member needs its own row here; deleting
+    the member from the tuple must fail the matching row and only that row.
+
+    The last row is the boundary that must not move: a visible delta still
+    blocks the retry, so this cannot degrade into "retry everything".
+    """
+
+    specs_seen: list[ModelSpec] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.model_id == "gpt-4o":
+            return _FailsAfter(leading)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    if not walks_chain:
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+        assert [spec.model_id for spec in specs_seen] == ["gpt-4o"]
+        return
+
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert specs_seen[-1].model_id == "claude-x"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # What this attempt produced is still FORWARDED -- carving a member out of
+    # the retry gate must not swallow it. Asserted as a set rather than a count:
+    # a pre-content failure is retried on the same target before the chain is
+    # walked, and each of those attempts legitimately re-emits the channel. How
+    # many attempts the ladder burns is the ladder's business.
+    forwarded = {e.delta for e in got if isinstance(e, StreamReasoningDelta)}
+    assert forwarded == {
+        event.delta for event in leading if isinstance(event, StreamReasoningDelta)
+    }
+    # Same rule for the accounting channel. Compared field-by-field rather than
+    # by identity because ``_stamp_serving_spec`` re-stamps a forwarded usage
+    # event with the serving spec, which is what makes a failover's cost land on
+    # the provider that actually served it.
+    forwarded_usage = [e.usage for e in got if isinstance(e, StreamUsageEvent)]
+    for usage in (event.usage for event in leading if isinstance(event, StreamUsageEvent)):
+        assert any(
+            served.input_tokens == usage.input_tokens
+            and served.output_tokens == usage.output_tokens
+            for served in forwarded_usage
+        ), "a forwarded usage event must survive the retry gate it was carved out of"
+
+
+async def test_a_lone_usage_event_rotates_the_credential_and_walks_the_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The usage carve-out must reach BOTH retry mechanisms, not just the chain.
+
+    ``forwarded_any`` is checked once, but it gates two behaviours: the tier-1
+    sibling rotation inside the provider and the tier-2 walk to the next target.
+    The parametrised test above proves the chain; a lone usage event that still
+    froze rotation would look identical there, because the walk happens anyway
+    once rotation returns "nothing left". So this test keeps a SECOND openai key
+    in the pool and asserts the second key is actually asked -- the observable
+    that distinguishes "rotated, then walked" from "never rotated".
+    """
+    sleeps: list[int] = []
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    used_keys: list[str | None] = []
+    specs_seen: list[ModelSpec] = []
+    accounting = Usage(input_tokens=7, output_tokens=0)
+
+    def primary(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        used_keys.append(api_key)
+
+        async def generate() -> AsyncIterator[Any]:
+            # Exactly the real shape: the provider accounts for the call, then
+            # the attempt dies before ANY content is forwarded.
+            yield StreamUsageEvent(usage=accounting)
+            raise ProviderError(500, "boom", retryable=True)
+
+        return generate()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.model_id == "gpt-4o":
+            return _FnClient(primary)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    auth = FakeAuth({"openai": ["k1", "k2"], "anthropic": ["k3"]})
+
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    # Rotated to the sibling account...
+    assert "k2" in used_keys, (
+        "a lone usage event must not stop tier-1 rotation; asked keys were "
+        f"{used_keys} with rotations {auth.rotations}"
+    )
+    assert auth.rotations[0] == ("openai", "k1")
+    # ...on the FAST transient budget, not the patient connectivity one: nothing
+    # about this failure resembles the machine being offline.
+    assert sleeps and max(sleeps) <= BACKOFF_CAP_MS
+    # ...and only then walked to the next provider.
+    assert specs_seen[-1].model_id == "claude-x"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # The accounting the failed attempt reported still reached the caller: it is
+    # metadata about a call that really happened, not content to be discarded.
+    assert any(
+        isinstance(e, StreamUsageEvent) and e.usage.input_tokens == accounting.input_tokens
+        for e in got
+    )
+
+
+async def test_a_usage_only_transport_cut_is_not_reported_as_mid_stream() -> None:
+    """The SAME flag feeds the mid-stream inference, so the carve-out must hold
+    on the transport arm too -- and this is the arm where the old behaviour did
+    real harm.
+
+    ``is_mid_stream_connectivity_loss`` reads ``forwarded_any`` through this
+    driver: bytes already forwarded means an interrupted answer, which the loop
+    CONTINUES (patient wait, then re-ask) instead of surfacing. A lone usage
+    event is not an answer, so a socket that dies after one is an ordinary
+    pre-content transport failure: the loop must be told to surface it, not to
+    continue a turn whose text never started.
+
+    The positive control lives next door, in
+    ``test_the_driver_marks_a_cut_that_already_forwarded_bytes``: the same kind
+    of cut after a VISIBLE delta must still be marked continuable.
+    """
+
+    async def client_for(spec: ModelSpec) -> Any:
+        async def generate(
+            request: ChatRequest, api_key: str | None, oauth_access: Any = None
+        ) -> AsyncIterator[Any]:
+            yield StreamUsageEvent(usage=Usage(input_tokens=7, output_tokens=0))
+            # No client in clients.py catches httpx, so a socket that dies
+            # mid-body reaches the driver raw -- see the driver's own comment.
+            raise httpx.ReadError("")
+
+        return _FnClient(generate)
+
+    forwarded: list[Any] = []
+    with pytest.raises(ProviderError) as excinfo:
+        async for event in stream_with_failover(
+            _request(),
+            FakeAuth({"openai": ["k1"]}),
+            # Budgets floored so a shape that IS retryable still terminates fast.
+            {
+                "retry": {
+                    "baseDelayMs": 1,
+                    "maxRetries": 1,
+                    "connectivityMaxRetries": 0,
+                    "fallbackChains": {},
+                }
+            },
+            client_for,
+        ):
+            forwarded.append(event)
+
+    assert forwarded, "the usage event must reach the caller, not be swallowed"
+    assert not excinfo.value.connectivity_loss, (
+        "a cut that only ever forwarded accounting was marked as an interrupted "
+        "answer, so the loop will continue a turn whose text never started"
+    )
 
 
 async def test_failover_stamps_serving_spec_on_usage() -> None:
@@ -2576,6 +2882,13 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
     by default for an ordinary request: the first five come from
     ``stream_with_failover``'s ``isolated`` branch, the sixth from the read-only
     credential resolve it asks for.
+
+    The branch's one sanctioned second attempt — a bearer rejected outright
+    (401/403) followed by a READ-ONLY re-resolve that hides the rejected
+    bearer — is exercised below, and every test around it re-asserts that the
+    widening bought the errand a title WITHOUT buying it any routing decision:
+    no rotation, no block, no demotion, no sticky write, no route state, no
+    sleep, and at most two wire attempts ever.
     """
 
     @staticmethod
@@ -2604,9 +2917,106 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
             ]
         assert specs_seen == ["gpt-4o"], "an isolated call walked onto a fallback model"
 
-    async def test_it_never_rotates_the_sessions_credential(self) -> None:
-        """``rotate_sibling`` moves the session's STICKY credential, so an auth
-        failure on a title would re-point the account the turn transacts on."""
+    class _SiblingResolvingAuth(FakeAuth):
+        """A store whose read-only re-resolve can see past a rejected bearer.
+
+        ``exclude_keys`` hides a row from ONE resolve alone — the real
+        ``AuthStore``'s parameter for the errand's sibling leg. ``FakeAuth``
+        itself ignores it, which is exactly the "same bearer again" case the
+        one-attempt rule must keep covering for stores without the support.
+        """
+
+        async def get_api_key(
+            self, provider: str, session_id: str | None = None, **kwargs: Any
+        ) -> str | None:
+            pool = self.keys.get(provider, [])
+            excluded = set(kwargs.get("exclude_keys") or ())
+            for key in pool:
+                if key not in excluded:
+                    return key
+            return pool[0] if pool else None
+
+    async def test_an_auth_rejection_serves_itself_from_a_sibling_without_rotating(
+        self,
+    ) -> None:
+        """The rewrite of the old ``never_rotates`` test under the auth-retry
+        rule. The wire now sees both bearers — that is the point of the fix —
+        but the ROUTING denial is absolute: ``rotate_sibling`` moves the
+        session's STICKY credential, so the errand must still never call it,
+        and it must leave the pinned route alone while it is at it."""
+        auth = self._SiblingResolvingAuth({"openai": ["bad-key", "good-key"]})
+        used_keys: list[str | None] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                if api_key == "bad-key":
+                    return ScriptedClient(
+                        ProviderError(401, "invalid api key", auth_error=True)
+                    ).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        pinned = FallbackTarget("anthropic/claude-opus-5", "high")
+        state = FailoverRouteState()
+        await state.activate(pinned, "an earlier turn failed over")
+        got = [
+            event
+            async for event in stream_with_failover(
+                self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
+            )
+        ]
+        assert used_keys == [
+            "bad-key",
+            "good-key",
+        ], "the errand did not spend its one auth retry on the sibling"
+        assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+        assert auth.rotations == [], "an isolated call rotated the session's credential"
+        assert state.active == pinned, "the auth retry moved the turn's sticky route"
+
+    async def test_a_dead_pool_ends_the_errand_after_exactly_two_attempts(self) -> None:
+        """The retry is a latch, not a walk. A pool where EVERY key is rejected
+        gets two wire attempts — the rejected bearer plus the one sibling the
+        read-only re-resolve produced — and then the errand dies, even though a
+        third sibling was available. A decorative call must not spend a pool
+        auditing itself for a title nobody asked to see."""
+        auth = self._SiblingResolvingAuth({"openai": ["bad-key", "bad-key-2", "bad-key-3"]})
+        used_keys: list[str | None] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid api key", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
+                )
+            ]
+        assert used_keys == ["bad-key", "bad-key-2"], "the errand walked past its single auth retry"
+        assert auth.rotations == []
+
+    async def test_a_re_resolve_that_yields_the_same_bearer_makes_exactly_one_attempt(
+        self,
+    ) -> None:
+        """The retry is CONDITIONAL on a different bearer: a store that cannot
+        hide the rejected row (no ``exclude_keys`` support — every store predating
+        it, and any pool of one) hands the same bearer back, and re-sending it
+        would be a guaranteed second 401 spent on nothing. That store keeps
+        today's one-attempt behaviour."""
         auth = FakeAuth({"openai": ["bad-key", "good-key"]})
         used_keys: list[str | None] = []
 
@@ -2628,8 +3038,201 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                     self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
                 )
             ]
-        assert used_keys == ["bad-key"], "an isolated call retried on a second credential"
-        assert auth.rotations == [], "an isolated call rotated the session's credential"
+        assert used_keys == ["bad-key"], "re-sent the rejected bearer"
+        assert auth.rotations == []
+
+    async def test_an_oauth_row_whose_refresh_would_succeed_still_yields_to_the_sibling(
+        self,
+    ) -> None:
+        """The refresh-same-account leg is SKIPPED for an isolated re-resolve.
+
+        ``resolve_next_key`` ordinarily force-refreshes the current account
+        before rotating, and ``_accept`` takes any bearer string it has not
+        tried — so a refresh that SUCCEEDS returns a new string for the same
+        rejected row and consumes the errand's one extra attempt on the
+        credential least likely to work, leaving the healthy sibling unasked.
+        That is not a hypothetical: it is the shape of an OAuth pool (the
+        anthropic rows), where the provisional opener therefore stuck forever
+        even with this fix in place.
+
+        Asserted two ways, because either alone would pass for the wrong
+        reason: the second WIRE bearer is the sibling's, and no refresh was
+        requested for this errand at all.
+        """
+        refreshes: list[bool] = []
+        used_keys: list[str | None] = []
+
+        class OAuthStore:
+            """Row 1 rejects at the wire but refreshes happily; row 2 is healthy."""
+
+            def __init__(self) -> None:
+                self.row_one = "oauth-bad"
+
+            async def get_oauth_access(
+                self,
+                provider: str,
+                session_id: str | None = None,
+                *,
+                force_refresh: bool = False,
+                read_only: bool = False,
+                model_id: str = "",
+                exclude_keys: Any = None,
+                exclude_credential_ids: Any = None,
+            ) -> Any:
+                from local_operator.providers.auth_store import OAuthAccess
+
+                refreshes.append(force_refresh)
+                excluded_ids = set(exclude_credential_ids or ())
+                excluded_keys = set(exclude_keys or ())
+                if force_refresh:
+                    # The token rotates, which is exactly why a bearer-only
+                    # exclusion cannot identify this row.
+                    self.row_one = "oauth-bad-refreshed"
+                if 1 not in excluded_ids and self.row_one not in excluded_keys:
+                    return OAuthAccess(self.row_one, 1, kind="oauth")
+                if 2 not in excluded_ids:
+                    return OAuthAccess("oauth-good", 2, kind="oauth")
+                return None
+
+            async def get_api_key(
+                self, provider: str, session_id: str | None = None, **kwargs: Any
+            ) -> str | None:
+                record = await self.get_oauth_access(provider, session_id, **kwargs)
+                return record.access_token if record is not None else None
+
+            def rotate_sibling(self, *args: Any, **kwargs: Any) -> bool:
+                raise AssertionError("an isolated errand must never rotate")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                if api_key == "oauth-good":
+                    return ScriptedClient(
+                        [
+                            StreamTextDelta(delta="<title>x</title>"),
+                            StreamEndEvent(stop_reason="stop"),
+                        ]
+                    ).stream(request, api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid credentials", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        got = [
+            event
+            async for event in stream_with_failover(
+                self._isolated(), OAuthStore(), {"retry": {"baseDelayMs": 1}}, client_for
+            )
+        ]
+        assert used_keys == ["oauth-bad", "oauth-good"], (
+            "the errand spent its one retry re-presenting the rejected account "
+            "instead of asking the healthy sibling"
+        )
+        assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+        assert not any(refreshes), "an isolated errand forced a token refresh"
+
+    async def test_a_store_on_the_protocols_exact_signature_keeps_one_attempt(self) -> None:
+        """A store implementing ``FailoverAuthStore`` as declared, and nothing
+        more, must DEGRADE rather than break.
+
+        The Protocol now names the exclusion kwargs as optional, but a host or
+        a test double written against an older copy does not accept them: the
+        call raises ``TypeError`` inside the resolver, which the existing
+        ``except Exception`` reports as "no sibling". The errand then keeps its
+        single attempt. Asserted because the graceful-degradation claim in the
+        resolver's comment is otherwise only an assertion about code nobody
+        runs."""
+        used_keys: list[str | None] = []
+
+        class StrictStore:
+            """Exactly the pre-exclusion signature — extra kwargs raise."""
+
+            async def get_api_key(
+                self,
+                provider: str,
+                session_id: str | None = None,
+                *,
+                force_refresh: bool = False,
+                read_only: bool = False,
+                model_id: str = "",
+            ) -> str | None:
+                return "only-key"
+
+            def rotate_sibling(
+                self,
+                provider: str,
+                session_id: str | None,
+                error: Any,
+                api_key: str | None = None,
+                *,
+                model_id: str = "",
+            ) -> bool:
+                raise AssertionError("an isolated errand must never rotate")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid api key", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(),
+                    # `type: ignore` is the POINT of this test, not a wart:
+                    # `StrictStore` deliberately does NOT satisfy the widened
+                    # Protocol, which is precisely the shape whose runtime
+                    # degradation is under test. A store that type-checks here
+                    # would be exercising the supported path instead.
+                    StrictStore(),  # type: ignore[arg-type]
+                    {"retry": {"baseDelayMs": 1}},
+                    client_for,
+                )
+            ]
+        assert used_keys == ["only-key"], "a strict-signature store did not degrade to one attempt"
+
+    @pytest.mark.parametrize("status", [429, 500])
+    async def test_non_auth_failures_still_make_exactly_one_attempt_and_never_sleep(
+        self, status: int
+    ) -> None:
+        """The widening is auth-shaped ONLY. A 429 says "wait", a 5xx says "the
+        provider is having a moment", and an errand must do neither: one
+        attempt, no backoff sleep, exactly as before the fix."""
+        client = ScriptedClient(ProviderError(status, "boom", retryable=True))
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(),
+                        FakeAuth({"openai": ["bad-key", "good-key"]}),
+                        {"retry": {"baseDelayMs": 1}},
+                        client_for,
+                    )
+                ]
+        finally:
+            failover_module._abortable_sleep = original
+        assert client.calls == 1, "a non-auth failure retried on an isolated request"
+        assert slept == [], "an isolated call slept on a backoff"
 
     async def test_it_neither_pins_nor_clears_the_sticky_route(self) -> None:
         """The route state is session-wide: a title pinning a fallback would move
@@ -2779,6 +3382,79 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
             assert (
                 store._sticky[("openai", session_id)] == sibling_row.id
             ), "stickiness did not move on an ordinary request"
+        finally:
+            store.close()
+
+    async def test_the_auth_retry_leaves_the_sticky_pointer_and_block_list_byte_identical(
+        self, tmp_path: Any
+    ) -> None:
+        """The sticky row is where the bug actually lived: the observed failures
+        were sessions whose TURN had pinned the DEAD row (or nothing at all,
+        with the hash pick landing on it), so every naming errand for them
+        resolved the stale key while the turn rotated past it. The fix lets the
+        errand retry on the sibling — and this pins that it does so by HIDING
+        the rejected row from one resolve, not by blocking it or moving the
+        pointer: a real ``AuthStore`` on a temp DB, byte-identical before and
+        after. The ordinary-request control proves the fixture could have
+        mutated both, so the assertions above cannot be vacuous.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-with-a-stale-row-first"
+        dead = store.upsert_credential(
+            "openai", {"key": "stale-key", "source": "login", "type": "api_key"}
+        )
+        good = store.upsert_credential(
+            "openai", {"key": "live-key", "source": "login", "type": "api_key"}
+        )
+        # The turn is sticky on the stale row, exactly as the live sessions
+        # were: the hash pick landed there and the turn's own rotation had not
+        # fired from this errand's point of view.
+        store._sticky[("openai", session_id)] = dead.id
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                if api_key == "stale-key":
+                    rejected = ProviderError(
+                        401, "Authentication Fails, Your api key is invalid", auth_error=True
+                    )
+                    return ScriptedClient(rejected).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        try:
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert store._sticky == {
+                ("openai", session_id): dead.id
+            }, "the auth retry moved the session's sticky credential"
+            assert not store.is_blocked(
+                dead.id, "openai"
+            ), "the auth retry blocked the rejected row"
+            assert (
+                store._active_demotions("openai") == set()
+            ), "the auth retry demoted the rejected row"
+
+            # CONTROL, same store and same 401: an ordinary request DOES block
+            # the stale row and move stickiness to the sibling — which is why
+            # the turn beside a failing errand stayed healthy all along.
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert store.is_blocked(dead.id, "openai"), "the ordinary rotation blocked nothing"
+            assert store._sticky[("openai", session_id)] == good.id
         finally:
             store.close()
 
@@ -4219,6 +4895,213 @@ def test_ordinary_transient_5xx_is_not_connectivity_loss() -> None:
     assert refused.kind == "transient"
 
 
+def _dial_failure(cause: BaseException) -> httpx.ConnectError:
+    """The exception chain a REAL failed dial leaves behind, reproduced.
+
+    Measured on this machine (httpx 0.28.1) rather than invented — the layers
+    wrap an anyio connect failure like this::
+
+        httpx.ConnectError("All connection attempts failed")      # ours, on top
+          __cause__  -> httpcore.ConnectError                     # (same class
+            __context__ -> OSError("All connection attempts failed")  #  name)
+              __cause__ -> the OS-level OSError, errno intact
+
+    BOTH links are load-bearing and they are different links: anyio raises its
+    aggregate with ``from`` (``__cause__``) while httpcore reaches the same
+    ``OSError`` through ``__context__``. The inner hop is a plain
+    ``httpx.ConnectError`` here only because httpcore is not a direct
+    dependency of this package; the walk keys on the class NAME and the
+    ``OSError``/group beneath, so the shape under test is the real one.
+    """
+    aggregate = OSError("All connection attempts failed")
+    aggregate.__cause__ = cause
+    inner = httpx.ConnectError("All connection attempts failed")
+    inner.__context__ = aggregate
+    outer = httpx.ConnectError("All connection attempts failed")
+    outer.__cause__ = inner
+    return outer
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        # macOS words EADDRNOTAVAIL "can't", Linux "Cannot"; the box in the
+        # 2026-09-15 incident hit the macOS one.
+        OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"),
+        # A multi-address connect reports one failure per address family, so a
+        # genuinely offline machine arrives as a GROUP rather than one OSError.
+        ExceptionGroup(
+            "multiple connection attempts failed",
+            [OSError(errno.ENETUNREACH, "Network is unreachable")],
+        ),
+        # anyio's aggregate with nothing readable under it. Silence is the
+        # offline case — see THE HONEST RULE FOR A SILENT CHAIN on the
+        # classifier — because the ONLY other thing this point in the dial can
+        # report, a refusal, leaves evidence the walk would have found.
+        OSError("All connection attempts failed"),
+    ],
+    ids=["eaddrnotavail", "unreachable-group", "silent"],
+)
+def test_an_offline_dial_is_classified_from_its_cause_chain(cause: BaseException) -> None:
+    """The chain carries the evidence the top-level sentence does not.
+
+    ``ConnectError: All connection attempts failed`` is byte-identical for an
+    offline laptop and a refused connection — it is anyio's own summary of a
+    dial that never completed, with the errno left one hop down. Reading only
+    the top level is what gave the incident's turn the FAST budget
+    (``maxRetries=3``, ~3.5s) and ended it in seconds instead of riding out the
+    flap. Wrapped as well as raw, because this is the form the driver holds.
+    """
+    raw = _dial_failure(cause)
+    wrapped = wrap_transport_error(raw)
+
+    assert is_connectivity_loss(raw)
+    assert is_connectivity_loss(wrapped)
+    # The flag the harness loop reads to decide whether an interrupted turn can
+    # be continued, not just the predicate: they must agree.
+    assert wrapped.connectivity_loss
+    # Frame label unchanged: a connectivity loss is still a transient error.
+    assert wrapped.kind == "transient"
+
+
+def test_the_offline_verdict_survives_the_transport_wrapper() -> None:
+    """The two failures that had to be told apart reach us IDENTICAL as text.
+
+    ``wrap_transport_error`` flattens to ``"<ClassName>: <detail>"``, so both
+    arrive as exactly the incident's ``ConnectError: All connection attempts
+    failed``. The chain is the only difference left, which is why it has to
+    survive the wrap: if it did not, no rewrite of the classifier could
+    separate them.
+    """
+    offline = wrap_transport_error(
+        _dial_failure(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+    )
+    refused = wrap_transport_error(
+        _dial_failure(OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 9)"))
+    )
+
+    # The incident's rendered text, verbatim, in BOTH cases.
+    assert offline.message == "ConnectError: All connection attempts failed"
+    assert refused.message == offline.message
+
+    assert is_connectivity_loss(offline)
+    assert offline.connectivity_loss
+    assert not is_connectivity_loss(refused)
+    assert not refused.connectivity_loss
+
+
+def test_a_group_of_refusals_is_not_a_connectivity_loss() -> None:
+    """A refusal is a TCP RST from the destination, so the host WAS reachable.
+
+    Every address of a multi-address dial being REFUSED still means this
+    machine has a working network — the excluded cluster is one
+    ``ExceptionGroup`` of refusals, not one bare errno, and it must not be
+    swallowed now that the classifier reads inside groups.
+    """
+    refusals = ExceptionGroup(
+        "multiple connection attempts failed",
+        [
+            OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 9)"),
+            OSError(errno.ECONNREFUSED, "Connect call failed ('::1', 9)"),
+        ],
+    )
+    assert not is_connectivity_loss(_dial_failure(refusals))
+    assert not is_connectivity_loss(wrap_transport_error(_dial_failure(refusals)))
+
+
+def test_a_tls_failure_is_not_a_connectivity_loss() -> None:
+    """httpcore maps ``ssl.SSLError`` to ``ConnectError``, so a certificate
+    failure arrives looking exactly like the offline case.
+
+    It is not one: the TCP connection was ESTABLISHED before the handshake
+    began, so the host was reached and the problem is a certificate or a
+    protocol. This is the exclusion that keeps a broken-certificate session on
+    its fast retry instead of parking it for the patient budget — the silent
+    regression a classifier rewrite is most likely to leave behind.
+    """
+    tls = _dial_failure(
+        ssl.SSLError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    )
+    assert not is_connectivity_loss(tls)
+    assert not is_connectivity_loss(wrap_transport_error(tls))
+
+
+def test_a_real_http_status_still_outranks_a_connect_chain() -> None:
+    """``status is not None`` means a provider WAS reached, whatever the chain
+    below it claims — the guard the incident must not cost us."""
+    error = ProviderError(
+        503,
+        "service unavailable",
+        retryable=True,
+        transport=True,
+        transport_cause=_dial_failure(
+            OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+        ),
+    )
+    assert not is_connectivity_loss(error)
+
+
+#: What asyncio actually builds for a failed connect: the errno is stated and the
+#: message is its OWN wording, so the text carries no route phrase at all.
+#: Measured live for `http://[2606:4700::1111]/` on this box, which raises
+#: ``ConnectError("All connection attempts failed")`` over
+#: ``OSError(65, "Connect call failed ('2606:4700::1111', 80)")`` — the shape
+#: agent review R1-3 was measured on.
+def _route_error(errno_value: int, address: str) -> OSError:
+    return OSError(errno_value, f"Connect call failed ({address!r}, 80)")
+
+
+@pytest.mark.parametrize("errno_value", [errno.ENETUNREACH, errno.EHOSTUNREACH])
+def test_a_lone_route_error_reached_by_unwinding_stays_on_the_fast_path(
+    errno_value: int,
+) -> None:
+    """A route error on a chain hop is PER-DESTINATION evidence, not machine evidence.
+
+    "No route to host" means either "this machine has no default route" or "this
+    one address is not routable from here", and unwinding the chain destroyed the
+    only thing that told them apart: this is a single-address dial, so every other
+    target may still be reachable and the remedy is the fallback walk. Parking it
+    for ``CONNECTIVITY_MAX_RETRIES`` instead was measured as a regression by agent
+    review R1-3, so a lone route error keeps the fast path it had before this
+    change. `test_a_multi_address_route_failure_is_a_connectivity_loss` and
+    `test_route_wording_in_the_failures_own_sentence_keeps_its_meaning` pin the two
+    corroborated cases that DO count.
+    """
+    assert not is_connectivity_loss(_dial_failure(_route_error(errno_value, "2606:4700::1111")))
+    assert not is_connectivity_loss(
+        wrap_transport_error(_dial_failure(_route_error(errno_value, "2606:4700::1111")))
+    )
+
+
+def test_a_multi_address_route_failure_is_a_connectivity_loss() -> None:
+    """anyio groups a dial that tried MORE THAN ONE address (`oserrors[0]` only
+    when there is exactly one), so a group of route failures is the machine
+    saying every address of the name was unroutable — the waking-laptop case.
+    This is also the shape the original report listed as a wrong answer."""
+    group = ExceptionGroup(
+        "multiple connection attempts failed",
+        [
+            OSError(errno.ENETUNREACH, "Connect call failed ('2606:4700::1111', 80)"),
+            OSError(errno.EHOSTUNREACH, "Connect call failed ('104.16.0.1', 80)"),
+        ],
+    )
+    assert is_connectivity_loss(_dial_failure(group))
+    assert is_connectivity_loss(wrap_transport_error(_dial_failure(group)))
+
+
+def test_route_wording_in_the_failures_own_sentence_keeps_its_meaning() -> None:
+    """The failure's OWN account is read exactly as this module always read it.
+
+    A caller handed ``ConnectError("[Errno 65] No route to host")`` has been
+    told the route by the failure itself, which is the documented waking-laptop
+    case the patient budget exists for; the stricter treatment above applies to
+    the same errno only where it was found by unwinding.
+    """
+    for detail in ("[Errno 65] No route to host", "[Errno 51] Network is unreachable"):
+        assert is_connectivity_loss(httpx.ConnectError(detail)), detail
+        assert is_connectivity_loss(wrap_transport_error(httpx.ConnectError(detail))), detail
+
+
 def test_connectivity_backoff_is_patient_not_the_8s_cap() -> None:
     """The patient delays grow past the 8s fast cap toward the ~60s ceiling,
     which is what lets the total budget span minutes."""
@@ -4283,6 +5166,56 @@ async def test_connectivity_loss_recovers_within_patient_budget(monkeypatch) -> 
     assert max(sleeps) <= CONNECTIVITY_BACKOFF_CAP_MS
 
 
+async def test_the_incident_shape_rides_out_a_flap_instead_of_dying(monkeypatch) -> None:
+    """The 2026-09-15 failure, end to end: the turn SURVIVES the flap.
+
+    The client raises the chain a real offline dial produces — a bare
+    ``ConnectError: All connection attempts failed`` over an ``EADDRNOTAVAIL``
+    — which is byte-identical by text to a refused connection and was therefore
+    classified as an ordinary transient. Under the FAST budget (this test's
+    ``maxRetries=3``, 500ms base) that is ~3.5s against the same target, which
+    is how the reported turn ended in about 3s while the network was still
+    coming back. Eight failures in a row — past what the fast budget could ever
+    allow — must still end in a completed stream, on the same credential and
+    without touching the fallback chain (an offline machine makes every target
+    equally unreachable, so walking it only multiplies the failure).
+    """
+    sleeps: list[int] = []
+    attempts = {"n": 0}
+    flap_failures = 8
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def flapping(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts["n"] += 1
+        if attempts["n"] <= flap_failures:
+            raise _dial_failure(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+
+        async def ok() -> AsyncIterator[Any]:
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(flapping)
+
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    settings = {"retry": {"maxRetries": 3, "baseDelayMs": 500, "fallbackChains": {}}}
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    assert attempts["n"] == flap_failures + 1
+    # More in-place retries than the fast budget allows, and no credential
+    # rotated: the machine being offline is nobody's fault.
+    assert len(sleeps) == flap_failures
+    assert auth.rotations == []
+
+
 async def test_connectivity_loss_does_not_walk_fallback_chain(monkeypatch) -> None:
     """The patient path retries the PRIMARY in place and never walks the chain.
 
@@ -4338,6 +5271,53 @@ async def test_connectivity_loss_does_not_walk_fallback_chain(monkeypatch) -> No
     # It rode out the offline window in place — no rotation to the sibling either.
     assert attempts["n"] == offline_failures + 1
     assert auth.rotations == []
+
+
+async def test_a_lone_route_error_walks_the_cascade_instead_of_parking(monkeypatch) -> None:
+    """The driver-level half of R1-3: a per-destination route error must reach the chain.
+
+    `test_a_lone_route_error_reached_by_unwinding_stays_on_the_fast_path` pins the
+    predicate; this pins what the verdict is FOR. A single unreachable address is
+    a condition another target can serve, so the failure has to charge the ordinary
+    budget and reach the configured fallback — the opposite of the connectivity
+    path, which retries the SAME target in place for minutes. Measured before the
+    fix: the patient path was taken here, the fallback's client was never built,
+    and the turn sat on one unreachable address instead of routing around it.
+    """
+    sleeps: list[int] = []
+    specs_seen: list[str] = []
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def route_failure(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        # Raised synchronously, exactly as the driver sees a raw transport error.
+        raise _dial_failure(_route_error(errno.EHOSTUNREACH, "2606:4700::1111"))
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.model_id == "gpt-4o":
+            return _FnClient(route_failure)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    settings = {
+        "retry": {
+            "maxRetries": 1,
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    assert "anthropic/claude-x" in specs_seen, "the fallback must be reached, not parked"
 
 
 async def test_ordinary_transient_5xx_still_uses_fast_budget(monkeypatch) -> None:
@@ -4421,13 +5401,18 @@ class _CutAfterDeltas:
 
 
 async def _drive_until_error(
-    exc_factory: Any, *, deltas: int
+    exc_factory: Any, *, deltas: int, request: ChatRequest | None = None
 ) -> tuple[list[Any], ProviderError | None]:
     """Run the REAL ``stream_with_failover`` against a client that cuts out.
 
     Deliberately goes through the driver rather than calling the classifier: the
     property under test is the WIRING, so anything that hands the marking to the
     test instead of making the driver perform it would defeat the purpose.
+
+    ``request`` selects the target, which matters for the AGGREGATOR cases: the
+    provider identity is a fact the driver parses out of the selector and is
+    half of the "is this resumable" decision, so a test that could not choose
+    the provider could not exercise it.
     """
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -4443,10 +5428,11 @@ async def _drive_until_error(
             "fallbackChains": {},
         }
     }
+    request = request if request is not None else _request()
     forwarded: list[Any] = []
     try:
         async for event in stream_with_failover(
-            _request(), FakeAuth({"openai": ["k"]}), settings, client_for
+            request, FakeAuth({request.model.provider: ["k"]}), settings, client_for
         ):
             forwarded.append(event)
     except ProviderError as error:
@@ -4518,6 +5504,231 @@ async def test_the_driver_does_NOT_mark_a_cut_that_forwarded_nothing(
     assert not error.connectivity_loss, (
         f"the {arm} pre-connect path must not be marked continuable — nothing was "
         "forwarded, so there is no answer to continue and no offline inference to draw"
+    )
+
+
+#: The exact in-band error OpenRouter served the sentinel pass when one of its
+#: upstream hosts died mid-body: HTTP 200 already committed, so the failure rode
+#: inside the stream as an error chunk whose ``code`` is the 502 and whose
+#: message names the upstream host and the transport that died.
+_AGGREGATOR_UPSTREAM_CUT = (
+    "provider_unavailable: Upstream error from Together: Stream error: "
+    "h2 protocol error: error reading a body from connection"
+)
+
+#: Every marker the classifier accepts, each on its own, as the gateway's own
+#: wording varies with which host died and how. Kept beside the tuple itself
+#: only as the population the predicate must accept — an empty one would pass
+#: every "does it stay terminal" control below while the fix did nothing.
+_AGGREGATOR_UPSTREAM_CUT_SHAPES = (
+    _AGGREGATOR_UPSTREAM_CUT,
+    "provider_unavailable",
+    "Upstream error from Azure: Stream error",
+    "upstream error from Google AI Studio",
+    "stream error: h2 protocol error",
+    "Network connection lost",
+    "JSON error injected into SSE stream",
+)
+
+
+@pytest.mark.parametrize("message", _AGGREGATOR_UPSTREAM_CUT_SHAPES)
+async def test_aggregator_in_band_upstream_5xx_is_continuable(message: str) -> None:
+    """THE REPORTED INCIDENT: a gateway's upstream host dies mid-body.
+
+    Driven through the REAL driver, so what is asserted is the wiring and not the
+    classifier in isolation: the selector's provider has to reach the marking
+    helper, which is the half of the decision an error object cannot carry.
+
+    Before this fix the driver raised this shape unmarked and the LOOP ended the
+    turn on it — no retry, no failover, no continuation — which is how a
+    scheduled sentinel pass lost 13 minutes of triage and a half-composed ``write``
+    call to a failure OpenRouter would have routed around on the very next
+    request.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, message, retryable=True),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "an aggregator's in-band upstream failure must be RESUMABLE, or the turn "
+        f"dies holding output the user already read: {message}"
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "deepseek"])
+async def test_first_party_5xx_mid_stream_stays_terminal(provider: str) -> None:
+    """The gate that keeps the fix narrow: a DIRECT provider has no sibling host.
+
+    Same status, same words, a provider that is not a gateway. Re-issuing the
+    turn there would re-bill a call we already hold the beginning of while the
+    provider's own service is what failed, so the pre-existing terminal rule is
+    the correct one and must survive this change untouched.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True),
+        deltas=2,
+        request=_request(provider, "some-model"),
+    )
+
+    assert len(forwarded) == 2
+    assert error is not None
+    assert not error.connectivity_loss, (
+        f"{provider} is not an aggregator: an upstream host dying is not a thing "
+        "it can report, so this shape must keep its terminal behaviour"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (400, "invalid_request_error: messages: field required"),
+        (429, "rate limit exceeded: please retry later"),
+        (401, "invalid api key"),
+        (403, "moderation: your request was flagged"),
+        # The DeepSeek thinking-mode echo refusal. The LOOP answers this one by
+        # retrying with thinking off, so reclassifying it here would spend the
+        # continuation budget on a retry that cannot express that fix.
+        (400, "reasoning_content must be passed back in the request"),
+        # A 5xx whose body names NOTHING about routing or transport: "the gateway
+        # 500ed" with no evidence about what failed is not replayable.
+        (500, "internal server error"),
+        # A 5xx on the aggregator that is a REFUSAL in disguise, with no
+        # upstream/stream wording for the shape gate to believe.
+        (503, "no available model for this request"),
+    ],
+)
+async def test_aggregator_in_band_refusals_stay_terminal(status: int, message: str) -> None:
+    """A REFUSAL about the request must stay terminal even from an aggregator.
+
+    Deterministic in its bytes: the same request earns the same answer on the
+    next attempt, so continuing only spends the turn's budget and hides the
+    refusal the operator has to act on (a bad model id, a spent quota, a
+    moderation block).
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(status, message, retryable=status >= 500 or status == 429),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2
+    assert error is not None
+    assert not error.connectivity_loss, f"HTTP {status} from the gateway is not a routing failure"
+
+
+def test_the_recorded_openrouter_error_chunk_classifies_as_resumable() -> None:
+    """The classifier must match the message the CLIENT composes, not a paraphrase.
+
+    Built by pushing the recorded wire chunk through the real
+    ``_compat_stream_error``, so the string under test is whatever the shipped
+    code produces from ``metadata.error_type``, the relay sentence and the
+    upstream's JSON-encoded ``raw`` — the trap an earlier round of these fixtures
+    fell into was asserting a hand-typed shape the client never emits.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    error = _compat_stream_error(
+        {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {
+                    "error_type": "provider_unavailable",
+                    "provider_name": "Together",
+                    "raw": json.dumps(
+                        {
+                            "error": {
+                                "message": (
+                                    "Upstream error from Together: Stream error: "
+                                    "h2 protocol error: error reading a body from connection"
+                                )
+                            }
+                        }
+                    ),
+                },
+            },
+        }
+    )
+
+    assert error.status == 502
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    # The gate, on the same composed message: radient is an aggregator too, and a
+    # first-party provider is not.
+    assert is_aggregator_upstream_stream_failure(error, "radient")
+    assert not is_aggregator_upstream_stream_failure(error, "openai")
+
+
+def test_a_relayed_5xx_with_an_OPAQUE_upstream_body_is_resumable() -> None:
+    """Round-1 m1: the envelope is PROVENANCE, so an opaque body cannot hide it.
+
+    Every fixture above starts from the marker-bearing body, which made the
+    classifier depend on the upstream HOST's wording. This is the same recorded
+    chunk with a body that says nothing at all — the reviewer's exact shape —
+    pushed through the real ``_compat_stream_error``, which renders it
+    ``Provider returned error: "ERROR"``: no marker matches, while the envelope
+    says plainly that the gateway is relaying an upstream death.
+
+    The status gate, not the wording, is what keeps refusals terminal, so
+    admitting the envelope stays bounded: 4xx never reaches the classifier, and
+    a non-aggregator never reaches it at all.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    opaque = {"code": 502, "message": "Provider returned error", "metadata": {"raw": '"ERROR"'}}
+    error = _compat_stream_error({"error": opaque})
+
+    assert error.status == 502
+    assert error.message == 'Provider returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    assert is_aggregator_upstream_stream_failure(error, "radient")
+    assert not is_aggregator_upstream_stream_failure(
+        error, "openai"
+    ), "a direct provider has no sibling host to re-route to"
+
+    # The attributed variant is the same envelope: the composer swaps the
+    # gateway's generic subject for the upstream host's name when the envelope
+    # carries one, so a recogniser keyed on the full generic sentence would miss
+    # half the envelopes on the wire.
+    attributed = _compat_stream_error(
+        {
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {"provider_name": "Together", "raw": '"ERROR"'},
+            }
+        }
+    )
+    assert attributed.message == 'Together returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(attributed, "openrouter")
+
+    # The STATUS gate is what keeps a refusal terminal, not the envelope's
+    # absence: the identical body under a 400 stays a request defect.
+    refusal = _compat_stream_error({"error": {**opaque, "code": 400}})
+    assert not is_aggregator_upstream_stream_failure(refusal, "openrouter")
+
+
+async def test_an_opaquely_worded_relay_5xx_continues_through_the_driver() -> None:
+    """The classifier's new arm has to be reached by the DRIVER's marking helper.
+
+    The classification is inert unless ``_mark_mid_stream_connectivity`` runs on
+    the forwarded-any raise, which is the half an error object cannot carry.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, 'Provider returned error: "ERROR"', retryable=True),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "the gateway's relay envelope says an upstream host died, however opaque "
+        "that host's own body was"
     )
 
 

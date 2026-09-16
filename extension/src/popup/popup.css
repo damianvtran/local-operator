@@ -59,32 +59,79 @@ body {
 
 /* A card, by the system's Card/panel reading: 10px radius, ONE hairline, and
  * NO shadow. Elevation is the --surface-on---paper step plus the hairline. */
+/* NOTHING here may read `100vh`, and that is load-bearing rather than stylistic.
+ *
+ * The card used to carry `max-height: calc(100vh - 20px)` so that a card taller
+ * than the popup's cap would scroll its BODY with the header pinned (design D2).
+ * In a popup that is CIRCULAR: Chrome sizes the popup WINDOW to the document's
+ * content, so `100vh` is the height of the very thing the clamp decides. Driven
+ * through the real toolbar path (chrome.action.openPopup(), no emulated
+ * viewport, Chrome 153) the loop settles at the collapsed end, because Chrome
+ * creates the window at an undersized height: the clamp then reads that height,
+ * the card is clamped to 5px, the document is 25px tall, and the window stays
+ * there. EVERY card rendered as a 300x25 dark bar — the 2px --tone rule with the
+ * header band clipped to a sliver — unpaired, disconnected and paired alike.
+ *
+ * An explicit viewport cannot show this: scripts/popup-states-shot.mjs opens
+ * popup.html as a page at 300x600, so `100vh` there is a number the harness
+ * chose, and every card measured there was 258-531px, i.e. under the clamp
+ * anyway. The capture was honest about what it set and blind to what a popup's
+ * `100vh` actually is.
+ *
+ * The property D2 wanted is carried by `position: sticky` on the header and
+ * footer instead (see .head/.foot). Chrome clamps a popup to its own max size
+ * (600 CSS px, or the display's work area, whichever is smaller) and scrolls the
+ * DOCUMENT past that, and a sticky header stays on screen through that scroll:
+ * measured on the wedged consent card, header top y=0 at scrollTop=88 where it
+ * left the viewport at y=-75 without it. Sticky is also the only form of this
+ * that survives page zoom, which shrinks the CSS viewport the stylesheet would
+ * have to read — a length it cannot know. (The clamp is a DIP/CSS-px quantity,
+ * not a device-px one: at 100% zoom it is ~600 CSS px on any display scale, and
+ * it is zoom, not the display, that eats into it. Earlier revisions of this
+ * comment said "device px"; the conclusion is the same either way.)
+ *
+ * `overflow: clip`, not `hidden`: both clip children to the 10px radius, but
+ * `hidden` makes the card a scroll container, and a sticky child of a scroll
+ * container sticks to THAT container — which never scrolls — so the header
+ * would stop being sticky exactly in the capped case that needs it. */
 .card {
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--hairline-strong);
   border-radius: 10px;
-  overflow: hidden;
+  overflow: clip;
   margin: 10px;
 }
-/* The one spend of colour: a 2px status rule along the card's top edge, read as
- * a status light, not a banner. --tone is set per state by the popup script and
- * is spent ONLY on real semantics (success = connected/paired, danger = error/
- * incompatible, neutral hairline = disconnected/pairing). Never the identity. */
-.card::before {
-  content: "";
-  display: block;
-  height: 2px;
-  background: var(--tone, var(--hairline-strong));
-}
-
-/* Header band on --sunken with a bottom hairline — the callback page's .head. */
+/* Header band on --sunken with a bottom hairline — the callback page's .head.
+ *
+ * Sticky so it survives the document scroll of a capped popup (see .card), and
+ * the .card::before status rule travels ON the band as its border-top rather
+ * than as a static child: a child left the viewport with the card, so a scrolled
+ * consent card lost its --danger accent and read as neutral while the band above
+ * it stayed put (design D1 — the asymmetry with the footer, whose own top
+ * hairline pins fine, is what made it visible). `top: 0`, not `-1px`: the old
+ * -1px cancelled the card's 1px border, which now would clip 1px off the rule,
+ * and the border above the band is the rule itself. Rest-state geometry is
+ * unchanged — border 10..11, rule 11..13, band content from 13, exactly the rows
+ * `.card::before` occupied.
+ *
+ * The one spend of colour is therefore here: --tone is set per state on #card by
+ * the popup script and is inherited, and it is spent ONLY on real semantics
+ * (success = connected/paired, danger = error/incompatible, neutral hairline =
+ * disconnected/pairing). Never the identity. The band's background is opaque, so
+ * scrolled content cannot show through it. */
 .head {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
+  border-top: 2px solid var(--tone, var(--hairline-strong));
   border-bottom: 1px solid var(--hairline);
   background: var(--sunken);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 /* The shared vector mark, stroked in currentColor pinned to --ink. Never
  * tinted by state: the software's identity must not look conditional. */
@@ -107,6 +154,10 @@ body {
 
 .body {
   padding: 18px 16px 16px;
+}
+.head,
+.foot {
+  flex: none;
 }
 
 /* State titles in the old-style serif display, sized for a 300px popup
@@ -332,6 +383,30 @@ input:disabled {
 .actions {
   margin-top: 16px;
 }
+/* Leaving the actions group costs what entering it costs. `.btn.block`'s 8px
+ * margin was doing double duty as both intra-group (button to button) and
+ * post-group spacing, so a paragraph after the buttons read as a caption
+ * hanging off the last one rather than as the card's next idea \u2014 16px in, 8px
+ * out (design D5). Matching the two restores the rhythm the other cards use. */
+.actions + .sub,
+.actions + .recheck,
+.sub + .recheck {
+  margin-top: 16px;
+}
+/* The "Check again" verdict. Quiet on purpose: it reports that nothing changed,
+ * which is information, not an alarm \u2014 the card's danger rule already carries
+ * the severity. Sized with `.again`'s well so a status line in the body reads
+ * consistently wherever it appears. */
+.recheck {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--sunken);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
 /* The repeat-ask line. Deliberately NOT the danger register: nothing has gone
  * wrong and the previous decision was honoured, so this is information the
  * user needs to read the card correctly, not an alarm. It takes the --sunken
@@ -360,6 +435,68 @@ input:disabled {
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
   color: var(--ink);
+}
+/* The wedged-worker banner on the CONSENT card. It borrows `.all-sites`'s
+ * treatment on purpose: both say "the gate you are looking at is not behaving
+ * the way the rest of this card implies", and inventing a second danger
+ * register beside an established one is how a design system drifts. It sits
+ * directly under the title — above the prose it qualifies — because it changes
+ * what the whole card means, and 12px/13px so a banner cannot outweigh the
+ * question it annotates. */
+/* Spacing is deliberately tighter than `.all-sites`' 12px/8px. The banner is
+ * the only element that grows the CONSENT card, which is already the tallest
+ * state, and at the default 300x600 its 74.53px pushed Allow/Deny 4.3px below
+ * the bounded body — the decision itself clipped, on the one card that carries
+ * the incident (design D8 / UX U9). 10px above (it follows a title that brings
+ * its own spacing) and 6px/9px of padding buy back exactly the overflow without
+ * touching any shared rule, so no other card's rhythm moves. */
+.wedge {
+  margin: 10px 0 0;
+  padding: 6px 9px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+}
+/* SCOPED to a consent card that is carrying the banner, via :has() — the wedged
+ * prompt is the only card that does not fit (580px against the 600px bound),
+ * and it does not fit because the banner is on it. Reclaiming the difference
+ * from the card's own vertical rhythm keeps every OTHER card's spacing exactly
+ * as designed: the healthy prompt at 513.84px is untouched, which is what makes
+ * this a fix for D8/U9 rather than a global retune nobody asked for. The
+ * elements chosen are the ones whose spacing is least load-bearing — the
+ * queue head/nav and the scope label — never the trough that quarantines the
+ * host or the action row itself. */
+#origin:has(#origin-wedge:not(.hidden)) .queue-head {
+  margin-top: 8px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .queue-nav {
+  margin-top: 6px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .label {
+  margin-top: 10px;
+}
+/* The generic consent prose is DROPPED on the wedged card, not merely tightened.
+ * "The agent wants to open a page on this site with your current login…" is
+ * orientation for a decision that is about to take effect; on this card the
+ * banner immediately above has just said the decision will not be applied, so
+ * the paragraph is both redundant and slightly contradictory — and it is the
+ * 43px that stops Allow/Deny fitting. The load-bearing content (the host in its
+ * trough, the scope picker and what it grants, the queue position) all stays. */
+#origin:has(#origin-wedge:not(.hidden)) #origin-body {
+  display: none;
+}
+
+/* The manual remedy inside the banner. A separate block, one step quieter than
+ * the sentence above it, because it is the SECOND thing to try — it must be
+ * findable without competing with the reload for the first read. */
+.wedge-manual {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--ink-muted);
 }
 .linkish {
   appearance: none;
@@ -422,13 +559,19 @@ input:disabled {
  * EVERY open — the resize it causes is unconditional, and only its duration
  * depends on how slow /health is.
  *
- * The pin is therefore chosen per user, from a synchronous localStorage hint:
- * 219px for a browser that has never paired (it becomes the 340px pairing form)
- * and 86px for one that has (it becomes the 207px connected card). A single pin
- * cannot serve both — pinning to the form costs the already-paired user, who
- * opens this popup for the rest of the product's life, a 133px settle; pinning
- * to the tallest state would leave a permanent band of empty card under
- * `connected` for everyone.
+ * The pin is therefore chosen per state, from a synchronous localStorage hint
+ * holding the pin show() recorded for the card it last rendered:
+ *
+ *  148px  -> the connected card (269.2px)
+ *   219px -> the pairing form (340.2px)
+ *   193px -> the standby card (314.27px)
+ * A value per state rather than a paired/unpaired boolean (design D3-1), and
+ * ONLY for states that are durable properties of the browser. A pin is a bet
+ * that the next open repeats this state: paired stays paired, unpaired stays
+ * unpaired, but the wedged card is acted on and its own copy asks the user to
+ * reopen — so pinning it optimised a reopen nobody makes and taxed the recovery
+ * open everybody makes, measured at 315.84px of collapse (design D1). The full
+ * reasoning and the measurements live in popup.ts's PIN_BY_STATE block.
  *
  * That choice is applied by first-paint.js, a CLASSIC script in <head>, NOT by
  * popup.ts. popup.js is a deferred module, so an inline style it sets arrives
@@ -439,8 +582,10 @@ input:disabled {
  *
  * All four numbers are measured at 300x600 and move together — the card's
  * height depends on the pairing form, which depends on the reserved error slot
- * below. Re-measure BOTH pins if any of them changes; a stale pin is a resize,
- * which is the defect this whole block exists to prevent. */
+ * below, and the Connected card gained a second reserved slot of its own for the
+ * extension-update advisory (popup.css). Re-measure BOTH pins if any of them
+ * changes; a stale pin is a resize, which is the defect this whole block exists
+ * to prevent. */
 #pending {
   min-height: 219px;
 }
@@ -471,10 +616,66 @@ input:disabled {
   visibility: hidden;
 }
 
-/* Footer link in the muted-dim register, above a hairline. */
+/* The extension-update advisory, inside the Connected card. A RESERVED slot for
+ * exactly the reason #pair-error is one: an un-hiding line grew the connected
+ * card and the popup WINDOW resized under the user's cursor. Reserving it keeps
+ * the card at ONE height whether or not there is anything to say, which is also
+ * what keeps the pin (see PIN_CONNECTED in popup.ts) a single number rather than
+ * a bet on which advisory happens to be showing.
+ *
+ * 54px is THREE lines at this size (12px / 1.5, the same line-height the
+ * pairing error slot uses), which is what the longest advisory occupies at
+ * 300px: the generated sentence wraps to three lines for any realistic version
+ * pair, measured in a real headless Chrome at 300x600 dpr=2 rather than
+ * estimated. Every string this slot can hold is generated from the SAME
+ * template (`protocol.EXTENSION_UPDATE_NOTE`), so the wrap depends only on the
+ * digit count of the two versions and not on which versions they are. A version
+ * component long enough to push it to a fourth line would resize the card.
+ *
+ * WHAT PINS EACH HALF, because they are not the same check and an earlier
+ * revision of this comment claimed the wrap was pinned when it was not (review
+ * R1-5 / design D1):
+ *
+ *   * CI pins the RESERVE only — `tests/pure.test.mjs` asserts the declared
+ *     min-height is three line-boxes at the declared line-height, which is
+ *     arithmetic on the CSS and would pass unchanged if the sentence started
+ *     wrapping to four lines.
+ *   * The WRAP and the no-resize invariant are pinned by
+ *     `extension/scripts/popup-states-shot.mjs`, the only place with a layout
+ *     engine: it renders the advisory at 300x600 dpr=2 and FAILS if the
+ *     measured line count differs from `reserve / line-height`, or if the card
+ *     is any taller with the advisory than without it. That script is not run by
+ *     a workflow (it needs a real Chrome), so the wrap is verified whenever
+ *     evidence is reproduced rather than on every push. */
+#connected-advisory {
+  min-height: 54px;
+}
+#connected-advisory.hidden {
+  display: block !important;
+  visibility: hidden;
+}
+
+/* Muted, smaller than the card's own `.sub`: this is a note ABOUT the
+ * extension, not the status of the browser, and it must not compete with the
+ * two lines above it. */
+.advisory {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  text-wrap: pretty;
+}
+
+/* Footer link in the muted-dim register, above a hairline. Sticky for the same
+ * reason as the header, and on a --surface ground so the card's content cannot
+ * show through it once it is pinned over that content. */
 .foot {
   padding: 10px 16px;
   border-top: 1px solid var(--hairline);
+  background: var(--surface);
+  position: sticky;
+  bottom: -1px;
+  z-index: 1;
 }
 .foot a {
   font-size: 12px;

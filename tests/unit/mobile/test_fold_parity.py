@@ -49,14 +49,22 @@ from typing import Any
 
 import pytest
 
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import (
-    HUB_MESSAGE_TYPE,
     PARENT_MESSAGE_CLOSE_TAG,
     PARENT_MESSAGE_TAG,
     TO_CHILD_INSTRUCTIONS,
 )
+from local_operator.harness.loop import (
+    LENGTH_ENDED_CALL_RESULT_TEXT,
+    TRUNCATED_RESULT_TEXT,
+)
+from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import (
     assistant_row_text,
     assistant_stop_notice,
@@ -66,6 +74,9 @@ from local_operator.harness.rows import (
     wake_receipt_headline,
 )
 from local_operator.harness.types import (
+    OUTPUT_LIMIT_ARGUMENTS,
+    OUTPUT_LIMIT_KEY,
+    OUTPUT_LIMIT_TURN,
     AgentMessage,
     CustomMessage,
     Message,
@@ -74,9 +85,13 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+from local_operator.incidents import format_model_switch_message
 from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.session.shell_record import shell_record_messages
+from local_operator.session.transcript import ENTRY_MESSAGE
+from local_operator.session.transcript import TranscriptEntry as JournalEntry
+from local_operator.session.transcript import replay_entries
 
 
 def _page_rows(history: Sequence[AgentMessage]) -> list[TranscriptEntry]:
@@ -125,6 +140,44 @@ def _hub_steer(body: str) -> CustomMessage:
             "steer": True,
             "text": _envelope(body),
         },
+    )
+
+
+def _switch_notice() -> str:
+    """The failover notice ``journal_model_switch`` renders, verbatim.
+
+    Built by the real producer rather than hand-written: the display rule is
+    about the STAMP, so a test that keyed on remembered wording would pass
+    while a reworded notice leaked.
+    """
+    return format_model_switch_message(
+        "zai/glm-5.3",
+        "anthropic/claude-opus-5",
+        reason="anthropic quota exhausted (0% remaining)",
+        transient=True,
+    )
+
+
+def _injected_notice(text: str | None = None) -> Message:
+    """Exactly what ``_injected_user_message`` mints: a stamped user row."""
+    return Message(
+        role="user",
+        content=[TextContent(text=_switch_notice() if text is None else text)],
+        provider_payload={RENDERED_INJECTION_KEY: True},
+    )
+
+
+def _carried_notice() -> Message:
+    """The legacy shape: a notice a compaction block carried forward.
+
+    Written before the stamp existed, so it is re-seated with
+    ``compaction_preserved`` and no stamp at all — QA measured eight of these on
+    the operator's own session, painted behind the user gutter twice each.
+    """
+    return Message(
+        role="user",
+        content=[TextContent(text=_switch_notice())],
+        provider_payload={PRESERVED_USER_TURN_KEY: True},
     )
 
 
@@ -181,6 +234,8 @@ CORPUS: dict[str, Sequence[AgentMessage]] = {
         "ls -la",
         ToolResult(tool_call_id="sh1", content=[TextContent(text="total 0")], is_error=False),
     ),
+    "D12 harness injection": [Message.user("why did the model change?"), _injected_notice()],
+    "D13 carried notice": [Message.user("why did the model change?"), _carried_notice()],
     "settled conversation": [
         Message.user("edit it"),
         _assistant("editing", calls=[ToolCall(id="e1", name="edit", arguments={"path": "/x"})]),
@@ -391,6 +446,84 @@ def test_ordinary_prose_mentioning_a_skill_is_left_alone() -> None:
     assert rows[0].text == "what does the $research skill do?"
 
 
+def test_a_harness_injected_row_is_never_painted_as_the_users_words() -> None:
+    """A row the harness minted from a ``CustomMessage`` is not the user's words.
+
+    The transient failover notice is the reported case: a compaction pass baked
+    it into the rebuilt context as a plain user row (the root-cause fix is in
+    ``Session._render_for_compaction``), and it is still on disk in every
+    session an older build wrote — so the DISPLAY decision has to hold for
+    rows already in a transcript, not only for new ones. Both folds, because
+    the phone's own bare ``role == "user"`` test is exactly how the two
+    surfaces drift apart.
+    """
+    notice = _switch_notice()
+    history = [Message.user("why did the model change?"), _injected_notice(notice)]
+
+    for rows in (_page_rows(history), _attach_rows(history)):
+        assert [row.kind for row in rows] == ["user"]
+        assert rows[0].text == "why did the model change?"
+        assert notice not in " ".join(row.text for row in rows)
+
+    # …and the same decision covers the LEGACY shape: a notice a compaction
+    # block carried forward from before the stamp existed (QA Q1, measured on
+    # the operator's own session). Both folds, again.
+    carried = [Message.user("why did the model change?"), _carried_notice()]
+    for rows in (_page_rows(carried), _attach_rows(carried)):
+        assert [row.kind for row in rows] == ["user"]
+        assert notice not in " ".join(row.text for row in rows)
+
+    # The LIMIT of the rule, pinned here because it is a trade and not a free
+    # win: the same wording with no stamp and no carried marker — a pasted notice,
+    # a realistic prompt — is ALSO hidden on both folds, because the audit phase
+    # serves stored rows whose only surviving evidence is the text (QA round 2 Q1
+    # found four such rows painted on the operator's session). The row is not lost
+    # anywhere else; only the renderer drops it, exactly as the chrome prompts
+    # above already do.
+    quoted = [Message(role="user", content=[TextContent(text=notice)])]
+    assert _page_rows(quoted) == []
+    assert _attach_rows(quoted) == []
+
+
+def test_a_stored_notice_row_is_hidden_in_the_audit_phase_too() -> None:
+    """QA round 2 Q1: the heal must not open the mirror.
+
+    Shedding the carried copies removed their ids from the hoisted suppression
+    set, so the plain stored rows an older build wrote — no stamp, no marker,
+    served verbatim by the audit phase — came back into view. The decision is
+    therefore text-based for any ``role="user"`` row, in whichever phase serves
+    it, and this pins the audit arm of that: a stored notice replayed through
+    ``replay_entries(..., mode="audit")`` paints nothing on either fold while the
+    row itself stays in the journal.
+    """
+    notice = _switch_notice()
+
+    def journal_row(entry_id: str, text: str) -> JournalEntry:
+        """A stored row as the JOURNAL holds it: no ``provider_payload`` at all."""
+        return JournalEntry(
+            id=entry_id,
+            ts=1.0,
+            type=ENTRY_MESSAGE,
+            payload={
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        )
+
+    entries = [
+        journal_row("stored-notice", notice),
+        journal_row("mine", "why did the model change?"),
+    ]
+
+    replayed = replay_entries(entries, None, mode="audit")
+    assert "stored-notice" in [getattr(row, "id", "") for row in replayed]
+
+    for rows in (_page_rows(replayed), _attach_rows(replayed)):
+        assert [row.kind for row in rows] == ["user"]
+        assert rows[0].text == "why did the model change?"
+
+
 def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     """D9: the phone suppressed ONE of the three continuation prompts and
     rendered the other two as the user's own words — a partially copied
@@ -400,6 +533,68 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     assert len(prompts) == 3
 
     assert _page_rows([Message.user(p) for p in prompts]) == []
+
+
+def test_every_connectivity_instruction_shape_is_chrome() -> None:
+    """Round-1 M1: the shared list only held the PROSE continuation prompt.
+
+    ``_continuation_instruction`` composes the persisted instruction per cut, so
+    the incident's own shape — partial prose with a call still being dictated —
+    is prose + a space + the tool-call half, and a prose-less cut gets the
+    tool-call half alone. Neither was an exact member of
+    ``harness_chrome_prompts()``, so a resumed session painted harness words as
+    the operator's own on both surfaces. Built from the producer, not typed out,
+    so the shapes cannot drift from the strings the loop actually persists.
+    """
+    from local_operator.harness.loop import _continuation_instruction
+
+    call = ToolCall(name="write", raw_arguments='{"path": "/tmp/notes", "content": "hel')
+    shapes = {
+        "prose only": _continuation_instruction(resumable_text=True, interrupted=[]),
+        "tool-call only": _continuation_instruction(resumable_text=False, interrupted=[call]),
+        "composed": _continuation_instruction(resumable_text=True, interrupted=[call]),
+    }
+    multi = [
+        ToolCall(name="write", raw_arguments="{"),
+        ToolCall(name="shell", raw_arguments="{"),
+    ]
+    shapes["composed, two tools"] = _continuation_instruction(
+        resumable_text=True, interrupted=multi
+    )
+
+    for label, text in shapes.items():
+        assert is_harness_chrome(text), f"{label} must not be painted as the user's words"
+        assert _page_rows([Message.user(text)]) == [], label
+
+
+@pytest.mark.parametrize(
+    "resembling",
+    [
+        # An operator QUOTING the instruction — asking about a log line is a
+        # realistic thing to do — must keep their own row, so the recogniser
+        # matches whole shapes and not a distinctive prefix.
+        "why does the transcript say: " + harness_chrome_prompts()[2],
+        "[system] A tool call (write) was aborted by the network interruption "
+        "before it finished, so it never ran. If you still need that action, "
+        "issue the call again from scratch. ok?",
+    ],
+)
+def test_an_operator_message_resembling_the_instruction_is_not_swallowed(
+    resembling: str,
+) -> None:
+    """Negative control for the recogniser above.
+
+    The pre-fix rule was exact membership of harness-minted constants, and the
+    extension must not turn "the operator typed something similar" into
+    "the harness said it": a swallowed operator turn is invisible and
+    unrecoverable, which is worse than the leak it fixes.
+    """
+    assert not is_harness_chrome(resembling)
+
+    rows = _page_rows([Message.user(resembling)])
+
+    assert [row.kind for row in rows] == ["user"]
+    assert rows[0].text == resembling
 
 
 def test_a_human_quoting_the_envelope_keeps_their_own_words() -> None:
@@ -470,6 +665,170 @@ def test_a_wake_receipt_strips_the_model_facing_envelope() -> None:
         assert "(alarm)" not in row.text
         # What the user needs: which wake fired, and what it delivered.
         assert row.text == "w-9 (1, every 6h) — Check the deploy pipeline"
+
+
+def test_a_length_stop_is_announced_on_both_surfaces() -> None:
+    """Agent review round 1 (B1): nothing folded ``stop_reason == "length"`` into
+    a notice, so a reply cut by the generation bound replayed as a complete one.
+
+    Both variants are asserted because they need opposite treatment: the turn
+    WITH prose is the one whose text lies (it reads as a finished, oddly short
+    answer), and the turn with NOTHING still needs a line because there is no
+    text to explain the silence. The tier is ``warning`` on both, matching the
+    live loop's own truncation notices, so one event is never described in two
+    voices by the two surfaces that render it.
+    """
+    cut = assistant_stop_notice(
+        text="1, 2, 3, 4", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert cut == ("answer cut off at the output limit", "warning")
+
+    empty = assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    )
+    assert empty == ("no answer: the model spent its whole output budget", "warning")
+
+    # A truncated TOOL CALL produced something, but not an ANSWER, so it takes
+    # its own arm rather than the content one: the call card directly above
+    # already says what happened to the call, and repeating "answer cut off"
+    # there was a second, false row for one event (design round 1, D3).
+    #
+    # The line is ARM-NEUTRAL when the caller cannot tell which arm the limit
+    # was in, which is what the call above does: it passes no arm at all (design
+    # round 1, D1). The two arms' lines are asserted in
+    # ``test_the_length_notice_reads_the_arm_off_the_turns_own_results``.
+    with_call = assistant_stop_notice(
+        text="", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert with_call == ("turn cut off at the output limit — nothing ran", "warning")
+
+    # Prose and a cut call together is the content arm: there IS an answer, and
+    # the live loop agrees -- it tests ``has_text`` before ``tool_calls`` too
+    # (design round 2, D7). It used to check the call first, so this same turn
+    # was "mid tool call" live and "answer cut off" here. The call half still
+    # reaches the reader, on its own row: the placeholder result appended for it
+    # says it was cut and nothing ran.
+    both = assistant_stop_notice(
+        text="here is the file", has_tool_calls=True, stop_reason="length", provider_payload=None
+    )
+    assert both == ("answer cut off at the output limit", "warning")
+
+    # An ordinary stop still needs nothing, which is what keeps the notice
+    # meaningful rather than decorative.
+    assert (
+        assistant_stop_notice(
+            text="done", has_tool_calls=False, stop_reason="stop", provider_payload=None
+        )
+        is None
+    )
+
+    # And the phone's fold actually renders it, on the same history the TUI
+    # would replay: the defect was invisible on BOTH surfaces, so the helper
+    # being right is not on its own the claim.
+    history = [Message.user("count to a million"), _assistant("1, 2, 3", stop="length")]
+    page = [row.kind for row in _page_rows(history)]
+    assert page == ["user", "assistant", "notice"]
+    notice_row = _page_rows(history)[-1]
+    assert "output limit" in notice_row.text
+
+
+def _limit_turn(arm: str | None) -> list[AgentMessage]:
+    """One length-stopped turn as the harness persists it, arm included.
+
+    The call the model was still dictating plus the SYNTHETIC result the loop
+    pairs it with (``_synthetic_result``'s shape). Built from the real
+    constants and the real marker, so this pins the CONTRACT — marker to
+    receipt to notice line — rather than a remembered wording.
+    """
+    call = ToolCall(id="c_limit", name="write", arguments={"path": "a.txt"})
+    model_text = (
+        TRUNCATED_RESULT_TEXT if arm == OUTPUT_LIMIT_ARGUMENTS else LENGTH_ENDED_CALL_RESULT_TEXT
+    )
+    payload = None if arm is None else {"details": {OUTPUT_LIMIT_KEY: arm, "__synthetic": True}}
+    result = Message(
+        role="tool",
+        content=[TextContent(text=model_text)],
+        tool_call_id="c_limit",
+        tool_name="write",
+        is_error=True,
+        provider_payload=payload,
+    )
+    return [Message.user("go"), _assistant("", calls=[call], stop="length"), result]
+
+
+#: The two arms' operator lines, spelled out because they are USER-VISIBLE COPY:
+#: a reworded notice is the change this test exists to catch, and comparing
+#: against the module's own constant would follow the reword instead of pinning
+#: what the operator reads (review round 2, MINOR-1).
+_CUT_RECEIPT = "tool call cut off at the output limit (nothing ran)"
+_TURN_RECEIPT = "turn cut off at the output limit before this call ran"
+_CUT_NOTICE = "turn cut off at the output limit mid tool call — nothing ran"
+_TURN_NOTICE = "turn cut off at the output limit — nothing ran"
+
+
+def test_the_limit_receipt_is_the_rows_line_and_not_the_expansions() -> None:
+    """The display half of review F2, pinned on the package that changed.
+
+    Nothing outside ``tests/unit/harness/test_loop.py`` mentioned the receipt
+    strings, so reverting ``receipt or result_text`` on ANY single row surface
+    stayed green (review round 2, MINOR-1 == QA Q-R2-2). This is the mobile
+    half of that pin, and it asserts the row the operator reads rather than the
+    helper's return value.
+
+    It pins the DECISION'S shape too: the receipt is the row's error line and
+    nothing else. Writing it to the expansion as well is what made one tap show
+    one sentence twice in two styles, and the notice a third time (design round
+    1, D5). A call that never ran has no output to expand; it has arguments.
+    """
+    for arm, receipt in (
+        (OUTPUT_LIMIT_ARGUMENTS, _CUT_RECEIPT),
+        (OUTPUT_LIMIT_TURN, _TURN_RECEIPT),
+    ):
+        rows = _page_rows(_limit_turn(arm))
+        row = next(r for r in rows if r.kind == "tool")
+        assert row.error == receipt
+        assert row.details.get("output", "") == ""
+        assert "args" in row.details
+        # Neither the model-facing prose nor a size claim reaches the operator.
+        for model_text in (TRUNCATED_RESULT_TEXT, LENGTH_ENDED_CALL_RESULT_TEXT):
+            assert model_text not in str(row.details)
+            assert model_text not in row.error
+        assert "oversize" not in str(rows)
+
+
+def test_the_length_notice_reads_the_arm_off_the_turns_own_results() -> None:
+    """One limit, two arms, and the notice may only name the one that happened.
+
+    On the arm where every call's arguments arrived COMPLETE, the turn-level
+    notice read "tool call cut off at the output limit (nothing ran)" two rows
+    under a card that said "turn cut off at the output limit before this call
+    ran": one event, two opposite explanations of it, while the model was being
+    re-asked for a smaller call it had no reason to shrink (design round 1, D1;
+    QA Q-R2-1; review round 2, MINOR-2).
+
+    The arm is read off the turn's OWN results — the marker the loop stamps on
+    the synthetic result — so the notice and the row cannot disagree. A
+    transcript the fold cannot read an arm from (one written before the marker
+    existed) takes the line that is true either way, never the dramatic one.
+    """
+    cut_rows = _page_rows(_limit_turn(OUTPUT_LIMIT_ARGUMENTS))
+    turn_rows = _page_rows(_limit_turn(OUTPUT_LIMIT_TURN))
+
+    assert [r.text for r in cut_rows if r.kind == "notice"] == [_CUT_NOTICE]
+    assert [r.text for r in turn_rows if r.kind == "notice"] == [_TURN_NOTICE]
+
+    # The notice states the TURN and the row states the CALL, so the sentence
+    # is painted once: no notice line is a receipt, verbatim (design round 1,
+    # D2 measured the two rows byte-identical before this).
+    assert {_CUT_NOTICE, _TURN_NOTICE}.isdisjoint({_CUT_RECEIPT, _TURN_RECEIPT})
+
+    # Unmarked (legacy) result: the arm is unknown, so the notice makes no arm
+    # claim at all — and the row keeps its own text, because the receipt is
+    # keyed on the marker and not on the shape of an error row.
+    legacy_rows = _page_rows(_limit_turn(None))
+    assert [r.text for r in legacy_rows if r.kind == "notice"] == [_TURN_NOTICE]
+    legacy_row = next(r for r in legacy_rows if r.kind == "tool")
+    assert legacy_row.error != _TURN_RECEIPT
 
 
 def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
@@ -561,8 +920,8 @@ def test_both_surfaces_strip_the_reference_block() -> None:
     file.
 
     Asserted through `user_row_text` because that is the ONE function both
-    surfaces paint through (`tui/session_presentation.py:922` and
-    `mobile/projection.py:767`). Stripping in a host is how the phone once got
+    surfaces paint through (`tui/session_presentation.py:1093` and
+    `mobile/projection.py:865`). Stripping in a host is how the phone once got
     a rule the TUI had and the other did not, which is the divergence this whole
     file exists to prevent — so the test lives here rather than in a new
     `test_rows.py` beside it.

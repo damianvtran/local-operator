@@ -37,7 +37,12 @@ class ChatOptions(BaseModel):
         top_k: Limits tokens to sample from at each step. Lower values (10) are more selective,
             higher values (100) allow more variety. Default: 40
         max_tokens: Maximum tokens to generate. Model may generate fewer if response completes
-            before reaching limit. Default: 4096
+            before reaching limit. Omitting it does NOT leave the cap to the provider: the
+            harness fills its own per-turn generation bound (the model's published output cap
+            where that is smaller, otherwise the harness ceiling), so a caller that wants a
+            different bound names it here. Must be 1 or greater: 0 used to mean "no cap", and on
+            a model that advertises one it silently re-created an ask at the model's full
+            advertised capability instead (agent review round 1, m3; QA round 1, Q4).
         stop: List of strings that will stop generation when encountered. Default: None
         frequency_penalty: Reduces repetition by lowering likelihood of repeated tokens.
             Range from -2.0 to 2.0. Default: 0.0
@@ -53,7 +58,14 @@ class ChatOptions(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(None, ge=0.0, le=1.0)
     top_k: Optional[int] = None
-    max_tokens: Optional[int] = None
+    max_tokens: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Maximum tokens to generate. Model may generate fewer if response completes "
+        "before reaching limit. Omitted, the harness fills its own per-turn generation bound "
+        "(the model's published output cap where that is smaller) rather than leaving the cap "
+        "to the provider. Must be 1 or greater.",
+    )
     stop: Optional[List[str]] = None
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
@@ -191,7 +203,9 @@ class Agent(BaseModel):
     max_tokens: Optional[int] = Field(
         None,
         description="Maximum tokens to generate. Model may generate fewer if response completes "
-        "before reaching limit.",
+        "before reaching limit. None, and an omitted request field, do not leave the cap to "
+        "the provider: the harness fills its own per-turn generation bound when the agent "
+        "runs (the model's published output cap where that is smaller).",
     )
     stop: Optional[List[str]] = Field(
         None, description="List of strings that will stop generation when encountered."
@@ -255,8 +269,11 @@ class AgentCreate(BaseModel):
     )
     max_tokens: int | None = Field(
         None,
+        ge=1,
         description="Maximum tokens to generate. Model may generate fewer if response completes "
-        "before reaching limit.",
+        "before reaching limit. Omitted, the harness fills its own per-turn generation bound "
+        "(the model's published output cap where that is smaller) rather than leaving the cap "
+        "to the provider. Must be 1 or greater.",
     )
     stop: List[str] | None = Field(
         None,
@@ -333,8 +350,11 @@ class AgentUpdate(BaseModel):
     )
     max_tokens: int | None = Field(
         None,
+        ge=1,
         description="Maximum tokens to generate. Model may generate fewer if response completes "
-        "before reaching limit.",
+        "before reaching limit. Omitted, the harness fills its own per-turn generation bound "
+        "(the model's published output cap where that is smaller) rather than leaving the cap "
+        "to the provider. Must be 1 or greater.",
     )
     stop: List[str] | None = Field(
         None,
@@ -723,9 +743,46 @@ class HealthCheckResponse(BaseModel):
 
     Attributes:
         version: Version of the Local Operator
+        instance_id: Identity of the process answering (see below)
+        pid: Process id of the server answering
+        prefix: ``sys.prefix`` of the install that is serving
+        install_kind: ``uv-tool`` / ``pipx`` / ``pip`` / ``editable`` / ``unknown``
+
+    The last four are ADDITIVE, and every one of them is defaulted so this
+    stays wire-compatible in both directions: an older client ignores fields it
+    does not know, and an older server's response (which has none of them)
+    still parses here. ``version`` keeps its spelling and meaning — it is what
+    the update banner reads, and a client must not have to be rewritten to keep
+    working.
+
+    They exist because a 200 does not identify anything. Three daemons were
+    live on one machine at once (``:1111``, ``:7341``, ``:8080``, three
+    different builds), each answered ``/health``, and a dev server eleven
+    releases behind was accepted as "the backend". ``instance_id`` is minted
+    per process at startup and also written into the serve rendezvous record,
+    so a discoverer can tell whether the process it reached is the process the
+    record described; ``prefix``/``install_kind`` name WHICH install is
+    serving, which is not the one on ``PATH``.
     """
 
     version: str = Field(..., description="Version of the Local Operator")
+    instance_id: str = Field(
+        default="",
+        description=(
+            "Identity of the process answering; minted at startup and carried in the "
+            "serve rendezvous record, so a probe can confirm it reached the daemon it "
+            "discovered. Empty on a server predating this field."
+        ),
+    )
+    pid: int = Field(default=0, description="Process id of the server answering")
+    prefix: str = Field(
+        default="",
+        description="sys.prefix of the install that is serving, i.e. WHICH install",
+    )
+    install_kind: str = Field(
+        default="",
+        description="How that install was made: uv-tool, pipx, pip, editable or unknown",
+    )
 
 
 class WebsocketConnectionType(str, Enum):

@@ -14,7 +14,8 @@ from local_operator.clients.openrouter import (
     OpenRouterModelPricing,
 )
 from local_operator.env import get_env_config
-from local_operator.model.discovery import DiscoveredModel
+from local_operator.model.discovery import DiscoveredModel, merge_models
+from local_operator.model.registry import deepseek_models
 from local_operator.server.app import app
 
 
@@ -49,7 +50,11 @@ def client(monkeypatch):
     # Local runtime integration has its own owned-HTTP tests. Enumeration
     # tests must not inspect whichever server a developer has running today.
     monkeypatch.setattr(
-        "local_operator.server.routes.models.available_models", lambda *a, **kw: ([], "static")
+        "local_operator.server.routes.models.available_models",
+        lambda provider, **kw: (
+            merge_models(deepseek_models, None) if provider == "deepseek" else [],
+            "static",
+        ),
     )
     had_env_config = hasattr(app.state, "env_config")
     previous = getattr(app.state, "env_config", None)
@@ -62,6 +67,37 @@ def client(monkeypatch):
             app.state.env_config = previous
         elif hasattr(app.state, "env_config"):
             delattr(app.state, "env_config")
+
+
+def test_deepseek_http_catalogue_uses_authenticated_live_inventory(
+    client, mock_credential_manager, monkeypatch
+):
+    """The older HTTP surface must not reintroduce retired picker entries."""
+    seen = []
+
+    def listing(provider, **kwargs):
+        seen.append((provider, kwargs))
+        return [
+            DiscoveredModel(
+                id="deepseek-flash",
+                name="Live Flash",
+                context_window=200_000,
+                supports_images=False,
+                supports_tools=False,
+                reasoning=False,
+            )
+        ], "ok"
+
+    monkeypatch.setattr("local_operator.server.routes.models.available_models", listing)
+    response = client.get("/v1/models?provider=deepseek")
+    assert response.status_code == 200
+    rows = response.json()["result"]["models"]
+    assert [row["id"] for row in rows] == ["deepseek-flash"]
+    assert rows[0]["info"]["supports_images"] is False
+    assert rows[0]["info"]["supports_tools"] is False
+    assert rows[0]["info"]["context_window"] == 200_000
+    assert seen[0][0] == "deepseek"
+    assert "api_key" in seen[0][1]
 
 
 def test_list_providers_with_ollama_active(client):

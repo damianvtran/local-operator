@@ -9,6 +9,7 @@ session semantics from the phone's deliberately capped projection.
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import os
 import time
@@ -28,12 +29,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, NamedTuple, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializationInfo,
     SerializerFunctionWrapHandler,
     TypeAdapter,
     field_validator,
@@ -42,6 +44,8 @@ from pydantic import (
 )
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
+from local_operator.harness.intent import ACTIVITY_RESPONDING, ACTIVITY_THINKING
+from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY as _TRAJECTORY_SEQ_KEY
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -49,17 +53,66 @@ from local_operator.harness.types import (
     AgentStartEvent,
     CompactionEndEvent,
     MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
+    ToolCallComposeEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    TurnEndEvent,
     Usage,
+    _omit_unset_usage_stamp,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
+from local_operator.model.costs import cost_summary, job_cost, turn_cost
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
-from local_operator.tui.costs import cost_summary, job_cost, turn_cost
+from local_operator.session.spend import (
+    SessionSpend,
+    serving_identity,
+    usage_prices_known,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    #: The duck-typed session members this store calls when a real session is
+    #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
+    #: signature rather than passing ``object`` around; the guard itself is the
+    #: runtime contract, and a reduced host simply has none of them. Declared
+    #: AFTER the imports, not in the typing block above, because flake8 resolves
+    #: a name used here against the module's import order.
+    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    SeedSpendFn = Callable[..., SessionSpend]
+    ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
+    IdentityFn = Callable[[Any], dict[str, str]]
 
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
 FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: The phase names ``FrontendSessionState.activity_phase`` folds to.
+#:
+#: The reader matches a folded phase against the phase it DERIVED by string
+#: equality, so these have to be the same words the working line's own
+#: vocabulary uses rather than a private enum: `thinking` and `responding` are
+#: imported from ``harness/intent.py`` (the module that owns the label words)
+#: rather than restated here, and `composing`/`queued`/`running` name the states
+#: the tool ledger itself uses. A rename in either place must move together or
+#: the reader silently stops matching and every clock goes blank.
+#:
+#: ``queued`` names the ledger's third live state — announced, dictation over,
+#: nothing started — and it is deliberately NOT folded here. The compose arm
+#: above folds `composing` off the announcements and keeps ONE zero for a
+#: batch's whole dictation, so a terminal frame leaves the folded phase where it
+#: was rather than opening an edge for this one. Nothing is lost by that: the
+#: working line's queued arm passes no clock at all
+#: (`OperatorApp._current_activity`), because there is no instant a "waiting to
+#: run" age could honestly count from — the call has not started, and the
+#: dictation clock that just ended measured the model writing, not the wait.
+ACTIVITY_PHASE_THINKING = ACTIVITY_THINKING
+ACTIVITY_PHASE_RESPONDING = ACTIVITY_RESPONDING
+ACTIVITY_PHASE_COMPOSING = "composing"
+ACTIVITY_PHASE_QUEUED = "queued"
+ACTIVITY_PHASE_RUNNING = "running"
 
 #: How many per-call billing receipts ``usage_components`` retains.
 #:
@@ -141,8 +194,67 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: 25. Per-row text is the right place to take it from — it is already shared,
 #: already floored at a legible preview, and 128 chars spread across a roster
 #: is invisible, whereas an over-limit frame cannot be sent at all.
-JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
+#:
+#: Reduced again, 119,872 → 119,360, by the UNION of the two per-frame consumers
+#: that arrived either side of a rebase: this branch's attention payload
+#: (``reason`` at :data:`local_operator.session.attention.REASON_WIRE_CHARS`
+#: plus ``cause``, 714 B on every frame) and upstream's ``live_tool_started_at``
+#: (8 concurrently executing calls × 52 B = 416 B). Each fits alone on its own
+#: base — upstream's tree had 147 B of headroom, this branch's 83 B — and the
+#: pair does not, which is what put the ``ran all year`` worst case 416 bytes
+#: over the line. The same shelf pays, for the same reasons: the budget is
+#: elastic, shared, and floored at a legible preview, so 512 chars spread across
+#: a 200-row roster is 3 characters off each row's 599 — invisible — where an
+#: over-limit frame cannot be sent at all.
+#:
+#: Mind the GRANULARITY, because it is why this is a round 512 rather than the
+#: 416 the union overshot by: a row's share is ``BUDGET // len(jobs)``, so a
+#: reduction lands on whole characters per row and no value buys exactly 416.
+#: At the guard's 200 rows, 512 chars moves the share 599 → 596, and three
+#: fields × 3 chars × 200 rows is 1,800 bytes off the frame's FIXED content —
+#: past the overshoot by a margin rather than flush against it, which is the
+#: distinction the 13-byte precedent above did not make. Measure the guard, not
+#: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
+#: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
+#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: the catalogue grown from its 50-row floor to 54). The number that matters is
+#: the one the overshoot was about — whether the FLOOR fits: with the catalogue
+#: held at its floor the frame now has 1,384 B of line where it had 416 B too
+#: little. It is not slack: it bought two fields, and the next per-frame field is
+#: paid for out of here too.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_360
 JOB_TEXT_FLOOR_CHARS = 200
+
+#: Byte budget for the trajectory deltas one relayed ``frontend_update`` may carry,
+#: shared across the jobs that connection is watching.
+#:
+#: WHY THIS EXISTS. :data:`TRAJECTORY_CAP` bounds a job's retained trajectory by
+#: ROW COUNT and says nothing about bytes, so a burst of rows that are each
+#: individually reasonable — a tool result at the 8 KiB wire cap, one long
+#: streamed answer — adds up past the 1 MiB socket line limit. Measured on the
+#: operator's machine: 44,681 oversized ``frontend_update`` frames, median
+#: 1.29 MB, p90 3.02 MB, max 4.51 MB, each of which cost that viewer its live
+#: update (the relay substitutes a degraded placeholder and the viewer recovers
+#: through ``frontend_sync`` plus durable history). Re-measured against the real
+#: producer at 500 retained rows: 1,922,210 B for one streamed answer and
+#: 4,390,839 B for 500 tool results, both over the limit on ``job trajectory``
+#: alone. Bounding the delta is what keeps the live path live.
+#:
+#: A quarter of the line limit, not all of it: the same frame carries the roster
+#: rows, todos and usage, and :data:`JOB_TEXT_FRAME_BUDGET_CHARS` already claims
+#: ~119 KB of it for row text. Choosing a budget that ignored them would trade
+#: one overflow for another.
+#:
+#: Measured with :func:`_live_row_cost`, like the live-event budget, so a row
+#: whose payload rides a key this module has never heard of is still counted.
+JOB_TRAJECTORY_FRAME_BUDGET_BYTES = 262_144
+
+#: Smallest newest-row set worth shipping for one job. A deep roster divides the
+#: frame budget, and without a floor a job's share can fall below one row's cost,
+#: which would ship it an empty window while its own newest event is exactly what
+#: an operator opened the page for. The floor is a slice, not an entitlement: it
+#: still cannot let the frame exceed :data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES`.
+JOB_TRAJECTORY_ROW_FLOOR_BYTES = 8_192
 
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
 #: whole-state deep copy — see that method for the measurement that motivates
@@ -223,6 +335,13 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "context_window",
         "context_is_estimate",
         "cumulative_parent_cost",
+        # The working line's phase and its zero are read PER EVENT that moves the
+        # turn (`OperatorApp._current_activity`), which is far too hot for the
+        # whole-state clone. Both are admitted on the set's own two tests: a
+        # `str` and a `float | None`, so nothing of the store's can be reached
+        # through them.
+        "activity_phase",
+        "activity_phase_started_at",
     }
 )
 #: Wire budget for the in-flight seed's retained tool results.
@@ -874,6 +993,25 @@ class PendingGateState(BaseModel):
     secret: bool = False
     question_index: int = 0
     question_total: int = 1
+    #: The conversation's name, for a surface that renders this card as a
+    #: NOTIFICATION rather than in the session it belongs to. A desktop banner
+    #: saying only "Waiting for approval" cannot be triaged: with several
+    #: sessions open the user cannot tell which run is being held hostage
+    #: without opening each one (design round 1, D3).
+    #:
+    #: EMPTY when ``display.notification_session_name`` is off, and the
+    #: emptiness is decided in the BACKEND for the same reason every other
+    #: notification fact is: only the backend can read that setting, and a
+    #: renderer re-deriving the privacy rule is a renderer that can get it
+    #: wrong in a signed binary the user updates on their own schedule.
+    #:
+    #: ADDITIVE AND DEFAULTED, in both skew directions. An old viewer reading a
+    #: new payload ignores a key it does not know; a new viewer reading an old
+    #: payload gets ``""`` and falls back to the anonymous card it already
+    #: renders. Gates deliberately keep travelling on THIS path rather than
+    #: gaining a ``notification`` frame of their own — a second channel for a
+    #: card the app already receives is how one question becomes two banners.
+    session_name: str = ""
 
 
 class _FrozenSequence(tuple[Any, ...]):
@@ -1020,6 +1158,81 @@ def _is_frozen_value(value: Any) -> bool:
     if isinstance(value, tuple):
         return all(_is_frozen_value(item) for item in value)
     return False
+
+
+def _trajectory_row_seq(row: Any) -> int | None:
+    """One retained row's append stamp, or ``None`` when it carries none.
+
+    ``_FrozenMapping`` rows read like a mapping here, so the same call serves the
+    raw rows coming off a job and the frozen rows already in canonical state.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    value = row.get(_TRAJECTORY_SEQ_KEY)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _freeze_row(row: Any) -> Any:
+    """Freeze ONE retained trajectory row into canonical immutable containers.
+
+    Mirrors ``JobState.from_job``'s materialisation — a model row is dumped to
+    JSON first — minus that method's ``deepcopy`` of a dict row:
+    :func:`_freeze_value` rebuilds every mutable container it meets and passes
+    through only immutables, so copying a row first is work whose result is
+    immediately copied again and dropped. That copy is also what made a roster
+    tick cost O(retained rows) instead of the delta.
+    """
+    if hasattr(row, "model_dump"):
+        row = row.model_dump(mode="json")
+    return _freeze_value(row)
+
+
+def _is_retained_row(event: Any) -> bool:
+    """Whether ``event`` is a row canonical state may hold.
+
+    THE one definition of what a retained row IS. :func:`_retained_row` materialises
+    exactly what this accepts, and BOTH readers (``JobState.from_job`` and the
+    retained-window memo) decide through these two functions rather than restating
+    the test: a second spelling would drift, and the drift lands in canonical state,
+    where ``FrontendUpdate(job_trajectory_appends=...)`` rejects a non-dict and the
+    ``ValidationError`` escapes ``refresh_jobs`` -- and, on the roster path, the
+    pump's bare ``call_later`` callback.
+    """
+    return hasattr(event, "model_dump") or isinstance(event, dict)
+
+
+def _retained_row(event: Any) -> Any | None:
+    """``event`` as a row ready for canonical state, or ``None`` when it is not one."""
+    if not _is_retained_row(event):
+        return None
+    if hasattr(event, "model_dump"):
+        return event.model_dump(mode="json")
+    return copy.deepcopy(event)
+
+
+def _row_items(rows: list[Any]) -> list[Any]:
+    """``rows`` ITSELF when every item is a row, else only the items that are rows.
+
+    WHY. The memo's fast path freezes what a ``list`` holds, while
+    ``JobState.from_job`` keeps only rows -- so a list carrying anything else was
+    served by the memo as a row the one-off reader drops, and canonical state then
+    handed the appends writer a non-dict for it. The merge-base answered 0 rows
+    quietly for that shape; a window that differs from what a plain rebuild would
+    hold is the one thing a memo may never produce, in either direction.
+
+    COST. An all-rows list comes back BY IDENTITY, so nothing is rebuilt and the
+    scan is one ``hasattr``/``isinstance`` per item with no copy -- and it is only
+    reached on a tick that was going to freeze anyway, because the O(1) memo HIT
+    returns before this. A tick whose window did not move never runs it.
+    """
+    for item in rows:
+        if not _is_retained_row(item):
+            return [row for row in (_retained_row(item) for item in rows) if row is not None]
+    return rows
+
+
+def _freeze_rows(rows: Iterable[Any]) -> _FrozenSequence:
+    return _FrozenSequence(_freeze_row(row) for row in rows)
 
 
 def _wire_value(value: Any) -> Any:
@@ -1228,8 +1441,8 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
-    """Omit the launch-reconciliation keys from a row that has no launch.
+def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Omit the per-row keys that are EMPTY from a row that has neither fact.
 
     An absent fact must not buy wire bytes. These two keys are empty on every
     bash job and on every child that was never resumed, and at roster scale the
@@ -1243,6 +1456,13 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
     reading neither key takes the same degrade path as one attached to a runtime
     that predates the fields. So this is a pure byte saving, not a semantic one.
 
+    ``cut_off_cause`` joins them for the same reason, measured the same way:
+    it is empty on every row that was not restored from a roster record, and one
+    key's worth of JSON on each of 200 rows was enough to push the same class
+    guard 4 KB over the line on its own. Its non-empty value is a single token
+    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
+    tens of bytes on the handful of rows that carry it.
+
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
@@ -1251,6 +1471,8 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_message_id", None)
     if not job.get("launch_prompts"):
         job.pop("launch_prompts", None)
+    if not job.get("cut_off_cause"):
+        job.pop("cut_off_cause", None)
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1258,6 +1480,60 @@ def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) 
     return len(current) == len(candidate) and all(
         old is new or old == new for old, new in zip(current, candidate)
     )
+
+
+def _capped_overlap_tail(old: Sequence[Any], trajectory: Sequence[Any]) -> list[Any] | None:
+    """The appended tail when ``trajectory`` is ``old`` with rows evicted from the front.
+
+    THE second half of the append/replacement decision, and the one that decides
+    whether a long-running child costs one row per frame or five hundred. The
+    writer keeps a bounded window: it appends one row and deletes the oldest past
+    ``TRAJECTORY_CAP`` (``harness/subagent.py``, ``relay``). A prefix test cannot
+    see that -- eviction breaks ``new[:len(old)] == old`` on EVERY append once the
+    window is full -- so the old classifier called a full-cap rotation a
+    "replacement" and shipped all 500 rows per job per frame (measured: ~634 KB
+    per frame against 6.5 KB for the uncapped shape, on 6 children).
+
+    WHY THE RESULT IS EXACT RATHER THAN APPROXIMATE. The receiver's rule is
+    already ``(old + tail)[-CAP:]``, for the plain append branch and this one
+    alike. So if ``old`` and ``trajectory`` share a NONEMPTY overlap of ``k`` rows
+    at the front of ``trajectory``/back of ``old``, and ``trajectory`` is exactly
+    ``CAP`` long, then ``len(old) + len(tail) - CAP == len(old) - k``: the
+    receiver's own trim drops precisely the rows before the overlap and lands on
+    ``trajectory``. No new wire field, no capability handshake, and an older
+    receiver that already trims at the cap reconstructs it without knowing the
+    owner evicted anything.
+
+    WHY A STAMP IS ONLY A CANDIDATE. ``_lo_seq`` counts RELAYS, so it locates an
+    overlap cheaply but cannot establish one: a restart can reissue stamps, two
+    rows can be equal, and an interior edit can leave both endpoints agreeing.
+    Every returned tail is therefore backed by one full element-wise comparison of
+    the proposed overlap, and an unprovable input returns ``None`` so the caller
+    keeps the replacement it has always sent. That is the conservative direction
+    on purpose -- a wrong tail ships the WRONG ROWS to a viewer, which is worse
+    than shipping too many.
+
+    Refused deliberately, each for its own reason: a window shorter than the cap
+    (a front deletion cannot be reconstructed by append+trim, even when every
+    surviving row is an equal suffix), an empty or over-cap prior, a zero-length
+    or full-length overlap (nothing to append), and a non-integer or non-monotone
+    stamp pair. Those all fall back to the existing full replacement.
+    """
+    if len(trajectory) != _TRAJECTORY_CAP or not 0 < len(old) <= _TRAJECTORY_CAP:
+        return None
+    tail_start = _trajectory_row_seq(old[-1])
+    head_start = _trajectory_row_seq(trajectory[0])
+    if tail_start is None or head_start is None:
+        return None
+    # The stamp distance between the two windows IS the overlap: at the cap the
+    # stamps advance by one per retained row, so the row that was last in ``old``
+    # sits exactly that far into ``trajectory``.
+    overlap = tail_start - head_start + 1
+    if not 0 < overlap < len(trajectory) or overlap > len(old):
+        return None
+    if list(old[len(old) - overlap :]) != list(trajectory[:overlap]):
+        return None
+    return list(trajectory[overlap:])
 
 
 def _freeze_job(job: "JobState") -> "JobState":
@@ -1274,6 +1550,15 @@ def _freeze_job(job: "JobState") -> "JobState":
     for name, value in (job.model_extra or {}).items():
         values[name] = _freeze_value(value)
     return job.model_copy(update=values)
+
+
+#: Context key for the sync-frame dump, read by
+#: :meth:`JobState._serialize_frozen_values`: its presence serves the retained
+#: trajectory as an empty list instead of thawing it. A serialization context is
+#: the one channel that reaches a nested model's serializer without changing the
+#: model's declared shape, and nothing else in this module reads one. See
+#: :func:`sync_wire_payload` for the bytes it must not change.
+_SYNC_OMIT_TRAJECTORY_KEY: Final[str] = "omit_retained_trajectory"
 
 
 class JobState(BaseModel):
@@ -1296,6 +1581,12 @@ class JobState(BaseModel):
     latest_details: dict[str, Any] | str | None = None
     error_text: str = ""
     result_text: str = ""
+    #: Why a restored row reads ``interrupted`` — added with the cut-off
+    #: taxonomy (design §4, D3) so the subagent panel can say what stopped the
+    #: child rather than only that it stopped. Additive with a ``""`` default,
+    #: so an older runtime's row validates and the panel's existing spellings
+    #: stay valid; the value is a token from ``incidents.CUT_OFF_CAUSES``.
+    cut_off_cause: str = ""
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
@@ -1394,11 +1685,24 @@ class JobState(BaseModel):
         return data
 
     @model_serializer(mode="wrap")
-    def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+    def _serialize_frozen_values(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
         # Pydantic's field serializers expect concrete lists/dicts. Thaw only
         # the ephemeral wire copy; canonical state keeps the immutable wrappers.
+        #
+        # ``_SYNC_OMIT_TRAJECTORY_KEY`` says skip the thaw for the retained
+        # trajectory, serving it empty instead: it is the one field here whose size is
+        # unbounded (``TRAJECTORY_CAP`` rows, each holding a whole tool result)
+        # and the sync-frame builder discards it immediately after the dump. The
+        # field keeps both its key and its position, so the frame's bytes are
+        # unchanged — see :func:`sync_wire_payload`.
+        omit = bool((info.context or {}).get(_SYNC_OMIT_TRAJECTORY_KEY))
         mutable = self.model_copy(
-            update={name: _wire_value(value) for name, value in self.__dict__.items()}
+            update={
+                name: ([] if omit and name == "trajectory" else _wire_value(value))
+                for name, value in self.__dict__.items()
+            }
         )
         if self.model_extra:
             mutable.__pydantic_extra__ = {
@@ -1407,13 +1711,22 @@ class JobState(BaseModel):
         return handler(mutable)
 
     @classmethod
-    def from_job(cls, job: Any) -> "JobState":
+    def from_job(cls, job: Any, *, window: _FrozenSequence | None = None) -> "JobState":
+        """Build one roster row, reusing an already-frozen retained row window.
+
+        ``window`` is the caller's frozen retained rows (:class:`_TrajectoryWindows`)
+        and it MUST describe this job's current rows — proving that is the caller's
+        job, not this one's. Supplying it skips both the per-row copy below and
+        ``_freeze_job``'s re-freeze of the same rows, which is what makes a roster
+        tick cost the delta rather than the retained window; omitting it keeps the
+        full rebuild a one-off reader wants.
+        """
         trajectory = []
-        for event in list(getattr(job, "trajectory", None) or []):
-            if hasattr(event, "model_dump"):
-                trajectory.append(event.model_dump(mode="json"))
-            elif isinstance(event, dict):
-                trajectory.append(copy.deepcopy(event))
+        if window is None:
+            for event in list(getattr(job, "trajectory", None) or []):
+                row = _retained_row(event)
+                if row is not None:
+                    trajectory.append(row)
         details = getattr(job, "latest_details", None)
         if isinstance(details, dict):
             details = copy.deepcopy(details)
@@ -1432,7 +1745,7 @@ class JobState(BaseModel):
                 descendants.append(FrontendUsage.model_validate(component))
             elif isinstance(component, Usage):
                 descendants.append(FrontendUsage.model_validate(component.model_dump(mode="json")))
-        return cls(
+        value = cls(
             id=str(getattr(job, "id", "") or ""),
             type=str(getattr(job, "type", "") or ""),
             status=str(getattr(job, "status", "running") or "running"),
@@ -1457,7 +1770,7 @@ class JobState(BaseModel):
             started_at=getattr(job, "started_at", None),
             settled_at=getattr(job, "settled_at", None) or getattr(job, "finished_at", None),
             trajectory=trajectory,
-            trajectory_length=len(trajectory),
+            trajectory_length=len(trajectory) if window is None else len(window),
             descendant_usage=descendants,
             prompt=getattr(job, "prompt", None),
             # Recorded on the job at registration beside ``prompt``
@@ -1472,7 +1785,26 @@ class JobState(BaseModel):
             output_tail=str(getattr(job, "output_tail", "") or ""),
             output_seq=int(getattr(job, "output_seq", 0) or 0),
             restored=bool(getattr(job, "restored", False)),
+            # Carried, not re-derived here: the resolver that sets it
+            # (``session/restored_rows.py``) is the one place that knows whether
+            # a restored row's outcome came from a record, from the child's own
+            # journal, or from nothing at all. Dropping it on the way to the
+            # wire is what left the dock unable to say WHY a restored child
+            # stopped — and, for a child whose record reads ``completed``, was
+            # how the whole resolved row disappeared within a second of the
+            # session opening (UX review round 1, U2).
+            cut_off_cause=str(getattr(job, "cut_off_cause", "") or ""),
         )
+        if window is None:
+            return value
+        # Attached WITHOUT validation, deliberately. ``trajectory`` is declared
+        # ``list[dict[str, Any]]`` and the window is already frozen canonical data
+        # (a ``_FrozenSequence`` of ``_FrozenMapping`` rows), so validating it here
+        # would re-coerce every row into a fresh dict — measured as the difference
+        # between 11.0 ms and 0.09 ms per idle roster tick — and it would hand
+        # ``_jobs_equal`` a new object to compare instead of the SAME one, which is
+        # what lets an unchanged tick cost nothing to detect.
+        return value.model_copy(update={"trajectory": window})
 
 
 class FrontendModelSpec(ModelSpec):
@@ -1494,7 +1826,11 @@ class _FrozenUsage(Usage):
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return handler(_thaw_model(self))
+        # Through the base helper: a subclass serializer REPLACES ``Usage``'s own
+        # rather than composing with it, so the unset ``at_ms`` would come back as
+        # a null on every frozen usage — which is the shape the attach frame's
+        # worst case is made of.
+        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
 
 
 class _FrozenFrontendUsage(FrontendUsage):
@@ -1504,7 +1840,8 @@ class _FrozenFrontendUsage(FrontendUsage):
 
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        return handler(_thaw_model(self))
+        # Same reason as ``_FrozenUsage`` above.
+        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
 
 
 def _thaw_model(value: BaseModel) -> BaseModel:
@@ -1584,7 +1921,59 @@ class FrontendSessionState(BaseModel):
     #: value — treat as aborted. Additive; extra="allow" keeps older readers
     #: tolerant. One value per user prompt, not per compaction continuation.
     last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+    #: The rendered reason for a cut-off last turn, mirrored beside
+    #: ``last_turn_outcome`` for the same reason that field exists: a viewer
+    #: that dropped mid-turn rebinds after the real end is gone from
+    #: ``live_events``, and without this it can only synthesise the CLASS
+    #: placeholder ``"turn failed"`` (or blame the user for a cancel they never
+    #: made). Additive; ``""`` is the old-runtime value and means "no reason
+    #: was recorded", which is exactly what it is.
+    last_turn_cut_off: str = ""
     activity_started_at: float | None = None
+    #: Which kind of work the working line is naming, and when that kind began.
+    #:
+    #: The terminal's band and the phone's working line both key their elapsed
+    #: number to the PHASE (`thinking`/`responding`/`composing`/`running`) rather
+    #: than to the label, because a batch shedding a call or a tool name arriving
+    #: in fragments must not restart a clock that answers "has this been stuck".
+    #: That phase zero lived only in whoever built the widget, so a frontend that
+    #: joined mid-turn counted from its own arrival — the operator's report
+    #: names the thinking indicator as well as the tool row, which a per-call
+    #: stamp alone cannot fix. `running` is folded here too, but its clock is
+    #: still taken from the live cards themselves (the oldest of their starts),
+    #: which is a finer anchor than any phase edge.
+    #:
+    #: ``""`` is "no phase": the turn has not started, or has ended, and a
+    #: frontend must not match it against anything it derives.
+    activity_phase: str = ""
+    activity_phase_started_at: float | None = None
+    #: ``tool_call_id -> started_at_epoch`` for the calls executing RIGHT NOW.
+    #:
+    #: Folded from ``ToolExecutionStartEvent.started_at_epoch`` so a frontend
+    #: that attaches mid-turn can seed a live row's clock from the call's true
+    #: age instead of its own arrival. Keyed by call rather than as one scalar
+    #: because a batch has several: the row and the band must agree on ONE
+    #: anchor, and only the per-call map can tell them what the oldest live
+    #: call's age actually is.
+    #:
+    #: TRANSIENT by construction and bounded by the live batch: an entry is
+    #: popped by the call's own end and the whole map is cleared at
+    #: ``agent_start``/``agent_end``, so it neither grows with the conversation
+    #: nor outlives the turn. A call whose producer sent no epoch is present
+    #: with ``None`` rather than stamped with the fold instant — see
+    #: ``_fold_live_tool_starts``. It is stripped from the durable checkpoint
+    #: for the same reason ``live_events`` is: there is nothing to restore.
+    #:
+    #: ``float | None``, and the ``None`` is load-bearing rather than sloppy:
+    #: this map is asked TWO different questions — "when did this call start"
+    #: (a float, or nothing to count from) and "has this call started at all"
+    #: (membership). Answering the second by absence conflated a call queued
+    #: behind a sibling with one executing under a producer too old to stamp an
+    #: epoch, and a replayed row for the first was painted as though it were the
+    #: second — `running`, with no clock, on a call nothing had run. Membership
+    #: is now the start fact and the value its instant, which is what the replay
+    #: paths read.
+    live_tool_started_at: dict[str, float | None] = Field(default_factory=dict)
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
@@ -1684,6 +2073,196 @@ def _freeze_state_jobs(
     """Detach the incoming owning models, or preserve already-owned jobs on scalar updates."""
     jobs = state.jobs if jobs_are_canonical else (_freeze_job(job) for job in state.jobs)
     return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+
+
+def _freeze_retained_rows(rows: Iterable[Any]) -> _FrozenSequence:
+    """Freeze one job's retained window into the immutable rows canonical state holds.
+
+    This is the per-ROW half of a ``jobs`` delta — the only part of it that
+    scales with the retained WINDOW rather than with the delta — and it is the
+    same work the payload rebuild always did, just reached directly: every row
+    goes through :func:`_freeze_value` exactly as it did when the rebuilt
+    ``trajectory`` was validated by pydantic and then frozen by
+    :func:`_freeze_job`. An already-frozen row comes back BY IDENTITY (the
+    ``_FrozenSequence``/``_FrozenMapping`` arm of that function), which is what
+    lets a proven prefix be reused without walking it again.
+    """
+    return _FrozenSequence(_freeze_value(row) for row in rows)
+
+
+def _extend_retained_window(retained: _FrozenSequence, appends: Iterable[Any]) -> _FrozenSequence:
+    """The next retained window from a PROVEN prefix plus this delta's appended rows.
+
+    ``retained`` must already have been proven unchanged by
+    :meth:`_FollowerTrajectoryWindows.prove`; this function's only job is to add
+    the delta's rows and honour the cap, so its cost is the APPENDED rows rather
+    than the window they land in.
+
+    Returns ``retained`` ITSELF when the delta appended nothing. That identity is
+    load-bearing rather than an optimisation: a roster tick that changed only
+    scalars must leave the canonical job holding the very object the memo
+    describes, or the next tick's proof fails and every delta after it pays a
+    full re-freeze.
+
+    The cap is EXPRESSED here rather than refused, and the equivalence is exact:
+    the rebuild path this replaces applied ``del rows[: len(rows) - CAP]`` to
+    ``list(prior.trajectory) + appends`` before freezing, so the surviving rows
+    are the same objects in the same order, re-frozen the same way. Dropping the
+    memo instead would cost the whole window on every delta of exactly the shape
+    this work was measured against (a window sitting AT the cap), which is the
+    residual PR #1123 documents on the producer side.
+    """
+    frozen = [_freeze_value(row) for row in appends]
+    if not frozen:
+        return retained
+    combined = (*retained, *frozen)
+    if len(combined) > _TRAJECTORY_CAP:
+        combined = combined[len(combined) - _TRAJECTORY_CAP :]
+    return _FrozenSequence(combined)
+
+
+@dataclass(frozen=True)
+class _FollowerRowWindow:
+    """One job's frozen retained window, as this follower's canonical state holds it.
+
+    ``rows`` is held by REFERENCE and is the whole proof — see
+    :class:`_FollowerTrajectoryWindows`. ``tail`` is the same window's last row,
+    also by reference, as a second witness of the same fact.
+    """
+
+    rows: _FrozenSequence
+    tail: Any
+
+
+class _FollowerTrajectoryWindows:
+    """Per-job memo of a FOLLOWER's frozen retained window, so a delta costs the delta.
+
+    WHY THIS EXISTS. ``FrontendStateStore.apply_update`` is the follower's whole
+    reducer: it runs on the event loop of every attached viewer, once per
+    canonical delta per session (``AttachedSession._on_frontend_update``). For a
+    ``jobs`` delta it used to rebuild every job from scratch — ``list(prior
+    .trajectory)`` per job extended with ``job_trajectory_appends``, then
+    ``FrontendSessionState.model_validate`` re-validating every retained row,
+    then ``_freeze_state_jobs`` re-freezing every row — which the coupling audit
+    measured at 6.8-9.3 ms per delta on a 6-child roster at a 500-row retained
+    window, i.e. 14-19 % of a core per attached session streaming at the
+    producer's 20/s cadence. The retained window is the one part of that work the
+    delta does not change, so it is frozen once and reused.
+
+    THE PROOF, and why it is a proof rather than a heuristic. The memo records
+    the ``_FrozenSequence`` object the reducer INSTALLED as a job's trajectory.
+    A reuse is granted only when the PREVIOUS canonical job's ``trajectory`` IS
+    that exact object. Two properties make that conclusive here:
+
+    * ``_FrozenSequence`` is an immutable tuple subclass and every row it holds
+      is a ``_FrozenMapping`` (or a scalar), so a window that has not been
+      replaced cannot have changed — the identity is not a cache key standing in
+      for the content, it IS the content, and the memo holds the only other
+      reference to it.
+    * the reducer is the only writer of ``_state``, and it installs windows with
+      ``model_copy(update=...)`` (no re-coercion) and freezes through
+      ``_freeze_value``'s already-frozen arm (identity), so the installed object
+      is the memo's object and not an equal copy of it.
+
+    A ``(count, last_seq)`` fingerprint would NOT be sufficient, and the reason
+    is recorded in the open producer-side PR #1123: a child's second attempt
+    rebinds the row list and restarts the row stamps at zero, so count and stamp
+    range can describe two different attempts. Counting has a second failure on
+    this side specifically — the follower's window is a bounded PAGE, so its
+    length is not even a function of the runtime's roster history.
+
+    EVERY PATH THAT REFUSES A REUSE, enumerated because a stale window would ship
+    the WRONG ROWS to a viewer, which is this cache's whole risk. Each of these is
+    exercised by a test in ``tests/unit/session/test_follower_row_window.py``:
+
+    * ``job_trajectory_replacements`` -- the runtime itself says the window is a
+      replacement, not a suffix. Checked before the memo is consulted.
+    * a job ENTERING the roster (no prior canonical job) or one whose canonical
+      trajectory is a different object than the recorded window -- a
+      ``seed_job_trajectory`` page installs a freshly frozen window, a
+      ``replace()``/``replace_and_notify()`` re-seat clears the memo outright,
+      and a job whose rows arrive any other way simply misses.
+    * a job LEAVING the roster (``retain``), so an entry cannot outlive its job
+      and pin that job's rows for the life of the store.
+    * an EPOCH move (``prove``'s ``epoch`` argument), i.e. the follower is now
+      reading a different lineage's state.
+    * a window whose recorded TAIL row is no longer the previous window's last
+      row. On today's reducer the immutable container already settles this, so
+      the witness cannot disagree through ``apply_update``; it is kept as an O(1)
+      guard against a future reducer that installs a MUTABLE row container, where
+      the container identity alone would stop being a proof.
+    * the DEGRADED path, which drops the memo (see ``apply_update``).
+
+    The ``_TRAJECTORY_CAP`` front-trim is deliberately NOT in that list: it is
+    expressed by :func:`_extend_retained_window` and proven equal to the rebuild
+    path it replaces, for the reason recorded there.
+    """
+
+    __slots__ = ("_by_job", "_epoch")
+
+    def __init__(self, epoch: str) -> None:
+        self._by_job: dict[str, _FollowerRowWindow] = {}
+        self._epoch = epoch
+
+    def reset(self, epoch: str) -> None:
+        """Bind to ``epoch`` and forget every window.
+
+        Called by the two paths that re-seat canonical state from a PAYLOAD
+        (``replace``/``replace_and_notify``, and the degraded delta that ends in
+        one): those rebuild rows instead of extending them, so no identity proof
+        can cross them.
+        """
+        self._by_job.clear()
+        self._epoch = epoch
+
+    def forget(self, job_id: str) -> None:
+        """Drop ``job_id``'s entry; the next delta for it pays a full freeze."""
+        self._by_job.pop(job_id, None)
+
+    def retain(self, job_ids: Iterable[str]) -> None:
+        """Drop every entry for a job that is no longer on the roster."""
+        live = set(job_ids)
+        for job_id in [key for key in self._by_job if key not in live]:
+            del self._by_job[job_id]
+
+    def prove(self, job_id: str, prior: Any, *, epoch: str) -> _FrozenSequence | None:
+        """The frozen window for ``prior``, or ``None`` when it cannot be proven.
+
+        Returns the entry's own object, so the caller installs the window the
+        memo describes rather than an equal copy of it — that is what keeps the
+        next delta's proof an identity check.
+        """
+        if epoch != self._epoch:
+            self.reset(epoch)
+            return None
+        entry = self._by_job.get(job_id)
+        if entry is None:
+            return None
+        # A job that has just appeared has no previous window to extend, and an
+        # entry surviving from an earlier roster would be exactly the stale
+        # window this memo must never ship.
+        if prior is None:
+            self.forget(job_id)
+            return None
+        if prior.trajectory is not entry.rows:
+            self.forget(job_id)
+            return None
+        rows = entry.rows
+        if rows and rows[-1] is not entry.tail:
+            self.forget(job_id)
+            return None
+        return rows
+
+    def remember(self, job_id: str, rows: _FrozenSequence) -> None:
+        """Record the window canonical state now holds for ``job_id``.
+
+        A window with no rows is not remembered: there is nothing to reuse, and
+        an entry for it could only ever produce a hit that proves nothing.
+        """
+        if not rows:
+            self.forget(job_id)
+            return
+        self._by_job[job_id] = _FollowerRowWindow(rows, rows[-1])
 
 
 def _public_job(job: JobState) -> JobState:
@@ -1852,8 +2431,18 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
 
     :func:`assert_frame_fits` is the guard that fails CI when a THIRD such
     field appears.
+
+    The rows are left out of the DUMP rather than stripped out of its result
+    (``_SYNC_OMIT_TRAJECTORY_KEY``): serializing them first walked ~100 MiB of
+    retained tool results to ship a 16.7 KiB payload, because thawing a row walks
+    its whole tool result — measured at 108 ms per frame on a 22-job roster on
+    the machine this was fixed on, and 460-491 ms on the reference host under
+    heavier load (see ``scripts/bench_roster_tick.py``). The strip
+    below stays as the boundary's own guarantee — no retained rows leave this
+    function whatever the dump was told — and costs nothing now that the field
+    arrives empty.
     """
-    payload = sync.model_dump(mode="json")
+    payload = sync.model_dump(mode="json", context={_SYNC_OMIT_TRAJECTORY_KEY: True})
     snapshot = payload.get("snapshot")
     if isinstance(snapshot, dict):
         components = snapshot.get("usage_components")
@@ -1887,7 +2476,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_launch_fields_in_place(job)
+                    _drop_absent_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -2213,6 +2802,58 @@ def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
         container[key] = [item.model_dump(mode="json") for item in folded]
 
 
+def largest_frame_fields(frame: dict[str, Any], *, limit: int = 3) -> str:
+    """The biggest payload fields of a frame the wire cannot carry, biggest first.
+
+    Attribution has to cover the whole ``data`` map, not one known wrapper:
+
+    * ``frontend_sync`` carries a canonical ``snapshot`` and ``frontend_update``
+      carries ``changes``, so those wrappers are unwrapped and their children
+      ranked as peers — the granularity the connect-time report already prints
+      (``cwd=1,049B``) and the unit a producer bounds;
+    * every other key of ``data`` is ranked alongside them, because the bulk of a
+      real oversized frame measured on the operator's machine sat in
+      ``data.job_trajectory_appends``, a SIBLING of ``changes``. Ranking only the
+      wrapper's children printed ``largest fields: jobs=588B`` for a 2.9 MB
+      frame — a wrong field name, which is worse than none, because it aims the
+      fix at a bystander.
+
+    A wrapper is skipped once unwrapped: its own total would otherwise always
+    outrank the single child that blew the limit, hiding the answer inside the
+    sum. Empty string when there is nothing to attribute, so a caller can say so
+    rather than invent one.
+    """
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return ""
+    # A key can arrive twice: once as a child of an unwrapped wrapper and once as
+    # a sibling of it (the update's own keys and the state's fields do not
+    # intersect today, but a future field named in both would be silently lost by
+    # a first-writer-wins merge). Keep the LARGER of the two, because the frame's
+    # size is the sum and the larger entry is the one worth naming.
+    candidates: dict[str, tuple[int, Any]] = {}
+
+    def offer(key: str, value: Any) -> None:
+        size = len(json.dumps(value).encode())
+        previous = candidates.get(key)
+        if previous is None or size > previous[0]:
+            candidates[key] = (size, value)
+
+    for key, value in data.items():
+        if key in ("snapshot", "changes") and isinstance(value, dict):
+            for inner_key, inner_value in value.items():
+                offer(inner_key, inner_value)
+        else:
+            offer(key, value)
+    if not candidates:
+        return ""
+    sizes = sorted(candidates.items(), key=lambda row: row[1][0], reverse=True)[:limit]
+    return ", ".join(
+        f"{key}={size:,}B" + (f", n={len(value)}" if isinstance(value, (list, dict)) else "")
+        for key, (size, value) in sizes
+    )
+
+
 def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     """Diagnose a frame that will not fit ``cap_bytes``, or ``None`` if it fits.
 
@@ -2232,19 +2873,8 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
     if encoded <= cap_bytes:
         return None
-    data = frame.get("data")
-    snapshot = data.get("snapshot") if isinstance(data, dict) else None
-    parts: list[str] = []
-    if isinstance(snapshot, dict):
-        sizes = sorted(
-            ((len(json.dumps(value).encode()), key, value) for key, value in snapshot.items()),
-            reverse=True,
-            key=lambda row: row[0],
-        )[:3]
-        for size, key, value in sizes:
-            count = f", n={len(value)}" if isinstance(value, (list, dict)) else ""
-            parts.append(f"{key}={size:,}B{count}")
-    detail = f" largest fields: {', '.join(parts)}" if parts else ""
+    fields = largest_frame_fields(frame)
+    detail = f" largest fields: {fields}" if fields else ""
     return (
         f"{frame.get('op', 'frame')} is {encoded:,} bytes, over the "
         f"{cap_bytes:,}-byte socket line limit; it cannot be sent and the "
@@ -2252,10 +2882,144 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     )
 
 
+#: The one delta field this filter replaces outright, excluded when measuring how
+#: much of the frame the rest of the payload already costs.
+#:
+#: Deliberately just this one. ``job_trajectory_replacements`` and
+#: ``job_todo_updates`` ride the same frame and nothing in this module bounds them,
+#: so both are measured: excluding them overstated the room by exactly the payload
+#: that ships — including the producer's own markers for watched jobs that have no
+#: rows in this delta, which no charge inside the bound would ever see.
+_APPENDS_FIELD = "job_trajectory_appends"
+
+#: Room reserved for the frame's own envelope — the ``{"op": "frontend_update",
+#: "data": …}`` wrapper — and for round-off, when the ceiling is derived from the
+#: socket's line limit. The wrapper plus the field name measure 111 B on a
+#: single-job frame (review measured that identity on this path, where the relay
+#: writes default JSON separators, so the row costs are exact rather than an
+#: over-estimate); the rest is round-off. It is NOT the accounting for the appends
+#: object's keys or the marker ids — those are charged explicitly against the room
+#: before any row spends it, because a reservation that silently absorbs them stops
+#: binding once a roster is deep enough.
+TRAJECTORY_FRAME_ENVELOPE_BYTES = 4_096
+
+
+def _bound_trajectory_appends_in_place(
+    appends: dict[str, list[dict[str, Any]]],
+    replacements: list[str],
+    *,
+    budget_bytes: int = JOB_TRAJECTORY_FRAME_BUDGET_BYTES,
+    floor_bytes: int = JOB_TRAJECTORY_ROW_FLOOR_BYTES,
+    ceiling_bytes: int | None = None,
+) -> bool:
+    """Trim one connection's trajectory deltas to a byte budget, newest rows kept.
+
+    Returns whether any row was dropped. See
+    :data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES` for the frames this exists to stop.
+
+    Rows are dropped OLDEST first, and a job that loses any row is added to
+    ``replacements``. That marker is not decoration: appends EXTEND the viewer's
+    local list, so shipping a short suffix would leave a hole in the middle of a
+    transcript the viewer believes is complete. A replacement resets the list to
+    exactly what rides here, which is the same signal the runtime already sends
+    when its retention rotated past a follower's copy — the viewer ends up with a
+    shorter, truthful window and can fetch the full one on demand through
+    ``load_job_trajectory``.
+
+    No row's text is clipped here, deliberately. The live-event bounds clip
+    because a stranded card is worse than a shortened result, but a trajectory
+    row is page detail with an on-demand fetch behind it, and an unmarked cut in
+    a transcript reads as the whole answer.
+
+    Two limits, and the second one is why the first can be conservative. The
+    budget is the SHARE the frame hands this connection's deltas, deliberately
+    well under the line limit so the roster, todos and usage still fit beside it.
+    ``ceiling_bytes`` is the measured room left under the real line limit once the
+    rest of this frame is counted, and it is the HARD one in both directions: when
+    it is smaller than the budget it caps the spend outright (a frame carrying a
+    near-limit roster leaves little room, and dropping rows entirely still beats
+    the degraded placeholder an overflow produces — measured: 800,014 B of
+    non-trajectory payload plus one 250 KB row shipped a 1,050,435-byte frame
+    under a 1,048,576-byte limit), and when it is larger it is what admits a job's
+    NEWEST row past its share (one 342 KB tool result fits a 1 MiB line, so
+    shipping that job an empty window would hide an event the socket could have
+    carried — the first cut of this bound did exactly that). A row larger than the
+    whole room has nowhere to ride; that job gets an empty window and the fetch
+    path.
+
+    The budget is spent newest-first per job, and unspent budget is offered back
+    to jobs that were cut short, so a child with a small delta cannot starve a
+    sibling's larger one by arriving first.
+    """
+    job_ids = [job_id for job_id, rows in appends.items() if rows]
+    if not job_ids:
+        return False
+    room = budget_bytes if ceiling_bytes is None else max(0, ceiling_bytes)
+    # The rows are not the only thing this object costs. Every job that keeps rows
+    # contributes its own KEY to the appends object and every job the trim marks
+    # contributes an id to the marker list, and both ride the same JSON; so do the
+    # separators between rows. Measured by QA on a 200-job roster: those keys and
+    # markers alone were 5,197 B, the difference between a frame that fit and one the
+    # wire pass repaired by EMPTYING the rows it had just kept — the silent cut this
+    # module exists to prevent. Review then measured the first version of this charge
+    # to be 8 B per job short at the runtime's 12-char ids, which is what the
+    # 2 * len(id) + 12 covers: `"<id>":[` for the key and `"<id>",` for the marker,
+    # with their punctuation, plus 2 B per row for its separator. Charged before any
+    # row spends room, so the reservation stays round-off rather than accounting.
+    overhead = sum(2 * len(str(job_id)) + 12 + 2 * len(appends[job_id]) for job_id in job_ids)
+    room = max(0, room - overhead)
+    costs = {job_id: [_live_row_cost(row) for row in appends[job_id]] for job_id in job_ids}
+    counts = {job_id: 0 for job_id in job_ids}
+    budget_left = min(budget_bytes, room)
+    spent = 0
+    jobs_left = len(job_ids)
+    for job_id in job_ids:
+        newest_first = list(reversed(costs[job_id]))
+        allowance = min(max(floor_bytes, budget_left // max(1, jobs_left)), budget_left)
+        used = 0
+        for cost in newest_first:
+            if used + cost <= allowance:
+                pass
+            elif used == 0 and spent + cost <= room:
+                # The newest row, past its slice but inside the frame's room.
+                allowance = cost
+            else:
+                break
+            used += cost
+            counts[job_id] += 1
+        budget_left = max(0, budget_left - used)
+        spent += used
+        jobs_left -= 1
+    if budget_left > 0:
+        for job_id in job_ids:
+            newest_first = list(reversed(costs[job_id]))
+            while counts[job_id] < len(newest_first):
+                cost = newest_first[counts[job_id]]
+                if cost > budget_left:
+                    break
+                budget_left -= cost
+                counts[job_id] += 1
+    dropped = False
+    for job_id in job_ids:
+        rows = appends[job_id]
+        keep = counts[job_id]
+        if keep == len(rows):
+            continue
+        appends[job_id] = rows[len(rows) - keep :]
+        if job_id not in replacements:
+            replacements.append(job_id)
+        dropped = True
+    return dropped
+
+
 def filter_update_trajectories(
-    payload: dict[str, Any], watched: Callable[[str], bool]
+    payload: dict[str, Any],
+    watched: Callable[[str], bool],
+    *,
+    line_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Drop trajectory deltas for jobs this connection has not subscribed to.
+    """Drop trajectory deltas for jobs this connection has not subscribed to, and
+    bound the ones it has to a byte budget.
 
     Same budget as :func:`sync_wire_payload` applied to the delta stream: a
     viewer that never opens a child's page must not pay for its events, and a
@@ -2263,6 +3027,13 @@ def filter_update_trajectories(
     line limit mid-turn. The row COUNT still rides along (``trajectory_length``
     on the job summary), so an unwatched page opened later fetches the whole
     window on demand rather than resuming from a hole.
+
+    Scope is only half of it, and the half that could not stop the measured
+    overflow: a WATCHED job's own burst is what produced the 44,681 oversized
+    frames (:data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES`), because the page a viewer
+    is reading is precisely the page whose deltas are allowed through. The kept
+    rows are therefore also bounded by measured size, newest kept, with a
+    replacement marker for any job that loses rows.
 
     Returns the input unchanged when nothing needs dropping, so the common
     no-trajectory delta costs one dict lookup and no copy.
@@ -2290,8 +3061,27 @@ def filter_update_trajectories(
         if isinstance(todos, dict)
         else {}
     )
+    # ...and what is left is bounded in BYTES as well as by scope. Watching a job
+    # is what lets its deltas through at all, and it is exactly the watched job
+    # whose burst of rows can overflow the line: the scope filter bounds how many
+    # jobs pay for their trajectory, never how much one job's trajectory costs.
+    #
+    # The ceiling is measured against this frame rather than assumed: the caller
+    # owns the socket limit, and what is left of it after the roster, todos and
+    # usage is the honest room for rows — which is what lets a job whose newest
+    # row exceeds the soft budget still ship it when the line can carry it.
+    ceiling: int | None = None
+    if line_limit_bytes is not None:
+        others = _live_row_cost(
+            {key: value for key, value in payload.items() if key != _APPENDS_FIELD}
+        )
+        ceiling = line_limit_bytes - others - TRAJECTORY_FRAME_ENVELOPE_BYTES
+    dropped = _bound_trajectory_appends_in_place(
+        kept_appends, kept_replacements, ceiling_bytes=ceiling
+    )
     if (
-        len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0)
+        not dropped
+        and len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0)
         and len(kept_replacements) == (len(replacements) if isinstance(replacements, list) else 0)
         and len(kept_todos) == (len(todos) if isinstance(todos, dict) else 0)
     ):
@@ -2321,12 +3111,19 @@ class SnapshotJobs:
         # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
         # stay immutable while consumers retain their abstract container API.
         self._values = [_public_job(value) for value in values]
+        # Roster rendering asks get() once per row. A linear lookup made one
+        # paint quadratic in the number of children; retain the first duplicate
+        # ID to preserve the old next(...) behaviour for malformed extensions.
+        self._by_id: dict[str, JobState] = {}
+        for value in self._values:
+            self._by_id.setdefault(value.id, value)
 
     def list(self) -> list[JobState]:
         return [_public_job(value) for value in self._values]
 
     def get(self, job_id: str) -> JobState | None:
-        return next((_public_job(value) for value in self._values if value.id == job_id), None)
+        value = self._by_id.get(job_id)
+        return _public_job(value) if value is not None else None
 
 
 class SnapshotWakeScheduler:
@@ -2726,6 +3523,308 @@ class SnapshotMcpManager:
         return self._callback
 
 
+#: The empty retained-row window, shared by every job that retains no rows.
+_EMPTY_WINDOW = _FrozenSequence(())
+
+
+class _TrajectoryWindow(NamedTuple):
+    """One job's frozen retained rows and the fingerprint that proves them."""
+
+    epoch: str
+    #: The raw row list this window was frozen from, held by REFERENCE: a job that
+    #: starts a fresh attempt rebinds ``job.trajectory`` to a new list
+    #: (``subagent.runner``) and restarts the stamp counter at 0, so a matching
+    #: count and stamp range can describe two different attempts' rows.
+    source: list[Any]
+    #: ``row_count``, not ``count``: a NamedTuple's fields are tuple attributes and
+    #: ``count`` is one of tuple's own methods.
+    row_count: int
+    first_seq: int
+    last_seq: int
+    #: The raw dict object at the window's end, by reference: the same list can be
+    #: emptied and refilled with a fresh counter, which no stamp comparison can
+    #: see. A row is never revised, so this object stays the window's last row for
+    #: as long as the window is a prefix of ``source``.
+    tail: Any
+    rows: _FrozenSequence
+
+
+class _TrajectoryWindows:
+    """Per-job memo of the frozen retained-row window, so a roster tick costs the delta.
+
+    WHY THIS EXISTS. ``FrontendStateStore.refresh_jobs`` is driven by
+    ``Session._schedule_frontend_jobs`` on a 50 ms coalescer while a turn runs, and
+    it rebuilds every job's ``JobState`` and freezes it. Before this memo the cost
+    was O(retained rows) per tick: ``JobState.from_job`` copied every row,
+    ``_freeze_job`` rebuilt every row's frozen containers, and ``_jobs_equal``
+    then deep-compared them -- measured at ~50-57 ms per tick on a 5-child roster
+    at the 500-row cap, with ~87 GC collections per tick, on the loop that also
+    drives the record's heartbeat (see
+    ``scripts/bench_roster_tick.py``). The retained window is the one
+    part of that work that does not change tick to tick, so it is frozen once and
+    reused, and only the appended tail is paid for.
+
+    THE INVARIANT THIS RESTS ON, and why it is a proof rather than a heuristic.
+    The writer (``harness.subagent._make_relay``) stamps every retained row with
+    :data:`_TRAJECTORY_SEQ_KEY` BEFORE appending it, never revises a row, and
+    trims the window from the FRONT past ``TRAJECTORY_CAP``. Its stamp is a single
+    counter that increments once per append, so a job's retained rows are a
+    contiguous run of stamps whose last value only ever moves forward, and
+    ``(count, first stamp, last stamp)`` therefore identifies the row SET: no two
+    different windows share that triple, a moved last stamp can only mean rows
+    were appended at the end, and rows leaving the front can only leave from the
+    front. That is what makes "freeze the rows past the cached last stamp, drop
+    the same number of rows from the front" exact rather than a guess, and every
+    check below exists to REJECT the reconstruction instead of trusting it when
+    the raw rows do not fit that shape.
+
+    The stamps ALONE are not enough, which is why an entry also holds the raw row
+    list and its last row BY REFERENCE. ``subagent.runner`` REPLACES
+    ``job.trajectory`` with a fresh list when a child starts an attempt, and the
+    new attempt's relay counts from 0 again — so a count and stamp range that
+    matches the previous attempt is not evidence that the rows do. The list
+    object identity is what separates the two attempts, and the tail object
+    identity is what catches the same list emptied and refilled. Both are O(1)
+    checks on a path that has already walked the appended suffix.
+
+    EVERY PATH THAT INVALIDATES AN ENTRY, enumerated because a stale window would
+    ship the WRONG ROWS to a viewer -- the whole risk of this cache:
+
+    * a row with no stamp (an older release, a restored roster, a hand-built
+      fixture) -- there is no identity to match on, so no entry is kept;
+    * a rebuild: a replaced or refilled row list, or a stamp range that did not
+      move forward (:meth:`window` falls back to a full freeze);
+    * the state lineage moving, i.e. an epoch change (:meth:`rebind`). Pinned by
+      a test against this class rather than through the store, because every
+      public path that moves the store's epoch also clears the memo outright --
+      so the guard is defence in depth today, and a store-level test would stay
+      green with it deleted;
+    * ``replace()`` and ``refresh_from_session(initial=True)`` -- the two paths
+      that re-seat canonical state from a PAYLOAD rather than by rebuilding it
+      from the session, where rows may be rebuilt instead of appended;
+    * a job leaving the roster (:meth:`retain`), so the memo cannot outlive it.
+
+    Each of those has a test in ``tests/unit/session/test_frontend_row_window.py``,
+    as does the WRITER invariant itself -- the one thing no check here can catch
+    is a retained row revised in place, which the single writer does not do.
+
+    A sequence that is not a ``list`` is never memoised: with no list identity to
+    hold and no comparable tail, nothing about it can be proved next tick, so it
+    takes the full freeze ``JobState.from_job`` always did -- through the same row
+    predicate ``from_job`` uses (:func:`_retained_row`), so a sequence holding
+    something other than rows gets the same answer it always got. Emptied is the
+    one answer the rows of a real sequence must never get -- that is a job whose
+    rows are silently gone.
+
+    Nor is a ``list`` whose ITEMS are not rows (:func:`_row_items`): the fingerprint
+    reads a list's identity, length and end stamps, so it cannot see that an item in
+    the middle is not a row at all. Both readers must agree on what a row is, in
+    both directions -- the memo may not keep a row a plain rebuild drops, and it may
+    not drop one a plain rebuild keeps.
+    """
+
+    __slots__ = ("_by_job", "_epoch")
+
+    def __init__(self, epoch: str) -> None:
+        self._by_job: dict[str, _TrajectoryWindow] = {}
+        self._epoch = epoch
+
+    def rebind(self, epoch: str) -> None:
+        """Bind to the store's current lineage, dropping the previous one's rows."""
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self._by_job.clear()
+
+    def clear(self) -> None:
+        """Forget every window; the next tick pays one full freeze per job."""
+        self._by_job.clear()
+
+    def retain(self, job_ids: Iterable[str]) -> None:
+        """Drop every entry for a job that is no longer on the roster.
+
+        The memo holds the raw row list by reference, so an entry kept for a job
+        that has left the roster would pin that job's rows for the life of the
+        store.
+        """
+        live = set(job_ids)
+        for job_id in [key for key in self._by_job if key not in live]:
+            del self._by_job[job_id]
+
+    def adopt_from(self, jobs: Iterable[Any]) -> None:
+        """Point each entry at the window canonical state holds for that job.
+
+        WHY: ``mutate`` keeps the STATE's own job objects when a refresh proves the
+        roster unchanged (``_jobs_equal``), so the window this memo hands out and
+        the window the state holds are equal but DISTINCT objects -- and the next
+        tick then has to prove them equal again, which walks the whole window. Once
+        a refresh has run, the state's rows are provably the current rows: they
+        were either adopted from this tick's candidate or deep-compared equal to
+        it. Handing that same object back turns the next tick's proof into an
+        identity check.
+
+        Gated on the entry's own fingerprint: a window of a different length, or
+        one whose end stamps are not the ones this entry describes, is not the
+        rows it was frozen from and is left alone (a reader-only graph-node row
+        for the same id carries no rows at all, for instance).
+        """
+        for job in jobs:
+            entry = self._by_job.get(job.id)
+            if entry is None:
+                continue
+            window = getattr(job, "trajectory", None)
+            if not isinstance(window, _FrozenSequence) or window is entry.rows:
+                continue
+            if len(window) != entry.row_count:
+                continue
+            if (
+                _trajectory_row_seq(window[0]) != entry.first_seq
+                or _trajectory_row_seq(window[-1]) != entry.last_seq
+            ):
+                continue
+            self._by_job[job.id] = entry._replace(rows=window)
+
+    def window(self, job_id: str, rows: Any) -> _FrozenSequence:
+        """The frozen window for ``rows``, reused when its fingerprint matches.
+
+        Returns the cached object ITSELF on a hit -- callers attach it without
+        re-validating, which is both what makes the reuse cheap and what lets
+        ``_jobs_equal`` recognise an unchanged tick by identity.
+        """
+        if not rows:
+            # Nothing retained (``None`` included): there is no window to reuse,
+            # and keeping an entry for a window that no longer exists is only a
+            # way to be wrong later.
+            self._by_job.pop(job_id, None)
+            return _EMPTY_WINDOW
+        if not isinstance(rows, list):
+            # A sequence this memo cannot fingerprint: it has no stable list
+            # identity to hold and no tail the next tick could compare against, so
+            # nothing about it can be PROVED -- but what cannot be proved must
+            # still be materialised, never emptied, because ``from_job`` accepts
+            # any iterable and dropping its rows silently loses them (round 1, F1).
+            # It is frozen through ``_retained_row`` -- the SAME predicate
+            # ``from_job`` uses -- rather than item by item: a mapping, a string or
+            # a tuple of non-rows holds no rows, so the pre-change answer for that
+            # shape is an empty window, and freezing its items instead would put
+            # non-rows into canonical state for the appends writer to reject
+            # (round 2, F6/Q5).
+            self._by_job.pop(job_id, None)
+            kept: list[Any] = []
+            for event in rows:
+                row = _retained_row(event)
+                if row is not None:
+                    kept.append(row)
+            return _freeze_rows(kept)
+        count = len(rows)
+        first_seq = _trajectory_row_seq(rows[0])
+        last_seq = _trajectory_row_seq(rows[-1])
+        entry = self._by_job.get(job_id)
+        if entry is not None and entry.epoch != self._epoch:
+            self._by_job.pop(job_id, None)
+            entry = None
+        if entry is not None and self._matches(entry, rows, count, first_seq, last_seq):
+            return entry.rows
+        filtered = _row_items(rows)
+        if filtered is not rows:
+            # See ``_row_items``: a list whose ITEMS are not rows is never memoised
+            # and never extended -- how many of its items are rows is a fact about
+            # the list's CONTENT, which the fingerprint (identity, count, end stamps)
+            # cannot see. Extended naively, ``[row, row, row, "x"]`` would reuse a
+            # two-row window while a plain rebuild materialises three.
+            self._by_job.pop(job_id, None)
+            return _freeze_rows(filtered)
+        if entry is not None and first_seq is not None and last_seq is not None:
+            extended = self._extended(entry, rows, count, first_seq, last_seq)
+            if extended is not None:
+                self._store(job_id, rows, count, first_seq, last_seq, extended)
+                return extended
+        frozen = _freeze_rows(rows)
+        if first_seq is None or last_seq is None:
+            # An unstamped row cannot be matched next tick, so caching this
+            # window would only ever produce a hit that proves nothing.
+            self._by_job.pop(job_id, None)
+            return frozen
+        self._store(job_id, rows, count, first_seq, last_seq, frozen)
+        return frozen
+
+    def _store(
+        self,
+        job_id: str,
+        rows: list[Any],
+        count: int,
+        first_seq: int,
+        last_seq: int,
+        window: _FrozenSequence,
+    ) -> None:
+        self._by_job[job_id] = _TrajectoryWindow(
+            self._epoch, rows, count, first_seq, last_seq, rows[-1], window
+        )
+
+    @staticmethod
+    def _matches(
+        entry: _TrajectoryWindow,
+        rows: list[Any],
+        count: int,
+        first_seq: int | None,
+        last_seq: int | None,
+    ) -> bool:
+        """Whether ``entry`` describes ``rows`` exactly, with nothing to re-freeze."""
+        return (
+            entry.source is rows
+            and entry.row_count == count
+            and entry.first_seq == first_seq
+            and entry.last_seq == last_seq
+            and entry.tail is rows[-1]
+        )
+
+    def _extended(
+        self,
+        entry: _TrajectoryWindow,
+        rows: list[Any],
+        count: int,
+        first_seq: int,
+        last_seq: int,
+    ) -> _FrozenSequence | None:
+        """Freeze only the rows appended since ``entry``; ``None`` means freeze all.
+
+        ``None`` is the honest answer whenever ``rows`` cannot be PROVED to be
+        ``entry``'s window plus a suffix of newer rows, which is the only change
+        the writer can make -- see the class docstring. Every rejection here pays
+        one full freeze; a wrong acceptance ships wrong rows.
+        """
+        if entry.source is not rows:
+            # A fresh row list: another attempt at the same job id, or a rebuilt
+            # window. Its stamps may restart, so nothing here is comparable.
+            return None
+        # Walk back over the appended suffix: O(appends), not O(window). Walking
+        # from the END is what keeps a one-row tick at one row of work.
+        start = count
+        while start > 0:
+            seq = _trajectory_row_seq(rows[start - 1])
+            if seq is None or seq <= entry.last_seq:
+                break
+            start -= 1
+        if start == 0:
+            # Every retained row is newer than the cache: the whole window turned
+            # over between ticks (a burst of appends past the cap), so there is
+            # nothing left to reuse.
+            return None
+        if rows[start - 1] is not entry.tail:
+            # The row before the suffix is not the row the cache ended on, so the
+            # rows in between are not the ones already frozen -- the list was
+            # emptied and refilled, or an unstamped row sits at the boundary.
+            return None
+        dropped = entry.row_count - start
+        if dropped < 0 or first_seq != entry.first_seq + dropped:
+            # Front trimming moves the first row forward by exactly as many rows
+            # as were evicted, because the writer's stamp is one counter that
+            # increments once per append. A first row that does not sit where that
+            # arithmetic puts it means the raw window's front is not the cached
+            # front moved forward, and the reconstruction would be a guess.
+            return None
+        return _FrozenSequence(itertools.chain(entry.rows[dropped:], _freeze_rows(rows[start:])))
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -2739,6 +3838,38 @@ class FrontendStateStore:
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
         self._todo_sequences: dict[str, int] = {}
         self._todo_seed_floor = state.sequence
+        #: The follower's per-job memo of the frozen retained windows it has
+        #: installed, so a ``jobs`` delta costs the appended rows rather than the
+        #: window they land in. Deliberately NOT named for the producer-side memo
+        #: in flight on this class: see ``_FollowerTrajectoryWindows`` for the
+        #: proof, the refusals, and why the two caches cannot share one.
+        self._follower_windows = _FollowerTrajectoryWindows(state.epoch)
+        #: The accumulator for a host whose session exposes none (a reduced
+        #: facade, a test double). ONE arithmetic site still: this is the same
+        #: ``SessionSpend``, not a second sum computed here.
+        self._local_spend: SessionSpend | None = None
+        #: Call indices accrued in the turn currently being reconciled. A
+        #: per-call CORRECTION has to move ``current_turn_accrued_cost`` (review
+        #: R1-1), and the index is what says whether it belongs to this turn: a
+        #: correction that lands after its turn closed must NOT be charged to the
+        #: next turn's remainder, because the closed turn's aggregate was priced
+        #: over the same calls and the delta on top of it IS the right total.
+        self._turn_spend_calls: set[int] = set()
+        #: The last CLOSED turn's reconciliation, as integer micro-USD: what the
+        #: turn had accrued (paint prices plus any corrections mirrored while it
+        #: was open) and the aggregate price it was billed at. A correction that
+        #: outlives its turn is clamped against these so the total does not depend
+        #: on WHEN it landed (review R2-2): the turn-end remainder makes the
+        #: aggregate a FLOOR for the turn, so a re-price may only move the total
+        #: to the extent it lifts the turn above that floor. ``None`` before any
+        #: turn has closed, when the delta stands on its own.
+        self._closed_turn_accrued_micro: int | None = None
+        self._closed_turn_agg_micro: int | None = None
+        #: Memo of each job's frozen retained-row window -- see
+        #: :class:`_TrajectoryWindows` for the invariant it rests on and for the
+        #: paths that invalidate it. Owned here rather than by the job manager
+        #: because it is a property of what this store last froze.
+        self._trajectory_windows = _TrajectoryWindows(self._state.epoch)
 
     @property
     def state(self) -> FrontendSessionState:
@@ -2776,6 +3907,39 @@ class FrontendStateStore:
                 "so the caller cannot mutate the store's own instance"
             )
         return getattr(self._state, name)
+
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        """A COPY of the live-call start map, without cloning the whole state.
+
+        The sibling of :meth:`read_field`, which cannot serve this one: that
+        allow-list is restricted to deeply immutable scalars precisely because
+        it hands out the store's OWN object, and this is a mutable mapping.
+
+        Copying is what the per-call caller can afford, and asking for ``state``
+        instead is what it cannot: ``state`` deep-copies every job, usage
+        component and trajectory row, which profiling one sidebar navigation
+        measured at ~30 ms of a 135 ms frame. This is read once per tool start
+        and once per switch, so the copy is a handful of floats.
+
+        Read BOTH halves of an entry: membership is "this call has STARTED"
+        (which a replay needs to tell a queued call from an executing one) and
+        the value is the instant to count from, ``None`` when the producer sent
+        no epoch and the row must therefore stay clockless.
+        """
+        return dict(self._state.live_tool_started_at)
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase and when it began, read cheaply.
+
+        One call rather than two :meth:`read_field` reads because the pair is
+        only ever consumed together — the reader compares the phase and uses
+        the instant in the same expression — and a caller that could read them
+        apart could pair a phase with the previous phase's zero.
+        """
+        return (
+            self.read_field("activity_phase"),
+            self.read_field("activity_phase_started_at"),
+        )
 
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.
@@ -2831,6 +3995,27 @@ class FrontendStateStore:
             )
         return value
 
+    def has_running_job(self) -> bool:
+        """Whether any canonical job is still RUNNING, without cloning the state.
+
+        The sibling of :attr:`pending_gate`, and it exists for the same measured
+        reason: ``state`` deep-copies every job, usage component and trajectory
+        row so no caller can mutate the store's instance, and the retention
+        predicate that asks this question read it through ``state`` for a
+        boolean. The audit measured that clone at 0.19-0.58 ms per call, ~90 % of
+        a whole scalar delta, on a path every owner delta of every leased source
+        walks (``SessionInteraction.retained_for_auto_work``).
+
+        ``self._state.jobs`` is already frozen — an immutable row sequence of
+        frozen job models — so a read-only scan of it is safe to share, unlike
+        the model-valued fields ``read_field``'s allow-list excludes. This is a
+        PREDICATE rather than a ``read_jobs`` accessor on purpose: handing the
+        job shells out would let a caller reach ``__pydantic_extra__``, which is
+        a mutable mapping on an otherwise frozen model, and not sharing that is
+        exactly the invariant ``state``'s clone protects.
+        """
+        return any(getattr(job, "status", "") == "running" for job in self._state.jobs)
+
     @property
     def pending_gate(self) -> "PendingGateState | None":
         """The pending gate alone, WITHOUT cloning the whole state.
@@ -2852,6 +4037,18 @@ class FrontendStateStore:
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._todo_sequences.clear()
         self._todo_seed_floor = state.sequence
+        # BOTH memos die here, and for the same reason from two directions.
+        # Canonical state is re-seated from a PAYLOAD rather than extended from
+        # the jobs already present, so the rows either cache describes may be
+        # gone or rewritten, and the windows a snapshot installs are freshly
+        # parsed objects that merely LOOK like the ones being described.
+        #
+        # The producer's memo (#1123) keys on the SESSION's list identity; the
+        # follower's keys on the rows canonical state itself holds. A store is
+        # only ever one of the two, but `replace` is shared, so both are cleared
+        # here rather than in two conditioned branches.
+        self._trajectory_windows.clear()
+        self._follower_windows.reset(state.epoch)
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
         """Install a proven wire snapshot without reaching into subscribers."""
@@ -2886,11 +4083,26 @@ class FrontendStateStore:
         if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
             raise ValueError("frontend update is not the next state sequence")
         if update.degraded:
+            # The window proof is a statement about THIS follower's objects, not
+            # about them being COMPLETE, so a shed body does not make it wrong —
+            # the local window is simply missing the rows that frame carried,
+            # exactly as it was before this memo existed. The memo is dropped
+            # anyway, because this arm ends in a resync that re-seats state from
+            # a snapshot: one full re-freeze on a path that already pays a socket
+            # round trip buys the certainty that no window survives a lineage the
+            # follower has just declared untrustworthy.
+            self._follower_windows.reset(self._state.epoch)
             self._state = self._state.model_copy(update={"sequence": update.sequence})
             for subscriber in list(self._subscribers):
                 subscriber(update.model_copy(deep=True))
             return self.state
         changes = copy.deepcopy(update.changes)
+        # A malformed field later in a jobs delta must not advance a plan's
+        # watermark: validation either installs the entire update or nothing.
+        todo_sequences = dict(self._todo_sequences)
+        # The frozen window each rebuilt job will carry, positionally aligned
+        # with ``changes["jobs"]``. Built here, installed AFTER validation.
+        windows: list[_FrozenSequence] = []
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
@@ -2898,34 +4110,116 @@ class FrontendStateStore:
             for raw in changes["jobs"]:
                 job_id = str(raw.get("id", ""))
                 prior = previous.get(job_id)
-                if job_id in replacements:
-                    trajectory = []
-                else:
-                    trajectory = list(prior.trajectory if prior is not None else [])
-                trajectory.extend(update.job_trajectory_appends.get(job_id, []))
-                # Defensive mirror of the runtime-side eviction: even a
-                # misbehaving runtime cannot grow a follower without bound.
-                if len(trajectory) > _TRAJECTORY_CAP:
-                    del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
-                raw["trajectory"] = trajectory
+                # A runtime that says "this is a replacement" has told us the
+                # window is not a suffix, so the memo is not consulted at all.
+                window = None
+                if job_id not in replacements:
+                    proven = self._follower_windows.prove(job_id, prior, epoch=update.epoch)
+                    if proven is not None:
+                        window = _extend_retained_window(
+                            proven, update.job_trajectory_appends.get(job_id, ())
+                        )
+                if window is None:
+                    # The unproven path, unchanged: rebuild the window and freeze
+                    # every one of its rows.
+                    trajectory = (
+                        []
+                        if job_id in replacements
+                        else list(prior.trajectory if prior is not None else [])
+                    )
+                    trajectory.extend(update.job_trajectory_appends.get(job_id, []))
+                    # Defensive mirror of the runtime-side eviction: even a
+                    # misbehaving runtime cannot grow a follower without bound.
+                    if len(trajectory) > _TRAJECTORY_CAP:
+                        del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
+                    window = _freeze_retained_rows(trajectory)
+                # The reducer has always OVERWRITTEN any trajectory a caller put
+                # in the payload with this reconstruction, so dropping it from the
+                # validated body changes nothing a caller could observe — except
+                # that pydantic no longer walks the retained window its result was
+                # about to be discarded from.
+                raw.pop("trajectory", None)
+                # ``JobState``'s before-validator derives ``trajectory_length``
+                # from the payload's own rows when — and only when — the caller
+                # supplied no count. The payload no longer carries rows here, so
+                # the same derivation is done from the window that will actually
+                # be installed. Keyed on PRESENCE, like the validator: an
+                # explicit-but-invalid count must still reach pydantic and be
+                # refused rather than be quietly replaced by a local length.
+                if "trajectory_length" not in raw:
+                    raw["trajectory_length"] = len(window)
                 raw["todos"] = _wire_value(prior.todos) if prior is not None else None
-                if (
-                    job_id in update.job_todo_updates
-                    and update.sequence > self._todo_sequences.get(job_id, -1)
+                if job_id in update.job_todo_updates and update.sequence > todo_sequences.get(
+                    job_id, -1
                 ):
                     raw["todos"] = update.job_todo_updates[job_id]
-                    self._todo_sequences[job_id] = update.sequence
+                    todo_sequences[job_id] = update.sequence
+                windows.append(window)
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
             retained = {str(row["id"]) for row in rebuilt}
-            self._todo_sequences = {
-                key: seq for key, seq in self._todo_sequences.items() if key in retained
+            todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
+            # A job that left the roster takes its window's entry with it, or the
+            # memo would pin that job's rows for the life of the store.
+            self._follower_windows.retain(retained)
+        # Validate only the supplied fields, through the MODEL rather than a
+        # bare TypeAdapter: its before-validators normalize Usage/ModelSpec,
+        # and extra='allow' preserves fields introduced by a newer runtime.
+        # Defaults fill this ephemeral model but are never installed. Dumping
+        # the previous state here serialized every child's retained trajectory
+        # for each scalar streaming edge, blocking the viewer's keyboard loop.
+        patch = FrontendSessionState.model_validate(
+            {
+                "session_id": self._state.session_id,
+                **changes,
+                "epoch": update.epoch,
+                "sequence": update.sequence,
             }
-        payload = self._state.model_dump()
-        payload.update(changes)
-        payload["epoch"] = update.epoch
-        payload["sequence"] = update.sequence
-        self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+        )
+        # Unknown wire names may collide with our properties or BaseModel
+        # methods (e.g. model_dump). Attribute lookup would substitute the
+        # property/method for the accepted JSON value and poison later exports.
+        # Read validated storage instead; extras have their own owning mapping.
+        normalized = {
+            name: patch.__dict__[name]
+            for name in patch.model_fields_set
+            if name in FrontendSessionState.model_fields
+        }
+        normalized.update(patch.model_extra or {})
+        if windows:
+            # Install the frozen windows the loop above produced, by IDENTITY:
+            # ``model_copy`` does not re-coerce (so the retained rows survive as
+            # the objects they already were) and ``_freeze_value`` returns an
+            # already-frozen window unchanged, which is what keeps the memo's
+            # object and canonical state's object the same one.
+            #
+            # ``zip(strict=True)`` because the two lists are the same roster read
+            # twice — ``rebuilt`` and the model validated from it — and a
+            # misalignment would install one child's rows on another. Naming that
+            # here is cheaper than trusting an ordering invariant to survive the
+            # next edit to this method.
+            normalized["jobs"] = _FrozenSequence(
+                _freeze_job(job.model_copy(update={"trajectory": window}))
+                for job, window in zip(patch.jobs, windows, strict=True)
+            )
+        candidate = self._state.model_copy(update=normalized)
+        # ``jobs_are_canonical`` is now true on the jobs path too: the windows
+        # above are frozen and the shells around them are frozen here, so the
+        # whole-roster re-freeze this flag used to force on every jobs delta is
+        # the cost this change removes. The flag's remaining job is the OTHER
+        # case — a delta that did not touch the roster, whose jobs are the ones
+        # canonical state already holds.
+        self._state = _freeze_state_jobs(candidate, jobs_are_canonical=True)
+        # Record what canonical state now HOLDS, so the next delta can prove
+        # those windows by identity. Done after the install rather than beside
+        # the loop above: a delta that fails validation never reaches here, and a
+        # memo describing a window no state holds is a stale entry waiting to be
+        # refused. The unproven path records too — a rebuild produces a window
+        # the next delta inherits.
+        if windows:
+            for job, window in zip(self._state.jobs, windows, strict=True):
+                self._follower_windows.remember(job.id, window)
+        self._todo_sequences = todo_sequences
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
         return self.state
@@ -3030,9 +4324,19 @@ class FrontendStateStore:
                 if prior is None or prior.todos != job.todos:
                     todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
+                # THREE arms, in order of cost, and the middle one is what keeps
+                # a long-running child cheap. See `_capped_overlap_tail` for the
+                # algebra and the refusals.
+                appended = None
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
+                    # The window rotated past its cap (or was rebuilt). Recover
+                    # the appended tail when the rotation is provable, so a full
+                    # window costs one row per frame rather than all 500; only a
+                    # genuinely unprovable difference pays a replacement.
+                    appended = _capped_overlap_tail(old, trajectory)
+                if appended is None:
                     # The runtime's list rotated past its cap (or was rebuilt):
                     # a suffix no longer exists, so ship a replacement once
                     # rather than the whole list disguised as appends forever.
@@ -3052,11 +4356,26 @@ class FrontendStateStore:
             # a bound placed only at the snapshot boundary holds for the first
             # frame and leaks on every one after it.
             _bound_launch_prompts_across_jobs(summaries)
+            # ...and the same is true of the per-ROW text bound, which lived only
+            # in ``sync_wire_payload``: a child whose ``result_text`` (or prompt,
+            # or error) was a whole transcript page rode out unbounded on every
+            # live delta while the reconnecting snapshot clipped it. Free text is
+            # the field that can be arbitrarily large on a row that is otherwise
+            # kilobytes, so it is the one that can put a delta over the socket
+            # line on its own. ``share`` is computed exactly as the snapshot
+            # computes it, off the same budget and floor, so a viewer cannot see
+            # two different previews of one child depending on whether it
+            # arrived live or in the seed.
+            text_share = max(
+                JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, len(summaries))
+            )
+            for summary in summaries:
+                _bound_job_text_in_place(summary, share=text_share)
             for summary in summaries:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_launch_fields_in_place(summary)
+                _drop_absent_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -3136,6 +4455,9 @@ class FrontendStateStore:
                 restored = None
         epoch = uuid.uuid4().hex
         session_id = str(session.session_id)
+        # The one rule ``refresh_from_session`` uses for the live state, so the
+        # FIRST frame a runtime publishes and every frame after it agree.
+        session_cwd = str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or "")
         state = restored or FrontendSessionState(session_id=session_id, epoch=epoch)
         # A new runtime epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
@@ -3150,6 +4472,20 @@ class FrontendStateStore:
             update={
                 "epoch": epoch,
                 "sequence": 0,
+                # WHERE THIS RUNTIME WORKS IS NOT THE CHECKPOINT'S TO DECIDE.
+                # ``cwd`` describes the runtime that WROTE the row, and a
+                # session's directory can move after that row was written
+                # (``/move``, and the desktop's move route): a successor that
+                # restored the old value published a ``frontend.cwd`` naming
+                # the directory the session had LEFT, while its own tools, its
+                # system prompt and its skills all used the new one (QA on the
+                # desktop move: the receipt and the marker said one thing and
+                # the stream said another). The owner's own directory is
+                # authoritative for this, resolved exactly as
+                # ``refresh_from_session`` resolves it, and the checkpoint's
+                # value stays the fallback for a host that exposes neither
+                # attribute.
+                "cwd": session_cwd or state.cwd,
                 "usage_components": _capped_components(state.usage_components),
                 # The checkpoint describes a previous runtime, not a scheduler
                 # to restart. Keep its progress visible without claiming an
@@ -3169,6 +4505,12 @@ class FrontendStateStore:
 
     def refresh_from_session(self, session: Any, *, initial: bool = False) -> FrontendSessionState:
         current = self._state
+        if initial:
+            # A full rescan is the one refresh whose job rows may be REBUILT
+            # rather than appended -- a restored roster, a resumed child -- so it
+            # starts from no memo at all. Cleared BEFORE the rows are read below,
+            # or the payload it installs could be built from a reused window.
+            self._trajectory_windows.clear()
         selected = getattr(session, "model", None)
         effective = getattr(session, "effective_model", None) or selected
         last_usage = None
@@ -3178,7 +4520,7 @@ class FrontendStateStore:
                 last_usage = restore()
             except Exception:
                 last_usage = None
-        jobs = self._jobs(session)
+        jobs = self._jobs(session, self._retained_windows())
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
@@ -3186,7 +4528,24 @@ class FrontendStateStore:
                 child_costs[job.id] = cost
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
-        if parent_cost is None and last_usage is not None:
+        # The record is the durable money and it is newer than the checkpoint's
+        # turn-end copy, so it wins when it exists at all. A pre-ledger session
+        # has no record, so its best legacy figure is SEEDED into the accumulator
+        # here and read back from it below -- which is what keeps the total
+        # continuous when the first live call lands (the per-call branch adds to
+        # the same number instead of replacing it).
+        self._seed_legacy_spend(session, last_usage if isinstance(last_usage, Usage) else None)
+        spend = self._spend_of(session)
+        if spend is not None and (spend.has_money or spend.unknown_money):
+            # The MONEY decides, not the call counts (QA round 2, Q3), and it is
+            # ``published_usd`` that says whether the record holds a figure we can
+            # state at all: ``None`` reaches the band as ``$—`` instead of the
+            # ``0.0`` this gate used to publish for an unpriceable sum, which the
+            # band's zero policy then dropped (Q1's in-process half). A record
+            # holding a turn-end remainder has ``calls == 0`` and real money.
+            parent_cost = spend.published_usd()
+            knowledge = spend.knowledge()
+        elif parent_cost is None and last_usage is not None:
             cost = turn_cost(_label(effective), last_usage)
             if cost is not None:
                 parent_cost = cost
@@ -3293,8 +4652,30 @@ class FrontendStateStore:
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
+            last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
                 current.activity_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else None
+            ),
+            # The live-batch anchor is carried on the same gate as the turn's
+            # own start instant, and for the same reason: both answer "how long
+            # has the work in flight been going", and neither means anything
+            # once the turn is over. See ``_fold_live_tool_starts``.
+            live_tool_started_at=(
+                current.live_tool_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else {}
+            ),
+            # The working line's phase and its zero ride the same gate. A
+            # non-streaming session has no phase, and leaving a stale one in
+            # place would let a frontend that has just settled match it and
+            # count from a zero belonging to a turn that is over.
+            activity_phase=(
+                current.activity_phase if bool(getattr(session, "is_streaming", False)) else ""
+            ),
+            activity_phase_started_at=(
+                current.activity_phase_started_at
                 if bool(getattr(session, "is_streaming", False))
                 else None
             ),
@@ -3313,12 +4694,180 @@ class FrontendStateStore:
             payload = current.model_dump()
             payload.update(changes)
             self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+            self._trajectory_windows.adopt_from(self._state.jobs)
         else:
             self.mutate(**changes)
+            self._trajectory_windows.adopt_from(self._state.jobs)
         return self.state
 
+    def _spend_of(self, session: Any) -> SessionSpend:
+        """The session's spend accumulator, or one owned by this store.
+
+        The fallback exists for hosts that expose no session accumulator (a
+        reduced facade or a test double). It is the SAME value object, so the
+        money still has exactly one arithmetic site; only its owner differs.
+        """
+        spend = getattr(session, "spend", None)
+        if isinstance(spend, SessionSpend):
+            return spend
+        if self._local_spend is None:
+            self._local_spend = SessionSpend()
+        return self._local_spend
+
+    def _accrue_call(self, session: Any, usage: Usage, paint_cost: float | None) -> SessionSpend:
+        """Count ONE provider call and hand its price off the loop.
+
+        Called from both per-call accrual sites (the event stream and detached
+        leaf calls) so a call is billed once whichever path saw it. The paint
+        cost is the optimistic figure the band paints this tick; the session's
+        off-loop pricer converges it to the full resolver's answer, which is the
+        only one that can price the models the paint resolver cannot (§2.4).
+        """
+        spend = self._spend_of(session)
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        # A store whose state already carries a cost (a restored checkpoint, or
+        # a host holding one outside the accumulator) must not lose it the
+        # moment the first live call lands: seed the accumulator from it first,
+        # so the addition below builds on that number rather than replacing it.
+        #
+        # ``usage=None`` deliberately: THIS call's receipt is not legacy state,
+        # and letting the seed price it would bill the call twice.
+        self._seed_legacy_spend(session, None)
+        micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
+        # ``cast`` rather than a bare call: these are duck-typed members on a
+        # session facade (a reduced host may not have them at all), so pyright
+        # sees ``object`` where the runtime contract is the call signature
+        # below. The ``callable`` guard IS the runtime contract.
+        accrue = getattr(session, "accrue_spend", None)
+        if callable(accrue):
+            index = int(cast("AccrueSpendFn", accrue)(micro, identity))
+        else:
+            index = spend.accrue(micro, identity)
+        schedule = getattr(session, "schedule_spend_price", None)
+        if callable(schedule) and not usage_prices_known(usage):
+            # A provider receipt is already the exact bill; nothing to converge.
+            self._turn_spend_calls.add(index)
+            cast("ScheduleSpendFn", schedule)(index, usage, identity)
+        return spend
+
+    def note_spend_correction(self, session: Any, index: int, delta_micro: int) -> None:
+        """Move the turn's already-accrued figure with a call's re-price.
+
+        The turn-end remainder is ``max(0, aggregate_price - accrued_this_turn)``
+        and ``accrued_this_turn`` is fed by the PAINT prices, so a correction
+        that moved the durable accumulator without moving that counter made the
+        remainder re-bill the whole correction: paint $1.00, corrected $2.00,
+        aggregate $2.00 persisted **$3.00** and published as EXACT (review
+        R1-1). The two numbers exist for different reasons — one is money, the
+        other is "what the turn's aggregate price has already been charged" — so
+        they are moved together rather than merged.
+
+        Scoped to the turn by ``index``. For a call the current turn did not
+        accrue (the correction outlived its turn), the delta is clamped against
+        the CLOSED turn's snapshot instead: the remainder made that turn's
+        aggregate a floor (``accrued + remainder == max(accrued, aggregate)``),
+        so the re-price may only move the total as far as it lifts the turn above
+        that floor. Without this the persisted total depended on WHEN the
+        correction landed — paint $2.00, re-priced $1.00, aggregate $2.00 gave
+        $2.00 mid-turn and $1.00 after the turn closed (review R2-2). Both
+        orderings now take the same branch of the same formula, and a correction
+        that raises the true cost above the aggregate still counts in full.
+        """
+        if not delta_micro:
+            return
+        if index in self._turn_spend_calls:
+            state = self._state
+            accrued_now = state.current_turn_accrued_cost + delta_micro / 1_000_000.0
+            self.mutate(current_turn_accrued_cost=accrued_now)
+            return
+        accrued = self._closed_turn_accrued_micro
+        aggregate = self._closed_turn_agg_micro
+        if accrued is None or aggregate is None:
+            # No turn has closed here, so there is no floor to clamp against and
+            # the authoritative re-price stands on its own.
+            return
+        applied = max(accrued + delta_micro, aggregate) - max(accrued, aggregate)
+        self._closed_turn_accrued_micro = accrued + delta_micro
+        # ``Session.correct_spend`` has already moved the accumulator by the full
+        # delta; this undoes the part the closed turn's floor absorbs. Negative
+        # adjustments are legal: the clamp can also hold a DOWNWARD re-price back.
+        if applied != delta_micro:
+            self._spend_remainder(session, (applied - delta_micro) / 1_000_000.0)
+
+    def _spend_remainder(self, session: Any, remainder: float) -> SessionSpend:
+        """Apply a turn-end remainder to the accumulator, if it is worth one."""
+        self._seed_legacy_spend(session, None)
+        spend = self._spend_of(session)
+        delta = int(round(remainder * 1_000_000))
+        adjust = getattr(session, "adjust_spend", None)
+        if callable(adjust):
+            adjust(delta)
+        else:
+            spend.adjust(delta)
+        return spend
+
+    def _seed_legacy_spend(self, session: Any, usage: Any) -> SessionSpend | None:
+        """Start a pre-record session's accumulator from its best legacy figure.
+
+        The best available source, in order: the store's own restored cost (a
+        checkpoint's whole accumulator, 7.7% of the real store), then the one
+        restored receipt priced on its own serving identity. Both are FACTS
+        about money this session spent; neither is this accumulator's own sum,
+        which is why the seed carries ``≥``.
+
+        Returns ``None`` for a host with no session accumulator (a reduced
+        facade), which then keeps the plain float path it always had.
+        """
+        spend = self._spend_of(session)
+        # "Already has state" is a NONZERO TOTAL as well as a call count: a
+        # turn-end remainder can put money in the accumulator with no per-call
+        # accrual (an AgentEndEvent whose calls were never seen individually),
+        # and seeding over it would bill the turn twice.
+        if spend.calls or spend.micro:
+            return spend
+        legacy = self._state.cumulative_parent_cost
+        knowledge = self._state.cost_knowledge
+        if not legacy and isinstance(usage, Usage):
+            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
+            if cost:
+                legacy = cost
+                knowledge = CostKnowledge.FLOOR
+        if not legacy:
+            return None
+        identity_of = getattr(session, "spend_identity", None)
+        identity = (
+            cast("IdentityFn", identity_of)(usage)
+            if callable(identity_of)
+            else serving_identity(usage, getattr(session, "effective_model", None))
+        )
+        micro = int(round(float(legacy) * 1_000_000))
+        seed = getattr(session, "seed_spend_floor", None)
+        if callable(seed):
+            return cast("SeedSpendFn", seed)(
+                micro, identity, floor=knowledge is not CostKnowledge.EXACT
+            )
+        # No session accumulator at all (a reduced facade or a test double): the
+        # store's own accumulator still has to continue from the state it was
+        # handed, or the first live call would replace that money instead of
+        # adding to it. Same value object, one arithmetic site.
+        spend.accrue(micro, identity)
+        spend.floor = knowledge is not CostKnowledge.EXACT
+        return spend
+
     def refresh_restored_usage(self, session: Any) -> FrontendUpdate | None:
-        """Price the restored point-in-time reading without rescanning state."""
+        """Publish the restored point-in-time reading and the durable spend.
+
+        The spend comes from the RECORD — the accumulator the session recalled
+        in O(1) — and only falls back to a seated legacy figure when the session
+        has no accumulator to speak for it (a pre-ledger session). That fallback
+        is today's behaviour, kept exactly: a session with no record must not
+        silently lose its ``≥``, and it must not lose the money either.
+        """
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if not isinstance(usage, Usage):
@@ -3329,13 +4878,16 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens,
             "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
         }
-        if state.cumulative_parent_cost is None:
-            cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
-            if cost is not None:
-                changes.update(
-                    cumulative_parent_cost=cost,
-                    cost_knowledge=CostKnowledge.FLOOR,
-                )
+        self._seed_legacy_spend(session, usage)
+        spend = self._spend_of(session)
+        if spend is not None:
+            # The RECORD speaks for the money, not its call counts (QA round 2,
+            # Q3): ``published_usd`` is the one derivation the cold seed, this
+            # path and the band all read, and it answers ``None`` for a record
+            # holding money we cannot state — which is what makes the band's
+            # ``$—`` branch reachable here instead of an unreachable zero.
+            changes["cumulative_parent_cost"] = spend.published_usd()
+            changes["cost_knowledge"] = spend.knowledge()
         return self.mutate(**changes)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
@@ -3347,20 +4899,15 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }
-        if cost is not None:
+        if cost is not None or usage.input_tokens or usage.output_tokens:
+            spend = self._accrue_call(session, usage, cost)
             changes.update(
-                cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + cost,
-                cost_knowledge=(
-                    CostKnowledge.EXACT
-                    if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                    else state.cost_knowledge
-                ),
+                cumulative_parent_cost=spend.usd,
+                cost_knowledge=spend.knowledge(),
                 usage_components=_capped_components(
                     list(state.usage_components) + list(usage.cost_components or [usage])
                 ),
             )
-        elif usage.input_tokens or usage.output_tokens:
-            changes["cost_knowledge"] = CostKnowledge.PARTIAL
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
@@ -3374,14 +4921,18 @@ class FrontendStateStore:
         cadence the page that needs it already refreshes on, at a fraction of
         the cost.
         """
-        jobs = self._jobs(session)
+        jobs = self._jobs(session, self._retained_windows())
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
             if cost is not None:
                 child_costs[job.id] = cost
-        return self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
+        update = self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
+        # After the reducer has decided, so the memo hands back the object the
+        # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
+        self._trajectory_windows.adopt_from(self._state.jobs)
+        return update
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
         """Publish the runtime's offerable model rows as canonical state.
@@ -3415,15 +4966,164 @@ class FrontendStateStore:
                     # ``Any``, and a duck-typed entry from an embedding host
                     # need not have the attribute.
                     "routed": bool(getattr(entry, "routed", False)),
+                    # The row's time-of-use schedule, carried for the same reason
+                    # as ``routed`` above and left out of the original round trip
+                    # by oversight (review round 1, MINOR 1): without it an
+                    # attached session rendered a tariffed row at its stored PEAK
+                    # price with no window tag while the owner's own picker showed
+                    # the rate in force — the two-surface disagreement the shared
+                    # renderer exists to prevent. Absent from an owner running an
+                    # older build, which reads back as ``None``: "this row's
+                    # prices do not vary by time of day", which is exactly what an
+                    # older build knew.
+                    "time_of_use": getattr(entry, "time_of_use", None),
                 }
             )
         return self.mutate(model_catalogue=rows)
+
+    def _fold_live_tool_starts(self, event: AgentEvent[Any]) -> dict[str, Any]:
+        """Track the start epoch of every call executing RIGHT NOW.
+
+        The map a mid-turn joiner seeds a live row's clock from. The producer
+        stamped the instant on its own ``tool_execution_start`` (see
+        ``ToolExecutionStartEvent.started_at_epoch``); this keeps those stamps
+        keyed by call so the row and the band can share one anchor, and drops
+        them the moment the call ends so nothing about a finished call is
+        offered as a start.
+
+        Two deliberate omissions, both of which keep this from becoming an
+        invention:
+
+        * a ``tool_execution_start`` carrying NO epoch still contributes an
+          entry — with ``None``. The tempting default for its VALUE is the
+          fold's own ``now``, and that is precisely the fabricated zero this
+          whole path exists to refuse: for an attached viewer it is its arrival
+          instant dressed as the call's start, and it would print a plausible
+          wrong age where the widget's blank column currently tells the truth.
+          ``None`` records the fact the event does carry — the call STARTED —
+          without inventing the instant, so a replay can tell a clockless
+          running call from one that never started at all.
+        * the map is cleared at BOTH ends of the turn (``agent_start`` and
+          ``agent_end``) rather than left to the individual ends. A turn that
+          dies without emitting every ``tool_execution_end`` is exactly the
+          case that leaves a stale entry, and a stale entry is worse than none:
+          a later turn's row would seed from it.
+        """
+        state = self._state
+        if isinstance(event, (AgentStartEvent, AgentEndEvent)):
+            return {"live_tool_started_at": {}} if state.live_tool_started_at else {}
+        if isinstance(event, ToolExecutionStartEvent):
+            epoch = getattr(event, "started_at_epoch", None)
+            live = dict(state.live_tool_started_at)
+            live[event.tool_call_id] = float(epoch) if isinstance(epoch, (int, float)) else None
+            return {"live_tool_started_at": live}
+        if isinstance(event, ToolExecutionEndEvent):
+            if event.tool_call_id not in state.live_tool_started_at:
+                return {}
+            live = dict(state.live_tool_started_at)
+            del live[event.tool_call_id]
+            return {"live_tool_started_at": live}
+        return {}
+
+    def _fold_activity_phase(self, event: AgentEvent[Any], now: float) -> dict[str, Any]:
+        """Fold the PHASE the working line is in, and when that phase began.
+
+        The band's clock is keyed to the phase, not to the label — a batch
+        shedding a call, a tool name arriving in fragments and an intent being
+        revised all change the label without the agent having changed what it
+        is doing — and the phase's zero used to exist only inside whichever
+        widget happened to be constructed. A frontend that joins mid-turn was
+        therefore always at zero: the operator's report names the thinking
+        indicator restarting alongside the tool row, and a per-call stamp
+        cannot answer that one because there is no call behind it.
+
+        The rule is the phone projection's (``mobile/projection.py``
+        ``_derive_activity``) for the PHASES it names, because both surfaces
+        draw the same row and a second rule would be a second answer. It is
+        deliberately narrow: a phase RESTARTS the zero only when it begins a
+        kind of work, never when it merely relabels one — the composed batch
+        is the case that shows the difference, since it announces a call per
+        fragment and all of them belong to one dictation.
+
+        It is one rule in two PLACES, not one shared implementation, and the
+        ``tool_execution_end`` arm below is where they part: the fold restarts
+        only when the batch has no siblings left (D9 — a narrowed label must
+        not report a shed sibling's age), while the phone projection restarts
+        unconditionally. The divergence is deliberate and is the TUI's D9
+        reading; it is recorded here rather than left for someone to find by
+        diffing the two files, and a change to either side has to be checked
+        against the other.
+
+        The ``running`` phase is folded so the end rule can tell a batch that
+        still has siblings from one that has just lost its last call. Its
+        clock does NOT come from here: a running batch is measured from the
+        OLDEST live card's own start, which is finer than any phase edge and is
+        what keeps a narrowed label from reporting a shed sibling's age.
+
+        Any mismatch between this phase and the one the app derives is handled
+        at the reader (``OperatorApp._current_activity``), which withholds the
+        clock rather than passing a zero that does not belong: a facade with no
+        fold, a legacy producer and a compaction fallback all stay blank
+        instead of inventing an age.
+        """
+        state = self._state
+        phase = state.activity_phase
+
+        def into(new_phase: str) -> dict[str, Any]:
+            return {"activity_phase": new_phase, "activity_phase_started_at": now}
+
+        if isinstance(event, (AgentStartEvent, TurnEndEvent)):
+            # A turn boundary and a per-model-turn boundary are both the start
+            # of waiting on a model call: between two tool batches, and before
+            # the first, that IS what the turn is doing.
+            return into(ACTIVITY_PHASE_THINKING)
+        if isinstance(event, AgentEndEvent):
+            return {"activity_phase": "", "activity_phase_started_at": None}
+        if isinstance(event, ToolCallComposeEvent):
+            # One batch, one zero: a three-call batch announces three calls in
+            # one dictation, and restarting per announcement would show the
+            # same "still composing" state counting from zero three times.
+            return {} if phase == ACTIVITY_PHASE_COMPOSING else into(ACTIVITY_PHASE_COMPOSING)
+        if isinstance(event, ToolExecutionStartEvent):
+            return into(ACTIVITY_PHASE_RUNNING)
+        if isinstance(event, ToolExecutionEndEvent):
+            # Waiting on the model again — but only once the batch is done. A
+            # batch that still has a sibling executing is still `running`, and
+            # restarting there would reset the number the surviving row's
+            # label still claims.
+            remaining = set(state.live_tool_started_at) - {event.tool_call_id}
+            return into(ACTIVITY_PHASE_THINKING) if not remaining else {}
+        if isinstance(event, MessageStartEvent):
+            # A model call in flight with nothing streamed yet. The loop yields
+            # this from a placeholder at the top of EVERY provider call, so
+            # keying prose here would claim text for a tool-only turn; the
+            # first non-empty delta below is the transition to `responding`.
+            if str(getattr(event.message, "role", "") or "") == "assistant":
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        if isinstance(event, MessageUpdateEvent):
+            if event.delta and phase == ACTIVITY_PHASE_THINKING:
+                return into(ACTIVITY_PHASE_RESPONDING)
+            return {}
+        if isinstance(event, MessageEndEvent):
+            # Ends the PROSE phase only. For a tool-calling turn this arrives
+            # after the compose events, and the composed call is still what
+            # the turn is doing, so anything but `responding` is left alone.
+            if (
+                str(getattr(event.message, "role", "") or "") == "assistant"
+                and phase == ACTIVITY_PHASE_RESPONDING
+            ):
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        return {}
 
     def observe_event(self, session: Any, event: AgentEvent[Any]) -> FrontendUpdate | None:
         now = time.time()
         state = self._state
         changes: dict[str, Any] = {}
         self._fold_live_event(event)
+        changes.update(self._fold_live_tool_starts(event))
+        changes.update(self._fold_activity_phase(event, now))
         if isinstance(event, AgentStartEvent):
             changes.update(
                 streaming=True,
@@ -3432,6 +5132,11 @@ class FrontendStateStore:
             )
         elif isinstance(event, AgentEndEvent):
             duration = state.active_duration_s
+            # The turn is over, so no later correction may claim a place in its
+            # reconciliation (``note_spend_correction`` reads this set). Cleared
+            # here rather than at each reset site because both branches below
+            # end the same turn.
+            self._turn_spend_calls.clear()
             if state.activity_started_at is not None:
                 duration += max(0.0, now - state.activity_started_at)
             if event.error:
@@ -3445,6 +5150,9 @@ class FrontendStateStore:
                 activity_started_at=None,
                 active_duration_s=duration,
                 last_turn_outcome=outcome,
+                # Empty for every non-cut-off end, which is what clears a
+                # previous turn's reason as the new outcome lands.
+                last_turn_cut_off=str(getattr(event, "cut_off", "") or ""),
             )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
@@ -3458,23 +5166,32 @@ class FrontendStateStore:
                 total = turn_cost(_label(getattr(session, "effective_model", None)), aggregate)
                 if total is not None:
                     remainder = max(0.0, total - state.current_turn_accrued_cost)
-                    previous = state.cumulative_parent_cost or 0.0
+                    # Snapshot what this turn accrued and what it is being billed
+                    # at, BEFORE the remainder moves the accumulator: a correction
+                    # for one of these calls that lands after the turn closed must
+                    # be clamped against the same pair the open turn would have
+                    # used, or the persisted total depends on the race (R2-2).
+                    self._closed_turn_accrued_micro = int(
+                        round(state.current_turn_accrued_cost * 1_000_000)
+                    )
+                    self._closed_turn_agg_micro = int(round(total * 1_000_000))
+                    # The remainder is MONEY, not another provider call: it
+                    # reconciles the aggregate's price with the sum of its
+                    # calls' prices, so it moves the total without moving the
+                    # call count the knowledge state is derived from.
+                    spend = self._spend_remainder(session, remainder)
                     changes.update(
-                        cumulative_parent_cost=previous + remainder,
+                        cumulative_parent_cost=spend.usd,
                         current_turn_accrued_cost=0.0,
                         usage_components=_capped_components(
                             list(state.usage_components)
                             if state.current_turn_accrued_cost > 0
                             else list(state.usage_components) + list(aggregate.cost_components)
                         ),
-                        cost_knowledge=(
-                            CostKnowledge.EXACT
-                            if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                            else state.cost_knowledge
-                        ),
+                        cost_knowledge=spend.knowledge(),
                     )
                 elif any(u.input_tokens or u.output_tokens for u in usages):
-                    changes["cost_knowledge"] = CostKnowledge.PARTIAL
+                    changes["cost_knowledge"] = self._spend_of(session).knowledge()
                     changes["current_turn_accrued_cost"] = 0.0
                 # `messages` remain the billing authority even when a post-turn
                 # compaction invalidates their occupancy. The session stamps the
@@ -3498,27 +5215,26 @@ class FrontendStateStore:
                 return
             # Occupancy is a level. Cost accrues per call so arbitrary joins see
             # the same lifetime figure; AgentEnd adds only the final remainder.
+            # The ADDITION happens in the session's accumulator (one arithmetic
+            # site, design §5.1) and the per-turn sum stays here as turn state,
+            # which is what the remainder below is computed against.
             call_cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
             changes.update(
                 last_usage=usage.model_dump(mode="json"),
                 context_tokens=usage.context_tokens or usage.input_tokens or state.context_tokens,
                 context_is_estimate=False,
             )
-            if call_cost is not None:
-                changes.update(
-                    cumulative_parent_cost=(state.cumulative_parent_cost or 0.0) + call_cost,
-                    current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
-                    cost_knowledge=(
-                        CostKnowledge.EXACT
-                        if state.cost_knowledge in {CostKnowledge.UNKNOWN, CostKnowledge.EXACT}
-                        else state.cost_knowledge
-                    ),
-                    usage_components=_capped_components(
-                        list(state.usage_components) + list(usage.cost_components or [usage])
-                    ),
-                )
-            elif usage.input_tokens or usage.output_tokens:
-                changes["cost_knowledge"] = CostKnowledge.PARTIAL
+            if call_cost is not None or usage.input_tokens or usage.output_tokens:
+                spend = self._accrue_call(session, usage, call_cost)
+                if call_cost is not None:
+                    changes.update(
+                        cumulative_parent_cost=spend.usd,
+                        current_turn_accrued_cost=state.current_turn_accrued_cost + call_cost,
+                        usage_components=_capped_components(
+                            list(state.usage_components) + list(usage.cost_components or [usage])
+                        ),
+                    )
+                changes["cost_knowledge"] = spend.knowledge()
         elif isinstance(event, CompactionEndEvent) and event.success:
             changes.update(
                 context_tokens=event.tokens_after or None,
@@ -3632,6 +5348,16 @@ class FrontendStateStore:
         durable = state.model_copy(
             update={
                 "live_events": [],
+                # The live-batch anchor is transient by construction, exactly
+                # like the seed above: it describes calls executing RIGHT NOW
+                # in this process, and there is nothing for a later reader to
+                # restore from it — a resumed conversation's in-flight call is
+                # re-stamped by the producer that is still running it. Its
+                # scalar neighbours (`activity_started_at`, `activity_phase`)
+                # are deliberately NOT stripped: they are O(1) values the
+                # turn-end fold and the non-streaming gate already clear, so
+                # there is nothing here to make durable or to withhold.
+                "live_tool_started_at": {},
                 "jobs": [
                     job.model_copy(
                         update={
@@ -3660,8 +5386,25 @@ class FrontendStateStore:
             {"checkpoint_id": checkpoint_id, "state": durable.model_dump(mode="json")},
         )
 
+    def _retained_windows(self) -> _TrajectoryWindows:
+        """The retained-row memo, bound to the store's CURRENT state lineage.
+
+        Rebinding on the way in is what makes an epoch change invalidate without
+        every writer having to remember to: a new epoch may reuse a job id, and a
+        window frozen for the previous lineage must not be matched against it.
+        """
+        self._trajectory_windows.rebind(self._state.epoch)
+        return self._trajectory_windows
+
     @staticmethod
-    def _jobs(session: Any) -> list[JobState]:
+    def _jobs(session: Any, windows: _TrajectoryWindows | None = None) -> list[JobState]:
+        """One roster row per job, reusing frozen retained windows when given a memo.
+
+        ``windows`` is the caller's :class:`_TrajectoryWindows`; omitting it keeps
+        the plain rebuild (every row copied and frozen) that a one-off reader
+        wants. The two refresh paths pass it, which is what makes a roster tick
+        cost the delta rather than the retained window.
+        """
         manager = getattr(session, "jobs", None)
         try:
             rows = manager.list() if manager else []
@@ -3676,13 +5419,29 @@ class FrontendStateStore:
             if isinstance(graph_rows, Sequence):
                 rows = graph_rows
         values: list[JobState] = []
+        seen: set[str] = set()
         for job in rows:
             try:
-                value = JobState.from_job(job)
+                job_id = str(getattr(job, "id", "") or "")
+                value = JobState.from_job(
+                    job,
+                    window=(
+                        None
+                        if windows is None
+                        else windows.window(job_id, getattr(job, "trajectory", None))
+                    ),
+                )
+                # Marked SEEN only once the row is built: a job whose row raises is
+                # skipped from ``values``, so keeping it in ``seen`` would keep its
+                # memo entry -- and that entry pins the job's raw row list, which
+                # is exactly what ``retain`` exists to release.
+                seen.add(job_id)
                 values.append(_with_lineage(value, comms) if comms is not None else value)
             except Exception:
                 # One malformed extension row cannot erase unrelated jobs.
                 continue
+        if windows is not None:
+            windows.retain(seen)
         nodes = getattr(comms, "nodes", None)
         if callable(nodes):
             known = {job.id for job in values}
@@ -3740,6 +5499,45 @@ def format_window(window: int) -> str:
         scaled = window / 1_000
         return f"{scaled:.0f}k" if scaled == int(scaled) else f"{scaled:.1f}k"
     return str(window)
+
+
+def context_block_numbers(data: dict[str, int], total: int) -> dict[str, int]:
+    """The unformatted figures behind the ``/context`` block's rows.
+
+    The rows are PRE-FORMATTED strings (``~12.3k``), which is right for a
+    terminal and useless to a panel that wants to draw a proportion bar: a
+    client parsing them would move its chart whenever a formatter changed. So
+    the numbers the rows were built from ride beside them on the block's
+    ``data``.
+
+    ADDITIVE: nothing reads this today, and a client that does not find
+    ``numbers`` renders the rows with no bars — it MUST NOT recover the figures
+    by parsing ``items``.
+
+    Lives HERE, beside the formatters that consume the same dict, for the reason
+    ``format_context_tokens`` states: this block is built by BOTH hosts — the
+    detached runtime (``session/runtime/serving.py``) and the TUI owner
+    (``tui/app.py::_context_slash_result``) — so one definition is what stops the
+    two surfaces answering the same command with different numbers. ``.get``
+    mirrors the rows' own defensive read, so a breakdown missing a key costs
+    that one figure rather than failing the command, and ``total`` is passed in
+    from the caller's computation rather than re-summed here.
+    """
+    numbers = {
+        key: int(data.get(key, 0))
+        for key in (
+            "instructions",
+            "tool_inventory",
+            "tool_schemas",
+            "environment",
+            "knowledge_mcp_goal",
+            "messages",
+            "context_window",
+            "cache_read",
+        )
+    }
+    numbers["total"] = total
+    return numbers
 
 
 def _slash_capabilities() -> list[SlashCapability]:
@@ -3914,6 +5712,20 @@ def _last_turn_outcome_from(session: Any, current: str) -> str:
         return current if current in ("completed", "aborted", "error") else ""
     raw = str(getattr(session, "_last_turn_outcome", "") or "")
     return raw if raw in ("completed", "aborted", "error") else ""
+
+
+def _last_turn_cut_off_from(session: Any, current: str) -> str:
+    """The session's published cut-off reason, or the store's, or ``""``.
+
+    The twin of :func:`_last_turn_outcome_from`, and needed for the same reason:
+    ``refresh_from_session`` copies the session's fields over the store, and a
+    reduced test double (or an older runtime) without the attribute would
+    otherwise wipe a reason ``observe_event`` had just written — leaving a
+    rebinding viewer to synthesise a cause it could have named.
+    """
+    if not hasattr(session, "_last_turn_cut_off"):
+        return current
+    return str(getattr(session, "_last_turn_cut_off", "") or "")
 
 
 def _label(spec: Any) -> str:

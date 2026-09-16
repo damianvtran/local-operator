@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.session.frontend_state import SlashResult as _SlashResult
+from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
@@ -73,6 +74,14 @@ class FakeSession:
         #: double. Declared here rather than attached per-test so the shape is
         #: part of the double's contract.
         self.mcp_manager: Any = None
+        #: The boot record the listing consults when there is NO manager, since
+        #: discovery that raised never assigns one and records itself here
+        #: instead. ``None`` is the not-yet-wired state; a test wanting the
+        #: failure state sets a real :class:`McpStartupOutcome` with failures.
+        #: Declared for the same reason as ``mcp_manager``: the shape is part
+        #: of the double's contract, and an undeclared attribute is invisible
+        #: to the type checker every gate runs.
+        self.mcp_startup: Any = None
         #: The session's event-emission seam. The runtime reports a settled
         #: MCP grant through it, since the grant outlives the request that
         #: started it. Tests replace it to capture what viewers would see.
@@ -200,6 +209,33 @@ class FakeSession:
 
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
 
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
@@ -1657,6 +1693,73 @@ async def test_dispose_cancels_a_grant_parked_on_a_browser(
 
 
 @pytest.mark.asyncio
+async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The level arrives WITH the pair, so the first turn runs at the chosen depth.
+
+    ``build_model_spec`` seeds the model's OWN default level, and a pair-only
+    switch therefore replaces a chosen level with that seed — on the very send
+    that consumes the viewer's intent. Asserted on the SPEC THE SESSION
+    RECEIVES, because that is where the level either survives or is silently
+    lost, and against a control built the same way for the no-effort case: an
+    absent level must leave exactly the spec this RPC has always produced.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[tuple[Any, bool]] = []
+    # ``raising=False``: ``FakeSession`` deliberately has no ``set_model`` — this
+    # test is about what the HANDLE sends it.
+    monkeypatch.setattr(
+        session,
+        "set_model",
+        lambda spec, explicit=False: applied.append((spec, explicit)),
+        raising=False,
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", "max")
+    await handle.set_model("deepseek", "deepseek-flash")
+
+    assert [(spec.provider, spec.model_id, spec.reasoning_effort) for spec, _ in applied] == [
+        ("deepseek", "deepseek-flash", "max"),
+        (
+            "deepseek",
+            "deepseek-flash",
+            build_model_spec("deepseek", "deepseek-flash").reasoning_effort,
+        ),
+    ]
+    assert [explicit for _, explicit in applied] == [
+        True,
+        True,
+    ], "a switch is a deliberate choice, so a pinned fallback must be withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored level outliving its ladder lands on the nearest rung it can have.
+
+    The refusal belongs to the moment the user chooses (the create/preview
+    routes, 422); by the time a level reaches an owner it is a stored decision,
+    and failing the send over it would turn a stale record into a dead turn.
+    ``xhigh`` is on no ``deepseek-flash`` ladder, which tops out at ``max``.
+    """
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", "xhigh")
+
+    assert applied[0].reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
 async def test_model_saved_adopts_the_configured_default_on_a_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -1776,6 +1879,157 @@ async def test_the_abort_receipt_does_not_claim_more_than_it_did() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_abort_clears_a_card_that_outlived_its_turn() -> None:
+    """C2, and the case that FAILED before this change: the ORPHAN card.
+
+    A card parked in a LIVE turn was already cleared by the cancellation that
+    follows ``_session.abort`` — the batch's abort watcher unwinds the parked
+    await through the gate closure's ``finally`` — which is why the hole went
+    unnoticed. A card that OUTLIVED its turn is parked on a future nothing will
+    resolve: the drain gave up on a tool whose cleanup outran
+    ``ABORT_DRAIN_TIMEOUT_S``, or the turn ended while the question was still on
+    screen. The user's own stop then left the question up while the receipt
+    said a turn had been stopped.
+
+    No turn is live here on purpose — that IS the orphan — so the assertion is
+    that the press settles the question anyway. Driven through the ask gate
+    (the harder shape: an approval would resolve ``False`` either way) and
+    asserted on the folded card the surface paints.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(
+        handle._ask_gate(
+            [
+                AskQuestion(
+                    id="env",
+                    question="Which environment?",
+                    options=[AskOption(label="prod"), AskOption(label="staging")],
+                )
+            ]
+        )
+    )
+    await asyncio.sleep(0)
+    assert handle._fold.projection.pending is not None
+
+    receipt = await handle.abort()
+    assert "refused 1 waiting prompt" in receipt, receipt
+    assert await asyncio.wait_for(parked, 2) is None, "the orphan card was never answered"
+    assert handle._fold.projection.pending is None, "the question is still on screen"
+    assert handle._pending_futures == {}
+
+
+@pytest.mark.asyncio
+async def test_an_abort_leaves_an_aborted_call_not_a_denial(tmp_path) -> None:
+    """C1: settling the card first must not turn a STOP into a user refusal.
+
+    The gate is denied BEFORE the turn is cut (that order is what closes the
+    window where a fresh answer could start a tool mid-teardown), which puts a
+    resolved deny on the awaiting gate one loop pass before the AbortSignal. If
+    the loop acted on that value the tool would be recorded as ``User denied
+    approval`` — blaming the user for a stop they did make, the same
+    misattribution class as the crashed-gate bug this repo fixed once already.
+
+    Driven against a REAL session, a REAL turn and a real parked card, and
+    asserted on the TRANSCRIPT: that entry is what the user reads and what the
+    next turn is shown, and a stub's return value cannot stand in for it.
+    """
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import ENTRY_MESSAGE, Transcript
+
+    def stream(request, signal):  # noqa: ANN001, ANN202
+        async def gen():
+            yield StreamTextDelta(delta="working")
+            yield StreamToolCallDelta(index=0, id="c1", name="gated", argument_delta="{}")
+            yield StreamEndEvent(stop_reason="toolUse")
+            yield StreamTextDelta(delta="after the batch")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    executed: list[str] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):  # noqa: ANN001, ANN202
+        executed.append(tool_call_id)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="gated", content=[TextContent(text="it ran")]
+        )
+
+    transcript = Transcript(tmp_path / "sess")
+    session = Session(
+        model=ModelSpec(provider="test", model_id="T", context_window=100_000),
+        stream_fn=stream,
+        # The default tier is ``exec``, which is what parks a card.
+        tools=[AgentTool(name="gated", execute=execute)],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    turn = asyncio.ensure_future(session.prompt("run the gated tool"))
+    try:
+        for _ in range(500):
+            if handle._pending_futures:
+                break
+            await asyncio.sleep(0.01)
+        assert handle._pending_futures, "no card ever parked, so nothing was interrupted"
+
+        receipt = await handle.abort()
+        await asyncio.wait_for(turn, 10)
+
+        assert handle._pending_futures == {}, "the card must not survive the stop"
+        assert receipt.startswith("stopping this turn"), receipt
+        assert executed == [], "a denied call must not have run"
+        tool_rows = [
+            entry.payload
+            for entry in transcript.entries()
+            if entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "tool"
+        ]
+        assert tool_rows, "the tool came back with no result row at all"
+        text = json.dumps(tool_rows)
+        assert "aborted" in text, text
+        assert "User denied approval" not in text, (
+            "a stop was recorded as the user's own refusal: " + text
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_abort_receipt_names_a_turn_only_when_one_was_running() -> None:
+    """C3: the receipt must not claim a turn on a press that found none.
+
+    The counterpart to ``_abort_receipt``'s existing rule that survivors are
+    named only when there ARE any. The orphan case above is exactly where the
+    old opening clause lied: the user pressed stop with nothing running, saw a
+    card still on screen, and was told a turn had been stopped. Both halves are
+    asserted together because the contrast IS the rule.
+    """
+    handle, session = make_handle()
+    session.cancel_subagents = lambda reason="interrupted": 0  # type: ignore[attr-defined]
+
+    idle = await handle.abort()
+    assert "stopping this turn" not in idle, idle
+    assert idle.startswith("no turn was running"), idle
+    # Nothing was denied either, and a receipt that named a refused prompt on a
+    # press that settled no gate would be the same overstatement in the other
+    # direction (the route answers `idle` for this state rather than reporting
+    # an interrupt, precisely because there is nothing here to report).
+    assert "refused" not in idle, idle
+
+    session.is_streaming = True
+    live = await handle.abort()
+    assert live.startswith("stopping this turn"), live
+
+
+@pytest.mark.asyncio
 async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
     """MAJOR-1: the count must be what DIED, not what was asked to die.
 
@@ -1860,6 +2114,10 @@ async def test_the_abort_op_survives_a_session_that_cannot_stop_children() -> No
     """
     handle, session = make_handle()
     assert not hasattr(session, "cancel_subagents")
+    # A stop arrives with a turn running — the normal case — and the receipt's
+    # opening clause says which state it found (see
+    # ``test_the_abort_receipt_names_a_turn_only_when_one_was_running``).
+    session.is_streaming = True
 
     receipt = await handle.abort()
 
@@ -1923,3 +2181,229 @@ async def test_the_abort_op_really_terminates_live_children(tmp_path) -> None:
     assert session.running_subagents() == 0
     assert "stopped 3 subagents" in receipt
     await session.dispose()
+
+
+# --- /mcp LISTING on a routed session -----------------------------------------
+#
+# The regression these cover: the listing test read `manager.servers`, an
+# attribute `McpManager` has never had, so its emptiness branch was taken on
+# every session whose slash command routes to the owner. An explicit
+# `/mcp list` therefore answered "no MCP servers configured." — every fresh
+# viewer, and the phone projection, which shares this handler — while the same
+# session's transcript was listing its configured servers failing to start by
+# name. The sibling producers in the TUI never had the bug, which is why the
+# bare `/mcp` typed locally rendered the right listing and `/mcp list` did not.
+
+
+class _NameManager:
+    """A manager exposing the REAL roster accessor, and nothing else.
+
+    Deliberately without ``servers``: that phantom attribute is what the
+    listing test used to read, and a double that carried it would keep the
+    old bug green.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._names = list(names)
+
+    def get_all_server_names(self) -> list[str]:
+        return list(self._names)
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager(["alpha-stdio", "beta-oauth"])
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    # A BLOCK is the instruction to render the listing; the notice below is the
+    # refusal to. Which one comes back is the whole defect.
+    assert result.kind == "block", result
+    assert result.data == {"type": "mcp"}
+
+
+@pytest.mark.parametrize(
+    ("manager", "startup"),
+    [
+        (None, None),
+        (_NameManager([]), None),
+        # A record that coexists with a manager and names NO failure — the
+        # ordinary arm at ``session_factory.py:2462-2469``, which a host with no
+        # MCP config reaches as ``configured=()`` / ``failures={}``. (The
+        # import-gap arm at ``2377`` records an empty outcome too, but it returns
+        # BEFORE any manager exists, so it cannot produce this pair.) Pinned so a
+        # later predicate change cannot drop the arm (review round 2, R2-NIT-2;
+        # citation corrected in review round 3, NIT-1).
+        (_NameManager([]), McpStartupOutcome()),
+    ],
+    ids=["no-manager", "zero-name-manager", "deliberate-empty-outcome"],
+)
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(
+    manager: Any, startup: Any
+) -> None:
+    """The states that MAY say this, none of them with a failure recorded.
+
+    Three shapes reach here and all are genuinely empty: a session whose wiring
+    has not run yet (no boot record at all), a host that really asked for
+    nothing — including the zero-name manager, which is the same answer the real
+    one gives when no config file names a server (QA round 1, row 3) — and the
+    recorded-but-empty outcome the ordinary wiring arm produces. An empty roster
+    with a failure on the boot record is a different answer entirely; see the
+    three tests below.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = manager
+    session.mcp_startup = startup
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+    assert result.style == "info"
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_but_empty_discovery_message_is_still_a_failure() -> None:
+    """MEMBERSHIP decides, not the value (review round 3, MINOR-1).
+
+    ``session_factory`` stores ``str(entry.get("error", ...))`` with no falsy
+    filter, and ``str(exc)`` is ``""`` for an exception raised with no args — so
+    a record can carry the discovery key with an empty message. Testing the
+    VALUE fell through to the empty-state sentence and had `/mcp list` deny a
+    failure it was holding; the fallback keeps that arm non-empty and says what
+    is missing rather than inventing a cause.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: ""})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "MCP discovery failed" in result.text
+    assert "no error detail was recorded" in result.text
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_does_not_blame_a_server_the_roster_lost() -> None:
+    """A STALE per-server entry must not be spoken for an EMPTY roster.
+
+    The boot record is written at boot and by its settle sink only, and that
+    sink fires only when a round DEFERRED something — so `/mcp remove` reloads
+    the manager into an empty roster while the record still names the server it
+    just removed (``mcp/manager.py:2032`` assigns ``_configs`` before
+    validating, so a fresh boot cannot produce this pair, but a config change
+    can). Speaking that entry would have `/mcp list` announce "MCP server
+    github failed: …" on a session that configures nothing, where the empty
+    sentence is the true answer (review round 2, R2-MINOR-1).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={"github": "command not found: gh"})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+    assert "github" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_failure_when_the_roster_is_empty() -> None:
+    """The REACHABLE hard-failure shape — empty roster, manager present.
+
+    ``discover_and_load_mcp_tools`` never raises for a discovery failure: it
+    catches, logs, and returns the manager alongside a synthetic
+    ``{"path": ".mcp.json"}`` error entry, which ``session_factory`` keys as
+    ``discovery`` (``mcp/__init__.py:145-149``). So the state a user actually
+    reaches is a MANAGER whose roster came back empty plus a boot record that
+    says why, and keying the honest answer on ``manager is None`` missed it
+    (QA round 1, Q2 — where this branch probe returned the old sentence).
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "the config layer could not be read"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "the config layer could not be read" in result.text
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_discovery_failure_instead_of_denying_it() -> None:
+    """A discovery RAISE is the other shape that reaches the failure answer.
+
+    ``wire_mcp_into_session`` never assigns ``mcp_manager`` when its own call
+    raises, and records the exception on the boot record instead; that session
+    is a machine which HAS an MCP setup that could not be read. The old guard
+    answered "no MCP servers configured." there — the operator's reported
+    sentence in the state where it is least true. The band refuses to say it
+    (``_mcp_status`` reads ``startup.failed`` for exactly this reason), so the
+    slash answer must not either. The reachable sibling of this state keeps the
+    same answer: see the zero-name-manager test above.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    assert session.mcp_manager is None
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "no such file or directory: mcp.json"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "no such file or directory: mcp.json" in result.text
+    # A failure is not an empty state, and it is not styled as one either.
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command() -> None:
+    """A slash surface has no error page to render an exception on.
+
+    Reading one attribute too far takes the whole app down with it, so a
+    manager that cannot answer has to degrade. It must NOT degrade to "none
+    configured" though: a roster we could not READ is not an empty roster, and
+    borrowing the empty state's sentence is the same lie in a quieter place
+    (review round 1, MAJOR-1, second half).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+
+    class _Mute:
+        def get_all_server_names(self) -> list[str]:
+            raise RuntimeError("no roster")
+
+    session.mcp_manager = _Mute()
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text != "no MCP servers configured."
+    assert "could not read" in result.text
+    assert result.style == "warning"

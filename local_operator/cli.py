@@ -37,7 +37,9 @@ import functools
 import math
 import os
 import platform
+import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -430,9 +432,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
     mobile_subparsers.add_parser("status", help="Daemon health, gate and live sessions")
     for action in ("start", "stop", "restart"):
         mobile_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
-    logs_parser = mobile_subparsers.add_parser("logs", help="Tail the daemon log")
-    logs_parser.add_argument("--lines", type=int, default=100)
-    logs_parser.add_argument("--follow", "-f", action="store_true")
+    logs_parser = mobile_subparsers.add_parser(
+        "logs", help="Tail the daemon's and the runtimes' logs"
+    )
+    logs_parser.add_argument(
+        "--lines", type=int, default=100, help="Lines per file (up to two are read)"
+    )
+    logs_parser.add_argument(
+        "--follow",
+        "-f",
+        action="store_true",
+        help=(
+            "Follow by name, so a log created or rotated while you watch is seen "
+            "(a descriptor-bound follow misses both)"
+        ),
+    )
     mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
     uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
     uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
@@ -488,6 +502,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
     pair_browser.add_argument(
         "--reset", action="store_true", help="Revoke the paired browser first"
+    )
+    pair_browser.add_argument(
+        "--list",
+        action="store_true",
+        help="List the authorised browser extensions, and which one is driving",
+    )
+    pair_browser.add_argument(
+        "--revoke",
+        metavar="ID-OR-LABEL",
+        default=None,
+        help="Revoke ONE authorised extension (its id, an unambiguous id prefix, "
+        "or part of its label), leaving every other one paired",
+    )
+    drive_browser = browser_subparsers.add_parser(
+        "drive", help="Choose which authorised extension drives the browser"
+    )
+    drive_browser.add_argument(
+        "target", help="Extension id (or an unambiguous prefix), or part of its label"
     )
     logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
     logs_browser.add_argument("--lines", type=int, default=100)
@@ -696,11 +728,50 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "after the socket times out, escalate to signals using the "
-            "record's own fields as identity — for a heartbeating-but-"
-            "starved process the socket cannot reach (use after the plain "
-            "stop refused with a fresh heartbeat)"
+            "escalate past a refusal or a skip: signal a target whose socket "
+            "cannot confirm identity, one that reports a turn in flight, or one "
+            "already leaving after a signal — each of those can cut the turn it "
+            "is in. Not needed for a cooperative mid-turn runtime: the plain "
+            "stop ends that one promptly, through its socket"
         ),
+    )
+
+    # The rotation path (`lop refresh`): ask every live runtime to move to the
+    # build on disk at its next boundary. Top-level beside `sessions`/`send`/
+    # `stop` because it answers a fourth question about this machine — "which
+    # of these is still on the old build, and what is it doing instead" — and
+    # it exists so that making a new build take effect never needs the thing
+    # that destroyed 32 turns on 2026-09-14: an ad-hoc signal sweep.
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help=(
+            "Ask running sessions to move to the build on disk at their next "
+            "boundary (no signals)"
+        ),
+        parents=[parent_parser],
+    )
+    refresh_parser.add_argument(
+        "target",
+        nargs="?",
+        help="conversation-name / session-id / pid / cwd substring (case-insensitive)",
+    )
+    refresh_parser.add_argument("--pid", type=int, help="target by exact pid")
+    refresh_parser.add_argument("--session", dest="session", help="target by exact session id")
+    refresh_parser.add_argument(
+        "--all",
+        dest="refresh_all",
+        action="store_true",
+        help="ask every live session on this machine (no confirmation: nothing is ended)",
+    )
+    refresh_parser.add_argument(
+        "--json", action="store_true", help="machine-readable outcome per target"
+    )
+    refresh_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="wait per session for its answer (default 10)",
     )
 
     # Scheduled wakes, and the process that fires them for sessions nobody is
@@ -712,6 +783,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Inspect scheduled wakes and the supervisor that fires them",
         parents=[parent_parser],
     )
+    # DEFAULTS ON THE PARENT, so every route into `wake_command` carries the
+    # flags it dereferences. `wake_command` falls back to "status" when no
+    # subcommand is given, and the status branch reads `json`/`install`/
+    # `uninstall` — so bare `lop wake` and `lop wake install` (which define no
+    # such flags of their own) used to reach it and die on `args.json`. A
+    # subparser that declares `--json` still overrides this, and a branch that
+    # gains a new flag inherits a safe default instead of a crash.
+    wake_parser.set_defaults(json=False, install=False, uninstall=False)
     wake_sub = wake_parser.add_subparsers(dest="wake_command")
     wake_status = wake_sub.add_parser(
         "status",
@@ -728,6 +807,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--uninstall",
         action="store_true",
         help="remove the supervisor; scheduled wakes then fire only when a session is open",
+    )
+    # THE ROLLOUT PATH, and the reason this is a subcommand rather than only a
+    # flag on `status`. Repair-on-demand lives in the install hook, which runs
+    # on a wake PERSIST — so a machine whose supervisor is stale or stopped
+    # cannot be fixed without some session happening to schedule a wake. After
+    # an upgrade that is exactly the wrong dependency: the running supervisor
+    # is still executing the old code, and there may be no session about to
+    # persist. This command makes the repair reachable directly.
+    wake_sub.add_parser(
+        "install",
+        help="install or repair the supervisor now (restarts a stale or stopped one)",
+        parents=[parent_parser],
     )
     wake_list = wake_sub.add_parser(
         "list",
@@ -807,6 +898,90 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="Print installed vs PyPI; do not install",
+    )
+    # Hidden (``SUPPRESS``): nobody types this, and it is not an upgrade — it is
+    # the repair step ``lop update`` runs in a CHILD process from the newly
+    # installed wheel, so that the LaunchAgent plists it renders come from THIS
+    # build rather than from the pre-upgrade modules the parent still holds in
+    # memory. Without the child, a repair renders the previous build's plist
+    # shape and silently changes nothing. See ``update.daemons_refresh_command``.
+    update_parser.add_argument(
+        "--refresh-daemons",
+        dest="refresh_daemons",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    # Install a build that is already on this machine into its own generation:
+    # a source directory, or a git ref of the repository this command runs in.
+    # Named separately from the PyPI path because it answers a different
+    # question ("install THIS tree") and asks nothing of the network.
+    update_parser.add_argument(
+        "--from-snapshot",
+        dest="from_snapshot",
+        metavar="DIR_OR_REF",
+        default=None,
+        help=(
+            "Install a local source tree (a directory, or a git ref of the current "
+            "repository) into its own install generation, instead of upgrading from PyPI"
+        ),
+    )
+
+    # The install LAYOUT's own commands. One verb group rather than flags on
+    # ``update`` because neither of these installs anything from a network: they
+    # manage the trees this machine already has.
+    #
+    # ``--keep``'s default is the REAL one rather than ``None``: argparse renders
+    # ``%(default)s`` from what is declared here, so a ``None`` the dispatcher
+    # later converted meant the help text stated a default that was not the
+    # default, and quoted a Python symbol an operator cannot act on (design
+    # review D5).
+    from local_operator.update import DEFAULT_KEEP_GENERATIONS
+
+    def _generation_count(value: str) -> int:
+        """``--keep``'s value: a non-negative count, or a clean argparse refusal.
+
+        REFUSING A NEGATIVE IS THE POINT (design review round 2, D15): ``-1`` is a
+        plausible typo for ``1``, and the old code silently read it as "keep
+        nothing" — the reading that deletes the most whole venvs, on the one
+        command whose entire job is deleting them. argparse renders this as exit 2
+        with a usage line, the same shape as any other bad option.
+        """
+        count = int(value)
+        if count < 0:
+            raise argparse.ArgumentTypeError(f"expected 0 or more, got {count}")
+        return count
+
+    install_parser = subparsers.add_parser(
+        "install",
+        help="Manage the local install generations (layout for the stable `lop` runtime)",
+        parents=[parent_parser],
+    )
+    install_subparsers = install_parser.add_subparsers(dest="install_command")
+    prune_parser = install_subparsers.add_parser(
+        "prune",
+        help="Delete install generations nothing is running from",
+        parents=[parent_parser],
+    )
+    prune_parser.add_argument(
+        "--keep",
+        type=_generation_count,
+        default=DEFAULT_KEEP_GENERATIONS,
+        metavar="N",
+        help=(
+            "How many unreferenced generations to keep (default: %(default)s; 0 or "
+            "more). A generation named by a live or saved session, and the one "
+            "`current` points at, are never removed"
+        ),
+    )
+    install_subparsers.add_parser(
+        "migrate",
+        help="Copy this install into the generation layout and point `current` at it",
+        parents=[parent_parser],
+    )
+    install_subparsers.add_parser(
+        "status",
+        help="Show the install layout: pointer, generations and what a new `lop` would load",
+        parents=[parent_parser],
     )
 
     exec_parser = subparsers.add_parser(
@@ -1259,24 +1434,47 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
-        # Try to convert to int
-        try:
-            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                value = int(value)
-            # Try to convert to float
-            elif value.replace(".", "", 1).isdigit() or (
-                value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
-            ):
-                value = float(value)
-            # Try to convert to boolean
-            elif value.lower() in ("true", "false"):
-                value = value.lower() == "true"
-            # Handle null/None values
-            elif value.lower() in ("null", "none"):
-                value = None
-        except (ValueError, AttributeError):
-            # Keep as string if conversion fails
-            pass
+        # An ENUM's displayed LABEL is not always its stored VALUE (D11).
+        # `model_effort auto` means the stored ``""``, and the guessed parse
+        # below would hand the literal string ``auto`` to ``validate`` and have
+        # it rejected — a documented choice unreachable from the documented
+        # command. A label is matched case-insensitively and, when it matches,
+        # wins OUTRIGHT: the chain below is skipped, which matters because it
+        # converts the literal word ``none`` to Python ``None`` and ``none`` is
+        # a real rung of ``EFFORT_ORDER``. Values matching no label fall through
+        # to the existing parse unchanged, so no other kind's behaviour moves.
+        matched_choice: settings_io.Choice | None = None
+        if setting.kind is settings_io.Kind.ENUM:
+            typed = str(value).strip().lower()
+            matched_choice = next(
+                (
+                    choice
+                    for choice in setting.resolved_choices
+                    if str(choice.label).strip().lower() == typed
+                ),
+                None,
+            )
+        if matched_choice is not None:
+            value = matched_choice.value
+        else:
+            # Try to convert to int
+            try:
+                if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                    value = int(value)
+                # Try to convert to float
+                elif value.replace(".", "", 1).isdigit() or (
+                    value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
+                ):
+                    value = float(value)
+                # Try to convert to boolean
+                elif value.lower() in ("true", "false"):
+                    value = value.lower() == "true"
+                # Handle null/None values
+                elif value.lower() in ("null", "none"):
+                    value = None
+            except (ValueError, AttributeError):
+                # Keep as string if conversion fails
+                pass
 
         # Through the facade rather than ``update_config``: a dotted key needs
         # the merge-into-existing-sub-mapping rule (a whole-mapping write drops
@@ -1292,8 +1490,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # the raw input would tell the user their config holds a spelling it
         # does not — the same class of lie as a page displaying a key the
         # runtime never bound.
+        #
+        # An ENUM echoes the LABEL the typed word selected, when it selected one
+        # (D8). The stored form is a wire value, not vocabulary: ``model_effort
+        # auto`` stores ``""``, so the receipt read "Successfully updated
+        # model_effort to " — the user typed a word and the confirmation named
+        # nothing. The same blank met every other member whose value is empty
+        # (``providers.openrouter.* default``), and the label also restores the
+        # words for the members whose value is not their label at all
+        # (``display.nerd_icons auto`` stores ``None`` and used to echo
+        # ``None``). Values that matched no label fall through unchanged, so the
+        # echo of a normalised value is exactly what it was.
         stored = settings_io.read_setting(config_manager, setting)
-        print(f"Successfully updated {args.key} to {stored}")
+        echoed = matched_choice.label if matched_choice is not None else stored
+        print(f"Successfully updated {args.key} to {echoed}")
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are
@@ -1621,6 +1831,237 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+#: The extension build that first ACTS on the `role` frame (the standby card and
+#: the ability to let go of one's own tabs). An install older than this keeps its
+#: debugger attachments when told it is a standby, so the operator sees
+#: "Local Operator is debugging this browser" bars nothing but that build can
+#: release — the one rollout cost no daemon-side fix can remove. Used to gate the
+#: `note:` line on the STANDBY's recorded build rather than printing it for any
+#: standby at all (copy review C4).
+_ROLE_AWARE_EXTENSION_VERSION = (0, 1, 13)
+
+
+def _extension_version_in(label: str) -> tuple[int, ...]:
+    """The version inside a pairing label (`Chrome extension 0.1.13`), or (0,).
+
+    Labels are produced by `_browser_label` and always end in the extension
+    version when the peer reported one; an entry paired before labels carried a
+    version (or by a peer that sent none) parses to (0,), which compares below
+    every real version — the conservative direction, since a build we cannot
+    identify might be any age.
+    """
+    match = re.search(r"(\d+(?:\.\d+)*)\s*$", label)
+    if not match:
+        return (0,)
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _seen_line(entry: dict[str, Any]) -> str:
+    """ "paired <when>, last seen <when>" for one identity record.
+
+    Design §8.1 asks `pair --list` to carry both, and they are the only fields
+    that still tell two installs apart when every other one collides (UX U2).
+    Epoch floats from the pairing file. A half that is absent or meaningless is
+    OMITTED rather than rendered as a 1970 date (review round 4, finding 2: a
+    schema-1 record, whose timestamps `pairing_status` coerces to 0.0, printed
+    "last seen 20709d ago"), and a record that carries neither says so in words.
+    """
+    parts = []
+    paired = _ago(entry.get("paired_at"))
+    seen = _ago(entry.get("last_seen_at"))
+    if paired:
+        parts.append(f"paired {paired}")
+    if seen:
+        parts.append(f"last seen {seen}")
+    return ", ".join(parts) if parts else "no timestamps on this record"
+
+
+#: A Unix timestamp below this is not a date this file could plausibly contain —
+#: the project is younger than the epoch, and `pairing_status` coerces a missing
+#: field to 0.0. Used to refuse the 1970 rendering rather than to be clever about
+#: calendars.
+_PLAUSIBLE_EPOCH_FLOOR = 1_500_000_000.0
+
+
+def _ago(stamp: object) -> str:
+    """A compact "how long ago" for a unix timestamp, or "" when unknowable."""
+    try:
+        value = float(stamp)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value < _PLAUSIBLE_EPOCH_FLOOR:
+        return ""
+    seconds = max(0.0, time.time() - value)
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _waiting_label(item: dict[str, Any]) -> str:
+    """The `(label · short id)` suffix that identifies one waiting install.
+
+    Both halves matter (copy review C6): the label names the browser, and the id
+    prefix is the only part that stays unique when two installs run the same
+    build and their labels are byte-identical. Falls back to whichever half the
+    record has rather than printing an empty pair of brackets.
+    """
+    extension_id = str(item.get("extension_id", ""))
+    label = str(item.get("label", "")) or "unnamed install"
+    if not extension_id:
+        return f"({label})"
+    return f"({label} · {_short_extension_id(extension_id)})"
+
+
+def _short_extension_id(extension_id: str) -> str:
+    """The 8-character prefix of an extension id, with an ellipsis.
+
+    Enough to tell two coexisting installs apart in a terminal line, which is
+    all a human ever needs one for. The full 32 characters are still accepted by
+    `--revoke` and `drive`, and so is THIS printed form: both resolvers strip a
+    trailing ellipsis before matching (`normalise_target`), because copying what
+    the screen shows is the most likely user action (UX round 2, U8).
+    """
+    return f"{extension_id[:8]}…" if len(extension_id) > 8 else extension_id
+
+
+def _resolve_pairing_target(target: str, identities: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Resolve an id, an id PREFIX, or a label substring against the authorised set.
+
+    Ambiguity resolves to None and the caller prints the candidates, because
+    revoking the wrong install is not a mistake this command gets to make
+    silently — and neither is handing the wheel to the wrong browser. An exact
+    id always wins, so a label that happens to contain another install's id
+    cannot shadow it.
+    """
+    # Imported here rather than at module scope: `lop` must not pay the daemon's
+    # import cost to print a list, and this is the only module-level helper that
+    # needs the daemon's normaliser. Same echo of `_short_extension_id`'s contract
+    # as the daemon-side resolver, so a printed handle resolves on both sides.
+    from local_operator.browser_bridge.daemon import normalise_target
+
+    wanted = normalise_target(target).lower()
+    if not wanted:
+        return None
+    for entry in identities:
+        if str(entry.get("extension_id", "")).lower() == wanted:
+            return entry
+    prefixed = [
+        entry
+        for entry in identities
+        if str(entry.get("extension_id", "")).lower().startswith(wanted)
+    ]
+    if len(prefixed) == 1:
+        return prefixed[0]
+    labelled = [entry for entry in identities if wanted in str(entry.get("label", "")).lower()]
+    return labelled[0] if len(labelled) == 1 else None
+
+
+def _print_identities(
+    pairing: dict[str, Any], health: dict[str, Any] | None, *, verbose: bool = False
+) -> None:
+    """Print which extensions are authorised, and which one has the wheel.
+
+    The role comes from the live daemon (`/health`) when it answers, because
+    only the daemon knows which socket is driving; the FILE can only say who is
+    authorised. With no daemon running the list is still printed, without roles,
+    rather than implying a connection state nobody observed.
+
+    ``verbose`` adds when each install was paired and last seen (design §8.1's
+    `pair --list`), which is the only field left that can tell two installs apart
+    once their labels collide — two profiles of one unpacked build, or any two
+    builds at one version. `status` keeps the compact form.
+    """
+    identities = pairing.get("identities") or []
+    if not identities:
+        return
+    driver = str((health or {}).get("driver_extension_id") or "")
+    standby = {str(item) for item in (health or {}).get("standby_extension_ids") or []}
+    count = len(identities)
+    print(f"identities:          {count} authorised")
+    for entry in identities:
+        extension_id = str(entry.get("extension_id", ""))
+        label = str(entry.get("label", "")) or "unnamed install"
+        # The timestamps come from the FILE, so they print whether or not a daemon
+        # answers (review round 4, finding 2): skipping them with `health is None`
+        # hid the one field that distinguishes two identically-labelled installs
+        # in exactly the state where a daemon is not running to name the roles.
+        if health is None:
+            print(f"                     - {label} ({_short_extension_id(extension_id)})")
+            if verbose:
+                print(f"                       {_seen_line(entry)}")
+            continue
+        if extension_id == driver:
+            role = "driving"
+        elif extension_id in standby:
+            role = "standby"
+        else:
+            role = "paired, not connected"
+        print(f"                     - {label} ({_short_extension_id(extension_id)}) {role}")
+        if verbose:
+            print(f"                       {_seen_line(entry)}")
+    if len(identities) > 1:
+        # The lever for "the wrong one is driving" (UX U7): with two installs up
+        # this panel is exactly where the operator notices, and the command that
+        # fixes it was discoverable only from `--help` or the docs. No
+        # parenthetical about approvals any more — the line below says it
+        # (copy review C13: the tip restated it word for word).
+        print(
+            "                     tip: 'lop browser drive <id|label>' chooses which"
+            " install drives."
+        )
+        # The per-install nature of approvals is the one thing a handover can cost
+        # that the user cannot see anywhere else (UX U6), so it belongs in this
+        # panel whenever the wheel can move — not only while a standby happens to
+        # be ATTACHED, which is how it was gated and why it went missing right
+        # after a wheel move that left the demoted install merely authorised (UX
+        # round 2's residual). Two or more authorised installs is the condition
+        # the disclosure is for.
+        print(
+            "                     approvals:           per install; they do not follow the"
+            " browser that takes over."
+        )
+    if standby:
+        # The rollout cost, stated where it is felt (design §10 risk 2, review
+        # round 1 m3): an install whose build PREDATES the role event cannot act
+        # on being told `standby`, so it keeps its debugger attachments and
+        # leaves "Local Operator is debugging this browser" bars on tabs only it
+        # can release.
+        #
+        # Gated on the STANDBY's own build, from the live labels `standby_labels`
+        # carries (copy review C4 / UX U7): the note used to print for any
+        # standby at all — including a pair where both installs are current —
+        # leaving the operator to evaluate a version condition the daemon already
+        # knew. The symptom is named too, because otherwise the reader cannot
+        # connect the note to the bars on their screen.
+        labels = (health or {}).get("standby_labels")
+        if labels is None:
+            # A daemon from this branch's own earlier build lists standbys but not
+            # their builds, so the condition cannot be evaluated at all: say the
+            # version-unknown form rather than a pre-0.1.13 claim nobody checked.
+            print(
+                "note:                if a standby stops driving, close that browser's tabs or"
+                " remove that build, or 'Local Operator is debugging this browser' bars"
+                " stay on them"
+            )
+        else:
+            stale = [
+                str(label)
+                for label in labels
+                if _extension_version_in(str(label)) < _ROLE_AWARE_EXTENSION_VERSION
+            ]
+            if stale:
+                print(
+                    "note:                the standby build predates 0.1.13 and cannot release"
+                    " its own tabs: if it stops driving, close that browser's tabs or remove"
+                    " that build, or 'Local Operator is debugging this browser' bars stay on"
+                    " them"
+                )
+
+
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
@@ -1759,6 +2200,24 @@ def browser_command(args: argparse.Namespace) -> int:
                     break_long_words=False,
                 ):
                     print(line)
+                if row.get("ownership") == "unavailable":
+                    # The record's own statement that the connected extension had
+                    # no `owner_*` lifecycle, so this scope was driven
+                    # capability-only. Printed because "it worked in legacy mode"
+                    # and "its ownership is proven" need opposite next steps when
+                    # a tab is stranded, and the two are otherwise identical on
+                    # this screen. Redacted by construction: the marker names the
+                    # MODE, never a capability.
+                    for line in textwrap.wrap(
+                        "ownership: unavailable — driven in legacy mode (the connected "
+                        "browser extension has no ownership lifecycle); no tab was "
+                        "reconciled or adopted",
+                        width=76,
+                        initial_indent="  ",
+                        subsequent_indent="    ",
+                        break_long_words=False,
+                    ):
+                        print(line)
                 if not row.get("cleanup_candidate") and row.get("blocked_reason"):
                     # Wrapped: the reasons name a recovery command, and a line
                     # running past the terminal width is where that command
@@ -1809,7 +2268,11 @@ def browser_command(args: argparse.Namespace) -> int:
         return serve_main(["--port", str(args.port)])
 
     from local_operator.browser_bridge import install as browser_install
-    from local_operator.browser_bridge.daemon import pairing_status, reset_pairing
+    from local_operator.browser_bridge.daemon import (
+        pairing_status,
+        reset_pairing,
+        revoke_identity,
+    )
 
     if command == "install":
         result = browser_install.install(args.port)
@@ -1839,14 +2302,76 @@ def browser_command(args: argparse.Namespace) -> int:
         print(f"installed:           {'yes' if result['installed'] else 'no'}")
         print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
         connected = bool(health.get("extension_connected"))
+        unresponsive = bool(health.get("extension_unresponsive"))
         print(f"extension connected: {'yes' if connected else 'no'}")
+        # The extension-update advisory, immediately under the line it is about.
+        # Deliberately a NOTE and not a fault: nothing is refused for an older
+        # extension any more (see MIN_SUPPORTED_PROTO), and the extension line
+        # above already answers the question the reader came for. The store's
+        # live version is unknowable from here, so the contingency is on the
+        # store and the sentence never says "requires" or "must".
+        if health.get("extension_update_available"):
+            from local_operator.browser_bridge.protocol import (
+                EXPECTED_EXTENSION_VERSION,
+                extension_update_note,
+            )
+
+            note = extension_update_note(
+                str(health.get("extension_version", "")),
+                str(health.get("extension_expected_version") or EXPECTED_EXTENSION_VERSION),
+            )
+            print(f"                     {note} (fixes and security patches)")
         print(f"paired:              {'yes' if result['paired'] else 'no'}")
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
+        # `extension_unresponsive` is the OTHER way to be paired-but-not-
+        # connected — the browser is open and the extension socket is up, but
+        # the worker stopped answering — and telling that user "browser not
+        # currently attached, it reconnects when opened" is precisely the
+        # misdiagnosis that made the wedge expensive. The two lines are
+        # mutually exclusive on purpose: `extension_connected` is false in both
+        # cases, so only the discriminator separates them.
+        #
+        # The unresponsive branch has TWO truthful spellings, chosen by
+        # `link_attached`, because the daemon both observes the state and then
+        # acts on it: while a mute socket is still attached the drop is still
+        # ahead ("will drop and re-dial"); once it has been dropped, the link is
+        # gone and re-dialling is in progress. Printing the future tense after
+        # the drop would assert a severing that already happened, which is the
+        # false trail D3 caught, and printing the past tense before it asserts a
+        # drop nothing has performed yet. Both say the same thing the user needs:
+        # this is not "open your browser".
         if result["paired"] and not connected:
-            print(
-                "                     (browser not currently attached; it reconnects when opened)"
-            )
+            if unresponsive:
+                # Payloads WITHOUT `link_attached` are a daemon from an earlier
+                # head of this very change (the field is additive). There the
+                # tense is unknowable, so say only what is certainly true and
+                # assert no mechanism rather than guess one.
+                attached_now = health.get("link_attached")
+                if attached_now is True:
+                    note = (
+                        "browser attached but not answering; the bridge will drop and re-dial "
+                        "the link — retry once in a few seconds"
+                    )
+                elif attached_now is False:
+                    note = (
+                        "browser attached but not answering; the bridge dropped the link and "
+                        "is re-dialling it — retry once in a few seconds"
+                    )
+                else:
+                    note = "browser attached but not answering; retry once in a few seconds"
+            else:
+                note = "browser not currently attached; it reconnects when opened"
+            print(f"                     ({note})")
+        # WHICH extensions are paired, and which one has the wheel. Paired
+        # alone stopped answering the question the moment two installs could be
+        # authorised at once: a user with both a store build and a locally
+        # loaded one needs to know which of them the agent is actually driving,
+        # and `drive`/`pair --revoke` are addressed by exactly these names.
+        # Printed from the FILE plus live /health, so it works with the daemon
+        # down as well. Above the driven-tabs block so the reader learns WHO is
+        # driving before WHAT.
+        _print_identities(pairing_status(), health if result["healthy"] else None)
         # Driven tabs, PLURAL and counted. `driving: <url>` implied a single
         # system-wide binding; with one tab per session that framing turned a
         # stale URL into "something is holding the bridge". Say how many tabs
@@ -1907,6 +2432,62 @@ def browser_command(args: argparse.Namespace) -> int:
             print(f"\n\033[1;33munclaimed registration:\033[0m {ambiguous}")
         return 0 if result["healthy"] else 1
     if command == "pair":
+        if getattr(args, "list", False):
+            result = browser_install.status()
+            pairing = pairing_status()
+            if not pairing.get("identities"):
+                print("no browser extension is paired. Run 'lop browser pair' to pair one.")
+                return 0
+            live_health = result.get("health")
+            # /health is a plain dict when the daemon answered and None when it
+            # did not; the printer takes the second case as "unknown", which is
+            # what a file-only listing must say rather than inventing a driver.
+            _print_identities(
+                pairing, live_health if isinstance(live_health, dict) else None, verbose=True
+            )
+            pending = pairing.get("pending") or []
+            if pending:
+                # Its own block, on a line of its own (copy review C7): indented
+                # under the identity rows the waiting codes read as part of the
+                # `note:` above them, which is a different subject.
+                print("")
+                print("waiting:             these installs have asked to pair")
+                for item in pending:
+                    print(f"                     {item.get('code')}  {_waiting_label(item)}")
+            return 0
+        if getattr(args, "revoke", None):
+            pairing = pairing_status()
+            identities = pairing.get("identities") or []
+            target = _resolve_pairing_target(args.revoke, identities)
+            if target is None:
+                print(
+                    f"\033[1;31mno single authorised extension matches " f"'{args.revoke}'.\033[0m"
+                )
+                for entry in identities:
+                    print(
+                        f"  {_short_extension_id(str(entry.get('extension_id', '')))}"
+                        f"  {entry.get('label', '') or 'unnamed install'}"
+                    )
+                if not identities:
+                    print("  (nothing is paired)")
+                return 1
+            # File-level, exactly like --reset: the daemon's revocation watcher
+            # then severs THIS identity's live socket within a few seconds and
+            # leaves every other identity's authority untouched.
+            # Keyword, not positional: this shares the daemon's
+            # ``revoke_identity(root, extension_id)`` order, so a positional id
+            # would be read as the CONFIG ROOT — revoking nothing at the real
+            # root and writing a stray file named after the id.
+            # root=None is the default config root, as every other CLI pairing
+            # call uses; the id is passed BY KEYWORD because the daemon's order is
+            # ``(root, extension_id)`` and a positional id would be read as the
+            # root — revoking nothing and writing a stray file named after the id.
+            revoke_identity(None, extension_id=target["extension_id"])
+            label = str(target.get("label", "")) or _short_extension_id(
+                str(target.get("extension_id", ""))
+            )
+            print(f"revoked {label}; any live connection for it is dropped within a few seconds.")
+            return 0
         if args.reset:
             # File unlink here; the running daemon's revocation watcher (and
             # the per-request pairing re-check) sever any LIVE socket within a
@@ -1927,16 +2508,82 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("open the extension popup to pair a browser again.")
             return 0
         pair = pairing_status()
+        pending = pair.get("pending") or []
+        if len(pending) > 1:
+            # Two installs waiting at once cannot be told apart by a bare code:
+            # the user is looking at two popups and a terminal. Name the install
+            # each code belongs to, from the label the daemon recorded when the
+            # code was minted (design §3.4) — and the short id as well, because
+            # two installs running the SAME build share a label byte for byte
+            # (copy review C6), which is precisely when "the matching popup" has
+            # no referent and the id prefix is the only token that resolves.
+            for item in pending:
+                print(f"pairing code: {item.get('code')}   {_waiting_label(item)}")
+            print("enter each code in the matching Local Operator extension popup.")
+            return 0
         code = pair.get("pending_code")
         if code:
             print(f"pairing code: {code}")
             print("enter this 6-digit code in the Local Operator extension popup.")
             return 0
         if pair.get("paired"):
-            print("browser extension is already paired. Use --reset to pair another profile.")
+            # Names BOTH routes, because the old wording offered only `--reset`
+            # (UX round 3, U3): a second install whose popup is showing the
+            # pairing form reaches here too, and `--reset` — which revokes the
+            # WORKING install as well — is not the answer the user wants. The
+            # code for that install appears here once it connects, so the honest
+            # line points at its popup first. "Connects" rather than "its worker
+            # dials" (copy review C9): a compliance analyst has no worker.
+            print(
+                "a browser is already paired. To pair another, open ITS popup and enter the"
+                " code that appears here (the code appears once that install's extension"
+                " connects). 'lop browser pair --list' lists every authorised install;"
+                " '--reset' revokes them all."
+            )
             return 0
         print("no extension is waiting to pair. Open the extension popup, then retry.")
         return 1
+    if command == "drive":
+        result = browser_install.pin_driver(args.target)
+        if not result.get("ok"):
+            # Distinguish "nothing matched" from "several matched" when the
+            # daemon told us how many did (copy review C8): one 404 shape used to
+            # carry both readings, so an unknown id was reported with the word
+            # "matches" and two unrelated installs under it. `matches` is absent
+            # on a daemon predating this field, and the old sentence stands.
+            matches = result.get("matches")
+            message = str(result.get("error", "could not pin the driver"))
+            if isinstance(matches, int):
+                # Echo the target AS TYPED, not the normalised form (review round 5,
+                # NIT 5): `drive 'ohcmfhja…'` used to answer "…matches 'ohcmfhja'.",
+                # editing the very token the user is looking at.
+                message = (
+                    f"no connected extension matches '{args.target}'."
+                    if matches == 0
+                    else f"no single connected extension matches '{args.target}'."
+                )
+            print(f"\033[1;31m{message}\033[0m")
+            # Candidates arrive as ids; the LABEL is what makes a list of ids
+            # actionable when two installs share one (copy review C1), and it is
+            # the string `status` itself printed a moment earlier. Read from the
+            # pairing file, so an id with no label still lists as a bare id.
+            candidates = result.get("authorized_extension_ids") or []
+            if candidates:
+                # A lead-in that is true whether or not anything matched, because
+                # these rows are the AUTHORISED set rather than the matches (copy
+                # review C8).
+                print("authorised installs:")
+            labels = {
+                str(entry.get("extension_id", "")): str(entry.get("label", ""))
+                for entry in (pairing_status().get("identities") or [])
+            }
+            for extension_id in candidates:
+                label = labels.get(str(extension_id), "")
+                suffix = f"  {label}" if label else ""
+                print(f"  {_short_extension_id(str(extension_id))}{suffix}")
+            return 1
+        print("now driving: " f"{_short_extension_id(str(result.get('driver_extension_id', '')))}")
+        return 0
     if command in ("start", "stop", "restart"):
         result = browser_install.service_action(command)
         if not result["ok"]:
@@ -1990,7 +2637,9 @@ def browser_command(args: argparse.Namespace) -> int:
         if warning:
             print(f"\033[1;33mnote:\033[0m {warning}")
         return 0 if result.get("ok") else 1
-    print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
+    print(
+        "usage: lop browser " "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
+    )
     return 1
 
 
@@ -2368,6 +3017,15 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except TimeoutError as exc:
+        # NOT "could not deliver": a read deadline expiring means no
+        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
+        # already in the owner's socket buffer, and the receiver commits before
+        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
+        # invites a duplicate steer or wake. Same split, and the same words, as
+        # the send TOOL's arm below it.
+        _peer_red(f"no delivery confirmation: {exc}")
+        return 1
     except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
         # ValueError covers a read fault the frame reader could still surface
         # (e.g. an oversized non-welcome line): it must become the same soft,
@@ -2658,24 +3316,70 @@ def sessions_command(args: argparse.Namespace) -> int:
     # unconditionally would re-flow the live-only listing every existing
     # consumer parses, so it is appended only when the flag brought stored rows.
     show_stored = any(row["state"] == "stored" for row in rows)
+    # WHY is the column THIS change adds, and it follows LAST_ACTIVE's precedent
+    # for the same reason: it is appended only when some row has something to
+    # say, so a healthy listing parses exactly as it did before. It is also the
+    # answer to the one question the 2026-09-13 kill wave left the operator
+    # unable to ask from a shell — "why did this session die, and did I ask for
+    # it?" — because a killed runtime publishes nothing and its reason survives
+    # only in the attention store (``completion_reason``).
+    from local_operator.incidents import outcome_summary
+
+    why = {
+        row["session_id"]: (
+            outcome_summary(str(row.get("completion_reason") or ""))
+            # A ``complete`` row has no why: its reason is a success sentence,
+            # and a column that explains every healthy session says nothing.
+            if row.get("completion_kind") not in ("", "complete")
+            else ""
+        )
+        for row in rows
+    }
+    show_why = any(why.values())
+    # ONLY WHEN SOMETHING IS LEAVING, on the same rule as WHY and LAST_ACTIVE
+    # above: a healthy fleet's listing must not gain a column of blanks, and the
+    # table is parsed by people. Unlike WHY this says something true about a row
+    # the operator may be about to act on — a signalled runtime is alive and
+    # working for up to ``SIGNAL_DRAIN_S``, and a plain ``lop stop`` on it cuts
+    # the turn the drain is finishing (U1/U2, PR #1141).
+    leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
+    show_leaving = any(leaving.values())
     header = (
-        f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
-        f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
+        f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
+        f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
+        f"{'MODEL':<{MODEL_COLUMN_WIDTH}} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} "
+        f"{'HB_AGE':>7}"
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+    if show_why:
+        header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
+    if show_leaving:
+        header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
-        name = (row["conversation_name"] or row["session_id"] or "")[:24]
-        model = (row["model_label"] or "")[:24]
-        needs = (row.get("pending") or "")[:8]
+        # CELLS, not characters, for the three columns that carry text this
+        # process did not author (design round 1, D2). A conversation title can
+        # be CJK and a model label carries the provider's own display name, and a
+        # 14-glyph title is 28 cells: a `[:24]` slice returned all of it and the
+        # row ran into its neighbour, leaving the table wider than its header.
+        # Measured here only for DISPLAY — `--json` above still carries the full
+        # values, which is what a script should read.
+        name = _fit_cell(
+            row["conversation_name"] or row["session_id"] or "",
+            CONVERSATION_COLUMN_WIDTH,
+        )
+        model = _fit_cell(row["model_label"] or "", MODEL_COLUMN_WIDTH)
+        needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
+        state = _state_cell(row["state"])
         line = (
-            f"{row['state']:<7} "
+            f"{state:<{STATE_COLUMN_WIDTH}} "
             f"{('—' if stored else str(row['pid'])):>7} "
-            f"{(row['kind'] or '—'):<7} {needs:<8} {name:<24} "
-            f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
+            f"{(row['kind'] or '—'):<7} {_pad_cell(needs, NEEDS_COLUMN_WIDTH)} "
+            f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
+            f"{_pad_cell(model, MODEL_COLUMN_WIDTH)} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
             f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
             f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
@@ -2684,8 +3388,181 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+        if show_why:
+            cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
+            # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
+            # fitted wide cell the blanks it never needed; `_pad_cell` is the
+            # same CELLS-not-characters rule the three text columns use above.
+            line += f" {_pad_cell(cell, WHY_COLUMN_WIDTH)}"
+        if show_leaving:
+            # `_fit_cell` rather than `_clamp_reason_cell`: this column's text is
+            # the harness's own phrase, so a cut only ever needs to be visible —
+            # the reason clamp's marker exists for provider-authored prose.
+            said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
         print(line)
     return 0
+
+
+def _clamp_reason_cell(summary: str) -> str:
+    """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
+
+    A silent slice is indistinguishable from a complete sentence, and this
+    column's whole purpose is to answer "why did this session die". The column
+    was ALREADY clipping silently before the marker existed: the involuntary
+    ``runtime-killed`` summary is 104 cells, and the old slice cut it at 47
+    CHARACTERS — 47 cells as well, this sentence being ASCII — landing on a word
+    boundary, so the row ended ``...exiting cleanly `` and read as a finished
+    sentence that happened to stop mid-clause — that is what design round 2 saw as
+    the one case that "fitted exactly", and it is why the marker is what keeps
+    the next longer sentence honest rather than what fixes one string.
+
+    CELLS, NOT CHARACTERS (design round 3, D9). The budget is a COLUMN width,
+    and the strings reaching here are not all harness-authored: a FAILED turn's
+    reason is the provider's own error text (``session.py``'s turn-end writer
+    publishes ``outcome.error`` verbatim, ``attention`` replays it into the
+    store, and ``completion_reason`` arrives in this cell). A localised provider
+    error of 29 characters is 58 cells, so a ``len()`` comparison returned it
+    UNCUT and the row rendered 208 cells against a 179-cell header — the reflow
+    this clamp exists to prevent, in its own blind spot.
+
+    The ellipsis is INSIDE the budget, so the table's fixed width and every
+    other row's columns are unchanged; a summary that already fits is returned
+    byte-for-byte, because a fitting cell must not pay for a cut that did not
+    happen. The full sentence stays one flag away in ``--json``'s
+    ``completion_reason``, which is what this column is a summary OF.
+
+    ONE CELL MAY GO UNUSED, and that is the honest reading of "inside the
+    budget" (review round 1, Q4 / design round 1, D3). The marker's own measured
+    width is subtracted, so the text gets cells 1-47 — and with all-wide glyphs
+    the longest prefix that fits 47 cells is 46, because a two-cell glyph cannot
+    occupy an odd cell. The cell then measures 47 rather than 48. Nobody pads it:
+    the last cell is unused, not missing, and inventing a space to fill it would
+    report width the text does not have. A reason whose glyph mix reaches an odd
+    boundary does land on 48.
+
+    The unit being fitted is the GRAPHEME — not the code point, and not the
+    character count the old rule used. A ZWJ family cluster is one 2-cell glyph,
+    so a reason built from them fills the column instead of a third of it, and a
+    VS16 sequence is 2 cells rather than the 1 its characters add up to (review
+    round 2, M1/M2; see :func:`_cut_to_cells`).
+
+    A summary that FITS is returned untouched, and that includes a joiner of its
+    own at the end: the back-off in :func:`_cut_to_cells` is a property of a CUT,
+    and a value nothing had to cut is not edited at all (review round 2, N2 —
+    recorded as the rule, not changed, because trimming it would be a second,
+    invisible edit on a cell that is already correct).
+    """
+    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+        return summary
+    # The marker's OWN measured width, not a hard-coded 1: the budget is
+    # arithmetic, so a future marker must not be able to push the cell over.
+    marker = "…"
+    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+
+
+def _cut_to_cells(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` that fits ``budget`` display cells.
+
+    A cell bound cannot be a slice: one East-Asian character is two cells, so
+    ``text[:n]`` overshoots by however many wide glyphs it happens to contain.
+    Neither can it be a walk over CHARACTERS, which is the defect this function
+    was written with: rich measures a STRING, and two of its rules only fire on a
+    whole sequence — a VS16 (``U+FE0F``) upgrades the glyph before it to two
+    cells, and a ZWJ (``U+200D``) collapses the emoji it joins into one two-cell
+    glyph. Summing ``cell_len(char)`` per character therefore MIS-measures both
+    classes in opposite directions: ``❤️`` is 1 cell per character but 2 as a
+    unit, so twenty of them (40 cells) came back UNCUT against a 24-cell budget
+    — worse than the character rule this replaced, which clipped them at 24 —
+    while a family cluster was charged about three times its width and left most
+    of the column empty (review round 2, M1 and M2).
+
+    So the unit measured is the GRAPHEME, via rich's own
+    :func:`rich.cells.split_graphemes` — the splitter the measurement rules come
+    from, so the unit measured is the unit emitted, and a combining mark or a
+    joined emoji cannot be separated from what it belongs to.
+
+    The returned prefix never ends on a ZERO-WIDTH JOINER. ``U+200D`` means "join
+    with the glyph AFTER me", so a prefix ending on one emits a joiner with
+    nothing to join — a stray control character immediately before the marker,
+    which a terminal renders as a replacement box (review round 1, Q1). The
+    back-off costs no cells, so the budget is unaffected and no other column
+    moves; it is a no-op for well-formed text, because a grapheme absorbs an
+    interior joiner together with the glyph it joins, and it fires only when the
+    input's OWN trailing grapheme ends on one. A value that fits is not touched
+    at all, trailing joiner included — see :func:`_clamp_reason_cell`.
+
+    The prefix is the longest that FITS, not one that FILLS. With all-wide text
+    the final cell can go unused (a two-cell glyph cannot occupy cell 47 of a
+    47-cell budget). The invariant is that the result is bounded by ``budget``;
+    occupying every cell is not a goal, and padding to reach it would report width
+    the text does not have.
+
+    ``split_graphemes`` is imported at the point of use, like every other
+    third-party name here: this module's contract is that ``import
+    local_operator.cli`` stays cheap (see the module docstring).
+    """
+    from rich.cells import split_graphemes
+
+    spans, _total_cells = split_graphemes(text)
+    used = 0
+    for start, _end, width in spans:
+        if used + width > budget:
+            cut = text[:start]
+            while cut.endswith("\u200d"):
+                cut = cut[:-1]
+            return cut
+        used += width
+    return text
+
+
+# The two primitives the table's text columns are built from, kept beside the
+# WHY column's own clamp so there is ONE cell-vs-character rule in this module
+# rather than one per column.
+
+
+def _fit_cell(text: str, width: int) -> str:
+    """``text`` cut to ``width`` display CELLS, silently.
+
+    Silent on purpose: these columns have always cut without a marker
+    (``value[:24]``), a marker would change every ASCII listing that overflows,
+    and none of them is the column whose PURPOSE is to answer a question. What
+    changes here is only the bound — characters to cells.
+
+    A value that already fits is returned byte-for-byte, and ``cell_len`` equals
+    ``len`` for ASCII, so an all-ASCII table renders exactly as it did before.
+    """
+    return _cut_to_cells(text, width) if _cell_len(text) > width else text
+
+
+def _pad_cell(text: str, width: int) -> str:
+    """``text`` left-aligned in ``width`` display CELLS.
+
+    ``f"{text:<{width}}"`` pads by CHARACTERS, so a fitted wide cell — 12 CJK
+    glyphs are 24 cells — is handed ``width`` characters PLUS the blanks it never
+    needed, leaving the row wider than its header in trailing space. Padding by
+    cells is what keeps "every row is header-width" true rather than merely true
+    for narrow text; for ASCII the two are identical.
+    """
+    return text + " " * max(0, width - _cell_len(text))
+
+
+def _cell_len(text: str) -> int:
+    """``len`` in terminal CELLS — what a fixed-width column is measured in.
+
+    Imported at the point of use because this module's contract is that
+    everything third-party stays out of its module-level imports so ``import
+    local_operator.cli`` stays cheap (see the module docstring); ``rich`` is
+    already a hard dependency and ``rich.cells`` is its width primitive.
+
+    This measures a WHOLE string, which is the only way rich applies its
+    sequence rules (VS16 upgrade, ZWJ collapse) — measuring per character is what
+    :func:`_cut_to_cells` did and why it mis-counted both classes. The cut fits
+    the same units this does, one grapheme at a time.
+    """
+    from rich.cells import cell_len
+
+    return cell_len(text)
 
 
 def _wake_create(args: argparse.Namespace) -> int:
@@ -2881,6 +3758,24 @@ def _wake_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _owed_age_s(record: "dict[str, Any] | None", now_ms: int) -> "float | None":
+    """How long a fire has been owed, in seconds, or ``None`` when not owed.
+
+    The ledger's ``first_attempt_ms`` is when the supervisor first failed to
+    hand this occurrence to a runtime, so the difference is the age of the
+    OWED fire rather than the age of the schedule. Rendered in the row tail
+    (design round 1, D2): the state words alone cannot separate a wake four
+    minutes late from one stuck since last week, and below 69 columns the WHEN
+    column is gone, so the row had no age of any kind.
+    """
+    if not record:
+        return None
+    first = record.get("first_attempt_ms")
+    if not isinstance(first, int) or isinstance(first, bool):
+        return None
+    return max((now_ms - first) / 1000.0, 0.0)
+
+
 def _wake_rows() -> "list[dict[str, Any]]":
     """Every scheduled wake on this machine, soonest first.
 
@@ -2892,20 +3787,49 @@ def _wake_rows() -> "list[dict[str, Any]]":
     import time as _time
 
     from local_operator.paths import config_dir
+    from local_operator.wakes.deliveries import read_deliveries
     from local_operator.wakes.store import read_index
+    from local_operator.wakes.supervisor import STALE_AFTER_S, _session_exists
 
+    root = config_dir()
     now_ms = int(_time.time() * 1000)
+    # The supervisor's ledger of fires it attempted and has not yet handed to a
+    # runtime. Read once, here, so the row's state and the `status` summary are
+    # derived from the same copy — the defect this whole PR is about was a wake
+    # that had failed to fire being visible on NO surface, and two surfaces
+    # disagreeing would be a smaller version of the same thing.
+    deliveries = read_deliveries(root)
     rows: list[dict[str, Any]] = []
-    for session_id, entry in read_index(config_dir()).items():
+    for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
             continue
         dormant = bool(entry.get("stopped_at"))
+        # GHOST, asked with the supervisor's own predicate (round 2, Q4). The
+        # supervisor refuses an entry whose session has no transcript and
+        # retires on a ghost-only store, while this listing had no ghost
+        # notion at all — so the rendered frame said "1 armed, 10m overdue"
+        # about a wake the process had already gone home over. A painted frame
+        # that contradicts the process is the defect class this PR exists to
+        # remove, so the two surfaces share the predicate rather than deriving
+        # it twice.
+        ghost = not dormant and not _session_exists(root, session_id)
+        record = deliveries.get(session_id)
         for raw in entry.get("schedules") or ():
             if not isinstance(raw, dict):
                 continue
             due = raw.get("next_due_at")
             if isinstance(due, bool) or not isinstance(due, int):
                 continue
+            # A GHOST'S RECORD IS FROZEN, NOT WORK IN PROGRESS — the same
+            # decision `_delivery_rows` makes for `status` (QA round 1, Q1).
+            # Nothing can engage a session with no transcript, so this row must
+            # not carry an owed age in its tail or its legend, or the listing
+            # contradicts the process that has already gone home over it.
+            delivery = (
+                record
+                if record is not None and not ghost and record.get("occurrence_ms") == due
+                else None
+            )
             rows.append(
                 {
                     "session_id": session_id,
@@ -2935,6 +3859,31 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     ),
                     "limit": raw.get("limit"),
                     "fired_count": raw.get("fired_count") or 0,
+                    # RELIABILITY FIELDS. The three questions the operator
+                    # could not previously answer about a wake that seemed not
+                    # to fire: is it late right now, how late, and has it been
+                    # late so long the supervisor has given up on it (past
+                    # STALE_AFTER_S it is skipped, deliberately, and left to
+                    # the session's own catch-up). `overdue` is a plain bool
+                    # rather than "due_in_s < 0" recomputed by every consumer.
+                    "overdue": due < now_ms,
+                    "overdue_s": max((now_ms - due) / 1000.0, 0.0),
+                    "stale": (now_ms - due) / 1000.0 > STALE_AFTER_S,
+                    "ghost": ghost,
+                    # Written by the session (the one writer of schedule
+                    # state), absent on an entry that has not fired since the
+                    # fields were added rather than defaulted to a lie.
+                    "last_fired_at": entry.get("last_fired_at"),
+                    "last_attempt_at": entry.get("last_attempt_at"),
+                    # THE OWED FIRE, if the supervisor has one for this very
+                    # occurrence. Matched on `occurrence_ms` rather than on the
+                    # session alone: a record is about one attempt at one due
+                    # time, and a recurring schedule whose next occurrence is
+                    # already different must not inherit it.
+                    "delivery": delivery,
+                    # Its age, against the SAME clock read as `due_in_s`, for the
+                    # `owed 9d` tail the listing renders (design round 1, D2).
+                    "owed_age_s": _owed_age_s(delivery, now_ms),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -2950,6 +3899,15 @@ def wake_command(args: argparse.Namespace) -> int:
     it reports whether the thing that fires wakes for closed sessions exists.
     """
     from local_operator.paths import config_dir
+
+    # BOTH branches render a wake's delivery state — `list` as the DUE-column
+    # word, `status` as prose — so the two words are named once, here, rather
+    # than imported into one branch and silently unbound in the other.
+    from local_operator.wakes.deliveries import (
+        STATE_RETRYING,
+        STATE_UNDELIVERED,
+        UNDELIVERED_AFTER_ATTEMPTS,
+    )
 
     command = getattr(args, "wake_command", None) or "status"
 
@@ -2973,13 +3931,114 @@ def wake_command(args: argparse.Namespace) -> int:
         if not rows:
             print("no scheduled wakes")
             return 0
+        import shutil
+
         from local_operator.harness.wake import format_duration
         from local_operator.wakes.display import format_wake_time
 
+        # A FIXED-WIDTH TABLE, matching `lop sessions` right next door rather
+        # than inventing a second listing convention. Round 1 (D4): padding a
+        # pre-composed "<abs time> (<rel>)" cell never applies, because that
+        # cell is already 19-31 characters wide, so the id column started at a
+        # different position on every row (measured: 33/27/21/22/29) and a long
+        # message produced a 155-column line that wrapped with no indent.
+        # Splitting the two time facts into their own columns is what makes the
+        # padding mean something.
+        term_width = shutil.get_terminal_size((80, 24)).columns
+        # A RENDERED TIME IS NEVER TRUNCATED (round 2, D11). `format_wake_time`
+        # chooses its own form — a clock alone for today, a date for another
+        # day, a year as well for another year — so its width is 11 to 24
+        # characters depending on the wake, and a fixed 18 cut `Jan 01 2027
+        # 9:00 AM EST` to `Jan 01 2027 9:00 A`: a half meridiem, no zone, and
+        # no marker to say anything was dropped. A time that is wrong is worse
+        # than a time that is absent, and unlike a message (which the reader
+        # can recognise from its start) there is no recovering a mangled clock.
+        #
+        # So the column is sized from THE ROWS BEING RENDERED, and the
+        # renderer's output is printed whole or not at all.
+        when_cells = {row["next_due_at"]: format_wake_time(row["next_due_at"]) for row in rows}
+        when_w = max(len(cell) for cell in when_cells.values())
+        rel_w = 11  # "10m overdue"
+        # SLACK for the id (round 2, R9). Ids are `uuid4().hex[:12]`, and a
+        # 12-wide column truncated a 12-character id to exactly itself with no
+        # room to show that anything was cut — while the 15-character `lr_` ids
+        # that appear in real stores rendered as a DIFFERENT id an operator
+        # cannot paste back. 13 gives a real id slack, and `_elide_id` marks
+        # anything longer instead of silently shortening it.
+        id_w = 13
+        fixed = rel_w + id_w + 2
+        message_floor = 24
+        # WHEN IS THE COLUMN THAT YIELDS on a narrow terminal (round 2, D12 /
+        # QA Q1), because the relative `DUE` cell answers "when does this fire"
+        # in 11 characters and the absolute time is the redundant half. Dropping
+        # it keeps the table aligned at 60 columns instead of wrapping every
+        # row, which is the trade D12 argued for — shed the absolute time
+        # rather than the alignment.
+        show_when = term_width >= when_w + fixed + 1 + message_floor
+        head = fixed + (when_w + 1 if show_when else 0)
+        message_w = max(message_floor, term_width - head - 1)
+        header = f"{'WHEN':<{when_w}} " if show_when else ""
+        # WHAT A NARROW TERMINAL ACTUALLY GETS, measured rather than intended.
+        # `message_w` is a budget for the message column, and the row also
+        # carries a state TAIL (` · every 20m, 12/40 fired`, 25 characters on
+        # the widest real row) that the budget does not include — `room` below
+        # subtracts it and can go negative. So on a terminal narrower than the
+        # row needs, BOTH things happen at once:
+        #
+        #   * the row overflows anyway — measured 50-53 columns at COLUMNS=40,
+        #     53 being a row whose tail is 25 characters; and
+        #   * the message degrades to one character plus an ellipsis (`r…`),
+        #     because `room` is negative and the clamp floors at 1.
+        #
+        # 53 columns is the point at which the widest tailed row stops
+        # overflowing (measured across 40/44/48/50/51/52/53/54/58/60 on the
+        # design round's own fixture), and it is IRREDUCIBLE for that row:
+        # 26 fixed + 1 gap + 25 tail + 1 message character = 53. A wider
+        # message budget cannot help — it makes the row longer, not shorter —
+        # and the only lever that would is clamping the tail, which round 5
+        # (R6/U16) deliberately forbade because the tail carries the bounds a
+        # user cannot be expected to remember. Narrower terminals therefore
+        # wrap, and the message column really does stop saying anything; the
+        # honest fix is a different layout for that width, not a budget tweak.
+        print(f"{header}{'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
-            when = f'{format_wake_time(row["next_due_at"])} ({_format_due(row["due_in_s"])})'
-            mark = " (dormant — session stopped)" if row["dormant"] else ""
-            name = row["session_id"]
+            when = when_cells[row["next_due_at"]]
+            # DORMANT WINS, and the overdue/stale marks are suppressed under it
+            # (round 1, Q2/R6). A dormant wake is one nothing is SUPPOSED to
+            # fire, so "(OVERDUE)" — which means "should have fired and did
+            # not" — contradicts it, and "no longer fired by the supervisor" is
+            # true of a dormant wake for an entirely different reason
+            # (reopening the session fires it; nothing revives a stale one).
+            # THE STATE WORD LIVES IN THE DUE COLUMN, and the row carries no
+            # prose repeating it — this is a table, like `lop sessions`, and
+            # the explanation of what "stale" or "dormant" costs belongs on the
+            # `status` summary that has room for a sentence. Keeping both put a
+            # 155-column line in an 80-column terminal (round 1, D4) and
+            # restated on every row what the reader needs told once.
+            if row["dormant"]:
+                state = "dormant"
+            elif row["ghost"]:
+                # Ghost before stale: with no session on disk, nothing can fire
+                # this at all, which is a stronger statement than "the
+                # supervisor stopped retrying" (round 2, Q4).
+                state = "ghost"
+            elif row.get("delivery"):
+                # AN OWED FIRE IS WORK IN PROGRESS. The supervisor has attempted
+                # this occurrence, failed, and is retrying it from that record —
+                # which is also the reason a row PAST the staleness bound is
+                # still being fired at all. Reading it as `stale` would state
+                # the opposite of what the process is doing, and the legend
+                # under the table promises `stale` wakes are not fired.
+                state = (
+                    "undelivered"
+                    if row["delivery"].get("state") == STATE_UNDELIVERED
+                    else "retrying"
+                )
+            elif row["stale"]:
+                state = "stale"
+            else:
+                state = _format_due(row["due_in_s"])
+            mark = ""
             # `every …` reuses the same renderer the tool listing and the wake
             # panel use, so one wake reads identically wherever it is shown.
             repeat = ""
@@ -2999,7 +4058,153 @@ def wake_command(args: argparse.Namespace) -> int:
                 left = row.get("until_in_s")
                 if left is not None:
                     repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
-            print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
+            elif not row.get("every_ms"):
+                # The TUI wake panel says `once` for a non-recurring schedule
+                # and this listing said nothing, so the same wake read
+                # differently in two places (round 1, D9).
+                repeat = " · once"
+            owed_age = row.get("owed_age_s")
+            if owed_age is not None:
+                # THE AGE GOES IN THE TAIL, where the other bounds already live
+                # and where the round-5 R6/U16 rule says it is never clamped:
+                # `retrying owedstale001` (9 days) and `retrying owedretry001`
+                # (4 minutes) were otherwise identical rows at any width that
+                # drops WHEN (below 69 columns). The message is what gives —
+                # the part of the row the reader already knows — so the row's
+                # total width is unchanged and only the prose shortens.
+                repeat += f", owed {_format_duration(owed_age)}"
+            if row.get("last_fired_at"):
+                repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
+            # THE MESSAGE IS WHAT GETS CLAMPED, never the state tail. Clamping
+            # the composed string instead would silently drop `until in 6d`,
+            # `3/5 fired` or `(stale — …)` off the end of a long row — exactly
+            # the bounds an earlier round added because a user cannot be
+            # expected to remember them (round 5, R6/U16). A user-authored
+            # message is the one part of the row they already know.
+            tail = f"{repeat}{mark}"
+            message = row["message"]
+            # `room` GOES NEGATIVE on a narrow terminal, because `message_w` is
+            # a budget for the whole cell and the tail is subtracted from it
+            # here rather than reserved there. The `max(..., 1)` then floors
+            # the message at one character plus an ellipsis (`r…`) and the row
+            # overflows regardless — see the width note above the header for
+            # the measured numbers and why no budget change fixes it.
+            room = message_w - len(tail)
+            if len(message) > room:
+                message = message[: max(room - 1, 1)] + "…"
+            detail = f"{message}{tail}"
+            when_cell = f"{when:<{when_w}} " if show_when else ""
+            print(
+                f"{when_cell}{state:>{rel_w}} "
+                f"{_elide_id(row['session_id'], id_w):<{id_w}} {detail}".rstrip()
+            )
+
+        if not show_when:
+            # The omission is STATED, not silent: the absolute time was dropped
+            # to keep the table aligned on a narrow terminal (round 2, D12), and
+            # the reader is told where it went rather than left to notice.
+            #
+            # AND IT IS SAID IMMEDIATELY (design round 1, D6): it used to print
+            # after the legend block, 14 rows below the table at 60 columns, so
+            # the reader who noticed the missing column had to scroll past three
+            # legends to learn why.
+            print("\n(WHEN hidden — terminal too narrow)")
+
+        # ONE legend under the table rather than the same sentence on every
+        # row, and only for the states actually present: what "stale" and
+        # "dormant" COST is the thing a reader needs told, but telling it per
+        # row is what made a single wake occupy 155 columns.
+        #
+        # AN OWED FIRE IS EXCLUDED FROM `stale`, exactly as it is from that
+        # count on `status`: the stale sentence promises the session's next open
+        # will deliver the wake, and for a fire the supervisor is still retrying
+        # that is not the plan. It gets its own words instead — `retrying` after
+        # a failed attempt, `undelivered` past `UNDELIVERED_AFTER_ATTEMPTS`,
+        # where the attempt count is what tells the reader whether this is a busy
+        # host or a session that will never construct (`lop wake status` carries
+        # both figures).
+        legend_rows: list[tuple[str, str]] = []
+
+        def _owed_state(state: str) -> bool:
+            return any(
+                row.get("delivery") and row["delivery"].get("state") == state for row in rows
+            )
+
+        if _owed_state(STATE_RETRYING) or _owed_state(STATE_UNDELIVERED):
+            # THE OWED PAIR COMES FIRST (design round 1, D8). They are the two
+            # states an operator has to act on; the three below them all mean
+            # "the supervisor is not firing this at all", so a reader scanning
+            # for what `retrying` means used to pass every one of those first.
+            #
+            # EACH WORD GETS ONE SHORT CLAUSE AND THE REST IS SAID ONCE (D5).
+            # The two legends used to repeat ~100 characters of the same
+            # sentence three lines apart, and the clause that actually separates
+            # them — below vs at the stalled-fire threshold — was buried
+            # mid-sentence in each; at 60 columns that was 21 rows of legend
+            # under a 6-row table, past a standard screen.
+            # Classification owns this boundary: retries 2–4 are not "one
+            # failed attempt", and copy must follow future threshold changes.
+            if _owed_state(STATE_RETRYING):
+                legend_rows.append(
+                    ("retrying", f"fewer than {UNDELIVERED_AFTER_ATTEMPTS} failed attempts.")
+                )
+            if _owed_state(STATE_UNDELIVERED):
+                legend_rows.append(
+                    ("undelivered", f"{UNDELIVERED_AFTER_ATTEMPTS}+ failed attempts.")
+                )
+            legend_rows.append(
+                (
+                    "",
+                    "these are still owed and retried with a backoff; 'lop wake status' has "
+                    "the attempts and the error",
+                )
+            )
+        if any(
+            row["stale"] and not row["dormant"] and not row["ghost"] and not row.get("delivery")
+            for row in rows
+        ):
+            legend_rows.append(
+                (
+                    "stale",
+                    "the supervisor no longer fires these; they are delivered when "
+                    "their session is next opened",
+                )
+            )
+        if any(row["ghost"] for row in rows):
+            legend_rows.append(
+                (
+                    "ghost",
+                    "no session with this id exists on disk; nothing can fire these, and "
+                    "nothing clears them automatically",
+                )
+            )
+        if any(row["dormant"] for row in rows):
+            legend_rows.append(
+                ("dormant", "the session was stopped; reopening it re-arms its wakes")
+            )
+
+        if legend_rows:
+            # THE LEGEND COLUMN IS SIZED FROM THE WORDS ACTUALLY RENDERED, and
+            # the fold follows it (round 2, D12) so a legend wraps the way the
+            # rows do. Every earlier word was at most 8 characters, so a fixed
+            # 9-wide column was invisible; `undelivered` is 11 and a fixed column
+            # ran the label straight into its sentence ("undeliveredthe
+            # supervisor has…"), which is the one line that explains a state. A
+            # word-less row is the shared continuation (design round 1, D5): it
+            # aligns under the labels so the shared clause reads as belonging to
+            # both words above it.
+            import textwrap
+
+            legend_w = max(len(word) for word, _ in legend_rows) + 1
+            for word, text in legend_rows:
+                print()
+                for line in textwrap.wrap(
+                    f"{word:<{legend_w}}{text}",
+                    width=term_width,
+                    subsequent_indent=" " * legend_w,
+                ):
+                    print(line)
+
         return 0
 
     # status
@@ -3007,6 +4212,7 @@ def wake_command(args: argparse.Namespace) -> int:
         ensure_supervisor_installed,
         is_supported,
         plist_path,
+        supervisor_state,
         uninstall,
     )
 
@@ -3015,46 +4221,589 @@ def wake_command(args: argparse.Namespace) -> int:
         print(f"supervisor: {outcome.reason}")
         return 0
 
+    # NOT `harness.wake.format_duration` here: the status lines use this
+    # command's own single-unit ladder (`_format_duration`), and importing the
+    # compound one alongside it was dead weight flake8 cannot see through a
+    # function-local import (round 1, R5).
+    from local_operator.wakes.supervisor import STALE_AFTER_S
+
+    stale_after_days = STALE_AFTER_S / 86400.0
+
     rows = _wake_rows()
-    installed = is_supported() and plist_path().exists()
-    if getattr(args, "install", False):
+    # `install` as a subcommand and `status --install` are the same operation;
+    # the hook is idempotent and now REPAIRS, so both routes reach the fix.
+    wants_install = command == "install" or getattr(args, "install", False)
+    if wants_install:
         outcome = ensure_supervisor_installed(config_dir())
-        installed = outcome.installed
         print(f"supervisor: {outcome.reason}")
 
-    upcoming = [row for row in rows if not row["dormant"]]
+    # RUNNING, not merely present. `plist_path().exists()` was an even weaker
+    # test than the install hook's `_is_loaded()` — it reported "installed"
+    # for a supervisor that had exited, which is the blind spot that let armed
+    # wakes sit unfired. The file is still reported separately, because "the
+    # plist is there but nothing runs" is a distinct, actionable state.
+    state = supervisor_state(config_dir()) if is_supported() else None
+    plist_present = is_supported() and plist_path().exists()
+    # UNVERIFIABLE is a third state, distinct from stopped and from absent:
+    # the store being asked about is not one launchd can supervise (an
+    # isolated run, a config dir outside the real home), so the global label
+    # answers about a DIFFERENT store. Nothing about it may be rendered here.
+    verifiable = bool(state and state.verifiable)
+    running = bool(state and state.running and state.verifiable)
+    uptime_s: float | None = None
+    if verifiable and state and state.pid:
+        uptime_s = _process_uptime_s(state.pid)
+
+    # FIREABLE is the classification the whole screen now hangs off (round 1,
+    # D2). A wake that is dormant or stale will not be fired by the supervisor,
+    # so counting it as "next" answered "when will my wake fire?" with a date
+    # nine days in the past, on a row that is never coming, while the wake due
+    # in three minutes was absent from the screen entirely.
+    armed = [row for row in rows if not row["dormant"]]
+    dormant = [row for row in rows if row["dormant"]]
+    # GHOST sits beside stale as a reason the supervisor will not fire a row
+    # (round 2, Q4): an index entry whose session has no transcript can never
+    # be engaged, and the supervisor retires on a ghost-only store. Excluded
+    # from `fireable` for exactly the same reason stale is.
+    ghost = [row for row in armed if row["ghost"]]
+    # AN OWED FIRE STAYS FIREABLE PAST THE STALENESS BOUND. The supervisor
+    # retries it from its own record — that is the whole exception the ledger
+    # introduces — so counting such a row as `stale` would put this frame back
+    # in contradiction with the process: `stale` promises the wake is left to
+    # the session's next open, which is not the plan for a fire something is
+    # still working on.
+    stale = [row for row in armed if row["stale"] and not row["ghost"] and not row.get("delivery")]
+    fireable = [
+        row for row in armed if (not row["stale"] or row.get("delivery")) and not row["ghost"]
+    ]
+    overdue = [row for row in fireable if row["overdue"]]
+    upcoming = fireable  # already sorted soonest-first by `_wake_rows`
+
+    # Probed once per session that has a wake, not per row: `wedged_runtime`
+    # reads the registry, and a session with three schedules is still one
+    # process. Only sessions with something armed are worth asking about — a
+    # dormant session's runtime being wedged is not why its wake is not firing.
+    # Each call is a `registry.scan`, which walks the run directory AND reaps
+    # records for dead processes (round 2, R10) — cheap and idempotent at this
+    # scale (measured 19 sessions / 28 ms), but not a free read.
+    from local_operator.wakes.supervisor import wedged_runtime
+
+    wedged: list[tuple[str, int, float]] = []
+    for session_id in dict.fromkeys(row["session_id"] for row in armed):
+        found = wedged_runtime(config_dir(), session_id)
+        if found is not None:
+            wedged.append((session_id, found[0], found[1]))
+
+    # THE OWED FIRES, which nothing on this surface could report before: the
+    # supervisor engaged a due wake, could not hand it to a runtime, and the
+    # only trace was a WARNING in wake-supervisor.log (510 lifetime on this
+    # machine, 128 in one day) while every other screen showed the wake as an
+    # ordinary overdue row. The record behind this line is the one the
+    # supervisor retries from, so the count is what the supervisor owes rather
+    # than a re-derivation of it — the two cannot disagree.
+    def _delivery_rows(state: str | None) -> "list[dict[str, Any]]":
+        # GHOSTS ARE EXCLUDED (QA round 1, Q1). An owed record whose session has
+        # no transcript on disk is frozen: `_engage_one` refuses a ghost before
+        # any attempt, so nothing retries it and nothing will. Reporting it as
+        # "still owed and retried with backoff" beside the `ghost:` line (which
+        # says nothing can fire it) made this surface argue with itself, and
+        # `--json` said `retrying: 1` with `overdue: 0`. The record is still on
+        # disk and still the operator's to delete; it is simply not work in
+        # progress, which is the only thing this bucket claims.
+        return [
+            row
+            for row in armed
+            if row.get("delivery")
+            and not row["ghost"]
+            and (state is None or row["delivery"].get("state") == state)
+        ]
+
+    owed = _delivery_rows(None)
+    stalled = _delivery_rows(STATE_UNDELIVERED)
+    retrying = _delivery_rows(STATE_RETRYING)
+
+    def _attempts_label(row: dict[str, Any]) -> str:
+        """``"4 attempt(s) since <time>"`` for one owed fire.
+
+        The age is the part that matters: whether a fire has been retrying for
+        a minute or for an hour is what tells the operator whether this is the
+        loaded-host case or a session that will never construct. The timestamp
+        renderer is imported HERE rather than hoisted: this status surface
+        otherwise renders every time relatively (its own ``_format_due``
+        ladder), and importing the absolute one at the top would put a name in
+        scope that only this helper uses.
+        """
+        from local_operator.wakes.display import format_wake_time
+
+        record = row["delivery"]
+        attempts = record.get("attempts")
+        count = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
+        first = record.get("first_attempt_ms")
+        if isinstance(first, int) and not isinstance(first, bool):
+            return f"{count} attempt(s) since {format_wake_time(first)}"
+        return f"{count} attempt(s)"
+
+    def _next_attempt_s(row: dict[str, Any]) -> float | None:
+        nxt = row["delivery"].get("next_attempt_ms")
+        if not isinstance(nxt, int) or isinstance(nxt, bool):
+            return None
+        return (nxt - int(time.time() * 1000)) / 1000.0
+
+    def _retry_clause(nxt: float | None) -> str:
+        """``, next attempt in 3m`` / ``, retry due now`` / ``""``.
+
+        ``next_attempt_in_s`` is the recorded attempt minus the clock this run
+        read, so it is SIGNED and design round 1 (D3) caught the old rendering:
+        the clause was dropped whenever the value was not positive, which is
+        exactly the state where the retry is already due — so the line that must
+        answer "is this being retried?" ended at `retried with backoff` with no
+        when at all, while the neighbouring `undelivered:` line printed one.
+        """
+        if nxt is None:
+            return ""
+        return f", next attempt in {_format_duration(nxt)}" if nxt > 0 else ", retry due now"
+
+    # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
+    # monitoring consumer branching on `state` had to string-match prose, and
+    # the booleans do not distinguish `stopped` from `not_loaded`.
+    if not is_supported():
+        supervisor_state_name = "unsupported"
+    elif not verifiable:
+        supervisor_state_name = "unverifiable"
+    elif running:
+        supervisor_state_name = "running"
+    elif state and state.loaded:
+        supervisor_state_name = "stopped"
+    elif plist_present:
+        supervisor_state_name = "not_loaded"
+    else:
+        supervisor_state_name = "not_installed"
+
     payload = {
         "supported": is_supported(),
-        "installed": installed,
+        # Kept as "a supervisor is in place" for readers that already parse
+        # it, but it now means RUNNING rather than "a file exists".
+        "installed": running,
         "plist": str(plist_path()) if is_supported() else "",
         "scheduled": len(rows),
-        "armed": len(upcoming),
-        "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        "armed": len(armed),
+        "dormant": len(dormant),
+        # NAMED FOR WHAT THEY MEAN (round 2, D18). `next_due_in_s` silently
+        # changed meaning in round 1 — it began excluding stale rows, which is
+        # what D2 asked for, under a name that still reads "the soonest due
+        # wake" — and a consumer wanting the raw value had nowhere to get it.
+        # Both are published: the fireable one under an explicit name, the raw
+        # one under the original name so an existing consumer keeps parsing.
+        "next_due_in_s": rows[0]["due_in_s"] if rows else None,
+        "next_fireable_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        "supervisor": {
+            # False whenever the answer would be about another store, so a
+            # monitoring caller cannot read this block as a verdict on THIS
+            # one. The pid is withheld for the same reason.
+            "verifiable": verifiable,
+            "state": supervisor_state_name,
+            "running": running,
+            "loaded": bool(state and state.loaded and verifiable),
+            "plist_present": plist_present,
+            "pid": state.pid if (verifiable and state) else None,
+            "uptime_s": uptime_s,
+            "detail": state.detail if state else "",
+        },
+        # `overdue` counts FIREABLE rows only, which is what makes it
+        # reconcilable: `scheduled` = fireable + dormant + stale + ghost, and
+        # `overdue` is a subset of the fireable ones. Round 2 (D18) noted a
+        # consumer had no way to tell which rows were inside it; the
+        # `unfireable` block below is that breakdown.
+        "overdue": len(overdue),
+        "stale": len(stale),
+        "ghost": len(ghost),
+        # Why each non-firing row will not fire, so the counts above can be
+        # reconciled without re-deriving the classification.
+        "unfireable": {
+            "dormant": [row["session_id"] for row in dormant],
+            "stale": [row["session_id"] for row in stale],
+            "ghost": [row["session_id"] for row in ghost],
+        },
+        "max_overdue_s": max((row["overdue_s"] for row in overdue), default=0.0),
+        # The wedged case: a runtime whose process is alive but whose
+        # heartbeat has gone stale holds the transcript lease without serving,
+        # so its wake cannot fire and the supervisor's only trace was an
+        # ordinary timeout. Reported, never repaired — see `wedged_runtime`.
+        "wedged": [
+            {"session_id": session_id, "pid": pid, "heartbeat_age_s": age}
+            for session_id, pid, age in wedged
+        ],
+        # The owed fires, one entry per wake whose delivery is outstanding.
+        # Additive: a monitoring consumer that predates this block keeps
+        # parsing the counts above.
+        "undelivered": len(stalled),
+        "retrying": len(retrying),
+        # AND THEY ARE A SUBSET OF `overdue`, stated as such (design round 1,
+        # D4): every owed fire is overdue by construction, so `overdue` +
+        # `retrying` + `undelivered` counted the same wakes twice and a consumer
+        # adding the keys got 6 of 5. The flat keys above stay for the readers
+        # that already parse them; this block is the one that says what they are.
+        "owed": {
+            "subset_of": "overdue",
+            "total": len(owed),
+            "retrying": len(retrying),
+            "undelivered": len(stalled),
+        },
+        "deliveries": [
+            {
+                "session_id": row["session_id"],
+                "message": row["message"],
+                "wake_id": row["wake_id"],
+                "occurrence_ms": row["delivery"].get("occurrence_ms"),
+                "state": row["delivery"].get("state"),
+                "attempts": row["delivery"].get("attempts"),
+                "first_attempt_ms": row["delivery"].get("first_attempt_ms"),
+                "last_attempt_ms": row["delivery"].get("last_attempt_ms"),
+                "next_attempt_in_s": _next_attempt_s(row),
+                "last_error": row["delivery"].get("last_error"),
+            }
+            for row in owed
+        ],
     }
     if args.json:
         print(_json_dumps(payload))
         return 0
 
-    print(f"supervisor:  {'installed' if installed else 'not installed'}")
-    if installed is False and is_supported() and rows:
-        # The ACTIONABLE branch. Round 1 (D4): this command reported "not
-        # installed" beside three armed wakes and an overdue one, which is
-        # precisely the failure the subcommand exists to surface — and then
-        # stopped, leaving the user to find `--help` to act on the one fact it
-        # had just told them. The unsupported branch below already got two
-        # explanatory lines; the fixable one got none.
-        print("             (nothing will fire these while their sessions are")
-        print("              closed — run 'lop wake status --install')")
+    if state is not None and not verifiable:
+        # Never another store's pid. Saying "running" here would be the very
+        # failure this command exists to remove, one level up: it would report
+        # wakes as supervised while the running process watches a different
+        # store. Observed during validation, where an isolated run printed the
+        # operator's real LaunchAgent pid.
+        print(_wrap_status("cannot be verified for this store", "supervisor:"))
+        print(_wrap_status(f"({state.detail})"))
+        print(_wrap_status("(wakes here fire only while a session is open)"))
+    elif running:
+        detail = f"running (pid {state.pid})" if state and state.pid else "running"
+        # Suppressed under a minute: `up 0s` on a just-started supervisor is
+        # noise, and the pid already says it is there (round 1, D9).
+        if uptime_s is not None and uptime_s >= 60:
+            detail += f", up {_format_duration(uptime_s)}"
+        print(_wrap_status(detail, "supervisor:"))
+    elif state and state.loaded:
+        # The exact state that produced the permanent misses: launchd knows
+        # the job, `launchctl print` returns 0, and nothing is running. The
+        # parenthetical carries the LAUNCHD fact rather than repeating the
+        # state word it was meant to disambiguate (round 1, D9).
+        print(
+            _wrap_status(
+                "loaded but NOT running (launchd has the job; it has exited)", "supervisor:"
+            )
+        )
+    elif plist_present:
+        print(_wrap_status("not loaded (a plist exists but launchd has no job)", "supervisor:"))
+    else:
+        print(_wrap_status("not installed", "supervisor:"))
+    # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and
+    # the ACTIONABLE branch used to fire in the not-loaded state, printing
+    # `run 'lop wake install'` twice in a four-line block.
+    if is_supported() and verifiable and not running:
+        if rows:
+            print(
+                _wrap_status(
+                    "(nothing will fire these while their sessions are closed — "
+                    "run 'lop wake install')"
+                )
+            )
+        else:
+            print(_wrap_status("(run 'lop wake install')"))
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole
         # point of this line.
-        print("             (no installer for this platform — wakes fire only while a")
-        print("              session is open)")
-    print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
-    if upcoming:
-        print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+        print(
+            _wrap_status(
+                "(no installer for this platform — wakes fire only while a session is open)"
+            )
+        )
+
+    # DORMANCY IS NAMED (round 1, D3). `scheduled: 1 (0 armed)` with no word of
+    # explanation was a dead end for the operator asking "why has nothing
+    # fired?", while `wake list` did state the reason.
+    counts = f"{len(armed)} armed"
+    if dormant:
+        counts += f", {len(dormant)} dormant"
+    print(f"scheduled:   {len(rows)} ({counts})")
+    if dormant and not armed:
+        print(_wrap_status("(dormant — their sessions were stopped; reopening one re-arms it)"))
+
+    # ONE LINE PER DISTINCT STATE (round 1, D5; sharpened in round 2, D16).
+    # `next:` names a wake in the FUTURE; an already-late one is reported by
+    # `overdue:` below, because labelling something late as "next" promises a
+    # future event and says twice what the line below already says (D16).
+    #
+    # SELECT the soonest future row rather than testing the head of the list
+    # (round 3, D19). `upcoming` is sorted soonest-first, so gating on
+    # `upcoming[0]` let ONE overdue row suppress `next:` for every future wake
+    # — a wake a minute away went unnamed on a surface README promises reports
+    # "the soonest wake that will fire".
+    future = [row for row in upcoming if not row["overdue"]]
+    if future:
+        soonest = future[0]
+        print(_wrap_status(f"{_format_due(soonest['due_in_s'])}  {soonest['message']}", "next:"))
+    if overdue:
+        # Counted over FIREABLE rows only, so "worst" is a wake that is
+        # actually coming rather than one the supervisor has given up on. The
+        # soonest overdue row is named, since with nothing in the future this
+        # is the line that answers "what is the supervisor working on".
+        worst = max(row["overdue_s"] for row in overdue)
+        summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        if owed:
+            # THE SUBSET IS STATED WHERE THE COUNTS ARE (design round 1, D4).
+            # Every owed fire is overdue by construction, so `overdue` already
+            # contains the `retrying:`/`undelivered:` lines below and an operator
+            # adding the three counted the same wakes twice (6 of 5 on the
+            # designer's store). One clause, on the line a reader is already
+            # doing the arithmetic against.
+            summary += f" — {len(retrying)} retrying, {len(stalled)} undelivered"
+        print(_wrap_status(summary, "overdue:"))
+    if stalled:
+        # THE DEEPEST-FAILING ONE, because a count alone cannot distinguish "a
+        # wake is 20 seconds late on a busy host" from "a session has not
+        # constructible for an hour", and only the second is worth attention.
+        deepest = max(stalled, key=lambda row: row["delivery"].get("attempts") or 0)
+        print(
+            _wrap_status(
+                f"{len(stalled)} — {deepest['session_id']} {deepest['message']!r} could not be "
+                f"handed to a runtime: {_attempts_label(deepest)}"
+                f"{_retry_clause(_next_attempt_s(deepest))} (last error: "
+                f"{deepest['delivery'].get('last_error') or 'unknown'}). It is STILL OWED "
+                "and retried with backoff.",
+                "undelivered:",
+            )
+        )
+    if retrying:
+        soonest = min(
+            retrying,
+            key=lambda row: row["delivery"].get("next_attempt_ms") or 0,
+        )
+        print(
+            _wrap_status(
+                f"{len(retrying)} — {soonest['session_id']} {soonest['message']!r}: "
+                f"{_attempts_label(soonest)}, retried with backoff"
+                f"{_retry_clause(_next_attempt_s(soonest))}",
+                "retrying:",
+            )
+        )
+    if stale:
+        print(
+            _wrap_status(
+                f"{len(stale)} past {int(stale_after_days)}d — delivered when their "
+                "sessions are next opened",
+                "stale:",
+            )
+        )
+    if ghost:
+        # The supervisor refuses these and retires on a ghost-only store
+        # (round 2, Q4). Saying so here is what stops this frame contradicting
+        # the process.
+        #
+        # THE REMEDY IS THE FILE (round 3, D20). The earlier wording said the
+        # entry "is removed when that session id is next written", which no
+        # reader can bring about: both callers of `store.remove_entry` need a
+        # live session (a persist with no schedules left, or `cleanup` after
+        # the session directory goes away), and `lop wake` exposes no cancel.
+        # So a ghost row is permanent, and the only action available is to
+        # delete the entry file — which is what the line now names.
+        # RELATIVE, not the absolute path: an absolute config root is one
+        # unbreakable token long enough to overflow a narrow terminal by
+        # itself, which is the thing D21 asked to stop. `wakes/<id>.json` is
+        # the form the design round suggested, and the ids it needs are on
+        # screen in `lop wake list`.
+        print(
+            _wrap_status(
+                f"{len(ghost)} with no session on disk — nothing can fire these, and "
+                "nothing clears them automatically; delete its "
+                "wakes/<session-id>.json entry to remove one",
+                "ghost:",
+            )
+        )
+    for session_id, pid, age in wedged:
+        # Named on its own line because the remedy is a DIFFERENT command from
+        # every other non-running state (round 2, D14): the surface points at
+        # `lop wake install` elsewhere, and here no wake-subsystem action can
+        # help at all, so it names the two commands that can.
+        #
+        # The remedy names the ladder's FIRST rung, with the forced rung's cost
+        # beside it (design round 2, D3). A lapsed beat — which is what this
+        # line describes — is exactly what `_identity_by_start_time` admits, so
+        # `lop stop --pid N` is the rung that acts on this state; `--force`
+        # re-reads the record only while the beat is still inside
+        # `HEARTBEAT_TIMEOUT_S` (`control._identity_by_record`), so here it cannot
+        # convert a refusal into a stop. It stays named for the shape it IS for —
+        # an owner that is still beating but silent — with what running it
+        # does. "It will not recover on its own" stays gone with it: a stale
+        # beat is evidence the owner stopped reporting, not a forecast about a
+        # long turn that may simply finish (``registry.classify``).
+        print(
+            _wrap_status(
+                f"{session_id} (pid {pid}) has not sent a heartbeat in "
+                f"{_format_duration(age)} and is not answering its socket; it holds "
+                f"the session lease, so its wake cannot fire while it does not "
+                f"answer. Nothing here can recover it — 'lop sessions' shows it; "
+                f"'lop stop --pid {pid}' asks it to stop and signals it if it will "
+                f"not answer, while 'lop stop --pid {pid} --force' signal-stops the "
+                f"process, discarding its in-flight turn, for an owner that is "
+                f"still beating but silent",
+                "wedged:",
+            )
+        )
     return 0
+
+
+def _elide_id(session_id: str, width: int) -> str:
+    """A session id that fits, and that SAYS SO when it does not.
+
+    Round 2 (R9): `session_id[:12]` in a 12-wide column rendered a
+    15-character id as a different, shorter id — one an operator cannot paste
+    back into `lop wake list` or `lop stop`, with nothing marking it as cut.
+    Truncating an identifier is not like truncating a message: the reader can
+    recognise a message from its opening words and cannot reconstruct an id.
+    Ids are `uuid4().hex[:12]` so the column fits every id the product mints;
+    anything longer is marked rather than silently shortened.
+    """
+    if len(session_id) <= width:
+        return session_id
+    return session_id[: max(width - 1, 1)] + "…"
+
+
+#: Width of `lop sessions`' leading STATE column, in display CELLS.
+#:
+#: Sized for the one human PHRASE it can carry rather than for the tokens
+#: around it (``wedged`` is 6 cells, ``not answering`` 13). The column used to
+#: be 7 and printed the raw token, which is fine for a script and not for the
+#: one person-facing place the wake surfaces send a reader to (design round 2,
+#: D5; QA Q1). ``--json``'s ``state`` key is untouched: it is the wire value.
+STATE_COLUMN_WIDTH = 13
+
+
+def _state_cell(state: str) -> str:
+    """The STATE cell for a person, from the state token a machine reads.
+
+    ``wedged`` is the one value in this column that is a verdict rather than a
+    word: ``lop wake status`` ends its wedge line with "'lop sessions' shows
+    it", so this table is where an operator arrives, and it was the only
+    person-facing surface where the token stood with no sentence to qualify it.
+    It reads as ``not answering`` — the phrase every other surface uses, and the
+    one the adjacent ``HB_AGE`` column measures — while ``--json`` keeps
+    ``wedged`` for the ~15 call sites and the desktop catalogue's
+    ``status.code`` that branch on it.
+
+    ``stale`` deliberately keeps its token: it means the record's pid is GONE,
+    which is a different fact from this one rather than a longer way of saying
+    the same thing, and the state whose wording this change is about is the one
+    where the process is still there.
+    """
+    return "not answering" if state == "wedged" else state
+
+
+#: Width of `lop sessions`' trailing WHY column, in display CELLS.
+#:
+#: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
+#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: is 104 cells — and an unbounded column re-flows the whole table on a normal
+#: terminal. The full text is one flag away in ``--json``'s
+#: ``completion_reason`` and is what a script should read.
+WHY_COLUMN_WIDTH = 48
+
+
+#: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
+#:
+#: A phrase, not an enum: the field's whole purpose is to say what is happening
+#: in the words the operator needs (``signalled; leaving when its turn ends (up
+#: to 2 min)``), so it is bounded like WHY rather than abbreviated to a token
+#: nobody could read. Wide enough for the shipped phrase in full, so the common
+#: case is not cut and a cut one is visibly marked (`_fit_cell`). The column
+#: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
+#: — a listing with no draining runtime is byte-for-byte what it was before.
+#:
+#: A TRAILING COLUMN RATHER THAN A TOKEN IN ``STATE``, which is the decision the
+#: drain's first round recorded (design round 2, D3, kept rather than changed):
+#: ``STATE`` holds seven cells that consumers branch on (``state == "stored"``),
+#: so teaching it a new word to carry a display fact would spend a value the
+#: machine reads to say something only a person needs.
+#:
+#: WIDENED FROM 40 when the phrase grew the drain's bound (UX round 2, U9): the
+#: row that carries this is the one the operator reads most, and
+#: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
+#: can take away. The number is the phrase's own cell width, pinned against it by
+#: ``tests/unit/info/test_sessions_extraction.py`` rather than imported — this
+#: module keeps session internals out of its module scope on purpose (see the
+#: header) — so a reword of the phrase fails loudly there instead of silently
+#: cutting the new clause off the row.
+LEAVING_COLUMN_WIDTH = 51
+
+
+#: Widths of `lop sessions`' three TEXT columns, in display CELLS.
+#:
+#: Named rather than left as literals inside the format specs because the row
+#: builder now has to MEASURE them: the header and the row have to agree on a
+#: number that is used twice, and a second literal is how the two drift. These
+#: three are the columns whose content this process does not author — a
+#: conversation title is whatever named the conversation, and a model label is
+#: the provider catalogue's own display name (``openai/gpt-5.2``, or a CJK
+#: display name) — so they are the ones a wide glyph can overrun. The remaining
+#: columns hold enums, pids and formatted byte counts, all ASCII and bounded.
+#:
+#: The values are unchanged from the literals they replace, and for ASCII text
+#: ``cell_len`` equals ``len``, so every existing listing renders byte-for-byte
+#: (design round 1, D2 on the WHY column's PR).
+NEEDS_COLUMN_WIDTH = 8
+CONVERSATION_COLUMN_WIDTH = 24
+MODEL_COLUMN_WIDTH = 24
+
+
+#: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
+#: Every continuation line on that surface already indents to it, so a new
+#: line that wraps at column 0 reads as a different block (round 2, D13).
+_STATUS_LABEL_W = 13
+
+
+def _wrap_status(text: str, label: str = "") -> str:
+    """One `wake status` line, folded at the surface's own hanging indent.
+
+    Two round-2 findings meet here. D13: the `wedged:` line was 108 columns and
+    the only one whose continuation started at column 0, so the single line an
+    operator must act on was the one rendered as a ragged paragraph. Q2: the
+    `next:`/`overdue:` lines interpolate a user-authored wake message and were
+    never clamped — a 129-character message produced a 156-column line at every
+    terminal width, which is the last unclamped string on either screen.
+
+    Wrapping rather than truncating, because unlike the `wake list` table (one
+    row per wake, where a clamp keeps the columns) these lines are prose and
+    the whole sentence is the payload.
+    """
+    import re
+    import shutil
+    import textwrap
+
+    width = max(shutil.get_terminal_size((80, 24)).columns, _STATUS_LABEL_W + 24)
+    indent = " " * _STATUS_LABEL_W
+    first = f"{label:<{_STATUS_LABEL_W}}{text}" if label else f"{indent}{text}"
+
+    # A QUOTED COMMAND IS ONE TOKEN. Every remedy on this surface is a command
+    # the operator copies — `'lop wake install'`, `'lop stop --pid 4242'` — and
+    # a wrap inside one produces a line that looks like an instruction and is
+    # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
+    # single quotes are hidden from it and restored afterwards.
+    nbsp = "\x00"
+    protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
+    return "\n".join(
+        textwrap.wrap(
+            protected,
+            width=width,
+            subsequent_indent=indent,
+            # A wake message can carry a path or a URL; breaking one makes it
+            # unusable, and an over-long line is the lesser harm.
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    ).replace(nbsp, " ")
 
 
 def _json_dumps(value: Any) -> str:
@@ -3076,6 +4825,45 @@ def _format_due(seconds: float) -> str:
     else:
         text = f"{int(seconds // 86400)}d"
     return f"{text} overdue" if overdue else f"in {text}"
+
+
+def _process_uptime_s(pid: int) -> float | None:
+    """How long ``pid`` has been alive, or ``None`` when it cannot be read.
+
+    ``ps -o etime=`` rather than a dependency: this is one line on a status
+    surface, and ``psutil`` is deliberately not a dependency of this project.
+    Every failure is None — an uptime is a nicety on a line whose real payload
+    is the pid, and a status command must never fail because a subprocess did.
+    """
+    import subprocess as _subprocess
+
+    try:
+        result = _subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["ps", "-p", str(pid), "-o", "etime="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, _subprocess.SubprocessError):
+        return None
+    raw = result.stdout.strip()
+    if result.returncode != 0 or not raw:
+        return None
+    # `[[dd-]hh:]mm:ss` — parsed right to left so every form falls out of the
+    # same loop rather than needing a format branch per shape.
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+    parts = raw.split(":")
+    if not all(part.strip().isdigit() for part in parts) or len(parts) > 3:
+        return None
+    seconds = 0.0
+    for power, part in enumerate(reversed(parts)):
+        seconds += int(part) * (60**power)
+    return seconds + days * 86400
 
 
 def stop_command(args: argparse.Namespace) -> int:
@@ -3153,6 +4941,8 @@ def stop_command(args: argparse.Namespace) -> int:
                 only_pids={rec.pid for rec in targets},
                 force=args.force,
                 _root=config_dir(),
+                _command="lop stop --all",
+                on_wait=_stop_progress,
             )
         )
         return _report_stops(outcomes, args.json, summary=True)
@@ -3168,20 +4958,54 @@ def stop_command(args: argparse.Namespace) -> int:
         return 1
 
     outcome = asyncio.run(
-        control.stop_session(record, timeout_s=timeout_s, force=args.force, _root=config_dir())
+        control.stop_session(
+            record,
+            timeout_s=timeout_s,
+            force=args.force,
+            _root=config_dir(),
+            # The artifact's point is naming WHO stopped it, so the CLI records
+            # what the user typed rather than the function they reached.
+            _command="lop stop",
+            on_wait=_stop_progress,
+        )
     )
     return _report_stops([outcome], args.json)
+
+
+def _stop_progress(line: str) -> None:
+    """Paint one progress line the ladder emits while it waits.
+
+    STDERR, not stdout, and that is the whole reason this is a function rather
+    than an inline ``print``: stdout carries the receipts — under ``--json``, a
+    document a caller parses — and a progress line there would either break that
+    parse or force every consumer to filter a line the final receipt supersedes
+    a moment later. Progress about a wait belongs beside it, which is where the
+    disambiguation listing above already goes.
+
+    It exists because the ladder's rung-2 wait is the longest silence a `lop`
+    command produces (~150 s for a wedged mid-turn target) and it used to print
+    nothing at all until it resolved: an operator clearing a wedged session
+    could not tell a working command from a hung one, and the natural response —
+    Ctrl-C — leaves the outcome ambiguous (U5, PR #1141).
+    """
+    print(line, file=sys.stderr)
 
 
 def _resolve_stop_target(
     args: argparse.Namespace,
 ) -> "tuple[Any | None, list[Any], str]":
-    """Resolve a ``lop stop`` target through the `send` vocabulary.
+    """Resolve a ``lop stop`` / ``lop refresh`` target through the `send` vocabulary.
 
     The same shared resolver `lop send` uses, so every way of addressing a
     peer — name, substring, session id, pid — behaves identically across
-    `send` and `stop`. Only the hint strings differ (the stop parser's own
-    flags).
+    `send`, `stop` and `refresh`. Only the hint strings differ (the parsers'
+    own flags).
+
+    WEDGED targets are included for both commands, for different reasons that
+    happen to want the same set: they are stoppable (the ladder's signal rungs
+    exist for them) and they are worth ASKING about (a rotation reports
+    ``unreachable``, which is the honest answer to "why is this one still on the
+    old build"). `send` keeps refusing them because nobody would read it.
     """
     from local_operator.mobile.peer_send import resolve_peer_target
 
@@ -3233,25 +5057,123 @@ def _report_stops(outcomes: list[Any], as_json: bool, *, summary: bool = False) 
             from local_operator.session.runtime.control import summarize
 
             print(summarize(outcomes))
-    # Only a refusal (identity unconfirmed, nothing signalled) is partial;
-    # "gone" (already exited) is a clean resolution — the method says which,
-    # so no receipt text is parsed here.
-    refused = any(o.method == "refused" for o in outcomes)
-    return 2 if refused else 0
+    # Anything that did NOT end the session is partial: a refusal (identity
+    # unconfirmed, nothing signalled) and a skip (a turn in flight, nothing
+    # signalled) alike — in both the target is still running, which is what the
+    # caller asked about. "gone" (already exited) is a clean resolution. The
+    # method says which, so no receipt text is parsed here; ``ENDED_METHODS`` is
+    # the one definition of "it is not running any more".
+    from local_operator.session.runtime.control import ENDED_METHODS
+
+    return 2 if any(o.method not in ENDED_METHODS for o in outcomes) else 0
+
+
+def refresh_command(args: argparse.Namespace) -> int:
+    """``lop refresh`` — move live sessions to the build on disk, without killing.
+
+    The supported way to make a new build take effect on sessions that are
+    WORKING. Run 1 of this command is ``lop-update``: the runtimes notice the
+    moved install on their own and retire when idle, but "when idle" can be
+    hours away, and the only other tool to hand was a signal sweep — which is
+    what cut 32 turns off on 2026-09-14. This asks instead of telling: each
+    runtime judges its own readiness, so a busy session is reported as moving
+    at its next boundary rather than ended.
+
+    Exit codes: **0** every target gave an answer (moved, busy, draining,
+    already current, or its own reason), **1** no target matched, **2** partial
+    — at least one runtime did not answer its control socket, so its move is not
+    going to happen on its own, OR the install on disk had not settled and no
+    runtime could judge it yet (``unsettled``). The second case is deliberately
+    partial rather than clean (D1/M2, PR #1141): this command's own run 1 is
+    ``lop-update``, so it lands inside the settle window for a whole fleet, and
+    exiting 0 there would tell a rotating script the rotation is complete when
+    every session on the machine is about to be retired. The receipt says to ask
+    again in a few seconds, which is the honest next step.
+
+    Imports stay function-local like every other runtime path here (the CLI
+    startup path must stay light — see ``tests/unit/test_import_graph.py``).
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import candidate_lines
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import control
+
+    timeout_s = (
+        args.timeout if args.timeout and args.timeout > 0 else control.DEFAULT_REFRESH_TIMEOUT_S
+    )
+
+    if getattr(args, "refresh_all", False):
+        # NO CONFIRMATION GATE, unlike `stop --all`: this command ends no session
+        # and interrupts no turn, so "every session" is not a decision anyone has
+        # to be talked through. The listing still prints, because the outcome per
+        # session IS the answer the caller came for.
+        targets = control._rotation_targets(config_dir(), own_pid=None)
+        if not targets:
+            print("no live sessions to refresh")
+            return 0
+        outcomes = asyncio.run(control.refresh_all(timeout_s=timeout_s, own_pid=None))
+        return _report_refreshes(outcomes, args.json, summary=True)
+
+    record, candidates, error = _resolve_stop_target(args)
+    if candidates:
+        print(f"{len(candidates)} sessions match; disambiguate with --pid:", file=sys.stderr)
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        return 1
+    if error or record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+
+    outcome = asyncio.run(control.refresh_session(record, timeout_s=timeout_s))
+    return _report_refreshes([outcome], args.json)
+
+
+def _report_refreshes(outcomes: list[Any], as_json: bool, *, summary: bool = False) -> int:
+    """Paint the rotation outcomes and derive the exit code.
+
+    0 when every runtime answered (however it answered — "busy" is a queued
+    move, not a failure, and "draining" is that move already scheduled), 2 when
+    at least one could not be asked at all, or could not yet judge the install
+    (``unsettled``, see ``REFRESH_SETTLED_METHODS``). The method is the verdict,
+    exactly as in ``_report_stops``: no receipt text is parsed and the two
+    commands cannot disagree about what counts as partial.
+    """
+    if as_json:
+        import json as _json
+
+        print(
+            _json.dumps(
+                [
+                    {
+                        "pid": o.pid,
+                        "session_id": o.session_id,
+                        "name": o.name,
+                        "method": o.method,
+                        "line": o.line,
+                    }
+                    for o in outcomes
+                ],
+                indent=2,
+            )
+        )
+    else:
+        for outcome in outcomes:
+            print(outcome.line)
+        if summary:
+            from local_operator.session.runtime.control import summarize_refresh
+
+            print(summarize_refresh(outcomes))
+    from local_operator.session.runtime.control import REFRESH_SETTLED_METHODS
+
+    return 2 if any(o.method not in REFRESH_SETTLED_METHODS for o in outcomes) else 0
 
 
 def _format_duration(seconds: float) -> str:
-    """Compact duration for the sessions table: 45s, 12m, 3h, 2d."""
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h"
-    return f"{hours // 24}d"
+    """Compact duration shared with the wake panel: 45s, 12m, 3h, 2d."""
+    from local_operator.wakes.display import format_age
+
+    return format_age(seconds)
 
 
 def mobile_command(args: argparse.Namespace) -> int:
@@ -3314,11 +5236,37 @@ def mobile_command(args: argparse.Namespace) -> int:
     if command == "logs":
         import subprocess
 
+        from local_operator.paths import runtime_log_path
+
         log = mobile_install.log_path()
+        runtime_log = runtime_log_path()
         tail = ["tail", "-n", str(args.lines)]
         if args.follow:
-            tail.append("-f")
-        tail.append(str(log))
+            # `-F`, not `-f`: follow by NAME. `-f` follows the fd it opened, so it
+            # never reads a file created after it started — the normal state on a
+            # machine whose daemons are up but whose runtimes have all exited — and
+            # it goes blind at the first rotation of the runtimes' bounded file,
+            # because bounding means renaming. Both were measured against the
+            # system `tail`. Both paths go in unconditionally HERE because `-F`
+            # retries a missing one quietly; a plain `tail` does not, so the
+            # non-following branch below filters to what exists.
+            # One limit of this argv that cannot be fixed from here, measured:
+            # BSD `tail` prints its `==> file <==` header when it OPENS a file, so
+            # a runtime log created after the follow started is read without a
+            # header and its lines sit under the daemon's. Attribution survives —
+            # every record names its logger, and a runtime names its own pid — and
+            # the alternative is a multiplexer of our own, which is not worth it
+            # for a header.
+            tail.append("-F")
+            tail.extend([str(log), str(runtime_log)])
+            return subprocess.call(tail)
+        existing = [path for path in (log, runtime_log) if path.exists()]
+        if not existing:
+            # `tail` with no operand reads STDIN and would hang the command on a
+            # machine whose daemon has not written yet.
+            print(f"no log files yet: {log} (and {runtime_log})")
+            return 0
+        tail.extend(str(path) for path in existing)
         return subprocess.call(tail)
 
     if command == "password":
@@ -3361,6 +5309,69 @@ def mobile_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _bind_serve_socket(host: str, port: int) -> socket.socket:
+    """Bind the listener ``serve`` will hand to uvicorn, and return it.
+
+    Bound HERE rather than by uvicorn for one reason: ``--port 0`` asks the
+    kernel for an ephemeral port and the daemon's rendezvous record must carry
+    the port ACTUALLY BOUND. Binding is the only way to know it — resolving an
+    ephemeral port with a bind/close/rebind probe can lose the port to another
+    process in between, and then the record and the listener disagree, silently
+    and precisely on the machines the record exists for. It is the design the
+    UI's own child needs, since it asks for port 0 deliberately so that two
+    daemons cannot collide on a fixed one.
+
+    Mirrors ``uvicorn.Config.bind_socket()``: the address family follows a host
+    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set, and the
+    socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
+    on the socket it is handed, which is the same sequence uvicorn uses on its
+    own path. Raising is deliberate: the caller reports a bind failure through
+    :func:`_refuse_serve_bind`, rather than letting it surface as a traceback.
+
+    ``SO_REUSEADDR`` is kept because it is what lets a daemon restart
+    immediately after a crash. What it does NOT do was measured rather than
+    assumed, because the first version of the collision test got it wrong: it
+    does not make a bind succeed over a LISTENING holder — that is refused on
+    Linux and on macOS, which is why that test holds its port with a real
+    listener rather than a bare bound socket. On the Linux CI runner it DOES let
+    a second bind succeed over a holder that has only bound and not listened
+    (measured: that is the shape that failed shard 3), while on this macOS host
+    (Darwin 25.6.0, arm64) every permutation of a bound-but-not-listening holder
+    was refused. So the friendly refusal below is guaranteed against a LISTENING
+    holder; against a merely-bound one on Linux the collision instead surfaces
+    from uvicorn's own ``listen``, as its own error.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family=family)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
+    """Report a bind this process could not make, naming the address.
+
+    The one refusal shape for BOTH binds ``serve_command`` makes — the listener
+    it hands uvicorn and the ``--reload`` probe — because to the operator they
+    are the same failure, and the address is what makes it actionable: the
+    common cause is a daemon already running on the default 1111, which
+    "address already in use" alone does not say.
+
+    Exit code 1, deliberately NOT uvicorn's ``STARTUP_FAILURE`` (3, from its own
+    ``Config.bind_socket``): this refusal is printed by us, with the address
+    named, and the tests assert 1. Nothing in this repo branches on the number.
+    """
+    print(
+        f"\n\033[1;31mError: cannot bind http://{host}:{port}: {exc}\033[0m",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def serve_command(host: str, port: int, reload: bool) -> int:
     """Start the FastAPI server using uvicorn.
 
@@ -3368,6 +5379,26 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     behind the ``server`` extra, so a default install (and every non-server
     entry point) must be able to ``import local_operator.cli`` without
     fastapi/uvicorn/starlette and their dependency chain present.
+
+    The listener is bound here and handed to uvicorn as an open socket
+    (``uvicorn.Server.run(sockets=[...])``, supported by the pinned uvicorn —
+    ``Server.startup`` takes the explicit-sockets branch and
+    ``loop.create_server`` adopts them), so that ``--port 0`` works and the
+    resolved port is known to THIS process. That port is announced to the app
+    before uvicorn starts — on the app object for the path that serves it
+    in-process, and through the environment only for a ``--reload`` child, which
+    cannot be reached any other way (``server.registry``) — because the
+    app publishes the daemon's rendezvous record at startup and that record
+    has to name the port the kernel gave us rather than the ``--port``
+    argument.
+
+    ``--reload`` is the one exception: uvicorn only reloads an app given as an
+    import string, and the reloader re-imports it in a CHILD process, so the
+    socket cannot be handed over here. That path keeps ``uvicorn.run`` and, for
+    ``--port 0``, resolves the port with the bind/close probe described above —
+    the race is acceptable in a development mode that no daemon discovery
+    depends on, and the identity check a discovery does (``/health``'s
+    ``instance_id``, never the record's port) is what admits a candidate.
     """
     try:
         import uvicorn
@@ -3378,17 +5409,80 @@ def serve_command(host: str, port: int, reload: bool) -> int:
         )
         return 1
 
-    print(f"Starting server at http://{host}:{port}")
-    if reload:
+    # Imported here for the same reason as uvicorn (it is the server package),
+    # and it is import-light by contract: stdlib plus the session registry.
+    from local_operator.server import registry as serve_registry
+
+    listener: socket.socket | None = None
+    resolved_port = port
+    if not reload:
+        try:
+            listener = _bind_serve_socket(host, port)
+        except OSError as exc:
+            return _refuse_serve_bind(host, port, exc)
+        resolved_port = listener.getsockname()[1]
+    elif port == 0:
+        # ``--reload`` only: the port is resolved here purely so the record and
+        # the banner name something, then the probe socket is released for
+        # uvicorn to bind again. Its child re-imports the app, so this is the
+        # one place the address cannot be handed over.
+        #
+        # Refused exactly like the listener above, and for the same reason: a
+        # host that cannot be bound is the operator's mistake on this path too,
+        # and a traceback is not a better report of it than a named address.
+        try:
+            probe = _bind_serve_socket(host, port)
+        except OSError as exc:
+            return _refuse_serve_bind(host, port, exc)
+        try:
+            resolved_port = probe.getsockname()[1]
+        finally:
+            probe.close()
+
+    # With a socket handed down, uvicorn SKIPS its own "Uvicorn running on …"
+    # line (it cannot know which of several listeners to name), so this print is
+    # the one place the resolved address is reported — which is why it names
+    # ``resolved_port``, not the ``--port`` argument that may have been 0.
+    print(f"Starting server at http://{host}:{resolved_port}")
+    if listener is not None:
+        # A bound listener exists exactly when we are NOT reloading, and it is
+        # the app object (not its import string) that is served in that case:
+        # with no reloader there is nothing to re-import the app, so handing
+        # over the object is what lets this process announce its address to the
+        # very app it serves.
+        from local_operator.server.app import app as asgi_app
+
+        # Announced on the app object, NOT in the environment, and that is the
+        # whole point of the split: this process may spawn children (an agent's
+        # shell tool, a wrapper, another entry point booting the same app) and an
+        # inherited variable would let any of them publish a record naming OUR
+        # listener as its own.
+        serve_registry.announce_address(asgi_app, host, resolved_port)
+        config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # ``KeyboardInterrupt`` caught here because this path replaces
+        # ``uvicorn.run``, which catches it around the same call. uvicorn's own
+        # signal handling turns Ctrl+C into a clean shutdown while it is
+        # installed, so this only covers the windows either side of that — but
+        # those windows are exactly where a traceback would otherwise reach the
+        # operator instead of a plain exit.
+        try:
+            uvicorn.Server(config).run(sockets=[listener])
+        except KeyboardInterrupt:
+            pass
+    else:
+        # The reloader re-imports ``server.app`` in a CHILD process, so the app
+        # object cannot be reached above and the inherited environment is the
+        # only channel that survives into it. The value carries OUR pid, so only
+        # the child this process spawns honours it, and it is read-and-cleared
+        # there so nothing that child later spawns can re-publish it.
+        serve_registry.announce_to_reload_child(host, resolved_port)
         uvicorn.run(
             "local_operator.server.app:app",
             host=host,
-            port=port,
+            port=resolved_port,
             reload=reload,
             reload_excludes=[".venv"],
         )
-    else:
-        uvicorn.run("local_operator.server.app:app", host=host, port=port, reload=reload)
     return 0
 
 
@@ -4865,6 +6959,8 @@ def main() -> int:
             return sessions_command(args)
         elif args.subcommand == "stop":
             return stop_command(args)
+        elif args.subcommand == "refresh":
+            return refresh_command(args)
         elif args.subcommand == "resume-click":
             # Function-local like every other runtime import here: this module
             # is on the CLI startup path and must not pull the spawn/terminal
@@ -4873,11 +6969,12 @@ def main() -> int:
 
             if open_session(args.session):
                 return 0
-            # A CLICK THAT DOES NOTHING NEEDS A REASON. Success stays silent —
-            # nobody watches a notification's activation target — but the
-            # failure path is reachable by hand and the fallback spawn
-            # "usually does nothing visible", so without this a user has no
-            # way to find out why the click appeared to do nothing (D17).
+            # A CLICK THAT DOES NOTHING NEEDS A REASON, and on a real click this
+            # is only half of it. The receipt is what a HAND-RUN gets, and it is
+            # what makes the failure path debuggable from a terminal; the click
+            # itself has no terminal (its three streams are /dev/null), so the
+            # ladder raises the same sentence as an out-of-band toast before
+            # returning False (UX round 2, U10).
             print(
                 f"could not open a terminal for session {args.session} — "
                 f"run: lop --resume {args.session}",
@@ -4902,7 +6999,35 @@ def main() -> int:
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command
 
-            return update_command(check=bool(getattr(args, "check", False)))
+            return update_command(
+                check=bool(getattr(args, "check", False)),
+                refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+                from_snapshot=getattr(args, "from_snapshot", None),
+            )
+        elif args.subcommand == "install":
+            # Same lazy import, same reason. The generation layout's own verbs:
+            # they install nothing from a network, so they never consult PyPI.
+            from local_operator.update import (
+                DEFAULT_KEEP_GENERATIONS,
+                install_migrate_command,
+                install_prune_command,
+                install_status_command,
+            )
+
+            action = getattr(args, "install_command", None)
+            if action == "prune":
+                # The parser's default IS the policy default and its type check
+                # refuses a negative, so this is only ever a non-negative int
+                # (design review D5/D15; review round 6 R6-4: the ``None`` arm this
+                # used to carry became unreachable when D5 landed).
+                keep = int(getattr(args, "keep", DEFAULT_KEEP_GENERATIONS))
+                return install_prune_command(keep=keep)
+            if action == "migrate":
+                return install_migrate_command()
+            if action == "status":
+                return install_status_command()
+            print("usage: lop install {status, prune, migrate}", file=sys.stderr)
+            return 1
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory

@@ -87,6 +87,18 @@ VIEWER_PROTOCOL = 1
 #: an implementation rather than the other way round.
 KNOWN_VIEWER_PROTOCOLS = frozenset({VIEWER_PROTOCOL})
 
+#: The viewer RECORD's surface names. Wire constants, not decoration: the
+#: client routes on them (a desktop viewer is the click ladder's FIRST
+#: destination — UI-first, review round 1 R9 — and the surface the ladder asks
+#: about when the launch is refused, review round 2 R13) and the runtime's
+#: rung-3 probe asks for a TUI. Declared here, beside the record that carries
+#: them, so the two halves that ROUTE on them ask through the constant rather
+#: than re-spelling it — which is what ``serving.py::_tui_viewer_running`` did
+#: with the literal ``"tui"`` until review round 3's N5, and what made the
+#: earlier, unqualified version of this sentence false.
+TUI_SURFACE = "tui"
+DESKTOP_SURFACE = "desktop"
+
 #: Advertised by a viewer whose host can activate its own window, and CONSULTED
 #: by the client before it spends a round trip asking. Lives here, beside the
 #: record that carries it, so neither half has to import the other's module to
@@ -194,6 +206,20 @@ class ViewerRecord:
     #: running. ``choose_viewer`` honours it now so the older client does the
     #: right thing on the day something publishes ``False``.
     can_switch: bool = True
+    #: Whether this viewer currently HAS a window. Defaulted ``True`` so every
+    #: TUI record — and every record written by a build that predates the field
+    #: — reads correctly, because a TUI is never windowless.
+    #:
+    #: THE FIELD EXISTS FOR ONE CASE, and it is a macOS one: closing the last
+    #: window leaves the desktop app alive in the dock with no window at all.
+    #: Such a process legitimately reports the session it was last showing —
+    #: but it cannot be displaying anything, so a routing decision that read
+    #: ``current_session`` alone would treat a closed window as "already
+    #: displaying the target", answer the click with a no-op, and leave the
+    #: user with nothing on screen. The publisher is therefore required to say
+    #: whether a window exists, and the client requires it before it treats
+    #: ``current_session`` as evidence.
+    has_window: bool = True
     #: When this viewer last held OS focus (``time.time()``). The best
     #: available proxy for "the window the user expects to land in" when
     #: several viewers could take the same session. 0.0 means never focused.

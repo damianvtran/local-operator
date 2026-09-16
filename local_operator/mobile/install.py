@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from local_operator import procname
+from local_operator import launchd, procname
 from local_operator.mobile.auth import generate_password, load_password, store_password
 from local_operator.mobile.daemon import DEFAULT_PORT
 from local_operator.paths import log_dir
@@ -117,17 +117,29 @@ def log_path() -> Path:
 
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     """The whole supervised-unit plan in one pure function — every consumer
-    (install, status, tests) reads the same rendering."""
+    (install, status, tests) reads the same rendering.
+
+    ``launchd_job`` rather than ``launchd_program``: it sets ``Program`` to the
+    branded interpreter image and ``ProgramArguments[0]`` to this daemon's role
+    label, which is what stops the four supervised daemons reading as one
+    indistinguishable ``Local Operator`` row. macOS names a background item by
+    the basename of ``ProgramArguments[0]``, so the pre-branding bare
+    ``sys.executable`` is what made ``lop mobile install`` notify that 'python3
+    is running in the background'. The trade-off that shape accepts is recorded
+    in ``procname.launchd_job``; a machine where no link can be planted gets
+    byte-for-byte this plist as it was before.
+
+    ``Program`` is the STABLE shim on a machine with the generation layout, and
+    the role label does not move with it — see ``procname.supervised_image`` for
+    why a path inside this venv is unsafe for a unit launchd may restart.
+    """
     return {
         "Label": LABEL,
-        # Branded interpreter image when one can be planted: macOS names this
-        # background item by the basename of ProgramArguments[0], so a bare
-        # `sys.executable` is what made `lop mobile install` notify that
-        # 'python3 is running in the background'. Falls back to sys.executable.
-        "ProgramArguments": procname.launchd_program(
+        **procname.launchd_job(
             "local_operator.mobile.service",
             "--port",
             str(port),
+            label=procname.branded_argv0(procname.LABEL_MOBILE, port=port),
         ),
         "RunAtLoad": True,
         # Restart on crash, throttled by launchd's own 10s floor; an
@@ -140,6 +152,59 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         # SSE-holding daemons must not be App Nap'd into suspending timers.
         "ProcessType": "Interactive",
     }
+
+
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Bring this daemon's LaunchAgent up to date, and restart it if it changed.
+
+    THE REPAIR ``lop-update`` NEVER HAD FOR THIS DAEMON. ``install`` renders the
+    current plist and nothing ever rewrote one written by an older build, so a
+    daemon installed before branding shows a bare ``python3.14`` in Activity
+    Monitor for the rest of its life — the colleague's symptom, measured on the
+    operator's machine as ``com.local-operator.mobile.plist`` (mtime Sep 5)
+    running ``python3.14 -m local_operator.mobile.service --port 4098``.
+
+    Deliberately NARROW: it rewrites the plist and restarts the job, and does
+    not touch the password, the Keychain or the web bundle, because the wheel
+    already ships the bundle and the upgrade path must not pay for a rebuild —
+    that is why this is not routed through ``install``.
+
+    Never raises, and never acts outside the real home:
+    ``launchd.is_own_plist`` refuses a redirected ``HOME`` because
+    ``launchctl`` addresses the REAL user's session whatever the plist path
+    says, so a sandboxed run would otherwise restart the operator's daemon.
+    """
+    name = "mobile"
+    try:
+        if not is_supported():
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not launchd.is_own_plist(path, LABEL):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The port comes off the plist being REPLACED: a repair must not move a
+        # daemon someone installed on a non-default port back to the default.
+        port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind != "repaired":
+            return outcome
+        # bootout + bootstrap, NOT kickstart -k: measured on macOS with a
+        # scratch label, a kickstart after a rewrite restarts the job from
+        # launchd's in-memory definition and keeps running the OLD argv. See
+        # :mod:`local_operator.launchd`.
+        _launchctl("bootout", _domain(), str(path))
+        result = _launchctl("bootstrap", _domain(), str(path))
+        if result.returncode != 0:
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
+            return launchd.reload_failure(
+                name,
+                path,
+                "lop mobile install",
+                result.stderr.strip()[:200] or str(result.returncode),
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:

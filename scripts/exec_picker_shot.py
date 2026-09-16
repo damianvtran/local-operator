@@ -21,8 +21,8 @@ gone from the scan, and shoots the frame the user actually sees when a one-shot
 ends underneath them. It also prints ``plan_columns`` before and after, because
 the stills show the symptom and only the numbers show whether the column moved.
 
-``--scroll`` seeds enough cold conversations to push the list past
-``PAGE_ROWS_MAX``, which is the ORDINARY shape rather than a stress case: the
+``--scroll`` seeds enough cold conversations to push the list past the rows the
+terminal can draw, which is the ORDINARY shape rather than a stress case: the
 picker scrolls at eleven sessions and this repo's author has ~500 of them, so
 every picker they open is in this state. It exists because design round 2 (D2)
 found the exec legend structurally unreachable there while every short-list
@@ -104,7 +104,13 @@ async def _seed_and_shoot(
         # Plain cold conversations, seeded through the same real transcript
         # writer: they need no live record, and their only job is to make the
         # list longer than one page so `scrolls=True` reaches the footer.
-        for filler in range(12):
+        #
+        # Sized against the TERMINAL, not against a constant: the picker draws
+        # as many rows as the height affords now that the 10-row cap is gone,
+        # so a fixed 12 no longer scrolls at the default geometry — the
+        # script's own precondition caught that. The default is 30 rows, which
+        # draws ~17, so seed comfortably past whatever this run asks for.
+        for filler in range(max(12, rows * 2)):
             sid = f"f{filler:011d}"
             directory = cfg / "sessions" / sid
             transcript = Transcript(directory)
@@ -201,17 +207,17 @@ async def _seed_and_shoot(
                 "— this frame cannot show the scrolling shed order"
             )
             lines = screen.render_lines_for_test()
-            # The legend lives on the META row (the counter's), NOT the key row
-            # below it — that placement is the D2 fix. Read the exact row rather
-            # than grepping the frame: the list is drawing `[exec]` too, so a
-            # whole-frame search reports a legend that is not there.
-            meta, keys = lines[-2], lines[-1]
+            # The legend lives in the FILTER ROW, NOT in the list — that
+            # placement is the D2 fix. Read that row rather than grepping the
+            # frame: the list is drawing `[exec]` too, so a whole-frame search
+            # reports a legend that is not there.
+            meta = keys = screen.render_footer_for_test()
             assert any(
                 EXEC_MARKER.strip() in line for line in lines[:-2]
             ), "no [exec] row in the list: the legend has nothing to explain"
             print(
                 f"shape: rows={len(screen.visible_rows)} page={page} "
-                f"scrolls=True width={screen._card_width()}"
+                f"scrolls=True width={screen._usable()}"
             )
             print(f"meta : {meta}")
             print(f"keys : {keys}")

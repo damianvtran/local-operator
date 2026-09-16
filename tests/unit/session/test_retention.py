@@ -260,6 +260,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     start counting as activity again."""
     from local_operator import resume
     from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.runtime import registry
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
 
@@ -275,6 +276,16 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         resume.ORIGIN_CACHE_NAME,
         SUBAGENT_ROSTER_SIDECAR,
         CREATED_AT_NAME,
+        # The durable stop marker a killer stages before an irreversible step:
+        # evidence ABOUT the run, not content BY it, so it must not count as
+        # activity (its canonical name lives in the registry module, which owns
+        # the writer and the reader).
+        registry.STOP_MARKER_NAME,
+        # The runtime's turn journal, written into the same directory and
+        # registered for the same reason: bookkeeping rather than content, so it
+        # must not be billed against the cleanup size budget. Its canonical name
+        # also lives in the registry module.
+        registry.TURN_JOURNAL_NAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

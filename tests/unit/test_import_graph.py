@@ -163,6 +163,35 @@ def test_session_factory_import_stays_off_the_heavy_stacks(
     _assert_absent(session_factory_modules, "textual", "TUI front end; the server has no terminal")
 
 
+# --- The tool registry -------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def tools_registry_modules() -> set[str]:
+    """Modules loaded by importing the table every session build walks."""
+    return _imported_modules("local_operator.tools.registry")
+
+
+def test_tool_registry_import_does_not_load_jedi(
+    tools_registry_modules: set[str],
+) -> None:
+    # jedi is the `lsp` extra, and its import executes the whole inference
+    # graph — 108 ms measured on an M-series box, against ~600 ms for the whole
+    # of create_session with its own imports pre-warmed. tools/registry.py
+    # imports the lsp module EAGERLY to fill its factory table, so a
+    # module-scope `import jedi` in tools/lsp.py puts that 108 ms on every
+    # session construction whether or not the model ever asks a symbol
+    # question. On the desktop plane a session construction is a fresh runtime
+    # child, which makes it a cost paid on every attach. tools/lsp.py now
+    # probes with find_spec and imports on first USE; this pin is what makes a
+    # revert loud.
+    _assert_absent(
+        tools_registry_modules,
+        "jedi",
+        "108 ms of inference-graph import per session build; only an `lsp` call needs it",
+    )
+
+
 # --- Per-session model configuration -----------------------------------------
 
 
@@ -211,3 +240,30 @@ def test_wake_store_import_is_stdlib_only(wake_store_modules: set[str]) -> None:
     _assert_absent(wake_store_modules, "tiktoken", "no tokenizer")
     ours = sorted(m for m in wake_store_modules if m.startswith("local_operator"))
     assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.store"], ours
+
+
+def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
+    """The same contract as the index, for the same processes.
+
+    ``local_operator.wakes.deliveries`` is read on the supervisor's serve loop
+    (an always-on ~40 MB trigger) and by ``lop wake status`` on its startup
+    path, so it must not drag in the harness either. Pinned separately from the
+    store rather than folded into it: the two are independent files with
+    independent readers, and a future edit that imports a session or a model
+    here must fail THIS test, in a way the message names.
+    """
+    modules = _imported_modules("local_operator.wakes.deliveries")
+
+    _assert_absent(modules, "asyncio", "the ledger is read and written synchronously")
+    _assert_absent(modules, "pydantic", "records are plain dicts, like the index entries")
+    _assert_absent(modules, "local_operator.session", "the ledger describes attempts, not sessions")
+    _assert_absent(modules, "local_operator.harness", "no schedule model is imported")
+    _assert_absent(modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(modules, "local_operator.tui", "no front end")
+    _assert_absent(modules, "textual", "no front end")
+    ours = sorted(m for m in modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.wakes",
+        "local_operator.wakes.deliveries",
+    ], ours

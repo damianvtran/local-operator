@@ -18,11 +18,21 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import errno
 import inspect
 import logging
 import random
+import ssl
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -35,7 +45,9 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
     StreamModelEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
+    StreamUsageEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
 
@@ -123,12 +135,22 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #:   - "temporary failure in name resolution" / "name or service not known" /
 #:     "getaddrinfo failed": Linux/glibc ``EAI_AGAIN`` / ``EAI_NONAME`` and the
 #:     generic resolver-failure wording.
-#:   - "network is unreachable" / "errno 51": no route to the network at all
-#:     (macOS ``ENETUNREACH`` 51, Linux 101) — the interface has no default
-#:     route yet after waking.
-#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113).
+#:   - "network is unreachable" / "errno 51": ``ENETUNREACH`` (macOS 51, Linux
+#:     101) — no route to the network, which is the interface having no default
+#:     route yet after waking... but ALSO what one unroutable address family
+#:     looks like, which is why this half is held to a stricter standard below.
+#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113),
+#:     and ambiguous in exactly the same way.
 #:   - "network is down" / "errno 50": ``ENETDOWN`` — the interface is still
 #:     coming up.
+#:   - "can't assign requested address" / "cannot assign requested address" /
+#:     "errno 49" / "errno 99": ``EADDRNOTAVAIL`` (macOS 49, Linux 99) — the
+#:     socket had no source address it could bind. macOS words it "can't" and
+#:     Linux "Cannot", so both spellings are listed. This is the one the
+#:     2026-09-15 incident actually carried, and it is the reason the markers
+#:     below are no longer the WHOLE of the evidence: a laptop mid-wifi-reconnect
+#:     reports it, and it arrives one hop down the cause chain (see
+#:     :func:`_transport_chain`), where the top-level sentence says nothing.
 #:
 #: DELIBERATELY EXCLUDED — do not re-add: ``ECONNREFUSED`` ("connection refused"
 #: / errno 61 on macOS, 111 on Linux). A refused connection is a TCP RST from the
@@ -139,19 +161,112 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #: genuinely-down LOCAL provider (ollama, LM Studio, a localhost proxy) the
 #: 8-minute patient wait AND suppress the fallback-chain walk that otherwise
 #: routes around it — a regression. A refusal stays an ordinary transient error.
-_CONNECTIVITY_LOSS_MARKERS = (
+#:
+#: The list is split in two below by WHAT THE EVIDENCE PROVES, which is not a
+#: stylistic division: see :data:`_MACHINE_ONLY_MARKERS` for the failures no
+#: destination can cause, and :data:`_ROUTE_EVIDENCE_MARKERS` for the route
+#: errors that can mean either the machine or the one address that was dialled.
+_MACHINE_ONLY_MARKERS = (
     "nodename nor servname",
     "errno 8",
     "temporary failure in name resolution",
     "name or service not known",
     "getaddrinfo failed",
-    "network is unreachable",
-    "errno 51",
-    "no route to host",
-    "errno 65",
     "network is down",
     "errno 50",
+    "can't assign requested address",
+    "cannot assign requested address",
+    "errno 49",
+    "errno 99",
 )
+
+#: Route errors: evidence that can mean EITHER "this machine has no route" or
+#: "this one address is not routable from here", and therefore NOT sufficient
+#: on its own when it is only reached by unwinding the chain.
+#:
+#: The ambiguity is real and was measured (agent review R1-3): a dial to a single
+#: IPv6 literal from a machine with no v6 route raises
+#: ``ConnectError("All connection attempts failed")`` over ``OSError(65)`` — the
+#: same shape as an interface that woke up with no default route yet. The two
+#: want opposite treatment: the first is a per-target condition whose remedy is
+#: the fallback walk, the second is the waking-laptop case this whole path
+#: exists for.
+#:
+#: So a route error counts on its own only when it is the failure's OWN account
+#: (the exception the caller holds, or the ``message`` of a wrapped one — see
+#: ``is_connectivity_loss``), which is what this module has always read and what
+#: its docstring above promised. Reached any other way it must be corroborated,
+#: by :data:`_MACHINE_ONLY_MARKERS`/``_MACHINE_ONLY_ERRNOS`` or by anyio's
+#: multi-address aggregate: ``connect_tcp`` raises an ``ExceptionGroup`` for
+#: ``len(oserrors) > 1`` and a bare ``OSError`` otherwise, so a group IS anyio
+#: telling us EVERY address of the name failed to route, where one lone failure
+#: says nothing about the machine.
+_ROUTE_EVIDENCE_MARKERS = (
+    "network is unreachable",  # macOS ENETUNREACH 51, Linux 101
+    "errno 51",
+    "no route to host",  # EHOSTUNREACH — macOS 65, Linux 113
+    "errno 65",
+)
+
+#: Every wording that marks a pre-connect failure, in one tuple, for callers that
+#: only want "does this text look like connectivity at all". The two halves are
+#: kept separate above because ``is_connectivity_loss`` weights them differently.
+_CONNECTIVITY_LOSS_MARKERS = _MACHINE_ONLY_MARKERS + _ROUTE_EVIDENCE_MARKERS
+
+#: ``errno`` values no DESTINATION can cause: the socket could not be given a
+#: source address, or the interface is down. Sufficient on their own, wherever on
+#: the chain they appear. Read off the ``OSError`` objects rather than parsed out
+#: of their text, and through the ``errno`` module rather than as literals, so
+#: each entry is correct on BOTH platforms at once: ``EADDRNOTAVAIL`` is 49 on
+#: macOS and 99 on Linux, and hard-coding either number is a classifier that
+#: silently stops working when the same code runs under Linux.
+#:
+#: NOT a one-for-one mirror of the marker lists, and the difference is not an
+#: oversight to be "restored": the resolution half of
+#: :data:`_MACHINE_ONLY_MARKERS` (``nodename nor servname``, ``errno 8``,
+#: ``temporary failure in name resolution``, ``name or service not known``,
+#: ``getaddrinfo failed``) has NO counterpart here, because ``getaddrinfo``
+#: reports ``EAI_*`` codes, which are not ``errno`` values at all and whose
+#: numbering is not stable across platforms. The mapping is exact for the
+#: route/address/interface failures only.
+_MACHINE_ONLY_ERRNOS: tuple[int, ...] = (
+    errno.EADDRNOTAVAIL,  # macOS 49 / Linux 99 — no source address to bind
+    errno.ENETDOWN,  # macOS 50 / Linux 100 — the interface is still coming up
+)
+
+#: The ``errno`` counterparts of :data:`_ROUTE_EVIDENCE_MARKERS`, and admitted on
+#: the same terms: sufficient when the failure's own text carries it, otherwise
+#: only with corroboration.
+_ROUTE_EVIDENCE_ERRNOS: tuple[int, ...] = (
+    errno.ENETUNREACH,  # macOS 51 / Linux 101 — no route to the network
+    errno.EHOSTUNREACH,  # macOS 65 / Linux 113 — no route to that host
+)
+
+#: Wordings that prove the DESTINATION was reached, which refutes
+#: :func:`is_connectivity_loss` whatever else the chain says. The complement of
+#: :data:`_CONNECTIVITY_LOSS_MARKERS`, and consulted only from
+#: :func:`_is_destination_reached`:
+#:   - "connection refused" / "econnrefused" / "errno 61" / "errno 111":
+#:     ``ECONNREFUSED`` (macOS 61, Linux 111) — a TCP RST from the far end. The
+#:     errno is also compared as an integer (see
+#:     :data:`_DESTINATION_REACHED_ERRNOS`); these wordings cover the case where
+#:     the errno survives only inside a message. Kept EXPLICIT rather than
+#:     implied by "no marker matched", because the fallback at the end of
+#:     :func:`is_connectivity_loss` treats exactly that silence as offline.
+_DESTINATION_REACHED_MARKERS = (
+    "connection refused",
+    "econnrefused",
+    "errno 61",
+    "errno 111",
+)
+
+#: ``errno`` values proving the far end answered. ``ECONNREFUSED`` only: a
+#: reset, a broken pipe or a protocol error all say the connection was
+#: ESTABLISHED, but they arrive as their own classes
+#: (:data:`_MID_STREAM_TRANSPORT_LOSS_CLASSES` handles the ones that matter),
+#: and widening this set would start excusing the pre-connect failures the
+#: patient budget exists for.
+_DESTINATION_REACHED_ERRNOS: tuple[int, ...] = (errno.ECONNREFUSED,)
 
 #: Transport failures that mean "a connection that was ALREADY WORKING died" —
 #: the mid-stream counterpart to :data:`_CONNECTIVITY_LOSS_MARKERS`, and
@@ -214,6 +329,80 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
     "readtimeout",
     "writetimeout",
     "remoteprotocolerror",
+)
+
+#: Substrings by which an AGGREGATOR reports, IN BAND on an HTTP 200 stream,
+#: that one of its UPSTREAM hosts died — the gateway's own routing/transport
+#: failure, not a refusal of the request WE sent it.
+#:
+#: OpenRouter is a GATEWAY: it answers 200, begins streaming, and then one of the
+#: upstream hosts behind it drops the connection mid-body. The status line is
+#: already spent, so the gateway reports it INSIDE the stream as an error chunk
+#: carrying ``code: 502`` and a message naming the upstream host and the
+#: transport that died. The recorded incident (a Minerva sentinel pass,
+#: 2026-09-13) is the canonical shape:
+#:
+#:     provider_unavailable: Upstream error from Together: Stream error:
+#:     h2 protocol error: error reading a body from connection
+#:
+#: Every marker below is evidence of THAT class — a routing or transport
+#: failure on the gateway's side of the hop, which is exactly the class a
+#: re-issue repairs because the gateway re-routes to another host. They are
+#: matched case-insensitively as substrings of the composed message, because
+#: that message is assembled by the client from several fields
+#: (``metadata.error_type``, the relay sentence, the upstream's JSON-encoded
+#: ``raw``) and the order and casing are the aggregator's formatting, not part
+#: of the signal. Deliberately NARROW: a 5xx that names none of these and carries
+#: no relay envelope — see :func:`is_aggregator_upstream_stream_failure` for that
+#: second, provenance-shaped piece of evidence — is left exactly as it was,
+#: because "the gateway 500ed" with no evidence about WHAT failed is not a routing
+#: failure we are entitled to replay.
+_AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
+    "provider_unavailable",
+    "upstream error from",
+    "stream error",
+    "h2 protocol error",
+    "network connection lost",
+    "json error injected into sse stream",
+)
+
+#: The only stream events that may be forwarded WITHOUT making an attempt
+#: non-retryable inside :func:`stream_with_failover`.
+#:
+#: ``forwarded_any`` means exactly one thing: the caller has been handed output
+#: that cannot be un-shown, so replaying this attempt would stream it twice.
+#: Every member here fails that test — it carries NOTHING the caller has seen:
+#:
+#: * ``StreamStartEvent`` is a boundary marker announcing that the provider
+#:   began. Counting it would make every failure landing after acceptance but
+#:   before the first token non-retryable (Anthropic 529s, in-band error chunks
+#:   on a 200 stream), bypassing credential rotation and the whole fallback
+#:   chain. It would also misreport a pre-content transport death as a
+#:   MID-STREAM loss, which is what :func:`is_mid_stream_connectivity_loss`
+#:   infers from this very flag.
+#: * ``StreamReasoningDelta`` carries the model's private reasoning, which
+#:   NOTHING renders: the loop appends text only for its visible channel, no
+#:   frontend handler exists, and the transcript never sees it. Counting it
+#:   re-breaks the case above for the reasoning families this harness runs.
+#: * ``StreamUsageEvent`` carries the provider's token accounting for the call
+#:   so far, which is METADATA and not content: it renders nothing, joins no
+#:   transcript, and its consumers document it as one report per provider call
+#:   (see ``Session.complete_aside``) — so a retry that reports again is
+#:   reporting a second real call, not repeating the first. Only the
+#:   OpenAI-compatible and Responses clients emit usage before the end of a
+#:   stream, which bounds where a lone event can be the FIRST thing forwarded.
+#:
+#: An ALLOWLIST of "safe to retry", deliberately, rather than a list of the
+#: events that count as seen: the two differ in how a FUTURE event type fails.
+#: An unlisted type counts as seen, so a type nobody listed costs at most the
+#: pre-existing behaviour — a retry that was available but not taken — never a
+#: delta the user reads twice. Add a member only after checking every consumer
+#: on the caller's side of the driver for a render, a transcript entry, or
+#: another durable effect.
+_RETRY_SAFE_STREAM_EVENTS: tuple[type[StreamEvent], ...] = (
+    StreamStartEvent,
+    StreamReasoningDelta,
+    StreamUsageEvent,
 )
 
 
@@ -523,6 +712,7 @@ class ProviderError(RenderedStreamError):
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
         transport: bool = False,
+        transport_cause: BaseException | None = None,
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -558,14 +748,35 @@ class ProviderError(RenderedStreamError):
         #: that builds its own connectivity ``ProviderError`` must keep taking
         #: the patient path there.
         self.transport = transport
+        #: The transport exception this error was BUILT from, carried on the
+        #: standard chain (``__cause__``) rather than a bespoke attribute so
+        #: that :func:`is_connectivity_loss` — and anything else that walks a
+        #: cause chain, a traceback printer included — can see the evidence the
+        #: wrapper would otherwise throw away. It has to be preserved somewhere:
+        #: ``wrap_transport_error`` keeps only the class name and ``str(exc)``,
+        #: and for anyio's aggregate that string is a sentence with NO errno in
+        #: it ("All connection attempts failed") — measured on this machine, a
+        #: dial that failed with EADDRNOTAVAIL and one refused with ECONNREFUSED
+        #: both arrive as exactly ``ConnectError: All connection attempts
+        #: failed``. The errno that separates them is one hop further down, so
+        #: the chain has to survive the wrap or the classifier is guessing.
+        #:
+        #: Assigned BEFORE ``connectivity_loss`` below, which is computed from
+        #: this chain. Only :func:`wrap_transport_error` passes one, so every
+        #: other construction site leaves ``__cause__`` untouched — including
+        #: the callers that later do their own ``raise wrapped from exc``, where
+        #: the interpreter assigns the same link again.
+        if transport_cause is not None:
+            self.__cause__ = transport_cause
         #: Stamped at construction so the flag travels with the exception across
         #: the layer boundary (see ``RenderedStreamError.connectivity_loss``):
         #: the harness must decide whether an interrupted turn is continuable,
         #: and it cannot import this module to ask. Computed by the SAME
         #: classifier every other call site uses rather than re-derived, so
         #: there is still exactly one definition of "the machine is offline".
-        #: Safe to evaluate here — the classifier reads only ``status`` and
-        #: ``message``, both already assigned above.
+        #: Safe to evaluate here — everything the classifier reads is already
+        #: assigned above: ``status`` and ``message`` on this object, and the
+        #: ``transport_cause`` chain handed to ``__cause__`` a few lines up.
         #:
         #: This is the PRE-CONNECT half only. The mid-stream half cannot be
         #: decided here, because it turns on a fact no exception carries:
@@ -932,7 +1143,87 @@ def is_mid_stream_connectivity_loss(error: BaseException) -> bool:
     return isinstance(error, _MID_STREAM_TRANSPORT_LOSS_CLASSES)
 
 
-def _mark_mid_stream_connectivity(error: ProviderError) -> None:
+def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | None) -> bool:
+    """An AGGREGATOR's in-band, mid-stream report that an UPSTREAM host died.
+
+    The third member of the family that decides whether an interrupted turn may
+    be CONTINUED, and the one that exists because an aggregator is a GATEWAY
+    rather than a provider. For a first-party provider the rule is — correctly —
+    that a 5xx means the provider DID answer and replaying the turn would hide a
+    failure the user needs to see. For a gateway whose in-band 5xx describes an
+    UPSTREAM host dying, re-issuing the turn is exactly the remediation: the
+    gateway has already accepted the request, answered 200 and begun streaming,
+    so it routes the next attempt to another of its hosts — which is the
+    failover the operator expects, and precisely what was lost when the sentinel
+    pass above died holding 13 minutes of work.
+
+    THE PROVIDER GATE carries as much weight as the error shape, so both are
+    required. The identity is a fact only the driver holds (it parses the
+    selector), which is why this predicate takes it rather than trying to infer
+    it from the message. Believing the shape alone would widen the rule for
+    first-party providers, where there is no sibling host to re-route to and the
+    same words describe the provider's own service failing — a case whose
+    current terminal behaviour is exactly what the loop's continuation budget
+    was written to protect.
+
+    The status gate keeps every REFUSAL terminal. A 4xx is the gateway
+    answering about OUR request — a bad model slug, a bad field, auth, quota,
+    moderation — and it is deterministic in its bytes, so re-asking earns the
+    same answer while spending the turn's continuation budget. Only a 5xx is a
+    statement about the gateway's own side of the hop.
+
+    A 5xx qualifies on EITHER of two kinds of evidence, and the second exists
+    because the first cannot cover the incident's whole class:
+
+    - the routing/transport WORDING in
+      :data:`_AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS`, when the upstream
+      host said something the markers recognise; or
+    - the relay ENVELOPE's own sentence (``clients.RELAY_ENVELOPE_MARKER``),
+      which is the gateway saying it is passing on an upstream provider's
+      failure. That is PROVENANCE rather than wording, so it stands however
+      opaque or unfamiliar the upstream host's body was — the case that stayed
+      terminal while every fixture started from the marker-bearing body, i.e.
+      the same incident waiting to happen again on a bare ``"ERROR"``.
+
+    Two shapes keep the pre-fix behaviour, recorded as decisions rather than
+    leftovers:
+
+    - a 5xx carrying NEITHER evidence; and
+    - ``503: no available model for this request``, a capacity/routing
+      condition. A re-issue could genuinely route around it, so admitting it is
+      arguable — but it makes no claim that anything DIED, and reading a routing
+      report out of it would be inferring the gateway's mood rather than its
+      words. Terminal costs the pre-existing behaviour (the operator reads the
+      gateway's own diagnostic); admitting it would spend the continuation
+      budget on what may be a property of the request's routing preferences.
+    """
+    if provider is None or not isinstance(error, ProviderError):
+        return False
+    # Imported at call time, like the sibling helpers in this module: `registry`
+    # is a heavier module and this sits on the stream path.
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider not in AGGREGATOR_PROVIDERS:
+        return False
+    if error.status is None or error.status < 500:
+        return False
+    # Imported at call time for the same reason as `registry` above: `clients`
+    # imports THIS module at module scope for `ProviderError`, so the reverse
+    # edge is deliberately taken late, from a frame that only runs once both
+    # modules are loaded.
+    from local_operator.providers.clients import RELAY_ENVELOPE_MARKER
+
+    lowered = error.message.lower()
+    if any(marker in lowered for marker in _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS):
+        return True
+    # The envelope is the second kind of evidence: the gateway's own sentence
+    # saying it is relaying an UPSTREAM provider's failure. Sourced from the
+    # module that mints it rather than re-spelled here, because two copies of
+    # the wording would drift into disagreeing about what a relay looks like.
+    return RELAY_ENVELOPE_MARKER in lowered
+
+
+def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None = None) -> None:
     """Upgrade ``connectivity_loss`` on an error raised AFTER deltas were sent.
 
     Called from the two ``forwarded_any`` raise sites in
@@ -943,11 +1234,193 @@ def _mark_mid_stream_connectivity(error: ProviderError) -> None:
     the same ``ReadError`` seen BEFORE any delta stays an ordinary transient
     and keeps its fast retry and its fallback walk.
 
+    Two families qualify, and the flag means the same thing for both: the
+    provider call was cut off mid-stream in a way that re-issuing the REMAINDER
+    repairs, so the loop must continue the turn rather than end it.
+
+    * :func:`is_mid_stream_connectivity_loss` — a status-less transport death.
+    * :func:`is_aggregator_upstream_stream_failure` — a gateway reporting its
+      own upstream host dying in band. ``provider`` is the selector's provider,
+      passed in by the driver because the predicate needs the identity and this
+      helper cannot recover it from the error. Only the forwarded-any
+      ``ProviderError`` arm passes it: that is the arm an aggregator's IN-BAND
+      report arrives on. The transport arm deliberately calls this bare —
+      ``wrap_transport_error``'s result is status-less by construction, so the
+      aggregator predicate cannot fire there and passing a provider would only
+      suggest it could.
+
     Never clears the flag — a pre-connect connectivity loss that somehow
     surfaces here is still one. Only ever an upgrade.
     """
-    if is_mid_stream_connectivity_loss(error):
+    if is_mid_stream_connectivity_loss(error) or is_aggregator_upstream_stream_failure(
+        error, provider
+    ):
         error.connectivity_loss = True
+
+
+def _transport_chain(error: BaseException) -> Iterator[BaseException]:
+    """Every exception reachable from ``error`` through the standard chain.
+
+    WHY the chain, and not just the exception in hand: anyio reports a failed
+    ``connect_tcp`` as ``OSError("All connection attempts failed")``
+    (``anyio/_core/_sockets.py``), a sentence that carries **no errno** — the
+    whole of the evidence sits one hop away, on the exception it was raised
+    ``from``. That ``OSError`` is wrapped twice more before it reaches us
+    (httpcore's ``ConnectError``, then httpx's), so ``ProviderError.message``
+    is, for a real offline laptop AND for a real refused connection alike,
+    exactly ``"ConnectError: All connection attempts failed"``. Reading only
+    the top level cannot tell those apart, and did not: a machine that could
+    not open any socket at all classified as an ordinary transient and got the
+    3-attempt fast budget, which is the 2026-09-15 incident this fixes.
+
+    Both links are walked because the layers above use both interchangeably.
+    anyio raises with ``from`` (``__cause__``) while httpcore's
+    ``map_exceptions`` reaches the same ``OSError`` through ``__context__``; a
+    real chain measured on this machine is
+    ``httpx.ConnectError --cause--> httpcore.ConnectError --context-->
+    OSError("All connection attempts failed") --cause--> OSError(49, ...)``.
+    Skipping either link would leave a shape that looks identical to the
+    offline case classified as transient. That is a considered difference from
+    the MCP transport renderer, which walks ONLY ``__cause__`` (agent review
+    R1-6): that one puts the first network-ish exception it finds into a
+    USER-VISIBLE sentence ("cannot resolve <host>"), where a stale neighbour
+    would print a wrong diagnosis, while here the walk only decides which
+    BUDGET a failure gets and a wrong answer is a longer wait. The errno the
+    incident turns on is under a ``__context__`` hop, so excluding it would
+    leave the real failure exactly as misclassified as before this change.
+
+    ``BaseExceptionGroup`` members are unwound because a multi-address connect
+    reports one failure per address family — a genuinely offline machine yields
+    a group of ``ENETUNREACH``/``EADDRNOTAVAIL``, and so does a reachable host
+    whose v6 route happens to be missing. Which of the two it is can only be
+    decided by looking inside. ``id()`` memoisation is what makes a cyclic or
+    self-referential chain terminate instead of spinning.
+
+    ``__context__`` IS the interpreter's IMPLICIT link, so this walk can reach
+    an exception that has nothing to do with the failure: any exception raised
+    inside an unrelated ``except`` block inherits its handler's as ``__context__``.
+    Nothing today is affected, and one constraint keeps it that way — every
+    caller hands the classifier the exception the client ACTUALLY raised
+    (``wrap_transport_error`` is passed the ``exc`` of the ``except`` it is
+    called from, and passes that one on), so the chain walked is this failure's
+    own. A future caller that wraps an error it merely happened to be holding
+    inside an unrelated handler would be reading that neighbour's evidence as
+    this failure's. That is the reason the walk is not offered as a general
+    "what went wrong" utility.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        yield node
+        if isinstance(node, BaseExceptionGroup):
+            stack.extend(node.exceptions)
+        if node.__cause__ is not None:
+            stack.append(node.__cause__)
+        if node.__context__ is not None:
+            stack.append(node.__context__)
+
+
+def _evidence_text(node: BaseException) -> str:
+    """The lowercased text ONE chain node contributes as evidence.
+
+    A :class:`ProviderError` contributes its ``message`` — the provider's own
+    words behind the wrapped class name (``"<ClassName>: <detail>"``, see
+    :func:`wrap_transport_error`) — rather than ``str()``, which would prepend
+    the kind label the harness itself wrote (``"transient provider error: ..."``).
+    Running harness-authored words back through a classifier is how this file
+    has already misdiagnosed its own bugs once (see :func:`wrap_transport_error`
+    on ``KeyError('usage')`` reading as quota exhaustion), so the label is kept
+    out of the haystack here as well.
+    """
+    if isinstance(node, ProviderError):
+        return node.message.lower()
+    return f"{type(node).__name__}: {node}".lower()
+
+
+def _is_connect_class(node: BaseException) -> bool:
+    """Did our own client fail to ESTABLISH the connection?
+
+    True for ``httpx.ConnectError`` and for httpcore's ``ConnectError`` under
+    it, matched by MRO NAME rather than by importing httpcore: what matters is
+    what the failure WAS, not which library happens to build it, and a
+    subclass or a vendored copy must not slip past. ``ConnectTimeout`` is
+    deliberately NOT here — a connect that timed out is its own kind
+    (``kind="timeout"``), with its own budget.
+
+    The second arm covers the same failure after :func:`wrap_transport_error`
+    has flattened it: that message is built as ``"<ClassName>: <detail>"``, so
+    a ``ProviderError`` wrapped from a connect failure still names the class in
+    its first token. It keeps clients that build their own connectivity error
+    (rather than letting :func:`wrap_transport_error` do it) classifying as
+    before.
+    """
+    if any(cls.__name__ == "ConnectError" for cls in type(node).__mro__):
+        return True
+    return isinstance(node, ProviderError) and node.message.split(":", 1)[0].strip() == (
+        "ConnectError"
+    )
+
+
+def _is_destination_reached(node: BaseException) -> bool:
+    """Did this node prove the DESTINATION answered, whatever else it says?
+
+    Two pieces of evidence refute "this machine has no network at all", and
+    both mean the far end was reached:
+
+    - A REFUSAL (``ConnectionRefusedError``, errno ``ECONNREFUSED``, or the
+      wordings in :data:`_DESTINATION_REACHED_MARKERS`): a TCP RST from the
+      destination. An offline machine cannot even resolve or route to a host,
+      so it never produces one. This is the exclusion the marker tuple's
+      docstring defends — a genuinely-down LOCAL provider (ollama, LM Studio, a
+      localhost proxy) must keep its fast retry and its fallback walk instead
+      of being parked for the patient budget.
+    - A TLS handshake failure (``ssl.SSLError``): the TCP connection was
+      ESTABLISHED before the handshake began, so the host was reached and the
+      problem is a certificate or a protocol, never a missing network. Without
+      this the fallback below would newly park a broken-certificate session for
+      minutes, which is the kind of silent regression a classifier rewrite is
+      most likely to leave behind.
+
+    Checked ahead of the offline evidence, and it WINS: a v6 ``ENETUNREACH``
+    beside a v4 ``ECONNREFUSED`` in one group means one address family has no
+    route, not that the box is offline.
+    """
+    if isinstance(node, (ConnectionRefusedError, ssl.SSLError)):
+        return True
+    if getattr(node, "errno", None) in _DESTINATION_REACHED_ERRNOS:
+        return True
+    lowered = _evidence_text(node)
+    return any(marker in lowered for marker in _DESTINATION_REACHED_MARKERS)
+
+
+def _carries_machine_only_evidence(node: BaseException) -> bool:
+    """Does this node state a failure no DESTINATION can cause?
+
+    Resolution failures, ``EADDRNOTAVAIL`` and ``ENETDOWN`` are about this
+    machine and nothing else, so they are sufficient wherever they appear — see
+    :data:`_MACHINE_ONLY_MARKERS` / :data:`_MACHINE_ONLY_ERRNOS`.
+    """
+    if getattr(node, "errno", None) in _MACHINE_ONLY_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _MACHINE_ONLY_MARKERS)
+
+
+def _carries_route_evidence(node: BaseException) -> bool:
+    """Does this node state a ROUTE failure — machine, or one address?
+
+    Deliberately a separate question from the one above: this evidence is
+    ambiguous, and :func:`is_connectivity_loss` decides whether anything
+    corroborates it. See :data:`_ROUTE_EVIDENCE_MARKERS`.
+    """
+    if getattr(node, "errno", None) in _ROUTE_EVIDENCE_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _ROUTE_EVIDENCE_MARKERS)
 
 
 def is_connectivity_loss(error: BaseException) -> bool:
@@ -961,6 +1434,46 @@ def is_connectivity_loss(error: BaseException) -> bool:
     cycle, which takes several minutes — longer than the ordinary ~80s transport
     budget — during which every provider and every credential is equally
     unreachable and rotation buys nothing.
+
+    THE EVIDENCE IS THE WHOLE CHAIN, not one exception's text. It is gathered
+    from every node :func:`_transport_chain` reaches — the exception itself, its
+    ``__cause__``/``__context__`` links, and the members of any
+    ``BaseExceptionGroup`` — and it is read three ways: the marker wordings
+    below, the ``errno`` an ``OSError`` states exactly, and the class of the
+    failure. That is what lets the two cases the incident could not tell apart
+    be told apart: a machine with no usable source address raises
+    ``EADDRNOTAVAIL`` on the chain under a sentence that says nothing, while a
+    refused connection raises ``ECONNREFUSED`` in the same place.
+
+    THE HONEST RULE FOR A SILENT CHAIN. A connect-class failure
+    (:func:`_is_connect_class`) that yields no other readable evidence, no HTTP
+    status and no sign the destination answered is classified as a connectivity
+    loss. The reasoning is a negative one: at that point our own client could
+    not open a socket, and the only alternative explanation it could have
+    produced — a refusal, or a TLS failure — leaves evidence this walk would
+    have seen. What remains is the machine. The alternative, returning ``False``
+    on silence, is what the incident did, and the cost of it is worse than the
+    cost of being wrong here: the failure it discards is the one that heals by
+    itself within seconds, while a false positive on a genuinely broken
+    CERTIFICATE is already excluded above and a false positive on a refusal is
+    excluded by the veto.
+
+    ROUTE EVIDENCE IS NOT SILENCE, AND NOT ENOUGH ON ITS OWN. A route error on
+    the chain means the walk DID find an explanation, which is why it never
+    reaches the fallback above — but that explanation is ambiguous ("this machine
+    has no route" or "this one address is not routable from here"), so it is
+    believed only where something corroborates it: in the failure's own text, or
+    beside anyio's multi-address group. A lone route error reached by unwinding
+    stays on the fast path it had before this change, because its remedy is the
+    fallback walk, and parking that target for minutes instead was measured as a
+    regression (agent review R1-3).
+
+    Deliberately NOT gated on ``ProviderError.transport`` (provenance), unlike
+    :func:`is_mid_stream_connectivity_loss`: this predicate only chooses a
+    BACKOFF on that path, where believing a provider that narrates its own
+    upstream trouble merely means waiting patiently, and the constructor gates
+    the control-flow flag on provenance separately. See the ``KNOWN IMPRECISION``
+    note on the mid-stream predicate for the split.
 
     Read from the same lowercased ``class name + detail`` haystack
     :func:`wrap_transport_error` builds, so it works both on the wrapped
@@ -988,18 +1501,41 @@ def is_connectivity_loss(error: BaseException) -> bool:
     same way would change the patient-backoff behaviour of every existing
     caller, which is out of scope for the mid-stream fix that needed it.
     """
-    if isinstance(error, ProviderError):
-        # `message` already carries the wrapped "<ClassName>: <detail>" text
-        # (see wrap_transport_error), and the class name is the load-bearing
-        # half — httpx.ConnectError is routinely raised with an errno-only
-        # detail. status must be absent: a real HTTP response means a provider
-        # WAS reached, so it is a 5xx/timeout, never a connectivity loss.
-        if error.status is not None:
+    # A real HTTP response means a provider WAS reached, so it is a 5xx/timeout,
+    # never a connectivity loss — whatever the chain below it looks like.
+    if isinstance(error, ProviderError) and error.status is not None:
+        return False
+    machine_only = False
+    route_evidence = False
+    multi_address = False
+    connect_class = False
+    # The failure's OWN account — the exception handed to us, or the message a
+    # ProviderError was built from. Route evidence HERE is what this module has
+    # always read (and what its docstring promises); the same wording reached by
+    # unwinding is held to a stricter standard. See the tuples.
+    route_in_own_account = _carries_route_evidence(error)
+    for node in _transport_chain(error):
+        if _is_destination_reached(node):
             return False
-        haystack = error.message.lower()
-    else:
-        haystack = f"{type(error).__name__}: {error}".lower()
-    return any(marker in haystack for marker in _CONNECTIVITY_LOSS_MARKERS)
+        if _is_connect_class(node):
+            connect_class = True
+        if isinstance(node, BaseExceptionGroup):
+            # anyio's shape for a dial that tried MORE THAN ONE address
+            # (`oserrors[0] if len(oserrors) == 1 else ExceptionGroup(...)`), so
+            # its presence is the multi-address corroboration route evidence
+            # needs — every address of the name failed to route.
+            multi_address = True
+        if _carries_machine_only_evidence(node):
+            machine_only = True
+        if _carries_route_evidence(node):
+            route_evidence = True
+    if machine_only:
+        return True
+    if route_evidence:
+        return route_in_own_account or multi_address
+    # ``connect_class`` alone: see THE HONEST RULE FOR A SILENT CHAIN above for
+    # why silence is a verdict here rather than a shrug.
+    return connect_class
 
 
 def is_invalidated_credential_error(error: BaseException) -> bool:
@@ -2158,6 +2694,16 @@ class FailoverAuthStore(Protocol):
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        # Declared so the contract matches what the driver actually sends: the
+        # isolated auth re-resolve passes these to ask for a SIBLING without
+        # taking any routing decision. A store that omits them still works —
+        # the call raises ``TypeError``, the resolver reports no sibling, and
+        # the errand keeps its single attempt — but a store that wants the
+        # errand to recover has to accept them, and a Protocol that hid them
+        # made "legacy stores are fine" rest on a swallowed exception rather
+        # than on a stated contract.
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> str | None: ...  # pragma: no cover
 
     def rotate_sibling(
@@ -2202,6 +2748,9 @@ class OAuthAccessSource(Protocol):
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        #: Same optional exclusion contract as :meth:`FailoverAuthStore.get_api_key`.
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> "OAuthAccess | None": ...  # pragma: no cover
 
 
@@ -2262,6 +2811,15 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
         # by a provider. `is_mid_stream_connectivity_loss` needs that distinction
         # and cannot recover it from the text — see `ProviderError.transport`.
         transport=True,
+        # The CLASS NAME and the message are not the whole evidence this
+        # exception carries, and for the connectivity classifier they are the
+        # wrong half: anyio reports a failed connect as
+        # `OSError("All connection attempts failed")`, raising it `from` the
+        # `OSError` that actually holds the errno. Flattening to text threw that
+        # away, so an offline machine and a refused connection became
+        # indistinguishable here — the 2026-09-15 incident. Handing the original
+        # to the ProviderError keeps it reachable without a second channel.
+        transport_cause=exc,
     )
 
 
@@ -2324,19 +2882,34 @@ async def stream_with_failover(
     primary_target = FallbackTarget(primary_selector, request.model.reasoning_effort)
 
     if request.isolated:
-        # DECORATION: one attempt on the model it named, and no reach into
-        # anything the concurrent turn depends on. Expressed by disabling retry
-        # rather than by a second code path, because "retry disabled" already
-        # means exactly the three things needed here — no fallback chain below,
-        # no transport-retry budget, and no credential rotation (every rotation
-        # `continue` sits behind a `retry.enabled` raise). Dropping the route
-        # state removes the fourth: a decorative call neither pins the session
-        # to a fallback nor clears a pin the turn is relying on. The fifth is
-        # not expressible here — the credential cascade takes routing decisions
-        # of its own on a read — so the resolve below is asked for read-only
-        # (`read_only=request.isolated`).
+        # DECORATION: at most one attempt on the model it named — with one
+        # sanctioned exception, the single auth re-resolve latched below — and
+        # no reach into anything the concurrent turn depends on. Expressed by
+        # disabling retry rather than by a second code path, because "retry
+        # disabled" already means exactly the three things needed here — no
+        # fallback chain below, no transport-retry budget, and no credential
+        # rotation (every rotation `continue` sits behind a `retry.enabled`
+        # raise; the auth exception does not rotate anything, it re-READS).
+        # Dropping the route state removes the fourth: a decorative call
+        # neither pins the session to a fallback nor clears a pin the turn is
+        # relying on. The fifth is not expressible here — the credential
+        # cascade takes routing decisions of its own on a read — so the resolve
+        # below is asked for read-only (`read_only=request.isolated`).
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
+
+    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
+    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
+    # walk: the errand makes at most TWO AUTH attempts, and the second only
+    # when the read-only re-resolve produced a bearer that differs from the one
+    # the provider just rejected.
+    #
+    # "Two auth attempts", not "two wire attempts": the pre-existing fast-mode
+    # refusal re-ask (below, and deliberately NOT gated on `retry.enabled`)
+    # can add one same-key attempt at standard speed before this latch is ever
+    # consulted, so a fast-mode model's errand can reach three requests. That
+    # path is older than this one and is left exactly as it was.
+    isolated_auth_resolved = False
 
     targets = [primary_target]
     if retry.enabled and retry.model_fallback:
@@ -2457,9 +3030,15 @@ async def stream_with_failover(
             built = client_for(spec)
             client = await built if inspect.isawaitable(built) else built
             clients[route_key] = client
-        current_request = (
-            request if target == primary_target else request.model_copy(update={"model": spec})
-        )
+        # ``with_model`` rather than a bare ``model_copy``: the generation bound
+        # lives on the request and ``model_copy`` cannot re-run the validator, so
+        # a straight copy carried the primary's bound onto a fallback that
+        # publishes a smaller ceiling (34 shipped rows publish under 20K, e.g.
+        # ``gemini-2.0-flash-exp`` at 8,192 -- an ask above the target's own
+        # published maximum) and kept a small primary's ask on a large fallback.
+        # ``with_model`` re-derives a POLICY-filled bound against the new spec and
+        # carries a caller's named ask untouched (review M1 / QA Q5).
+        current_request = request if target == primary_target else request.with_model(spec)
         if (
             route_state is not None
             and getattr(current_request.model, "fast_mode", False)
@@ -2468,8 +3047,14 @@ async def stream_with_failover(
             # This route already refused fast mode for this session's account
             # (see `FailoverRouteState.fast_refused`). Ask at standard speed
             # from the start rather than paying the refused attempt again.
-            current_request = current_request.model_copy(
-                update={"model": current_request.model.model_copy(update={"fast_mode": False})}
+            #
+            # `with_model` even though this is the SAME model with the speed dial
+            # off: one rule for every re-aiming of a request, so no reader has to
+            # work out which of the `model_copy` calls beside it happen to be
+            # safe. The re-derivation is idempotent here -- the spec's published
+            # ceiling is untouched by `fast_mode`.
+            current_request = current_request.with_model(
+                current_request.model.model_copy(update={"fast_mode": False})
             )
         if route_state is not None and target != primary_target:
             cooldown_ms = max(60_000, reported.retry_after_ms or 0) if reported else 60_000
@@ -2699,7 +3284,10 @@ async def stream_with_failover(
                     for key in ("context_window", "default_context_window", "max_context_window")
                 )
                 spec = resolved
-                current_request = current_request.model_copy(update={"model": resolved})
+                # Same re-derivation as the fallback hop above: an OAuth-resolved
+                # spec can publish a different output ceiling than the one the
+                # bound was computed from, and ``model_copy`` would not notice.
+                current_request = current_request.with_model(resolved)
                 # An API request whose budget did not move remains a transparent
                 # stream. OAuth still publishes unknown-resolution provenance.
                 if changed_budget or access.kind == "oauth":
@@ -2719,17 +3307,11 @@ async def stream_with_failover(
                     # ``forwarded_any`` gates retry, and it means exactly one
                     # thing: the caller has SEEN output that cannot be un-shown,
                     # so replaying this attempt would stream deltas twice.
-                    # A ``StreamStartEvent`` shows the user nothing — it is a
-                    # boundary marker announcing that the provider began — so
-                    # counting it would make every failure that lands after
-                    # acceptance but before the first token non-retryable
-                    # (Anthropic 529s, in-band error chunks on a 200 stream),
-                    # bypassing credential rotation and the whole fallback
-                    # chain. It would also misreport a pre-content transport
-                    # death as a MID-STREAM loss, which is what
-                    # ``is_mid_stream_connectivity_loss`` infers from this very
-                    # flag. Nothing has been rendered, so nothing blocks a retry.
-                    if not isinstance(event, StreamStartEvent):
+                    # ``_RETRY_SAFE_STREAM_EVENTS`` names the only events that
+                    # carry nothing the caller has seen and therefore block
+                    # nothing; it holds the criterion, the members and the reason
+                    # the test is an allowlist rather than a list of what counts.
+                    if not isinstance(event, _RETRY_SAFE_STREAM_EVENTS):
                         forwarded_any = True
                     yield stamped
                 # This selector just answered: from here on an unknown-model
@@ -2773,7 +3355,12 @@ async def stream_with_failover(
                     # only this frame knows bytes were forwarded, which is the
                     # whole of the mid-stream inference (see
                     # `is_mid_stream_connectivity_loss`).
-                    _mark_mid_stream_connectivity(exc)
+                    #
+                    # `provider` is passed through because one of the two
+                    # continuable families is an AGGREGATOR's in-band upstream
+                    # failure, whose classification needs the identity the
+                    # selector holds and the error does not.
+                    _mark_mid_stream_connectivity(exc, provider=provider)
                     raise
                 if is_fast_mode_refusal_for(
                     exc, fast_requested=bool(getattr(current_request.model, "fast_mode", False))
@@ -2797,10 +3384,9 @@ async def stream_with_failover(
                     # the route state is what stops later requests re-paying
                     # the refusal, and its handler is what tells the user.
                     # Guarded by the flag actually being on, so it cannot loop.
-                    current_request = current_request.model_copy(
-                        update={
-                            "model": current_request.model.model_copy(update={"fast_mode": False})
-                        }
+                    # `with_model` for the same reason as its twin above.
+                    current_request = current_request.with_model(
+                        current_request.model.model_copy(update={"fast_mode": False})
                     )
                     refused_selector = f"{spec.provider}/{spec.model_id}"
                     logger.info(
@@ -2863,9 +3449,11 @@ async def stream_with_failover(
                 # fault ceiling nor rotate — it waits, in place, on a minutes-
                 # long backoff, until the network returns or the patient budget
                 # is spent. The sleep stays abortable, so Ctrl-C still wins.
-                # Gated on retry.enabled so an isolated/decorative call still
-                # makes exactly one attempt (the `not retry.enabled` raise below
-                # would otherwise be pre-empted by this patient loop).
+                # Gated on retry.enabled so an isolated/decorative call never
+                # enters the patient loop: connectivity loss is not an auth
+                # failure, so it gets no re-resolve either and the
+                # `not retry.enabled` raise below ends the errand on its first
+                # attempt (which this loop would otherwise pre-empt).
                 if retry.enabled and is_connectivity_loss(exc):
                     if connectivity_retries < retry.connectivity_max_retries:
                         connectivity_retries += 1
@@ -2907,6 +3495,53 @@ async def stream_with_failover(
                         shortest_retry_after_ms or exc.retry_after_ms, exc.retry_after_ms
                     )
                 if not retry.enabled:
+                    if (
+                        request.isolated
+                        and not isolated_auth_resolved
+                        and (exc.auth_error or exc.status in (401, 403))
+                    ):
+                        # The one widening of the isolated budget, and it is
+                        # auth-shaped only. Deployment reality: a pool can
+                        # hold a stale key while the TURN beside us rotates
+                        # past it and stays healthy, so the errand's read-only
+                        # resolve keeps landing on the dead row (the pick is a
+                        # hash of the session id — re-firing the errand later
+                        # picks the same row) and every naming call for such a
+                        # session fails forever. One extra request, and only
+                        # here, buys the title back: a READ-ONLY re-resolve
+                        # with the rejected bearer hidden may serve the errand
+                        # from a sibling — the resolve's own sanctioned move
+                        # (see `_resolve_access_for_provider`) — while the
+                        # sticky pointer, the block list and the demotion set
+                        # stay exactly as they were, so the turn beside us
+                        # keeps resolving to precisely what it did before.
+                        # Non-auth failures (5xx, 429, request-kind, transport)
+                        # keep the exactly-one-attempt behaviour: a rate limit
+                        # says wait, and an errand must not.
+                        isolated_auth_resolved = True
+                        sibling = await _resolve_access_for_provider(
+                            auth,
+                            provider,
+                            session_id,
+                            state,
+                            exc,
+                            read_only=request.isolated,
+                            model_id=spec.model_id,
+                            scoped_blocks=retry.usage_aware_fallback,
+                            # The ROW, not just its bearer: an OAuth token
+                            # rotates under a refresh, so a key-only exclusion
+                            # would let the rejected account back in.
+                            rejected_credential_id=(
+                                access.credential_id if access is not None else None
+                            ),
+                        )
+                        if sibling is not None and sibling.access_token != key:
+                            # `retry_same_key` consumes the record just
+                            # resolved: the loop top then skips its own resolve
+                            # and fires this sibling directly.
+                            access = sibling
+                            retry_same_key = True
+                            continue
                     raise
                 if _same_credential_retry_allowed(
                     exc,
@@ -2980,6 +3615,12 @@ async def stream_with_failover(
                     # catches httpx, so a socket that dies mid-body reaches here
                     # raw as `ReadError`/`RemoteProtocolError`/`ReadTimeout`.
                     # Mark it continuable before it leaves — see the sibling arm.
+                    #
+                    # `provider` is deliberately NOT passed here (unlike the
+                    # sibling arm): `wrap_transport_error`'s result is
+                    # status-less by construction, so the aggregator predicate it
+                    # would feed cannot fire, and naming one would read as if
+                    # this arm could classify an in-band gateway failure.
                     _mark_mid_stream_connectivity(wrapped)
                     raise wrapped from exc
                 record(wrapped, primary=is_primary)
@@ -2993,9 +3634,10 @@ async def stream_with_failover(
                 # charging the fault ceiling or rotating buys nothing — the only
                 # thing that helps is waiting, in place, for the network to come
                 # back. The backoff is abortable, so Ctrl-C still breaks out.
-                # Gated on retry.enabled so an isolated/decorative call still
-                # makes exactly one attempt rather than entering the patient loop
-                # ahead of the `not retry.enabled` raise below.
+                # Gated on retry.enabled so an isolated/decorative call never
+                # enters the patient loop ahead of the `not retry.enabled` raise
+                # below. Connectivity loss is not auth-class, so no re-resolve
+                # follows it either: the errand ends on its first attempt.
                 if retry.enabled and is_connectivity_loss(wrapped):
                     if connectivity_retries < retry.connectivity_max_retries:
                         connectivity_retries += 1
@@ -3254,6 +3896,7 @@ async def _resolve_access_for_provider(
     read_only: bool = False,
     model_id: str = "",
     scoped_blocks: bool = False,
+    rejected_credential_id: int | None = None,
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
@@ -3265,6 +3908,29 @@ async def _resolve_access_for_provider(
     credential — and neither ``retry.enabled=False`` nor a dropped
     ``route_state`` is upstream of that. A decorative call resolves the account
     the turn is already on and decides nothing.
+
+    The one thing ``read_only`` DOES allow is answering a caller that comes
+    back with the bearer it was just handed rejected outright (``error`` set):
+    the resolve then asks for a SIBLING by hiding the rejected row from that
+    single resolve instead of rotating onto it — see the resolver's
+    ``read_only`` branch. That is the isolated errand's one sanctioned second
+    attempt (deployment reality: pools contain stale keys, and one stale row
+    must not permanently silence a decorative call), and it still decides
+    nothing about routing.
+
+    ``rejected_credential_id`` names the ROW whose bearer was just rejected, and
+    it is what makes that sibling leg correct for OAuth. Two reasons it cannot
+    be left to the bearer string alone:
+
+    - A forced refresh of the SAME row returns a new bearer, which
+      ``resolve_next_key``'s ``_accept`` treats as a fresh candidate. Under
+      ``read_only`` the refresh-same-account leg is therefore SKIPPED entirely
+      (see below): re-presenting the account the provider just rejected, with a
+      fresh token, spends the errand's one extra attempt on the credential least
+      likely to work while the healthy sibling is never asked. An expired token
+      is the turn's problem to fix, on the turn's own rotation.
+    - A row's bearer can rotate underneath us (the concurrent turn refreshing
+      it), so a key-only exclusion would let the rejected row back in.
     """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
@@ -3289,15 +3955,31 @@ async def _resolve_access_for_provider(
             flags["model_id"] = model_id
         return flags
 
-    async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
+    def _exclusion_flags(rejected_key: str | None) -> dict[str, Any]:
+        """The rejected row, named BOTH ways — see this function's docstring on
+        why an id is required alongside the bearer for OAuth. Each key rides
+        only when it has a value, so the flags stay absent for a store that has
+        nothing to exclude."""
+        flags: dict[str, Any] = {}
+        if rejected_key:
+            flags["exclude_keys"] = frozenset((rejected_key,))
+        if rejected_credential_id:
+            flags["exclude_credential_ids"] = frozenset((rejected_credential_id,))
+        return flags
+
+    async def _access(
+        *, force_refresh: bool = False, exclude: str | None = None
+    ) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
-        return await oauth_store.get_oauth_access(
-            provider, session_id, **_model_flags(force_refresh)
-        )
+        flags = _model_flags(force_refresh)
+        flags.update(_exclusion_flags(exclude))
+        return await oauth_store.get_oauth_access(provider, session_id, **flags)
 
-    async def _key(*, force_refresh: bool = False) -> str | None:
-        return await auth.get_api_key(provider, session_id, **_model_flags(force_refresh))
+    async def _key(*, force_refresh: bool = False, exclude: str | None = None) -> str | None:
+        flags = _model_flags(force_refresh)
+        flags.update(_exclusion_flags(exclude))
+        return await auth.get_api_key(provider, session_id, **flags)
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -3305,6 +3987,35 @@ async def _resolve_access_for_provider(
                 record = await _access()
                 if record is None:
                     return await _key()
+            elif read_only:
+                # The isolated errand's sibling leg, and it is deliberately the
+                # FIRST thing tried rather than the last. ``resolve_next_key``
+                # ordinarily spends a leg on force-refreshing the same account
+                # before rotating; for a decorative call that is the wrong
+                # trade, because a refreshed token on the row the provider just
+                # rejected is the candidate least likely to work, and spending
+                # the errand's single extra attempt there means the healthy
+                # sibling is never asked at all (an OAuth pool whose refresh
+                # SUCCEEDS therefore stayed permanently unnamed). Re-authing a
+                # stale account is the turn's job, on the turn's own rotation.
+                #
+                # ``_rotate_sibling`` blocks or demotes the failing row and
+                # moves session stickiness — routing decisions that belong to
+                # the TURN, not to decoration running beside it — so the sibling
+                # instead comes from the store hiding the rejected ROW from this
+                # resolve alone: the sticky pointer, the block list and the
+                # demotion set come out of the call exactly as they went in.
+                #
+                # A store that does not accept the exclusion kwargs raises
+                # ``TypeError`` here, which the ``except Exception`` below turns
+                # into "no sibling"; the driver's differs-check then refuses the
+                # retry and the errand keeps its single-attempt budget. So a
+                # foreign or older store degrades to today's behaviour rather
+                # than breaking — covered by
+                # ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``.
+                record = await _access(exclude=ctx.previous_key)
+                if record is None:
+                    return await _key(exclude=ctx.previous_key)
             elif ctx.last_chance:
                 # Family-scoped rotation blocks ride only with usage-aware
                 # routing: on the opt-out path no preflight probe exists to

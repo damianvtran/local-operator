@@ -255,6 +255,59 @@ A = ModelSpec(provider="test", model_id="conversation-a", context_window=100_000
 B = A.model_copy(update={"model_id": "default-b"})
 
 
+@pytest.mark.asyncio
+async def test_the_chosen_effort_rides_the_intent_rpc_with_the_model(tmp_path):
+    """The LEVEL is sent WITH the pair, never left to be re-applied later.
+
+    The owner's ``set_model`` rebuilds the spec from the model's own metadata,
+    which seeds the model's DEFAULT level, and ``Session.set_model`` assigns that
+    spec before its same-pair early return — so a pair-only intent RPC would
+    silently replace the level the user chose, on the very send that consumes the
+    intent. Asserted on the call the owner receives, because that is where the
+    level either travels or is lost.
+
+    The negative half lives in
+    ``test_explicit_resume_intent_survives_rpc_errors_and_owner_snapshots``: a
+    birth sample with no level still sends the two-argument frame every older
+    client and owner already understand.
+    """
+    from unittest.mock import AsyncMock
+
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    chosen = B.model_copy(update={"reasoning_effort": "high"})
+
+    async def no_takeover():
+        raise AssertionError("viewer cannot take ownership")
+
+    viewer = await AttachedSession.cold(
+        "effort-intent",
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+        initial_model=chosen,
+        model_selection_override=True,
+    )
+    client = SimpleNamespace(connected=True, set_model=AsyncMock(return_value="selected"))
+    viewer._client = cast(Any, client)
+    viewer._ready_for_events = True
+    viewer._install_frontend(
+        viewer.frontend_state.model_copy(
+            update={
+                "epoch": "winning-owner",
+                "selected_model": FrontendModelSpec(**A.model_dump()),
+            }
+        )
+    )
+    try:
+        await viewer._ensure_bound(foreground=True)
+        assert client.set_model.call_args.args == (B.provider, B.model_id, "high")
+        assert viewer._model_selection_override is False
+    finally:
+        viewer._client = None
+        await viewer.dispose()
+
+
 def session(directory: Path, *, model=A, source="config", defer=False):
     stream = ScriptedStream([text_turn("ok") for _ in range(8)])
     owner = Session(
@@ -440,11 +493,29 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
             cold.frontend_state.model_copy(
                 update={
                     "epoch": "owner-epoch",
-                    "selected_model": FrontendModelSpec(provider="test", model_id="owner-picked"),
+                    "selected_model": FrontendModelSpec(
+                        provider="test", model_id="owner-picked", reasoning_effort="max"
+                    ),
                 }
             )
         )
         assert cold._birth_model.model_id == "owner-picked"
+        # The LEVEL belongs in the sample too: a successor seeded from the pair
+        # alone is constructed with no ``LOP_MOBILE_CHILD_EFFORT`` and silently
+        # drops to its own resolution (review round 1, R2). Same pair at a new
+        # level is a new sample, not the same one.
+        assert cold._birth_model.reasoning_effort == "max"
+        cold._install_frontend(
+            cold.frontend_state.model_copy(
+                update={
+                    "epoch": "owner-epoch-2",
+                    "selected_model": FrontendModelSpec(
+                        provider="test", model_id="owner-picked", reasoning_effort="low"
+                    ),
+                }
+            )
+        )
+        assert cold._birth_model.reasoning_effort == "low"
         newer = await AttachedSession.cold(
             "newer", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=takeover
         )
@@ -464,3 +535,45 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
         assert resumed.model.model_id == A.model_id
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_journal_outranks_the_configured_birth_effort(tmp_path):
+    """`model_effort` is a BIRTH default, so a conversation's own stored
+    selection — the journal row every `/model` writes — outranks it on resume.
+
+    The two keys answer different questions: "what should NEW conversations
+    start on" versus "what was THIS conversation running". A config effort that
+    overrode a restored row would silently move a conversation the user had
+    deliberately left somewhere else, and would do it on the one path
+    (`--resume`) where they most expect their state back.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.transcript import Transcript as _Transcript
+
+    directory = tmp_path / "sessions" / "effort-journal"
+    transcript = _Transcript(directory)
+    # A version-2 row, i.e. one that carries an effort (the writer only emits
+    # `effort` from v2 on), naming a model whose ladder can express `low`.
+    await transcript.append_custom(
+        "selected_model",
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": "low"},
+    )
+    # The BIRTH spec a configured `model_effort: high` would have produced.
+    birth = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "high"}
+    )
+    stream = ScriptedStream([text_turn("ok")])
+    owner = Session(
+        model=birth,
+        model_source="config",
+        stream_fn=stream,
+        tools=[],
+        transcript=_Transcript(directory),
+        system_blocks_provider=lambda: [],
+        cwd=str(directory.parent),
+    )
+    try:
+        assert owner.model.reasoning_effort == "low"
+    finally:
+        await owner.dispose()
