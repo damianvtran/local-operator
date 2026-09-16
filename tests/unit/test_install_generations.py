@@ -79,21 +79,35 @@ class FakeUv:
 
 
 def _build_tree(venv: Path, bin_dir: Path, version: str) -> None:
-    """The files uv would leave for one generation."""
+    """The files uv would leave for one generation, including its scripts.
+
+    The console scripts are the shape ``uv tool install`` really writes — an
+    ABSOLUTE shebang naming the venv they were installed into, plus a Python body
+    — and they print the ``sys.prefix`` they ended up on. That is what makes them
+    exec-able evidence: running one through the launcher chain reports which
+    INTERPRETER actually answered, which is the only way the migration's
+    shebang rebinding (:func:`local_operator.update._rebind_scripts`) can be
+    asserted at all (review round 1, R-1/R-5: a fixture whose scripts said
+    ``#!/bin/sh`` could not represent a migrated tree, so the test that should
+    have caught the blocker passed for a tree that could not exhibit it).
+    """
     for directory in (venv / "bin", venv / "lib" / "python3.12" / "site-packages", bin_dir):
         directory.mkdir(parents=True, exist_ok=True)
     (venv / "pyvenv.cfg").write_text("home = /nonexistent\n", encoding="utf-8")
-    for name in ("lop", "local-operator"):
-        shim = venv / "bin" / name
-        shim.write_text(f"#!/bin/sh\necho {name}\n", encoding="utf-8")
-        shim.chmod(0o755)
-        os.symlink(shim, bin_dir / name)
     interpreter = venv / "bin" / "python3"
     if not interpreter.exists():
-        # A real interpreter would be spawned by nothing here; a symlink to the
-        # test process's own keeps ``os.access(..., X_OK)`` honest about what a
-        # generation's interpreter looks like on disk.
+        # A symlink to the test process's own interpreter, so the scripts below
+        # can actually run: ``pyvenv.cfg`` beside it is what makes the child
+        # report THIS venv as its prefix.
         os.symlink(sys.executable, interpreter)
+    for name in ("lop", "local-operator"):
+        script = venv / "bin" / name
+        script.write_text(
+            f"#!{interpreter}\n" "import sys\n" "print('PREFIX', sys.prefix)\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        os.symlink(script, bin_dir / name)
     dist = venv / "lib" / "python3.12" / "site-packages" / f"local_operator-{version}.dist-info"
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "METADATA").write_text(
@@ -337,6 +351,29 @@ class TestInstallIntoGeneration:
             update_mod.install_into_generation(runner=_explode, version="0.52.0")
         assert list(update_mod.generations_dir().iterdir()) == []
 
+    def test_a_flip_that_cannot_happen_is_a_refusal_and_leaves_no_tree(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R-9: an unwritable stable root must not raise a bare ``OSError``.
+
+        The flip used to sit OUTSIDE the handler that removes a tree on failure,
+        so ``EACCES``/``ENOSPC`` escaped as ``OSError`` — not the "one refusal
+        sentence" the neighbouring comment promises — and left a fully built,
+        marker-bearing generation that no reader references. The pointer itself
+        is untouched either way (``os.rename`` either happened or it did not),
+        which is the property asserted here alongside the tree being gone.
+        """
+        good = _install("0.51.9")
+
+        def _boom(_generation: Path) -> None:
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(update_mod, "flip_pointer", _boom)
+        with pytest.raises(UpdateError, match="could not point current"):
+            _install("0.52.0")
+        assert update_mod.current_generation() == good.resolve()
+        assert sorted(path.name for path in update_mod.generations_dir().iterdir()) == [good.name]
+
     def test_two_installs_get_two_generations(self, home: Path) -> None:
         first = _install("0.52.0")
         second = _install("0.52.0")
@@ -511,6 +548,29 @@ class TestPruning:
         assert debris in removed
         assert not debris.exists()
 
+    def test_an_interrupted_flips_staging_link_is_swept(self, home: Path) -> None:
+        """R-6: a ``kill -9`` between ``os.symlink`` and ``os.rename``.
+
+        ``flip_pointer`` unlinks its own staging name in a ``finally``, which
+        covers failures inside the call but not a death mid-call, and nothing
+        else reclaims one — the stable root is meant to hold a closed set
+        (``current``, ``bin/``, ``generations/``). Aged like every other in-flight
+        artefact, so a CONCURRENT flip between its two steps is never deleted
+        underneath.
+        """
+        generation = _install("0.52.0")
+        pointer = update_mod.pointer_path()
+        stale = pointer.with_name(f"{pointer.name}.tmp-999999")
+        fresh = pointer.with_name(f"{pointer.name}.tmp-999998")
+        for link in (stale, fresh):
+            os.symlink(generation, link)
+        old = time.time() - update_mod._PARTIAL_TTL_S - 60
+        os.utime(stale, (old, old), follow_symlinks=False)
+
+        update_mod.prune_generations(now=time.time())
+        assert not stale.exists(), "an interrupted flip left litter in the stable root"
+        assert fresh.is_symlink(), "a concurrent flip's staging link must survive"
+
     def test_pruning_a_machine_with_no_layout_is_a_no_op(self, home: Path) -> None:
         assert update_mod.prune_generations() == []
 
@@ -519,6 +579,59 @@ class TestPruning:
 
 
 class TestMigration:
+    def test_the_migrated_launcher_runs_the_generation_not_the_source(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """R-1: a verbatim copy keeps the SOURCE tree's absolute shebang.
+
+        Executed, not inspected — the console scripts in the fixture print the
+        ``sys.prefix`` they ended up on, so this asserts WHICH INTERPRETER
+        answered. Before the fix the launcher chain
+        (``~/.local/bin/lop`` → ``current/bin/lop`` → ``<gen>/bin/lop``) ended at
+        a script whose ``#!`` named the legacy venv, and the prefix printed here
+        was the SOURCE tree — the one the host rewrites in place, which is the
+        whole hazard. This test fails against that tree, which the previous
+        version could not: it asserted a resolved path was a file and never ran
+        anything, so a launcher pointing at a foreign interpreter passed it
+        (review round 1, R-1/R-5).
+        """
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        generation = update_mod.clone_into_generation(legacy)
+        launcher = Path.home() / ".local" / "bin" / "lop"
+
+        ran = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [str(launcher)], capture_output=True, text=True, timeout=60
+        )
+        assert ran.returncode == 0, ran.stdout + ran.stderr
+        reported = Path(ran.stdout.split()[-1])
+        assert reported.resolve() == (generation / "tools" / "local-operator").resolve()
+        assert reported.resolve() != legacy.resolve(), "the copy still ran the source tree"
+
+    def test_the_migration_plants_the_daemon_shim(
+        self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R-2: the migrating process IS the legacy tree, so the this-process
+        gate answered ``None`` and no shim was ever written — QA measured
+        ``<stable>/bin/python3`` missing right after a real ``lop install
+        migrate``, and every plist rendered afterwards kept naming a path inside
+        the legacy venv.
+
+        ``install_kind`` is monkeypatched because the process running this test
+        is a source checkout, which deliberately never names a machine-level
+        artefact (``_may_name_the_shim``, the ``_repair_refusal`` rule). A real
+        migration runs from a uv-tool or pipx tree, and that is the read half
+        this asserts works afterwards.
+        """
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        update_mod.clone_into_generation(legacy)
+        shim = update_mod.daemon_image_path()
+        assert shim.is_file(), "the migration must leave the shim a plist would name"
+        assert os.access(shim, os.X_OK)
+        monkeypatch.setattr(update_mod, "install_kind", lambda **_k: update_mod.InstallKind.UV_TOOL)
+        assert update_mod.daemon_image() == shim
+
     def test_the_legacy_tree_is_copied_not_moved(self, home: Path, tmp_path: Path) -> None:
         legacy = tmp_path / "legacy-venv"
         _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
@@ -727,3 +840,47 @@ def test_referenced_roots_reads_session_and_serve_records(
     finally:
         registry.unpublish(record.pid)
     assert any("generations/g1" in str(path) for path in roots)
+
+
+def test_referenced_roots_read_the_default_config_root_too(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-7: the ambient config root is not the machine's only one.
+
+    ``registry.scan()`` reads ``config_dir()``, so a prune run under an isolated
+    root — a QA pass, a second profile — could not see the sessions the DEFAULT
+    root publishes, and their generations fell back to the count margin. Both
+    roots are read now, and this is the test that would fail if the ambient one
+    were read alone.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    ambient = tmp_path / "ambient-config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(ambient))
+    assert config_dir() == ambient
+
+    generation = _install("0.52.0")
+    default_root = Path.home() / ".local-operator"
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="tui",
+        session_id="r7",
+        conversation_name="n",
+        cwd="/",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=str(generation / "tools" / "local-operator"),
+    )
+    registry.publish(record, root=default_root)
+    try:
+        roots = update_mod.referenced_install_roots()
+    finally:
+        registry.unpublish(record.pid, default_root)
+
+    assert any(
+        Path(root).resolve() == (generation / "tools" / "local-operator").resolve()
+        for root in roots
+    ), roots

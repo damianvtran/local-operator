@@ -17,13 +17,18 @@ So these cells drive the PRODUCTION machinery around a real runtime:
   what happens to the running process, not what uv compiles. The live-host proof
   (a real install with the fleet up, pid set identical before and after, zero
   new DiagnosticReports) belongs to QA;
-* the real stable launchers, and the real ``lop`` console script behind them, for
-  the mid-flip ``lop --version`` cell.
+* the real stable launchers, and the real console script behind them, for the cell
+  that resolves the generation ``current`` names — a console script the fixture
+  writes with an absolute shebang, exactly as ``uv`` does.
 
 Each generation's venv is a symlink to this checkout's venv, which is what makes
 the cells cheap: the process really does import from
-``<stable>/generations/<id>/tools/local-operator/...`` (verified in the assertions
-below), and nothing in the install path needs a 136 MB copy to be exercised. The
+``<stable>/generations/<id>/tools/local-operator/...``, which the cells assert
+from the CHILD's own record (``SessionRecord.install_root`` — the runtime's
+report of ``sys.prefix``), never from ``ps``: the runners' ``ps`` prints argv
+(truncated at 80 columns) on Linux and the resolved image on macOS, so neither
+shows a launch path (review round 1, R-4). Nothing in the install path needs a
+136 MB copy to be exercised. The
 symlink is never written to — the installs only ever create NEW generations.
 
 Isolation follows ``AGENTS.md``'s rule for every cell here: ``HOME`` and the
@@ -315,13 +320,14 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     try:
         record = _wait_for_record(config, session_id)
         assert record.pid == child.pid
-        # The tree this generation names, and the distribution inside it,
-        # captured before anything moves. Both reads are portable to an
-        # interpreter that is not in a venv — CI runs this stage on the runner's
-        # own framework Python, which has no ``pyvenv.cfg`` — and both name real
-        # files the RUNNING runtime imports from, so they cannot be satisfied by
-        # an empty shell of a tree.
+        # THE PREMISE, and it is asserted from the child's own report rather than
+        # from the fixture or from ``ps``: the runtime stamps
+        # ``SessionRecord.install_root`` with the tree it imports from
+        # (``sys.prefix``), so this line says "the process really was started out
+        # of THIS generation" — the sentence the removed assertion tried to make
+        # and could not, portably (review round 1, R-4).
         launched_from = (first / "tools" / "local-operator").resolve()
+        assert Path(record.install_root).resolve() == launched_from, record.install_root
         site_packages = next(launched_from.glob("lib/python*/site-packages"))
         recorded = sorted(
             entry.name for entry in site_packages.iterdir() if "local_operator" in entry.name
@@ -353,6 +359,9 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
         # that looked for ``pyvenv.cfg`` failed on both CI legs (2026-09-16,
         # head 57523116f) because the runner's interpreter is not in a venv.
         assert (first / "tools" / "local-operator").resolve() == launched_from
+        assert (
+            Path(_wait_for_record(config, session_id).install_root).resolve() == launched_from
+        ), "the swap moved the runtime's own view of its install root"
         assert site_packages.is_dir(), "the running generation's site-packages vanished"
         assert (
             sorted(
@@ -424,10 +433,12 @@ def test_an_engage_after_a_flip_lands_on_the_generation_current_names(
     measured), and the documented answer to that is the fallback to
     ``sys.executable``, which is correct but not the property under test here;
     still less should a test demand that a microsecond race resolve one
-    particular way. The mid-flip case that IS a hard requirement — nothing that
-    execs the launcher chain may fail — is
-    :func:`test_lop_version_through_the_pointer_never_fails_mid_flip`, which runs
-    real processes under exactly that load.
+    particular way. A racing cell for the launcher chain existed in an earlier
+    revision and was removed: the residual it kept tripping is measured and
+    written down in ``docs/design-install-generations.md`` §3.2, QA round 1
+    re-measured it independently (148 execs through the chain during real flips,
+    zero failures at operationally real rates), and no assertion here depends on
+    a microsecond race resolving one particular way.
     """
     config = headless_tui_env
     session_id = "genengage01"

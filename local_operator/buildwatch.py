@@ -291,9 +291,11 @@ def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
       decides; the exception/unreadable case below is the same direction for the
       same reason.
 
-    A DIFFERENT build than the one announced is NOT ``None``: it is the newer
-    move, and the caller re-announces onto it rather than leaving for a build
-    that has already been replaced.
+    A DIFFERENT build than the one announced is NOT ``None``: it is the move the
+    caller re-announces onto rather than leaving for a build that has already been
+    replaced. A build that is strictly OLDER than the boot stamp is ``None`` — see
+    :func:`is_older` — because leaving for a lagging pointer would walk the fleet
+    backwards (review round 1, R-3).
     """
     if boot is None:
         return None
@@ -342,9 +344,48 @@ def proves_a_move(boot: "BuildStamp", on_disk: "BuildStamp") -> bool:
         # Nothing at all could be read: no dist-info, no marker. A stamp like
         # this labels as "unknown" and is not a build to leave for.
         return False
+    if is_older(on_disk, boot):
+        # A move BACKWARDS is not a handover to leave for. Reachable whenever the
+        # pointer lags the build a process loaded — a migrated host whose legacy
+        # uv-tool tree is still advanced in place by ``uv tool install --force``
+        # has exactly that shape — and acting on it retires a running runtime
+        # onto the older build (review round 1, R-3).
+        return False
     if on_disk.source_ref:
         return True
     return on_disk.version != boot.version
+
+
+def is_older(candidate: "BuildStamp", than: "BuildStamp") -> bool:
+    """Is ``candidate`` an OLDER build than ``than``, by version?
+
+    Only versions can be ordered here: the ref is a commit id, and ``lop-update``
+    builds from ``main`` while ``pyproject.toml`` still names the last release, so
+    two genuinely different builds routinely share one version string. Equal
+    versions therefore answer ``False`` — "not older", because the direction is
+    unknown rather than backwards — and that is the case the ref comparison in
+    :func:`proves_a_move` exists for.
+
+    WHERE THE ORDER MATTERS (review round 1, R-3). Under the pre-generation
+    layout a differing stamp could only mean "the tree this process holds was
+    rewritten", which is forward in practice. The compared tree is now the one the
+    POINTER names (``update.disk_build``), and a pointer may legitimately LAG: a
+    host that has adopted the layout while its legacy uv-tool tree keeps being
+    advanced in place has an older generation under ``current`` than the build its
+    processes loaded. Unordered, that difference read as an update — the runtime's
+    soft refresh and hard-stale bound would retire a live runtime onto the OLDER
+    build, ``_spawn_interpreter`` would engage the fleet onto it, and the TUI's
+    drift notice printed the two labels reversed ("was updated … 0.55.11 →
+    0.55.10"). Ordered once here so the runtime, the spawn path and the notice
+    cannot disagree.
+    """
+    from local_operator.update import parse_version
+
+    candidate_version = parse_version(candidate.version)
+    other_version = parse_version(than.version)
+    if candidate_version is None or other_version is None:
+        return False
+    return candidate_version < other_version
 
 
 def _settle_elapsed() -> bool:
@@ -397,12 +438,12 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     caller tells them apart; this function answers only "may I act now", which
     is what both of its callers need.
     """
-    newer = handover_build(boot)
-    if newer is None:
+    on_disk = handover_build(boot)
+    if on_disk is None:
         return None
     if not _settle_elapsed():
         return None
-    return newer
+    return on_disk
 
 
 def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
@@ -423,10 +464,10 @@ def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
     shape ``handover_build`` refuses — in those the settle window is not what is
     being described.
     """
-    newer = handover_build(boot)
-    if newer is None or _settle_elapsed():
+    on_disk = handover_build(boot)
+    if on_disk is None or _settle_elapsed():
         return None
-    return newer
+    return on_disk
 
 
 def moved_and_unsettled(version: str, source_ref: str) -> bool:

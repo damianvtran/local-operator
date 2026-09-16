@@ -1175,28 +1175,25 @@ def _generation_install_root(generation: Path) -> Path:
 def current_generation() -> Path | None:
     """The generation root ``current`` resolves to, or ``None``.
 
-    ``os.readlink`` RATHER THAN ``Path.resolve``, and the difference is real
-    rather than cosmetic: readlink returns what the link NAMES (one check, no
-    chasing), so a flip landing mid-read cannot leave this function resolving a
-    path the link has already stopped naming. ``Path.resolve`` walks the chain
-    and can be caught between steps — measured on this platform, macOS's
-    ``realpath`` raises ``OSError: [Errno 22] Invalid argument`` when the link is
-    replaced underneath it.
+    WHAT THIS GUARANTEES, stated narrowly because the narrow version is the one
+    the callers can rely on: a DANGLE is impossible — the pointer is replaced by
+    ``os.rename``, so it always names a generation that exists, and a pointer to
+    a tree that is gone (or to nothing at all) answers ``None``. A READ CAN
+    STILL FAIL, transiently, on the platform this ships on: macOS raises
+    ``OSError: [Errno 22] Invalid argument`` from both ``os.readlink`` and
+    ``Path.resolve`` while a symlink is being renamed underneath the reader
+    (reproduced by a tight rename loop; the numbers are in
+    ``docs/design-install-generations.md`` §3.2). Every caller has a documented
+    fallback for that answer — a spawn falls back to this process's interpreter,
+    the build watch sees no move, and :func:`prune_generations` REFUSES TO
+    DELETE ANYTHING, because "I could not read which tree is live" must never
+    be answered by deleting trees.
 
-    THAT TRANSIENT IS NOT ELIMINATED BY EITHER SPELLING, and the docstring says
-    so because a test measured it: a tight rename loop makes macOS's ``readlink``
-    raise the same ``EINVAL`` occasionally. What the layout guarantees is that
-    such a hiccup is TRANSIENT — the pointer is replaced by ``os.rename``, so it
-    always names a real generation again on the next read — and every caller
-    already has a documented fallback for "no answer": a spawn falls back to
-    this process's interpreter, the build watch sees no move, and
-    :func:`prune_generations` REFUSES TO DELETE ANYTHING (it cannot know which
-    tree is live, so doubt keeps trees). What no reader ever sees is a pointer
-    that names a tree which is not there.
-
-    A symlink whose target genuinely is gone (a generation removed out from
-    under the pointer, an interrupted flip) is ``None`` too, for the same
-    reason: a pointer to nothing is not an install.
+    ``os.readlink`` rather than ``Path.resolve`` on top of that, because it also
+    answers the right QUESTION: readlink returns what the link NAMES (one check,
+    no chasing), which is what the caller wants to pass on; ``resolve`` walks the
+    chain and can be caught between steps, returning a path the link had already
+    stopped naming.
     """
     try:
         target = os.readlink(pointer_path())
@@ -1480,6 +1477,28 @@ def _write_executable(path: Path, text: str) -> bool:
         return False
 
 
+def _may_name_the_shim() -> bool:
+    """May THIS process render a plist / systemd unit against the stable shim?
+
+    TWO SHAPES QUALIFY, and the second is the one review round 1 (R-2) found
+    missing: a process that already runs out of a generation (the ordinary case),
+    and an INSTALLED distribution that is not one yet — a uv-tool or pipx tree on
+    a machine whose pointer has already moved to a generation, which is exactly
+    the post-migration state. In that state the shim exists and names the current
+    build, so a unit rendered against it runs the machine's install; keeping the
+    legacy venv in the plist instead would name the tree that is no longer
+    current.
+
+    A SOURCE CHECKOUT never qualifies, and that is the guard this predicate
+    inherits from ``_repair_refusal``: a dev tree must not repoint the operator's
+    daemons at itself, and rendering a unit that runs the machine's install from
+    a worktree would be the same surprise in the other direction.
+    """
+    if _is_generation_install():
+        return True
+    return install_kind() in (InstallKind.UV_TOOL, InstallKind.PIPX, InstallKind.PIP)
+
+
 def daemon_image() -> Path | None:
     """The stable interpreter path a supervised unit should name, or ``None``.
 
@@ -1488,29 +1507,53 @@ def daemon_image() -> Path | None:
     test of ``render_plist`` go through here, and a status command that plants a
     file is a surprise with no upside.
 
-    ``None`` unless this process is itself a generation install AND the shim is
-    already there. Both halves matter: a pipx or pip install has no generation
-    layout to point at, and a source checkout must not rewrite the plists of the
-    operator's real install. With ``None`` every caller keeps its pre-generation
-    shape, which still works.
+    ``None`` unless this process may name a machine-level artefact
+    (:func:`_may_name_the_shim`) AND the machine has a pointer AND the shim is
+    already there. All three matter: a source checkout has no business naming the
+    operator's install, a machine with no layout has nothing to point at, and a
+    shim that does not exist is a unit that cannot start. With ``None`` every
+    caller keeps its pre-generation shape, which still works.
     """
-    if not _is_generation_install():
+    if not _may_name_the_shim():
         return None
-    if current_generation() is None:
+    if not pointer_path().is_symlink():
         return None
     path = daemon_image_path()
     return path if path.is_file() else None
 
 
-def ensure_daemon_image() -> Path | None:
+def ensure_daemon_image(generation: Path | None = None) -> Path | None:
     """Write the stable interpreter shim supervised units name, or ``None``.
 
     Called from the install paths (a new generation, and the migration), so the
     file a plist names exists before any plist is rendered against it.
+
+    ``generation`` is how a caller that is NOT itself a generation install asks
+    for the shim anyway, and the migration is exactly that caller: it runs from
+    the legacy tree while creating a generation, so a gate on "is THIS process a
+    generation install" answered ``None`` there and left the shim unwritten.
+    Measured after a real ``lop install migrate`` (QA round 1, Q3: ``<stable>/bin/
+    python3`` did not exist) and named by review round 1 (R-2): the four
+    installers then kept rendering plists that name a path inside the legacy
+    venv — the shape this shim exists to remove. The shim is a MACHINE-level
+    artefact (it resolves ``current`` for whatever generation is current), so a
+    caller that has just created a generation may offer it.
+
+    An explicitly passed path must still BE one of our generations. This is the
+    one writer of a file the operator's daemons will execute, and "a caller said
+    so" is not a licence to plant it anywhere.
     """
-    if not _is_generation_install():
+    if generation is not None:
+        if not _is_generation_install(generation):
+            return None
+    elif not _may_name_the_shim():
         return None
-    if current_generation() is None:
+    if not pointer_path().is_symlink():
+        # The shim execs ``current``. With no pointer there is nothing for it to
+        # name, and a shim that can only exit 78 is worse than no shim: the
+        # installers would render a plist naming a program that is guaranteed to
+        # fail. Asked of the LINK rather than of ``current_generation()`` so a
+        # transient read failure cannot silently skip the write.
         return None
     path = daemon_image_path()
     return path if _write_executable(path, _DAEMON_SHIM) else None
@@ -1550,6 +1593,70 @@ def _atomic_symlink(link: Path, target: Path) -> bool:
     except OSError:
         logger.debug("could not point %s at %s", link, target, exc_info=True)
         return False
+
+
+def _rebind_scripts(install_root: Path, source_root: Path) -> list[Path]:
+    """Point a COPIED tree's own scripts at itself instead of at the original.
+
+    THE MIGRATION'S ONE REWRITE, and without it the migration does not work at
+    all. ``uv tool install`` writes every console script with an ABSOLUTE
+    shebang naming the venv it was installed into, so a verbatim copy executes
+    the tree it was copied from:
+
+        #!/Users/…/.local/share/uv/tools/local-operator/bin/python3
+
+    Measured on the reporting host (review round 1, R-1): the chain
+    ``~/.local/bin/lop → current/bin/lop → <gen>/…/bin/lop`` ended at the LEGACY
+    interpreter, so every process started from the stable launcher after ``lop
+    install migrate`` still had ``sys.prefix`` = ``~/.local/share/uv/tools/
+    local-operator`` — the tree the host rewrites in place, which is exactly the
+    hazard this layout exists to remove.
+
+    Rewrites every TEXT file under ``<install_root>/bin`` that names the source
+    root: the shebang of each console script, and the ``VIRTUAL_ENV`` line in
+    ``activate``/``activate.csh``/``activate.fish``, which is the same claim in
+    another form. Both spellings of the source are matched (the path as given and
+    its resolved form — ``/tmp`` is ``/private/tmp`` on this platform). Symlinks
+    are skipped: ``bin/python3`` points at a base interpreter OUTSIDE the tree,
+    which must not be touched. Anything with a NUL byte in its first block is
+    skipped as binary.
+
+    Written atomically with the mode preserved, because a half-rewritten script
+    is a script ``lop`` cannot execute and the pointer is about to name this
+    tree. Bytes, not text: nothing here decodes or re-encodes a file it does not
+    change.
+    """
+    bin_dir = install_root / ("Scripts" if os.name == "nt" else "bin")
+    if not bin_dir.is_dir():
+        return []
+    spellings = {str(source_root), str(_real(source_root))}
+    replacements = [(spelling.encode(), str(install_root).encode()) for spelling in spellings]
+    rewritten: list[Path] = []
+    for entry in sorted(bin_dir.iterdir()):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        try:
+            data = entry.read_bytes()
+        except OSError:  # pragma: no cover — unreadable means nothing to rewrite
+            continue
+        if b"\x00" in data[:4096]:
+            continue
+        patched = data
+        for old, new in replacements:
+            patched = patched.replace(old, new)
+        if patched == data:
+            continue
+        try:
+            mode = entry.stat().st_mode
+            staged = entry.with_name(f"{entry.name}.rebind-{os.getpid()}")
+            staged.write_bytes(patched)
+            os.chmod(staged, mode & 0o7777)
+            os.rename(staged, entry)
+        except OSError:  # pragma: no cover — best effort, never fail the migration
+            logger.warning("could not rebind %s to %s", entry, install_root, exc_info=True)
+            continue
+        rewritten.append(entry)
+    return rewritten
 
 
 def _link_generation_bin(generation: Path) -> None:
@@ -1712,15 +1819,28 @@ def install_into_generation(
             ref=ref,
             origin=origin,
         )
+        # The flip is INSIDE this handler so a refusal from the stable root
+        # (``EACCES``, ``ENOSPC``) arrives as the one sentence the callers print
+        # instead of a bare ``OSError``, and so a built tree nobody can reach is
+        # not left behind (review round 1, R-9). Safe to remove on failure:
+        # ``flip_pointer`` either renamed the pointer or raised before it did,
+        # never both.
+        try:
+            flip_pointer(generation)
+        except OSError as exc:
+            raise UpdateError(f"could not point current at {generation.name}: {exc}") from exc
     except BaseException:
         # Nothing has been flipped, so this tree is nobody's but ours. A
         # ``kill -9`` cannot reach here — which is exactly what
         # ``prune_generations``' marker-age rule is for.
         _remove_tree(generation)
         raise
-    flip_pointer(generation)
     write_stable_launchers(generation)
-    ensure_daemon_image()
+    # ``generation`` explicitly, for the same reason the migration passes it: the
+    # process running this may be a LEGACY uv-tool install (``lop update`` from a
+    # tree that predates the layout), so the this-process gate is False on the
+    # very run that creates the layout (review round 1, R-2).
+    ensure_daemon_image(generation)
     return generation
 
 
@@ -1766,13 +1886,55 @@ def clone_into_generation(
             version=found.version if found is not None else "",
             origin=SNAPSHOT_SOURCE_TOKEN,
         )
+    # The copied scripts still name the tree this was copied FROM (see
+    # ``_rebind_scripts``), so they are re-pointed at the copy before anything
+    # executes them — and before the pointer flip below, which is what makes
+    # ``~/.local/bin/lop`` mean the generation afterwards.
+    _rebind_scripts(install_root, origin)
     # No installer ran, so this tree has no ``bin`` of its own: lay one down
     # before anything points through it (see ``_link_generation_bin``).
     _link_generation_bin(generation)
     flip_pointer(generation)
     write_stable_launchers(generation)
-    ensure_daemon_image()
+    # ``generation`` explicitly: this process is the LEGACY tree, so the
+    # this-process gate in :func:`ensure_daemon_image` cannot see the layout
+    # that now exists.
+    ensure_daemon_image(generation)
     return generation
+
+
+def _sweep_staging_links(moment: float) -> list[Path]:
+    """Remove ``current.tmp-*`` leaves an interrupted flip left in the stable root.
+
+    ``flip_pointer`` unlinks its own staging name in a ``finally``, which covers
+    every failure INSIDE that call but not a ``kill -9`` between ``os.symlink``
+    and ``os.rename``. Nothing else reclaims one: ``prune_generations`` walks
+    ``generations/``, and the stable root is the one directory whose contents are
+    meant to be a closed set (``current``, ``bin/``, ``generations/``), so a
+    stray link there is permanent litter that also happens to look like a
+    pointer (review round 1, R-6).
+
+    Aged by :data:`_PARTIAL_TTL_S`, the same "young means in flight" rule the
+    generation sweep uses: a concurrent ``flip_pointer`` that is between its
+    symlink and its rename must not have its staging name deleted underneath it.
+    """
+    root = stable_root()
+    if not root.is_dir():
+        return []
+    swept: list[Path] = []
+    for entry in sorted(root.glob(f"{pointer_path().name}.tmp-*")):
+        try:
+            # ``lstat``: the entry is a SYMLINK, and ``stat`` would follow it to
+            # the generation and report that tree's (fresh) mtime — so every
+            # staging link would look in-flight and none would ever be swept.
+            if moment - entry.lstat().st_mtime < _PARTIAL_TTL_S:
+                continue
+            entry.unlink()
+        except OSError:  # pragma: no cover — vanished or unreadable: nothing to do
+            continue
+        logger.info("removed an interrupted flip's staging link: %s", entry)
+        swept.append(entry)
+    return swept
 
 
 def referenced_install_roots() -> tuple[Path, ...]:
@@ -1786,31 +1948,70 @@ def referenced_install_roots() -> tuple[Path, ...]:
     FUNCTION-LOCAL because they reach the session and server layers: this module
     is on ``lop --version``'s path and must not drag either in.
 
-    A failure in either reads as "no records from there", which only ever keeps
-    MORE trees — the failure direction that costs disk rather than a running
-    session.
+    AND TWO CONFIG ROOTS. ``registry.scan()`` reads ``config_dir()``, which is the
+    AMBIENT one — an isolated run, a second profile, a QA pass each have their
+    own — so a prune invoked under a different root could not see sessions
+    published under the default one, and their generations fell back to the
+    ``keep`` margin alone (review round 1, R-7). Both roots are read, deduped;
+    the default (``~/.local-operator``) is the one every ordinary session on the
+    machine publishes under, and reading it is what makes rule 2 mean what its
+    docstring says. The failure direction is unchanged: MORE trees kept.
+
+    A failure in either namespace, under either root, reads as "no records from
+    there", which only ever keeps MORE trees — the direction that costs disk
+    rather than a running session.
     """
     roots: list[Path] = []
+    seen: set[str] = set()
+    for config_root in _config_roots():
+        for value in _session_roots_under(config_root) + _serve_roots_under(config_root):
+            key = str(value)
+            if key and key not in seen:
+                seen.add(key)
+                roots.append(Path(key))
+    return tuple(roots)
+
+
+def _config_roots() -> tuple[Path, ...]:
+    """The ambient config root and the home default, deduped, when both exist."""
+    from local_operator.paths import DEFAULT_CONFIG_DIRNAME, config_dir
+
+    ambient = config_dir()
+    default = Path.home() / DEFAULT_CONFIG_DIRNAME
+    if _real(ambient) == _real(default):
+        return (ambient,)
+    return (ambient, default)
+
+
+def _session_roots_under(config_root: Path) -> list[Path]:
+    """``install_root`` from every session record under one config root."""
+    found: list[Path] = []
     try:
         from local_operator.session.runtime import registry
         from local_operator.session.runtime.types import SessionRecord
 
-        for record, _state in registry.scan(parse=SessionRecord.from_json):
+        for record, _state in registry.scan(config_root, parse=SessionRecord.from_json):
             value = str(getattr(record, "install_root", "") or "")
             if value:
-                roots.append(Path(value))
+                found.append(Path(value))
     except Exception:  # noqa: BLE001 — no readable records means no objection to keep
-        logger.debug("session records unreadable; pruning without them", exc_info=True)
+        logger.debug("session records unreadable under %s", config_root, exc_info=True)
+    return found
+
+
+def _serve_roots_under(config_root: Path) -> list[Path]:
+    """``prefix`` from every ``lop serve`` record under one config root."""
+    found: list[Path] = []
     try:
         from local_operator.server import registry as serve_registry
 
-        for serve_record, _state in serve_registry.scan():
+        for serve_record, _state in serve_registry.scan(config_root):
             value = str(getattr(serve_record, "prefix", "") or "")
             if value:
-                roots.append(Path(value))
+                found.append(Path(value))
     except Exception:  # noqa: BLE001 — same direction as above
-        logger.debug("serve records unreadable; pruning without them", exc_info=True)
-    return tuple(roots)
+        logger.debug("serve records unreadable under %s", config_root, exc_info=True)
+    return found
 
 
 def _real(path: Path) -> Path:
@@ -1874,6 +2075,7 @@ def prune_generations(
         return []
     if current is not None:
         wanted.add(_real(current))
+    _sweep_staging_links(moment)
     for root in referenced:
         try:
             # A record names the venv (``<gen>/tools/local-operator``), and the

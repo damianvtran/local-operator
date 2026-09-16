@@ -952,6 +952,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "staged symlink -> <stable>/current; both under the stable root, no directory moves",
     ),
     (
+        "local_operator/update.py::_rebind_scripts",
+        "os.rename",
+        "<gen>/…/bin/<script>.rebind-<pid> FILE -> the script; only text FILES under bin/",
+    ),
+    (
+        "local_operator/update.py::_sweep_staging_links",
+        "<path>.unlink",
+        "<stable>/current.tmp-<pid> SYMLINK left by an interrupted flip; the stable root, aged",
+    ),
+    (
         "local_operator/update.py::_atomic_symlink",
         "os.rename",
         "<local bin>/<entry>.tmp-<pid> -> <local bin>/<entry> symlink; no directory moves",

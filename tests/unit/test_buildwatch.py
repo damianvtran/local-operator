@@ -115,6 +115,22 @@ class TestTheWatch:
         self.state["age"] = buildwatch.BUILD_SETTLE_S / 2
         assert buildwatch.build_changed(OLD) is None
 
+    def test_a_pointer_that_lags_the_running_build_is_not_a_move(self) -> None:
+        """R-3: the disk tree can be OLDER than the process's own.
+
+        The compared tree is now the POINTER's generation, and a migrated host
+        whose legacy uv-tool tree is still advanced in place by ``uv tool install
+        --force`` has exactly this shape: ``current`` names an older generation
+        than the build its processes loaded. Unordered, that difference read as an
+        update — so the runtime's soft refresh (and its hard-stale bound) retired a
+        live runtime onto the older build, ``_spawn_interpreter`` engaged the fleet
+        onto it, and the TUI printed the two labels reversed.
+        """
+        self.state["build"] = OLD  # disk: 0.54.30@1111111, the boot sample is NEW
+        self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
+        assert buildwatch.build_changed(NEW) is None
+        assert buildwatch.proves_a_move(NEW, OLD) is False
+
     def test_a_moved_build_past_the_settle_is_a_change(self) -> None:
         self.state["build"] = NEW
         self.state["age"] = buildwatch.BUILD_SETTLE_S + 1
@@ -328,3 +344,19 @@ class TestMovedAndUnsettled:
 
         monkeypatch.setattr(update_mod, "disk_build", _boom)
         assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is False
+
+
+def test_is_older_orders_versions_and_never_guesses_on_refs() -> None:
+    """The ordering half of :func:`buildwatch.is_older`, on its own.
+
+    The ref is a commit id, so two genuinely different builds routinely share one
+    version — which is why equal versions answer "not older" (the direction is
+    unknown, not backwards) and why an unparseable version answers the same.
+    """
+    assert buildwatch.is_older(BuildStamp("0.54.30"), BuildStamp("0.54.31")) is True
+    assert buildwatch.is_older(BuildStamp("0.54.31"), BuildStamp("0.54.30")) is False
+    assert (
+        buildwatch.is_older(BuildStamp("0.54.31", "aaaa"), BuildStamp("0.54.31", "bbbb")) is False
+    )
+    assert buildwatch.is_older(BuildStamp("nonsense"), BuildStamp("0.54.31")) is False
+    assert buildwatch.is_older(BuildStamp("0.54.30"), BuildStamp("")) is False

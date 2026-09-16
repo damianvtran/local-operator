@@ -27702,12 +27702,28 @@ class OperatorApp(App[None]):
         # its own working tree and whose reload target is not a
         # ``~/.local/bin`` generation at all.
         try:
+            from local_operator import buildwatch
             from local_operator import update as update_mod
 
             on_disk = update_mod.disk_build()
+            # NOT when the pointer names an OLDER build than this window loaded.
+            # The notice below says "was updated after this window opened" and
+            # offers ``/reload``, and a lagging pointer — a migrated host whose
+            # legacy uv-tool tree is still advanced in place — would be announced
+            # with the two labels reversed while there is nothing for the user to
+            # fix (review round 1, R-3). The order is the shared rule's, so this
+            # branch and the runtime's own refresh cannot disagree about which way
+            # a move goes.
+            announcing = (
+                on_disk is not None
+                and loaded is not None
+                and on_disk != loaded
+                and not buildwatch.is_older(on_disk, loaded)
+            )
         except Exception:  # noqa: BLE001 — diagnostics never break a seam
             on_disk = None
-        if on_disk is not None and on_disk != loaded:
+            announcing = False
+        if on_disk is not None and loaded is not None and announcing:
             announce(
                 "disk",
                 loaded.label(),

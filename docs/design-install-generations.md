@@ -86,6 +86,18 @@ is the original failure wearing a new hat, which is why every spawn site in this
 change resolves the pointer itself and hands the child a **concrete** path
 (`update.current_interpreter`, `launch._spawn_interpreter`).
 
+**The console scripts carry the same claim, and a copy must be re-pointed.**
+`uv tool install` writes them with an ABSOLUTE shebang naming the venv they were
+installed into, so a generation produced by `uv` is correct and a generation
+produced by the MIGRATION is not: copying the tree verbatim would leave every
+launcher executing the legacy venv, i.e. the tree the host still rewrites in
+place (review round 1, R-1 — reproduced by running the migrated
+`~/.local/bin/lop` and reading `sys.prefix`). `update._rebind_scripts` therefore
+rewrites the source root out of every text file under the copy's `bin/`
+(shebangs, and the `VIRTUAL_ENV=` line in the activate scripts) before the
+pointer is flipped, and `test_the_migrated_launcher_runs_the_generation_not_the_source`
+executes the chain to prove it.
+
 ## 3. Install, flip, prune
 
 ### 3.1 One install, six steps
@@ -197,10 +209,19 @@ something this tool gets to do.
 ### 3.4 Migration
 
 `lop install migrate` copies the tree the running `lop` imports from into
-generation 1 and flips the pointer. **Non-destructive**: the legacy fixed tree
-is copied, never moved or deleted, so a machine that has just adopted the layout
-still has the install it was running on and can fall back to it by hand; it is
-removed only by an explicit prune.
+generation 1, **re-points the copied scripts at the copy** (§2), links the copy's
+`bin/`, flips the pointer and plants the supervisor shim. **Non-destructive**:
+the legacy fixed tree is copied, never moved or deleted, so a machine that has
+just adopted the layout still has the install it was running on and can fall back
+to it by hand.
+
+There is deliberately **no supported way to remove that legacy tree in this
+change**: `lop install prune` enumerates `generations/` only, and the fixed
+uv-tool tree is not a generation — so nothing in this PR can delete it, and the
+honest statement is "left in place", not "removed by an explicit prune" (review
+round 1, R-8 / QA round 1, Q2). Removing it belongs with the decision about
+whether `~/.local/share/uv/tools/local-operator` should keep existing at all,
+which is the host script's business and out of this repo.
 
 A real copy rather than hardlinks — the cheap shape is wrong here: a hardlinked
 generation shares inodes with a tree that `uv tool install --force` is about to
@@ -252,8 +273,18 @@ image when it is planted, so `p_comm` still reads `Local Operator`, and falls
 back to the interpreter when it is not; `ProgramArguments[0]` — what macOS
 Background Task Management names the login item by — is unchanged.
 
+`update.ensure_daemon_image(generation=None)` plants the shim, and it is called
+from every install path — including the migration, which passes its generation
+explicitly because the migrating process IS the legacy tree and a gate on "is
+*this* process a generation install" answered `None` there (review round 1, R-2 /
+QA round 1, Q3: after a real `lop install migrate`, `<stable>/bin/python3` did
+not exist and the four installers kept rendering the legacy shape).
+
 `procname.supervised_image()` answers `None` on a machine with no generation
 layout, and every installer then keeps **exactly** the plist it shipped before.
+A SOURCE CHECKOUT never names the shim either: a dev tree must not point the
+operator's daemons at anything (`update._may_name_the_shim`, the same rule as
+`_repair_refusal`).
 That gate matters: a source checkout must never rewrite the operator's plists,
 and a pip/pipx install has no pointer to name.
 
@@ -302,13 +333,20 @@ Real-path walkthrough (isolated `HOME`, real `uv`, real console scripts — the
 runbook QA is asked to repeat at fleet scale):
 
 ```sh
-uv tool install --force .                                  # a legacy fixed tree
+uv tool install --force --no-cache .                       # a legacy fixed tree
 <legacy>/lop install migrate                               # copy + flip, legacy left in place
 ~/.local/bin/lop --version                                 # through the pointer chain
 <generation>/lop update --from-snapshot <dir>              # real uv build into a new generation + flip
 ~/.local/bin/lop install status                            # pointer, generations, disk build
 ~/.local/bin/lop install prune                             # removes only superseded trees
 ```
+
+`--no-cache` is load-bearing rather than tidy: uv caches a build of a local
+directory, so a repeat of this walkthrough on a worktree other sessions are
+building from once produced a legacy tree 28 minutes STALE — missing a function
+that was on disk at HEAD — and the migrated launcher then exited 127 exactly as
+`_link_generation_bin`'s docstring describes (QA round 1, Q4, which is how the
+note got here).
 
 Observed: the migration copied the tree into generation 1 and flipped the
 pointer while leaving the legacy install intact; `lop --version` resolved
