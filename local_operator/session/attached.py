@@ -173,6 +173,47 @@ ATTACHED_SLASH_CONSUMERS: tuple[str, ...] = SLASH_ACTION_RECEIPTS
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
 
+#: The budget a READ gives an existing owner to deliver canonical state before
+#: the read serves the durable facade cold.
+#:
+#: A read is not an action a user is waiting on, which is why this is neither
+#: ``FRONTEND_SYNC_FOREGROUND_S`` (15 s — the envelope for a command the user
+#: just submitted) nor ``COLD_FALLBACK_S`` (8 s — the point at which a VIEWER
+#: concludes owner loss and ends an in-flight turn locally with a named
+#: ``owner-lost`` cut-off). Paying either on every panel open is exactly the
+#: 15-17 s REFUSAL the read never needed: ``bridge.snapshot()``/``history()``
+#: already serve the durable answer with no owner at all, in the same process,
+#: on the same session directory. 2.0 s is the number this codebase already uses
+#: for "one socket round trip plus the leg's own work" against a 15 s caller
+#: deadline (``_ADMISSION_ACK_BOUND_S``, routes/desktop_sessions.py). A healthy
+#: owner lands the welcome and the sync inside it by three orders of magnitude;
+#: a stalled one does not, and the read does not care.
+READ_ATTACH_BUDGET_S = 2.0
+
+#: How long a read's RETAINED dial may wait for its canonical sync before the
+#: socket is abandoned.
+#:
+#: :meth:`AttachedSession._retain_unsynced_dial` keeps an authenticated-but-
+#: unsynced dial alive so a sync that lands after the read's budget still
+#: installs state and publishes the rollover the renderer already handles. It
+#: cannot be kept indefinitely: an attach socket is term 3 of the runtime's own
+#: exit predicate (``session.runtime.process._should_exit``), so a viewer that
+#: has given up must stop holding an 82 MB process resident. This is the hard
+#: deadline after which the client is closed and the runtime's attach slot is
+#: given back.
+SYNC_LANDING_DEADLINE_S = 30.0
+
+#: How long the DIAL path waits for a desktop presence re-assert's ack.
+#:
+#: Best-effort, exactly like the event-mute re-assert five lines above it on the
+#: same path: the presence lease's own TTL (``DESKTOP_WATCH_LEASE_S``, 45 s) and
+#: the renderer's next 15 s beat repair a lost assertion, and a READ must not be
+#: refused because a presence hint went unacknowledged. Bounded so a wedged
+#: owner cannot hold a redial open for the full ``ACK_TIMEOUT_S`` (15 s) over an
+#: optimisation. A caller that brought a deadline of its own (a read) clamps
+#: this further — see ``_dial``.
+_DESKTOP_WATCH_ACK_BOUND_S = 5.0
+
 #: The SECOND bound on recovery used to live here: ``RECOVERY_GIVE_UP_S = 2 *
 #: HEARTBEAT_TIMEOUT_S`` (90 s), for the LIVE-BUT-SILENT owner — a record is
 #: found on every pass, the socket accepts, the canonical sync never lands.
@@ -956,6 +997,20 @@ class AttachedSession:
         # The projection callback authenticates the welcome identity only. Full
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
+        #: WHY the last READ-attach served cold, in the wire vocabulary of
+        #: ``docs/DESKTOP_API.md`` (``"no-runtime" | "owner-silent" |
+        #: "owner-leaving"``). ``None`` until a read classifies this facade;
+        #: :attr:`cold_reason` defaults the token for a cold facade, so a
+        #: renderer that knew only the ``cold`` boolean is unaffected.
+        self._read_cold_reason: str | None = None
+        #: An authenticated dial RETAINED past a read's envelope, waiting for a
+        #: canonical sync that arrived too late for the read that opened it.
+        #: The socket is a residency term of the runtime's own exit predicate,
+        #: so this is a state to leave DELIBERATELY: :meth:`_await_late_sync`
+        #: abandons it at ``SYNC_LANDING_DEADLINE_S``, ``dispose`` cancels it,
+        #: and any later dial supersedes it.
+        self._socketed_unsynced = False
+        self._sync_landing_task: asyncio.Task[None] | None = None
         self._frontend_store: FrontendStateStore | None = None
         #: Set by the desktop bridge; see :meth:`set_local_cwd_callback`.
         self._local_cwd_callback: Callable[[str], Any] | None = None
@@ -2201,6 +2256,43 @@ class AttachedSession:
         return self._client is not None and self._client.connected
 
     @property
+    def attaching(self) -> bool:
+        """An authenticated dial is retained, waiting for canonical state.
+
+        The wire reports this so a renderer can tell "the runtime is gone" from
+        "the runtime has accepted us and its state has not arrived yet" — the
+        second is a few hundred milliseconds of an ordinary busy loop, not a
+        failure, and the reads that were refused by mistaking one for the other
+        are what this state exists to remove.
+        """
+        return self._socketed_unsynced
+
+    @property
+    def cold_reason(self) -> str | None:
+        """WHY this facade is cold, as a token, or ``None`` when it is live.
+
+        Deliberately a token rather than a sentence: the copy belongs to the
+        surface (the desktop renderer writes its own), and the same discipline
+        already governs ``code`` in the routes' error ladder. The vocabulary is
+        closed and documented in ``docs/DESKTOP_API.md``:
+
+        * ``"no-runtime"`` — no pid holds this session's transcript lease, so
+          there is nothing to attach to. Also the default for a cold facade
+          that no read has classified, which is what makes the field safely
+          additive for a reader that never saw this attribute exist.
+        * ``"owner-silent"`` — a pid DOES hold the lease (a live or wedged
+          record, or a live pid publishing no dialable record) and did not
+          deliver canonical state inside the read's budget. Distinguishing this
+          from ``no-runtime`` is the whole point of the field.
+        * ``"owner-leaving"`` — the record it dialled carries a ``leaving``
+          phrase (``runtime.types.SessionRecord.leaving``), i.e. the runtime
+          has committed to a handover and is finishing work in flight first.
+        """
+        if not self.is_cold:
+            return None
+        return self._read_cold_reason or "no-runtime"
+
+    @property
     def can_ever_bind(self) -> bool:
         """Whether a bind attempt on this facade could EVER succeed.
 
@@ -2245,14 +2337,46 @@ class AttachedSession:
             self._can_go_cold or self._recovering or (client is not None and client.connected)
         )
 
-    async def attach_existing(self) -> bool:
+    async def attach_existing(self, *, budget: float | None = None) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
         Desktop read/subscription requests use the cold viewer's recovery policy
         even when an owner is already live: losing that owner must never move
         execution into the HTTP worker or start a replacement just for a reader.
+
+        ``budget`` selects READ MODE. A read has no use for an owner's answer
+        delivered after the user has already lost interest, and it has a durable
+        answer of its own — the transcript the cold facade parses
+        (``AttachedSession.cold``) — so it gives the owner ``budget`` seconds to
+        deliver canonical state and then serves cold. Two properties follow from
+        that, and they are the contract rather than a side effect:
+
+        * **A read never raises for a session that exists on disk.** This is the
+          whole of the reported failure: the route ladder converted
+          ``OwnerAckTimeout`` out of a silent-but-alive owner into
+          ``503 Session owner is unavailable`` after ~17 s, when the durable rows
+          had been readable in 0.02 s the entire time. In read mode the attempt
+          is bounded and every failure below the caller is absorbed here.
+        * **The dial is RETAINED, not discarded.** A read that ran out of budget
+          leaves its authenticated socket open so the sync that lands a moment
+          later still installs state and publishes the rollover the renderer
+          already handles (see :meth:`_retain_unsynced_dial`) — bounded by
+          ``SYNC_LANDING_DEADLINE_S`` so a viewer that has given up cannot pin a
+          runtime resident.
+
+        ``None`` (the default) is the CONTROL envelope every existing caller
+        keeps: one attempt on the foreground envelope, and a raise when the
+        owner does not serve it.
+
+        The return value is the same question in both modes — is this facade
+        attached — so a read that served cold answers ``False`` while leaving the
+        retained dial in place (``attaching``), which is what the bridge's
+        ``cold``/``cold_reason`` pair reports.
         """
-        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.mobile.attach_client import (
+            dialable_owner_record,
+            find_runtime_record,
+        )
 
         # FOREGROUND: an HTTP request is waiting on this acquisition, so it
         # announces itself rather than silently inheriting whatever envelope a
@@ -2261,18 +2385,96 @@ class AttachedSession:
         # (MAJOR-2) — which is the same wait the sync_timeout below already
         # refuses to take.
         async with self._bind_lock_for(foreground=True):
-            if self._disposed or not self.is_cold:
-                return not self.is_cold
-            record, _ = await asyncio.to_thread(
+            if self._disposed:
+                return False
+            if not self.is_cold:
+                return True
+            # RISK 2 of the design: an unsynced RETAINED dial is not a reason to
+            # dial again. ``is_cold`` stays true for the whole of the wait below,
+            # so gating a redial on it made a warm/lease-warm arriving in that
+            # window open a second socket for one viewer (bounded by the LRU cap
+            # and by the loser's discard, but needless). The honest question is
+            # "is there already a client?", and a connected one owns this
+            # facade's dial until it is discarded.
+            if self.owner_reachable:
+                return False
+            record, owner = await asyncio.to_thread(
                 find_runtime_record, self._config_dir, self._session_id
             )
+            if record is None and owner is not None:
+                # AN owner EXISTS but published no LIVE record: an older binary, a
+                # registrant that failed, or — the case a read must not call "no
+                # runtime" — a WEDGED record (pid alive, heartbeat stale), which
+                # ``find_runtime_record`` filters out by state. Ask the registry's
+                # second reading and dial that record anyway: the welcome
+                # projection's identity check arbitrates, so one refused dial is
+                # the entire cost, and a stuck owner that recovers on its own is
+                # served instead of being reported as absent.
+                record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
             if record is None or self._disposed:
+                if budget is not None:
+                    self._note_read_cold_reason(record, owner)
                 return False
-            # A desktop READ attaching to an owner that already exists: an HTTP
-            # request is waiting on it, so this takes the foreground envelope
-            # rather than the proxy's generous one.
-            await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
-            return True
+            if budget is None:
+                await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
+                return True
+            await self._attach_existing_for_read(record, budget=budget)
+            return not self.is_cold
+
+    async def _attach_existing_for_read(self, record: SessionRecord, *, budget: float) -> None:
+        """One bounded attach attempt whose failure is a cold answer, not a raise.
+
+        The body of :meth:`attach_existing`'s read mode, kept here so the lock's
+        scope and the classification below cannot drift apart. ``budget`` is a
+        DEADLINE for the whole attempt rather than a per-phase timeout: the dial
+        spends part of it waiting for the owner's reply, and the canonical sync
+        gets what is left. Composing the two budgets independently is how a
+        "2 s read" becomes a 7 s one, which is the composition this exists to
+        stop — the same reasoning ``_bind_under_lock`` records for clamping an
+        ATTEMPT to the remaining budget rather than each phase to its own.
+        """
+        try:
+            await self._bind_to(
+                record,
+                sync_timeout=budget,
+                retain_unsynced=True,
+                deadline=time.monotonic() + budget,
+            )
+        except (ConnectionError, OSError, TimeoutError) as error:
+            # A REFUSED dial — a socket that died, a welcome projecting another
+            # conversation, an owner too old for this surface — is not a raise on
+            # a read. The session exists on disk and the route is holding a
+            # durable answer for it. DEBUG rather than WARNING because a runtime
+            # mid-restart produces this on every panel open, and the roster the
+            # operator reads for that state is `lop sessions`, not this log.
+            logger.debug("read attach for %s served cold: %s", self._session_id, error)
+        if self.is_cold:
+            self._note_read_cold_reason(record, record.pid)
+        else:
+            self._read_cold_reason = None
+
+    def _note_read_cold_reason(self, record: SessionRecord | None, owner: int | None) -> None:
+        """Classify why a read is cold, in the wire's three-token vocabulary.
+
+        The tokens are the facts the registry actually holds, which is what makes
+        them worth reporting rather than prose: no pid holds this session's
+        transcript lease (``no-runtime``); a pid does, and it published nothing
+        this build could dial (``owner-silent``); or the record it published is
+        finishing work in flight first, which is the one state that is BOTH alive
+        and knowingly unavailable (``owner-leaving`` —
+        ``runtime.types.SessionRecord.leaving``).
+
+        The middle case is the point of the field. "No runtime" for a pid that
+        holds the lease is the claim the renderer painted as a lost conversation,
+        and it is false in exactly the case the operator hit: a runtime whose loop
+        was busy, which answers again as soon as it is free.
+        """
+        if record is None and owner is None:
+            self._read_cold_reason = "no-runtime"
+        elif record is not None and record.leaving:
+            self._read_cold_reason = "owner-leaving"
+        else:
+            self._read_cold_reason = "owner-silent"
 
     async def admit_prompt(
         self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
@@ -3005,7 +3207,10 @@ class AttachedSession:
             return
         if not self.is_cold:
             return
-        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.mobile.attach_client import (
+            dialable_owner_record,
+            find_runtime_record,
+        )
         from local_operator.session.runtime.launch import (
             ActionableConnectionError,
             RuntimeStartupError,
@@ -3098,7 +3303,7 @@ class AttachedSession:
             # facade nobody owns, which pins the runtime resident and never
             # offers it back (the failure ``_dial``'s disposed-guard and
             # review round 1 MAJOR-1 both document).
-            if self._disposed or self._recovering or not self.is_cold:
+            if self._disposed or self._recovering or not self.is_cold or self.owner_reachable:
                 # Stopping the retry must not SWALLOW a failure an attempt
                 # already produced. Disposal before any attempt is the
                 # ordinary silent return this function has always made (see
@@ -3113,7 +3318,7 @@ class AttachedSession:
             # runtime that retired between attempts publishes a NEW record
             # under a new pid, and redialling the dead one would burn every
             # remaining attempt on a socket that cannot answer.
-            record, _owner = await asyncio.to_thread(
+            record, owner = await asyncio.to_thread(
                 find_runtime_record, self._config_dir, self._session_id
             )
             if self._disposed:
@@ -3122,6 +3327,23 @@ class AttachedSession:
                 if last_error is not None:
                     raise last_error
                 return
+            if record is None and owner is not None:
+                # AN OWNER STILL HOLDS THE LEASE but published no LIVE record —
+                # the third state of the registry, which ``find_runtime_record``
+                # filters out by state because an ordinary attach wants an owner
+                # that is answering. Do NOT claim "no runtime" for it: a pid that
+                # holds this session's transcript lease IS a runtime, and the
+                # states behind this tuple are a wedged heartbeat (a stuck owner
+                # that may recover on its own), a v1 record and the rebind race —
+                # none of which this side has established. Dial the owner's own
+                # record, live OR wedged, and let the welcome projection's
+                # identity check arbitrate, exactly as `find_runtime_record`'s own
+                # rebind fallback does. A spawner would be the wrong answer to the
+                # same tuple: `engage_runtime` refuses to start a second writer
+                # while a live pid holds the lease, so it could only build a
+                # candidate doomed to lose the race while telling the user their
+                # session has no runtime.
+                record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
             if record is None:
                 # No record at all is not a transient the way a refused
                 # dial is — ``engage_runtime`` returned, so one existed
@@ -3225,6 +3447,8 @@ class AttachedSession:
         *,
         sync_timeout: float,
         preempt: asyncio.Event | None = None,
+        retain_unsynced: bool = False,
+        deadline: float | None = None,
     ) -> None:
         """Attach this viewer to a live record and adopt its canonical state.
 
@@ -3240,12 +3464,41 @@ class AttachedSession:
         caller's promise to give that envelope back if a foreground caller
         starts waiting on the lock this bind holds; foreground callers pass
         None because they are what it protects.
+
+        ``deadline`` is an absolute ``time.monotonic()`` bound on the WHOLE
+        attempt, for callers whose budget has to cover the dial as well as the
+        sync (a read: ``READ_ATTACH_BUDGET_S``). ``sync_timeout`` alone cannot
+        express that, because it starts counting after the dial has already
+        spent part of the caller's patience — see
+        :meth:`_attach_existing_for_read`.
+
+        ``retain_unsynced`` (a read) keeps the authenticated socket when the sync
+        did not land in time instead of discarding it, so the sync that arrives a
+        moment later still installs state and publishes its rollover. The facade
+        reports ``attaching`` in the meantime; see
+        :meth:`_retain_unsynced_dial`. Every other caller keeps today's behaviour,
+        where a sync timeout is a failed bind.
         """
         try:
-            pending_sync = await self._dial(record)
-            frontend = await self._await_frontend(
-                pending_sync, timeout=sync_timeout, preempt=preempt
-            )
+            pending_sync = await self._dial(record, deadline=deadline)
+            remaining = sync_timeout
+            if deadline is not None:
+                remaining = min(sync_timeout, max(0.0, deadline - time.monotonic()))
+            try:
+                frontend = await self._await_frontend(
+                    pending_sync, timeout=remaining, preempt=preempt
+                )
+            except RuntimeUnresponsiveError:
+                # ONLY a read retains. The owner is alive and authenticated on
+                # this socket; it simply has not spoken yet, which for a read is
+                # a state to wait out off the request path rather than a verdict
+                # about the session. Every other await failure (a malformed
+                # frame, a refused identity, a closed socket) is a real refusal
+                # and falls through to the discard below, where it belongs.
+                if not retain_unsynced:
+                    raise
+                self._retain_unsynced_dial(pending_sync)
+                return
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
@@ -3263,6 +3516,146 @@ class AttachedSession:
             if not self._recovering:
                 self._runtime_ready.set()
             raise
+
+    def _retain_unsynced_dial(self, pending_sync: asyncio.Future[FrontendSync]) -> None:
+        """Keep an authenticated-but-unsynced dial alive for a late sync.
+
+        The sibling of the discarding path, and the difference is a fact the
+        code already has and used to throw away: the client is authenticated by
+        the time the sync wait begins (the welcome was read and its identity
+        checked in ``AttachClient.connect``), so "the owner was slow" and "the
+        owner refused" are not the same outcome — yet discarding the socket
+        collapsed them irreversibly. ``_on_frontend_sync`` resolves only the
+        in-flight future, so once the future's waiter has gone there is no path
+        by which a late arrival installs state, and each retry then paid the full
+        envelope again: a busy owner was unreadable for as long as it was busy.
+
+        The semantics are the ones this file already established for a SHORTENED
+        wait — ``_await_frontend_preemptible`` never cancels the future, and
+        ``test_a_preempted_wait_still_adopts_a_sync_that_lands`` pins that a sync
+        landing inside the shortened window is still adopted. This changes only
+        the end of that arc: past the caller's deadline the facade reports
+        ``attaching``/``owner-silent`` on reads, keeps the socket, and lets the
+        landing task adopt what arrives.
+        """
+        self._socketed_unsynced = True
+        # CONSUMED HERE, not only by the waiter. The shield that keeps this
+        # future un-cancellable also drops its done-callback when the outer wait
+        # is abandoned, so whoever gave up leaves a future whose later failure
+        # (the pump's reason, on the close that ends the retained dial) would be
+        # reported by the loop as an unretrieved exception. Retrieving it here is
+        # harmless to the landing task: ``exception()`` clears that flag without
+        # consuming the future, which the task still awaits.
+        pending_sync.add_done_callback(_swallow_future)
+        self._sync_landing_task = asyncio.ensure_future(self._await_late_sync(pending_sync))
+
+    async def _await_late_sync(self, pending_sync: asyncio.Future[FrontendSync]) -> None:
+        """Adopt a retained dial's sync if it lands, or give the socket back.
+
+        Mirrors :meth:`_bind_to`'s tail exactly, because a late sync is not a
+        second kind of attachment: the state has to be installed, the durable
+        history cut loaded, and the rollover published (`publish=True`), which is
+        the frame the renderer consumes to move from ``cold``/``attaching`` to a
+        live paint.
+
+        The deadline is not optional. An attach socket is a RESIDENCY term of the
+        runtime's own exit predicate, so a viewer that will never get its sync —
+        a runtime wedged past any recovery — must hand the slot back rather than
+        hold an 82 MB process up for as long as the browser tab stays open.
+        """
+        try:
+            frontend = await asyncio.wait_for(
+                asyncio.shield(pending_sync), timeout=SYNC_LANDING_DEADLINE_S
+            )
+        except TimeoutError:
+            # THE LANDING DEADLINE: give the socket back. The future is left to
+            # settle on its own and is already consumed by the retention-time
+            # callback (see ``_retain_unsynced_dial``).
+            self._abandon_landing_claim(pending_sync)
+            return
+        except BaseException:  # noqa: BLE001 — disposal, or a socket that died
+            self._abandon_landing_claim(pending_sync)
+            return
+        if self._disposed or self._frontend_future is not pending_sync:
+            # SUPERSEDED by a later dial (or disposed): that dial's state is this
+            # facade's now, and installing a stale one here would be a silent
+            # revert of whatever it already adopted. The socket itself was the
+            # superseding dial's to close, which is why nothing is closed here.
+            self._abandon_landing_claim(pending_sync)
+            return
+        # THE DIAL IS NO LONGER RETAINED: it is an ordinary attached client from
+        # here, so the claim is dropped WITHOUT the discard below — releasing it
+        # through the abandonment path would close the very socket that just
+        # delivered this state, and the facade would report itself cold while
+        # holding canonical state nobody could reach.
+        self._socketed_unsynced = False
+        self._sync_landing_task = None
+        try:
+            self._install_frontend(frontend.snapshot, publish=False)
+            await self._load_frontend_history(frontend)
+            if self._disposed:
+                return
+            self._finish_sync()
+            self._deliberate_stop = False
+            self._stopped_announced = False
+            self._runtime_ready.set()
+            self._read_cold_reason = None
+            # PUBLISHED LAST, AND THAT ORDER IS THE CONTRACT. This frame IS the
+            # renderer's signal that the viewer is live, so it must not go out
+            # while the facade would still report itself cold: ``_finish_sync``
+            # is what clears ``is_cold``, and publishing from
+            # ``_install_frontend`` (the ordinary bind's shape) would announce a
+            # rollover to a live state that does not exist yet.
+            store = self._frontend_store
+            assert store is not None, "_install_frontend just installed the store"
+            store.replace_and_notify(frontend.snapshot)
+        except BaseException:  # noqa: BLE001 — a refused late sync is a cold read
+            logger.debug("late frontend sync for %s was refused", self._session_id, exc_info=True)
+            if not self._disposed and self._frontend_future is pending_sync:
+                self._discard_rejected_client()
+
+    def _cancel_landing_task(self) -> None:
+        """Drop the retained dial's landing task, if one is still running.
+
+        Cancelling does not itself close the socket — the task's own cleanup does,
+        and it does so only if the future is still the current one
+        (``_abandon_landing_claim``). Delivery is at an await point, so a caller
+        that supersedes a dial MUST cancel before it installs anything new: the
+        cancelled cleanup then runs against the NEW future's identity and leaves
+        it alone.
+        """
+        task, self._sync_landing_task = self._sync_landing_task, None
+        # ``is not current_task`` because this is also reached from the landing
+        # task's OWN cleanup (``_abandon_landing_claim`` -> here): cancelling
+        # oneself at that point marks a task that is already finishing as
+        # cancelled. Harmless but pointless, and the explicit guard says why.
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _abandon_landing_claim(self, pending_sync: asyncio.Future[FrontendSync]) -> None:
+        """Give up the retained dial, if it is still THIS landing task's to give.
+
+        Identity, not a flag, and that is load-bearing rather than fastidious:
+        ``cancel()`` is delivered at an await point, so a landing task that is
+        being abandoned can run its cleanup AFTER the dial that superseded it has
+        installed a new client — and an unconditional ``_discard_rejected_client``
+        there would close that new, healthy socket. ``self._frontend_future`` is
+        the facade's own marker for which dial is current (``_dial`` replaces it
+        per attempt, ``_discard_rejected_client`` clears it), so comparing it is
+        the same discipline the file already keeps for the epoch suffix.
+
+        ONLY the abandonment paths call this. A landing task that SUCCEEDS owns an
+        ordinary attached client and must leave it alone; see
+        :meth:`_await_late_sync`.
+        """
+        if self._frontend_future is not pending_sync:
+            return
+        self._socketed_unsynced = False
+        if not self._disposed:
+            # Same discard boundary as a failed bind: the client must not be left
+            # half-bound, because `is_cold` would then say False on the strength
+            # of a connection that will never carry state.
+            self._discard_rejected_client()
 
     def _discard_rejected_client(self) -> None:
         """Drop a client whose runtime dialled fine but whose state was refused.
@@ -3292,6 +3685,14 @@ class AttachedSession:
         starts would redial the same runtime and be refused the same way.
         """
         client, self._client = self._client, None
+        # A RETAINED dial's landing task dies with the dial it belongs to: this
+        # boundary is where the future it awaits is cleared, so leaving the task
+        # running would have it await a future nothing will ever resolve and then
+        # act on a client that is gone. Cancelling here rather than in the task's
+        # own cleanup is what makes the order deterministic (see
+        # ``_cancel_landing_task``).
+        self._cancel_landing_task()
+        self._socketed_unsynced = False
         self._frontend_future = None
         self._runtime_pid = None
         # The rejected dial's buffered suffix belongs to its refused epoch.
@@ -3308,7 +3709,9 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 - teardown of a connection being abandoned
             logger.debug("closing a rejected owner connection failed", exc_info=True)
 
-    async def _dial(self, record: SessionRecord) -> asyncio.Future[FrontendSync]:
+    async def _dial(
+        self, record: SessionRecord, *, deadline: float | None = None
+    ) -> asyncio.Future[FrontendSync]:
         """Open the owner socket and return THIS dial's canonical-sync future.
 
         Returning it, rather than leaving callers to re-read
@@ -3316,7 +3719,21 @@ class AttachedSession:
         await that follows: see :meth:`_await_frontend` for the seam that
         closes. The attribute is still assigned because ``_on_frontend_sync``
         resolves through it from the pump.
+
+        ``deadline`` (an absolute ``time.monotonic()`` value) bounds this dial's
+        own best-effort re-asserts, for a caller whose budget covers the whole
+        attempt — a read. Without it the re-assert caps at
+        ``_DESKTOP_WATCH_ACK_BOUND_S`` regardless of what is left of the caller's
+        patience, so a "2 s read" would spend 5 s waiting for a presence hint on
+        the one path that must never wait for one.
         """
+        if self._sync_landing_task is not None or self._socketed_unsynced:
+            # A NEW dial supersedes a RETAINED unsynced one. The old socket is
+            # replaced below, so it must be closed HERE: the landing task's own
+            # cleanup is identity-checked against ``self._frontend_future``
+            # (``_abandon_landing_claim``) and would correctly leave the client
+            # this attempt is about to install alone.
+            self._discard_rejected_client()
         self._runtime_record = record
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
@@ -3426,12 +3843,34 @@ class AttachedSession:
             # Reconnecting the proxy must not resurrect a renderer's expired
             # visibility/notification lease. Only another host heartbeat may.
             live = time.monotonic() - self._desktop_seen < DESKTOP_WATCH_LEASE_S
+            # BOUNDED AND SWALLOWED, exactly like the mute re-assert above, and
+            # the asymmetry was the reported bug: two best-effort re-asserts sit
+            # five lines apart on this path and the one that was NOT best-effort
+            # is the one that failed a read — a silent-but-alive owner turned
+            # ``desktop_watch`` into ``OwnerAckTimeout`` after ``ACK_TIMEOUT_S``
+            # (15 s, measured 15.27 s) and the route ladder answered 503, when
+            # the durable rows had been readable in 0.02 s. This RPC asserts the
+            # RENDERER's presence lease: its own TTL (45 s) expires it and the
+            # renderer's next ``/watch`` beat (15 s) re-states it, so a lost
+            # assertion is a cost, not a defect — and a READ must never be
+            # refused because a presence hint went unacknowledged.
+            watch_timeout = _DESKTOP_WATCH_ACK_BOUND_S
+            if deadline is not None:
+                watch_timeout = max(0.0, min(watch_timeout, deadline - time.monotonic()))
             try:
-                await client.desktop_watch(
-                    visible=live and self._desktop_visible,
-                    can_notify=live and self._desktop_can_notify,
+                await asyncio.wait_for(
+                    client.desktop_watch(
+                        visible=live and self._desktop_visible,
+                        can_notify=live and self._desktop_can_notify,
+                    ),
+                    timeout=watch_timeout,
                 )
+            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+                logger.debug("desktop watch re-assert failed", exc_info=True)
             except BaseException:
+                # Cancellation, which is NOT a lost hint: the dial is being
+                # abandoned, so the half-open socket goes with it (same discipline
+                # as the mute re-assert's caller and ``connect``'s own arm).
                 client.close()
                 self._client = None
                 raise
@@ -7545,6 +7984,15 @@ class AttachedSession:
     async def dispose(self) -> None:
         self._disposed = True
         self._fail_prompt_completion_waiters("viewer disposed while awaiting turn completion")
+        # A RETAINED dial's landing task must not outlive the facade it belongs
+        # to: its whole job is to install state here, and the client it holds is
+        # a residency term of the runtime's exit predicate — a viewer closing the
+        # window must hand that slot back rather than wait out
+        # ``SYNC_LANDING_DEADLINE_S``. Cancelled rather than awaited: delivery is
+        # at an await point, and the task's cleanup re-checks the future's
+        # identity before touching the client below (``_abandon_landing_claim``).
+        self._cancel_landing_task()
+        self._socketed_unsynced = False
         # A sleeping degraded-resync backoff would otherwise outlive the facade
         # and re-enter a refresh against a client dispose is about to drop.
         self._cancel_degraded_resync_retry()
@@ -7565,6 +8013,22 @@ class AttachedSession:
             # A pending snapshot owns the final close, including failure and
             # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
+
+
+def _swallow_future(future: asyncio.Future[Any]) -> None:
+    """Retrieve a future's outcome when its waiter has given up on it.
+
+    A RETAINED dial's sync future outlives its landing task by design: the wait
+    shields it (cancelling it would make ``_on_frontend_sync`` raise inside the
+    pump over a healthy socket), so at the landing deadline there is a future
+    still pending whose eventual failure — the pump's own reason when the socket
+    is finally closed — would otherwise be reported by the loop as "Future
+    exception was never retrieved". Same job ``_log_abort_failure`` does for a
+    task, and deliberately quiet: the read was already answered cold and the
+    abort was intentional.
+    """
+    if not future.cancelled():
+        future.exception()
 
 
 def _log_abort_failure(task: asyncio.Task[Any]) -> None:
