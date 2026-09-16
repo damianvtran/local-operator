@@ -44,9 +44,25 @@ a model's answer), and an opener that forwards whatever it is given is a
 one-token file path or ``javascript:`` away from being an execution vector.
 The posture matches the mobile renderer's (``mobile/web/src/components/
 markdown.tsx``: "Links are forced https? and open in a new tab"). The guard is
-:func:`is_openable`, and the caller applies it once more at the boundary — a
-second regex spelling the same rule would be a second thing to keep in step,
-so there is one.
+:func:`is_openable`, applied to every capture and again by the caller at the
+boundary — one function, two call sites, no second spelling of the rule.
+
+WHAT COUNTS AS A URL
+====================
+
+Three rules, each stated once:
+
+* :data:`_URL_BODY` — the characters a URL is made of, shared by BOTH patterns
+  so a markdown link's target and a bare URL are cut at the same place. A
+  parenthesised run is included only when it is BALANCED, which is what keeps
+  ``…/wiki/Foo_(bar)`` whole. Review round 1 found what happens when that rule
+  lived on one path only: the markdown capture stopped at the link's own
+  terminator, and the picker painted two rows for one link with the cursor on
+  the truncated one (MAJOR-1).
+* :func:`_trim` — the punctuation that belongs to the prose or the emphasis
+  AROUND the URL (``…/docs.``, ``**…/x**``), applied to both captures for the
+  same reason.
+* :func:`is_openable` — the scheme.
 """
 
 from __future__ import annotations
@@ -60,21 +76,43 @@ from dataclasses import dataclass
 #: almost anything as a scheme, and the point here is to REFUSE, not to parse.
 _OPENABLE_RE = re.compile(r"^https?://", re.IGNORECASE)
 
+#: The URL BODY both patterns share, so the parentheses rule has one spelling.
+#:
+#: A parenthesised run belongs to the URL only when it is BALANCED, which keeps
+#: a documentation URL whole (``…/wiki/Foo_(bar)``) without swallowing the
+#: ``)`` that closes the prose around it. It has to live in the PATTERN and not
+#: in :func:`_trim`, and that is where review round 1 found the defect
+#: (MAJOR-1): ``[label](…)``\ 's own terminator is a ``)``, so a capture that
+#: stopped at the FIRST one truncated the target — and because the bare pattern
+#: then found the correct form at the same offset, the picker painted TWO rows
+#: for one link with ``❯`` on the truncated one, so a plain ``enter`` opened a
+#: 404. A fix on the markdown path alone would have left the two paths
+#: disagreeing about the same characters; one shared body is what makes them
+#: agree by construction.
+#:
+#: ``<>`` are excluded because a URL in angle brackets is an autolink and its
+#: closing ``>`` is punctuation; quotes because a URL inside prose is very
+#: often quoted.
+_URL_BODY = r"https?://(?:[^\s()<>\"'`]+|\([^\s()]*\))+"
+
 #: ``[label](target)`` — the markdown link, with an optional title. Matched
 #: against the SOURCE, so the label may be anything Rich would render.
-_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*(https?://[^\s)]+)(?:\s+[^)]*)?\)", re.IGNORECASE)
+_MARKDOWN_LINK_RE = re.compile(rf"\[[^\]]*\]\(\s*({_URL_BODY})(?:\s+[^)]*)?\)", re.IGNORECASE)
 
-#: A bare URL: everything up to whitespace or a delimiter that cannot be part
-#: of one. ``<>`` are excluded because a URL in angle brackets is an autolink
-#: and its closing ``>`` is punctuation, and quotes because a URL inside prose
-#: is very often quoted.
-_BARE_URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+#: A bare URL: the same body, so both paths cut a URL at the same characters.
+_BARE_URL_RE = re.compile(_URL_BODY, re.IGNORECASE)
 
-#: Trailing characters that belong to the SENTENCE, not the URL. A URL written
-#: at the end of a clause arrives as ``…/docs.`` and opening that exact string
-#: is a 404; the period is the most common case by far, and the rest are the
-#: closers a human types after a link in prose.
-_TRAILING_JUNK = ".,;:!?'\""
+#: Trailing characters that belong to the SENTENCE (or to emphasis), not the
+#: URL. A URL written at the end of a clause arrives as ``…/docs.`` and opening
+#: that exact string is a 404; the period is the most common case by far, and
+#: the rest are the closers a human types after a link in prose.
+#:
+#: ``*`` and ``~`` are here for the emphasis marks a model writes around a URL
+#: (``**https://a.test/x**``) — review round 1, MAJOR-2. They cost a real URL
+#: that ENDS in one of those characters, which is rarer than the bold link.
+#: Unbalanced ``)`` is NOT here: :data:`_URL_BODY` cannot emit one, which is why
+#: there is no second trimmer for it.
+_TRAILING_JUNK = ".,;:!?'\"*~"
 
 #: What each side of the conversation is called in the picker's hint column.
 _AGENT = "agent"
@@ -113,15 +151,18 @@ def is_openable(url: str) -> bool:
 def _trim(url: str) -> str:
     """Drop the punctuation that belongs to the surrounding prose.
 
-    Balanced parentheses are kept, because they are legal in a path and common
-    in documentation URLs (``https://en.wikipedia.org/wiki/Foo_(bar)``) — the
-    naive version truncated the URL AND left a stray close paren in the row,
-    which is how this was found. An UNBALANCED closer is prose punctuation and
-    goes.
+    Applied to BOTH patterns' captures, so a markdown link and a bare URL that
+    point at the same characters come out as the same string — which is also
+    what lets the dedupe collapse them to one row.
+
+    Nothing here handles parentheses. A balanced run is part of the URL by
+    :data:`_URL_BODY`, and an unbalanced closer can never reach this function:
+    the body excludes ``)`` from its first alternative and requires a matching
+    ``(`` for its second, so a capture cannot end on one. The trimmer this used
+    to carry was dead code the moment the pattern learned the rule, and two
+    places deciding the same question is how they come to disagree.
     """
     while url and url[-1] in _TRAILING_JUNK:
-        url = url[:-1]
-    while url.endswith(")") and url.count("(") < url.count(")"):
         url = url[:-1]
     return url
 
@@ -135,10 +176,22 @@ def extract_links(text: str) -> list[str]:
     see, and running one pattern's results after the other's would list it
     wrong. A markdown link's target also appears inside the bare pattern's
     reach, so the merge is what keeps each URL to one entry.
+
+    Both captures go through the SAME :func:`_trim`, which is what makes the
+    two patterns produce the same string for the same characters — the property
+    the dedupe depends on, and the one whose absence put a truncated row under
+    the cursor in review round 1 (MAJOR-1).
+
+    Both captures are also filtered through :func:`is_openable`, though
+    :data:`_URL_BODY` already starts with ``https?://``: the rule that only
+    http(s) may become a ROW is stated rather than implied by a pattern, and a
+    later edit to the body cannot quietly admit a scheme.
     """
     found: list[tuple[int, str]] = []
     for match in _MARKDOWN_LINK_RE.finditer(text):
-        found.append((match.start(1), match.group(1)))
+        url = _trim(match.group(1))
+        if is_openable(url):
+            found.append((match.start(1), url))
     for match in _BARE_URL_RE.finditer(text):
         url = _trim(match.group(0))
         if is_openable(url):

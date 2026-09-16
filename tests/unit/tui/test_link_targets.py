@@ -79,6 +79,42 @@ def test_both_shapes_in_one_message_keep_the_order_the_reader_sees() -> None:
     assert extract_links(text) == ["https://a.test/1", "https://b.test/2"]
 
 
+def test_a_markdown_link_whose_url_has_parentheses_stays_whole() -> None:
+    """Review round 1, MAJOR-1 — the most user-visible defect this layer had.
+
+    The markdown pattern's own terminator is ``)``, so a capture that stopped at
+    the first one truncated the target — and because the bare pattern then found
+    the correct form at the SAME offset, the list held TWO entries for ONE link
+    with the truncated one first. That row is the one the picker's cursor starts
+    on, so a plain ``enter`` opened a 404 with the correct link visible one row
+    below it.
+    """
+    text = "See [Foo (bar)](https://en.wikipedia.org/wiki/Foo_(bar)) for the case."
+    assert extract_links(text) == ["https://en.wikipedia.org/wiki/Foo_(bar)"]
+
+
+@pytest.mark.parametrize(
+    "text,url",
+    [
+        ("**https://a.test/x**", "https://a.test/x"),
+        ("*https://b.test/y*", "https://b.test/y"),
+        ("~~https://c.test/z~~", "https://c.test/z"),
+    ],
+)
+def test_emphasis_marks_are_not_part_of_the_url(text: str, url: str) -> None:
+    """Review round 1, MAJOR-2: a model writes a bold link, and the delimiter
+    rode into the URL — ``…/x**`` is a 404 with nothing on screen to explain it.
+    """
+    assert extract_links(text) == [url]
+
+
+def test_a_markdown_target_is_trimmed_like_a_bare_one() -> None:
+    """ONE trim rule for both paths. The same characters must produce the same
+    string whichever pattern found them, which is what the dedupe rests on."""
+    assert extract_links("see [docs](https://a.test/x.)") == ["https://a.test/x"]
+    assert extract_links("see https://a.test/x.") == ["https://a.test/x"]
+
+
 def test_a_url_repeated_in_one_message_is_listed_once() -> None:
     """A markdown link's target is inside the bare pattern's reach as well."""
     assert extract_links("[t](https://a.test/x) and https://a.test/x") == ["https://a.test/x"]
