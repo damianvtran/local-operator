@@ -2879,33 +2879,37 @@ async def test_the_footer_chip_carries_the_hidden_count():
 
 
 @pytest.mark.asyncio
-async def test_the_footer_chip_caps_at_999():
+async def test_the_footer_chip_caps_at_1k():
     """An unbounded counter would grow the footer without limit; the cap is
     what makes its width deterministic.
 
-    Asserted at a terminal wide enough to paint the capped chip in full (120
-    cells of terminal is 34 of list), because the narrow floor cannot: the
-    list's rendered content is **29** cells, not the 30 ``SIDEBAR_WIDTH``
-    advertises — ``_sync_sidebar_layout`` docks `content_width + gutter` and
-    then spends one more cell on the left padding, which
-    ``sidebar_content_width`` does not reserve. That is pre-existing and not
-    this change's to fix; the companion assertion below pins the documented
-    consequence, which is that an overflowing chip is CROPPED rather than
-    wrapped.
+    The cap is ``1k+`` above 999 rather than a three-digit overflow because the
+    one cell it saves is binding at the 29-cell content width, where
+    ``f9 focus · ctrl+b hide · ⌥1k+`` is exactly 29 and survives while the
+    three-digit form makes 30 and costs ``ctrl+b hide`` whole (design round 4,
+    §R4.4). Asserted at 120×30, which is 34 cells of list: unpaged the footer
+    is ``f9 focus · ctrl+b hide · ⌥1k+``, 29 cells in 34, uncropped.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
         footer = sidebar.render().plain.splitlines()[-1]
-        assert "⌥999+" in footer
+        assert "⌥1k+" in footer
         assert cell_len(footer) <= sidebar.size.width
 
 
 @pytest.mark.asyncio
 async def test_an_overflowing_chip_crops_rather_than_breaking_the_frame():
-    """At the narrow floor the capped chip does not fit. It must lose its tail,
-    never a line: a wrapped footer would silently eat a session row."""
+    """The chip never loses its tail: a fact drops WHOLE or not at all.
+
+    Under the fitted ladder (design round 4, §R4.3) every chip-carrying
+    candidate is itself fit-tested, so when the full form does not fit it is
+    ``ctrl+b hide`` that yields entire — never a mid-word crop of the count.
+    What this test still pins is the frame contract underneath that: the footer
+    stays ONE line whatever it carries, because a wrapped footer would silently
+    eat a session row.
+    """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -3279,3 +3283,78 @@ async def test_the_section_chrome_cost_is_the_accepted_one():
         sidebar.show_subagents = True
         await pilot.pause()
         assert sidebar._header_lines() == 11, "four sections must cost 11 chrome lines"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_ladder_keeps_an_exact_fit_at_the_29_cell_floor():
+    """Capping the overflow at `1k+` buys `ctrl+b hide` back at 29 cells.
+
+    This is the D9/D13 proof and the reason the cap is not revertable. At 29
+    cells of content `f9 focus · ctrl+b hide · ⌥1k+` is EXACTLY 29 and every
+    fact survives; spelled with a three-digit overflow the same candidate is 30,
+    fails the fit test and the ladder drops `ctrl+b hide` whole. The second
+    assertion is the discriminating half: it goes red on a revert rather than
+    merely shortening a string (design round 4, §R4.3/§R4.4).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        assert not sidebar.has_focus, "premise: the list does not hold the keyboard"
+        assert len(sidebar.entries) <= sidebar.page_size, "premise: the list must not page"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.strip() == "f9 focus · ctrl+b hide · ⌥1k+", footer
+        assert cell_len(footer.strip()) == 29, cell_len(footer.strip())
+        assert "ctrl+b hide" in footer, f"the cap cost a hint: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
+    """Candidate ③: the position yields second, the lead and chip never yield.
+
+    On the last page of 152 entries the position is 11 cells, so candidate ②
+    (`128–152/152 · esc return · ⌥1k+`, 31 cells) does not fit 29 and the
+    ladder must fall to `{lead} · {chip}`. What it must NOT do is crop: a fact
+    drops whole or not at all (design round 4, §R4.3).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain(f"a{i}", active=True) for i in range(152)]
+        sidebar = await _sidebar_with(pilot, app, entries, total=1520)
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        assert len(sidebar.entries) > sidebar.page_size, "premise: the list must page"
+        sidebar._offset = len(entries) - sidebar.page_size
+        await pilot.pause()
+        last = min(len(sidebar.entries), sidebar._offset + sidebar.page_size)
+        position = f"{sidebar._offset + 1}–{last}/{len(sidebar.entries)}"
+        context = f"page_size={sidebar.page_size} position={position!r}"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.strip() == "esc return · ⌥1k+", f"{footer!r} ({context})"
+        assert "…" not in footer, f"a fact was cropped instead of yielding: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_at_the_24_cell_floor_the_position_yields_and_the_chip_survives():
+    """The 24-cell trade, and the red->green proof for the ladder.
+
+    The blind append this replaces painted `1–10/21 · f9 focus · ⌥4…` here —
+    the chip cropped MID-WORD, which is main's own D4/U1 defect class
+    reintroduced by our chip. Under the ladder the position yields instead and
+    the chip lands intact. The expectation holds whether or not the list pages
+    at this height: paged, candidate ② is over 24 and falls to ③; unpaged,
+    candidate Ⓐ is over 24 and falls to Ⓑ — and ③ and Ⓑ are the same string
+    (design round 4, §R4.4).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(30, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain(f"a{i}", active=True) for i in range(21)]
+        sidebar = await _sidebar_with(pilot, app, entries, total=1520)
+        assert not sidebar.has_focus, "premise: the list does not hold the keyboard"
+        context = f"width={sidebar.size.width} page_size={sidebar.page_size}"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.strip() == "f9 focus · ⌥1k+", f"{footer!r} ({context})"
+        assert "…" not in footer, f"the chip cropped instead of the position yielding: {footer!r}"

@@ -1238,9 +1238,10 @@ class SessionSidebar(Widget, can_focus=True):
         # population is recoverable from nowhere else on the frame; `ctrl+b hide`
         # yields first and the position second (design round 4, §R4.3/§R4.4, on
         # top of main's D4/U1 above). The cap is `1k+` above 999 — one cell
-        # cheaper than `999+`, and that cell is binding at the 29-cell content
-        # width, where `f9 focus · ctrl+b hide · ⌥1k+` is exactly 29 and survives
-        # but the `999+` spelling makes 30 and drops `ctrl+b hide` whole.
+        # cheaper than spelling the overflow out in three digits, and that cell
+        # is binding at the 29-cell content width, where
+        # `f9 focus · ctrl+b hide · ⌥1k+` is exactly 29 and survives while the
+        # three-digit form makes 30 and drops `ctrl+b hide` whole.
         chip = ""
         if self._subagent_total > 0:
             chip = f"⌥{'1k+' if self._subagent_total > 999 else self._subagent_total}"
@@ -1257,7 +1258,11 @@ class SessionSidebar(Widget, can_focus=True):
         if chip:
             candidates.append(f"{lead} · {chip}")
         hint = next(
-            (candidate for candidate in candidates if truncate_cells(candidate, width) == candidate),
+            (
+                candidate
+                for candidate in candidates
+                if truncate_cells(candidate, width) == candidate
+            ),
             base,
         )
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint

@@ -134,7 +134,16 @@ PINNED_IDS = ("aaaaaaaaaaa3", "aaaaaaaaaad2")
 
 #: What the footer chip reports. Larger than the seeded rows on purpose: the
 #: chip counts the whole hidden population, not the capped slice on screen.
-SUBAGENT_TOTAL = 438
+#: ``LO_SIDEBAR_SHOT_TOTAL`` overrides it so the capped frame (`⌥1k+`, above
+#: 999) can be captured from the same fixture; the default reproduces the
+#: existing frames byte-identically.
+SUBAGENT_TOTAL = int(os.environ.get("LO_SIDEBAR_SHOT_TOTAL") or 438)
+
+#: The capture opens the sidebar but leaves the keyboard in the composer, which
+#: is the unfocused footer (`f9 focus`). ``LO_SIDEBAR_SHOT_FOCUS=1`` presses
+#: `f9` as well, so the focused lead (`esc return`) can be captured — the only
+#: way to see the D12 fix on a real frame. Default unset, i.e. unfocused.
+FOCUS_LIST = os.environ.get("LO_SIDEBAR_SHOT_FOCUS") == "1"
 
 
 def _entries() -> list[CatalogEntry]:
@@ -198,6 +207,14 @@ async def main() -> None:
 
         await pilot.press("ctrl+b")
         await pilot.pause()
+        if FOCUS_LIST:
+            # BEFORE the rows are handed in, not after: focusing runs
+            # `_set_sidebar_open`, which takes a fresh population count and
+            # re-reads the store, and that read would replace the seeded rows
+            # with the empty real one. Seeding last is what every other piece
+            # of state here already does for the same reason.
+            await pilot.press("f9")
+            await pilot.pause()
         sidebar = app._session_sidebar
         # The ⌥ layer ON, so the capture shows all four sections at once. The
         # rows are handed in directly (as every other row here is) rather than
