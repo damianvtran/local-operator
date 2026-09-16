@@ -423,6 +423,39 @@ def test_prune_boot_records_drops_dead_pids_and_keeps_live_ones(tmp_path: Path) 
     assert journal.read_boot_record(os.getpid(), root=root) is not None
 
 
+def test_prune_boot_records_keeps_the_newest_when_the_count_bound_bites(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R2-1: the count path evicts by AGE, not by filename.
+
+    The directory glob hands records back in pid-as-string order, which says
+    nothing about when a runtime died: evicting in that order deletes the
+    FRESHEST death and keeps the oldest, the inversion ``registry._prune_reaped``
+    exists to prevent. This arm gives the newest death the SMALLEST pid, so with
+    filename order it is the first victim and with age order it is the last
+    record standing (reviewer round 2, R2-1).
+    """
+    root = tmp_path / "cfg"
+    # A three-record count bound and no record old enough to age out, so the
+    # count path is the only term that can fire.
+    monkeypatch.setattr(registry, "REAPED_MAX_FILES", 3)
+    now = time.time()
+    pids = sorted(_pid_from_child() for _ in range(5))
+    for index, pid in enumerate(pids):
+        registry.publish(
+            journal.BootRecord(pid=pid, session_id=f"s{pid}", started_at=now - index * 60.0),
+            root,
+            "run/host",
+        )
+
+    newest, oldest = pids[0], pids[-1]
+    assert journal.prune_boot_records(root, now=now) == 2
+    assert (
+        journal.read_boot_record(newest, root=root) is not None
+    ), "the newest death is the evidence; it must survive a count-bound eviction"
+    assert journal.read_boot_record(oldest, root=root) is None
+
+
 def test_a_closed_row_that_left_a_turn_open_is_not_an_unfinished_turn(tmp_path: Path) -> None:
     """Q10, pinned as a decision rather than left as prose.
 

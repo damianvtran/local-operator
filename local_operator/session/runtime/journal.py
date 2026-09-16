@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Any
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, HOST_RUN_DIRNAME
+from local_operator.session.runtime.types import HOST_RUN_DIRNAME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.update import BuildStamp
@@ -355,17 +355,25 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     indefinite storage.
 
     Called from the boot path, which is the one moment a new writer joins this
-    namespace. Cheap by construction: one directory listing, and a signal-0 probe
-    per record, on a directory that this function keeps small.
+    namespace. Cheap by construction: one directory listing and one signal-0
+    probe per record, on a directory that this function keeps small.
 
-    THE ZOMBIE PROBE IS DERIVED, NOT PAID ON EVERY RECORD: the same
-    ``age > HEARTBEAT_INTERVAL_S * 1.5`` policy ``registry.classify`` uses, so a
-    healthy runtime's record costs a signal-0 and nothing more while the record
-    this is about to judge pays the ``ps`` fork (~2.4-4.6 ms, see
-    ``procstate.is_zombie``). A boot on this box finds a record for every live
-    runtime, and forking per live runtime would put tens of milliseconds on a
-    boot path to save one file — the module's own rule is that the fork is spent
-    only where the answer changes what the caller does.
+    THE ZOMBIE PROBE IS DELIBERATELY NOT PAID HERE, and the reason is that it
+    cannot be made cheap for THIS namespace the way ``registry.classify`` makes
+    it cheap for session records. That rule — ``age > HEARTBEAT_INTERVAL_S *
+    1.5`` — needs a heartbeat that keeps moving; ``RecordPublisher`` re-stamps a
+    ``SessionRecord`` every 15 s, while a ``BootRecord`` is a boot-time snapshot
+    by design (see its docstring) and nothing ever refreshes its heartbeat. So
+    every record of a runtime that has been up longer than 22.5 s is "quiet", and
+    deriving the probe from that age here would fork ``ps`` (~2.4-4.6 ms, see
+    ``procstate.is_zombie``) once per LIVE runtime at every boot — ~100-200 ms
+    for a forty-session fleet, on the path this design measured at ~1.2 s.
+
+    The consequence is bounded and in the safe direction: a record whose pid has
+    exited but has not been reaped yet reads as alive through signal-0 and is
+    kept one cycle longer. That costs a file, not an answer — a zombie's record
+    is still a true statement about a pid that booted on a build, and the next
+    boot after its parent reaps it prunes it.
     """
     directory = (root or config_dir()) / HOST_RUN_DIRNAME
     try:
@@ -383,10 +391,17 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
             continue
         if record is None:
             continue
-        quiet = moment - (record.heartbeat_at or record.started_at) > HEARTBEAT_INTERVAL_S * 1.5
-        if registry.pid_alive(record.pid, check_zombie=quiet):
+        if registry.pid_alive(record.pid):
             continue
         dead.append((record.started_at or path.stat().st_mtime, path))
+    # NEWEST-FIRST EVIDENCE, by AGE rather than by filename. ``dead`` arrives in
+    # directory-glob order (pid-as-string), which has nothing to do with when a
+    # runtime died, so walking it directly made the count path evict whatever
+    # sorted first — deleting the freshest death and keeping a 23-hour-old one,
+    # the exact inversion ``registry._prune_reaped`` exists to prevent ("a burst
+    # cannot evict today's evidence in favour of yesterday's"). The numbers are
+    # reused from that function; this is the rule.
+    dead.sort()
     removed = 0
     for started_at, path in dead:
         aged_out = (moment - started_at) > registry.REAPED_MAX_AGE_S

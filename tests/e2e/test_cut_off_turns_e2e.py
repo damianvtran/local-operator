@@ -84,12 +84,15 @@ def _seed(config_dir: Path, session_id: str) -> Path:
 
 
 def _child_env(config_dir: Path, session_id: str) -> dict[str, str]:
-    # THREE FAMILIES, not just the cmux one. ``LOP_RUNTIME_ADOPT_SESSION`` and
-    # the ``LOP_MOBILE_CHILD_*`` pair pin a spawned runtime's session and
+    # FAMILIES, NOT JUST THE CMUX ONE, PLUS ONE SINGLE NAME. ``LOP_RUNTIME_ADOPT_SESSION``
+    # and the ``LOP_MOBILE_CHILD_*`` pair pin a spawned runtime's session and
     # provider, so a suite run from inside a harness that exports them would
     # spawn a child that ADOPTS the operator's own session — the same class of
-    # hazard the ``CMUX_*`` strip exists for (#648). The values this cell needs
-    # are set explicitly below, so nothing legitimate is lost.
+    # hazard the ``CMUX_*`` strip exists for (#648). The fourth entry,
+    # ``LOP_BUILD_PREFIX``, is a bare name rather than a prefix and behaves as
+    # one here: both consumers test it with ``startswith``, which matches it
+    # exactly and every longer name under it. The values this cell needs are set
+    # explicitly below, so nothing legitimate is lost.
     env = {k: v for k, v in os.environ.items() if not k.startswith(CHILD_ENV_FAMILIES)}
     env.update(
         {
