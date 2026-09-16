@@ -105,6 +105,25 @@ def _seed(config: Path, session_id: str) -> Path:
     return directory
 
 
+@pytest.fixture
+def layout_home(headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """``headless_tui_env`` PLUS a private ``HOME`` — what these cells require.
+
+    THE STABLE ROOT COMES FROM ``HOME`` (``update.stable_root()``), so a cell that
+    flips the pointer and writes ``~/.local/bin`` does all of it in the
+    developer's REAL home when only the config dir is isolated. Run on a machine
+    that has not adopted the layout — this host — the stage would CREATE
+    ``~/.local/share/lop``, flip ``current`` at a fixture generation and repoint
+    ``~/.local/bin/lop`` at it (QA round 2, Q5: the QA lane escaped that only by
+    isolating ``HOME`` by hand). The isolation lives here rather than in the
+    shared ``headless_tui_env`` because only this module's cells touch the layout.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return headless_tui_env
+
+
 def _stable() -> Path:
     return update_mod.stable_root()
 
@@ -144,7 +163,18 @@ def _plain_generation(name: str, venv: Path) -> Path:
     os.symlink(sys.executable, install_root / "bin" / "python3")
     for entry in ("lop", "local-operator"):
         script = install_root / "bin" / entry
-        script.write_text(f"#!{install_root / 'bin' / 'python3'}\n", encoding="utf-8")
+        # A REAL CONSOLE SCRIPT, body and all: these cells reach the product
+        # through ``~/.local/bin/lop``, which ``write_stable_launchers`` points at
+        # this file — a shebang with nothing after it runs an empty program, exits
+        # 0, delivers nothing, and turns the busy-runtime cell's 90 s wait into a
+        # timeout that looks like the product failing (QA round 2, Q1; CI was red
+        # on both platforms for exactly this).
+        script.write_text(
+            f"#!{install_root / 'bin' / 'python3'}\n"
+            "from local_operator.cli import main\n"
+            "raise SystemExit(main())\n",
+            encoding="utf-8",
+        )
         script.chmod(0o755)
         os.symlink(script, generation / "bin" / entry)
     site_packages = next(Path(venv).glob("lib/python*/site-packages"))
@@ -194,7 +224,12 @@ def _fake_uv(version: str):
     def _run(argv: list[str], env: dict[str, str]) -> int:
         venv = Path(env["UV_TOOL_DIR"]) / "local-operator"
         bin_dir = Path(env["UV_TOOL_BIN_DIR"])
-        for directory in (venv / "bin", venv / "lib" / "python3.12" / "site-packages", bin_dir):
+        # Version-derived, never hardcoded: a child started from the generation
+        # resolves site-packages under ``lib/python<major>.<minor>`` of ITS prefix,
+        # so a fixed 3.12 makes the cell red on any other interpreter while 3.12
+        # CI stays green (QA round 2, Q2).
+        version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        for directory in (venv / "bin", venv / "lib" / version_dir / "site-packages", bin_dir):
             directory.mkdir(parents=True, exist_ok=True)
         (venv / "pyvenv.cfg").write_text("home = /nonexistent\n", encoding="utf-8")
         for entry in ("lop", "local-operator"):
@@ -203,7 +238,7 @@ def _fake_uv(version: str):
             shim.chmod(0o755)
             os.symlink(shim, bin_dir / entry)
         os.symlink(sys.executable, venv / "bin" / "python3")
-        dist = venv / "lib" / "python3.12" / "site-packages" / f"local_operator-{version}.dist-info"
+        dist = venv / "lib" / version_dir / "site-packages" / f"local_operator-{version}.dist-info"
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "METADATA").write_text(
             f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
@@ -313,7 +348,7 @@ def _install_new_generation(version: str = "0.55.1") -> Path:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and signals")
-def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path) -> None:
+def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> None:
     """The incident, inverted: the swap lands mid-turn and the runtime does not notice.
 
     A runtime parked on a real ``bash`` tool (``sleep 8``, issued by the mock
@@ -334,7 +369,7 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     itself is asserted in
     :func:`test_an_engage_after_a_flip_lands_on_the_generation_current_names`.
     """
-    config = headless_tui_env
+    config = layout_home
     session_id = "genbusy001"
     directory = _seed(config, session_id)
     first = _plain_generation("20260101T000000Z-old", Path(sys.prefix))
@@ -403,7 +438,7 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and signals")
 def test_an_unwatched_runtime_keeps_its_pid_and_is_not_recorded_as_gone(
-    headless_tui_env: Path,
+    layout_home: Path,
 ) -> None:
     """Nobody is watching, so nothing else can be blamed for what the install does.
 
@@ -411,7 +446,7 @@ def test_an_unwatched_runtime_keeps_its_pid_and_is_not_recorded_as_gone(
     lands under it, and the record must still name the SAME live pid afterwards
     — not a successor, not an empty row — with its heartbeat still advancing.
     """
-    config = headless_tui_env
+    config = layout_home
     session_id = "genidle001"
     _seed(config, session_id)
     first = _plain_generation("20260101T000000Z-old", Path(sys.prefix))
@@ -442,7 +477,7 @@ def test_an_unwatched_runtime_keeps_its_pid_and_is_not_recorded_as_gone(
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and signals")
 def test_an_engage_after_a_flip_lands_on_the_generation_current_names(
-    headless_tui_env: Path,
+    layout_home: Path,
 ) -> None:
     """The convergence path: new work runs the build ``current`` points at.
 
@@ -468,7 +503,7 @@ def test_an_engage_after_a_flip_lands_on_the_generation_current_names(
     zero failures at operationally real rates), and no assertion here depends on
     a microsecond race resolving one particular way.
     """
-    config = headless_tui_env
+    config = layout_home
     session_id = "genengage01"
     _seed(config, session_id)
     log = Path(config) / "spawns.log"
@@ -522,7 +557,7 @@ def test_an_engage_after_a_flip_lands_on_the_generation_current_names(
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 def test_the_stable_launcher_resolves_the_generation_current_names(
-    headless_tui_env: Path,
+    layout_home: Path,
 ) -> None:
     """The launcher chain is what a person (and a supervised unit) executes.
 
@@ -547,7 +582,7 @@ def test_the_stable_launcher_resolves_the_generation_current_names(
     never holds a mutable path). The residual itself is written down in
     ``docs/design-install-generations.md`` §3.2 rather than hidden here.
     """
-    config = headless_tui_env
+    config = layout_home
     _seed(config, "genversion1")
     log = Path(config) / "spawns.log"
     first = _recording_generation("20260101T000000Z-old", log, marker="GENERATION-ONE")

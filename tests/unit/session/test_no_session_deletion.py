@@ -957,6 +957,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<gen>/…/bin/<script>.rebind-<pid> temp FILE, unlinked when its rename fails",
     ),
     (
+        "local_operator/update.py::_undo_migration",
+        "<path>.unlink",
+        "<stable>/current pointer and <stable>/bin/python3 shim, undone on a failed migration",
+        2,
+    ),
+    (
         "local_operator/update.py::_rebind_scripts",
         "os.rename",
         "<gen>/…/bin/<script>.rebind-<pid> FILE -> the script; only text FILES under bin/",

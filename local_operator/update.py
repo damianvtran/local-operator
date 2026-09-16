@@ -37,6 +37,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import (
@@ -1428,10 +1429,27 @@ def _remove_tree(path: Path) -> bool:
     The return value exists for the same reason: a caller that PRINTS a removal
     has to know whether one happened.
     """
-    if not path.exists() and not path.is_symlink():
+    try:
+        present = path.exists() or path.is_symlink()
+    except (OSError, RuntimeError):
+        # ``Path.exists`` reaches ELOOP through ``stat()``, and pathlib raises
+        # that as a RuntimeError rather than answering False (measured on 3.12:
+        # a self-referential link). Something is there under a name this process
+        # cannot resolve, and "there" is the answer this guard needs.
+        present = True
+    if not present:
         return True
 
-    root = path.resolve()
+    try:
+        root = path.resolve()
+    except (OSError, RuntimeError):
+        # A dangling path, or a symlink LOOP — which is the input rmtree is
+        # about to refuse, and the reason ``resolve()`` cannot be left unguarded
+        # in a function documented never to raise (review round 5, R5-2: the
+        # loop escaped as a RuntimeError where the previous head returned
+        # False). Falling back to the spelling we were given keeps the
+        # containment test below meaningful.
+        root = path
 
     def _inside(candidate: Path) -> bool:
         """Is ``candidate`` a REAL path inside the tree being deleted?
@@ -1450,7 +1468,7 @@ def _remove_tree(path: Path) -> bool:
             if candidate.is_symlink():
                 return False
             return candidate.resolve().is_relative_to(root)
-        except OSError:  # pragma: no cover — vanished under us mid-walk
+        except (OSError, RuntimeError):  # pragma: no cover — gone, or a loop
             return False
 
     def _with_write_bits(
@@ -1468,10 +1486,18 @@ def _remove_tree(path: Path) -> bool:
                 # ``exc_info=True``, not the exception that triggered the handler:
                 # that traceback is about a different call (review round 4, R4-2).
                 logger.debug("could not make %s writable", candidate, exc_info=True)
-        if Path(target).is_symlink():
-            # The notification form a top-level symlink produces (see
-            # ``_inside``): there is nothing to remove and nothing to retry, and
-            # ``rmtree`` has already returned.
+        if function is os.path.islink:
+            # rmtree's TOP-LEVEL notification form: the path it was handed is a
+            # symlink, it refused to touch it, and there is nothing to retry.
+            #
+            # THE TEST IS ON THE CALLABLE, NOT ON THE TARGET. The INNER form —
+            # unlinking a symlink ENTRY inside the tree — arrives with
+            # ``os.unlink`` and a target that is also a symlink, and that retry
+            # is both needed and safe: ``unlink`` removes the link itself, never
+            # its target. Gating on ``Path(target).is_symlink()`` instead made a
+            # read-only ``bin/`` containing a venv's symlinks unremovable — the
+            # R3-2 shape, reintroduced by its own fix, on exactly the tree where
+            # those links live (review round 5, R5-1).
             return
         try:
             function(target)
@@ -1667,6 +1693,70 @@ def _atomic_symlink(link: Path, target: Path) -> bool:
         return False
 
 
+#: An absolute POSIX path inside a text file: a shebang target, or a
+#: ``VIRTUAL_ENV=`` value. Deliberately not exhaustive — it exists to find the
+#: paths uv writes into an installed tree, and anything it does not match is left
+#: byte-identical.
+_ABSOLUTE_PATH = re.compile(rb"(?<![A-Za-z0-9_.\-/])(/[^\s'\"\n]*)")
+
+
+def _repoint_paths(data: bytes, source_root: Path, install_root: Path) -> bytes:
+    """Rewrite every absolute path in ``data`` whose PREFIX is ``source_root``.
+
+    THE HALF OF THE REBINDING THAT MAKES IT WORK ON A REAL MACHINE.
+    ``str(source_root)`` is the spelling the caller has, and the caller derives it
+    from ``sys.prefix`` — which CPython has already RESOLVED. The spelling in the
+    file is the one ``uv`` was given when the tree was installed, and on any host
+    where the install path has a symlinked component the two never match:
+
+        file:   #!/tmp/…/legacy/tools/local-operator/bin/python     (uv's spelling)
+        caller: /private/tmp/…/legacy/tools/local-operator          (sys.prefix)
+
+    A string search for the caller's spelling therefore found nothing, nothing
+    failed, and the migration reported success with a copy that still executed the
+    legacy venv (design review round 1, D2 — reproduced with the design's own §8
+    walkthrough shape under an isolated ``HOME``, which on macOS is usually under
+    ``/tmp``). This compares the venv's IDENTITY instead, so every spelling of it
+    is found.
+
+    THE MATCH IS ON A PREFIX, RESOLVED ONE COMPONENT AT A TIME, and that detail is
+    load-bearing rather than fussy: resolving the WHOLE token does not work for
+    the shebang, because a venv's ``bin/python3`` is itself a symlink to the base
+    interpreter, so the full path resolves straight OUT of the venv (measured: a
+    shebang naming the legacy tree resolved to ``/usr/bin/python3`` and was left
+    untouched by the first version of this). The longest prefix that resolves to
+    the source root is what gets rewritten; the remainder of the path — ``/bin/
+    python3`` — is preserved verbatim.
+    """
+    real_source = str(_real(source_root))
+    out = bytearray()
+    cursor = 0
+    for match in _ABSOLUTE_PATH.finditer(data):
+        token = match.group(1)
+        try:
+            spelled = token.decode("utf-8")
+        except UnicodeDecodeError:  # pragma: no cover — not text we wrote
+            continue
+        parts = spelled.split("/")
+        matched = 0
+        for cut in range(2, len(parts) + 1):
+            try:
+                if os.path.realpath("/".join(parts[:cut])) == real_source:
+                    matched = cut
+            except (OSError, ValueError):  # pragma: no cover — a path the OS rejects
+                break
+        if not matched:
+            continue
+        prefix = "/".join(parts[:matched])
+        out += data[cursor : match.start(1)]
+        out += str(install_root).encode("utf-8") + spelled[len(prefix) :].encode("utf-8")
+        cursor = match.end(1)
+    if not cursor:
+        return data
+    out += data[cursor:]
+    return bytes(out)
+
+
 def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], list[Path]]:
     """Point a COPIED tree's own scripts at itself instead of at the original.
 
@@ -1687,9 +1777,12 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], 
     Rewrites every TEXT file under ``<install_root>/bin`` that names the source
     root: the shebang of each console script, and the ``VIRTUAL_ENV`` line in
     ``activate``/``activate.csh``/``activate.fish``, which is the same claim in
-    another form. Both spellings of the source are matched (the path as given and
-    its resolved form — ``/tmp`` is ``/private/tmp`` on this platform). Symlinks
-    are skipped: ``bin/python3`` points at a base interpreter OUTSIDE the tree,
+    another form. The search is on the VENV'S IDENTITY rather than on a
+    spelling: every absolute path in the file is resolved and compared against
+    the resolved source root, so a file written with the unresolved spelling is
+    re-pointed too (see :func:`_repoint_paths` — a plain string search missed
+    exactly that case, design review round 1, D2). Symlinks are skipped:
+    ``bin/python3`` points at a base interpreter OUTSIDE the tree,
     which must not be touched. Anything with a NUL byte in its first block is
     skipped as binary.
 
@@ -1707,8 +1800,7 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], 
     bin_dir = install_root / ("Scripts" if os.name == "nt" else "bin")
     if not bin_dir.is_dir():
         return [], []
-    spellings = {str(source_root), str(_real(source_root))}
-    replacements = [(spelling.encode(), str(install_root).encode()) for spelling in spellings]
+    replacements = [(str(source_root).encode(), str(install_root).encode())]
     rewritten: list[Path] = []
     failed: list[Path] = []
     for entry in sorted(bin_dir.iterdir()):
@@ -1728,6 +1820,7 @@ def _rebind_scripts(install_root: Path, source_root: Path) -> tuple[list[Path], 
         patched = data
         for old, new in replacements:
             patched = patched.replace(old, new)
+        patched = _repoint_paths(patched, source_root, install_root)
         if patched == data:
             continue
         staged = entry.with_name(f"{entry.name}.rebind-{os.getpid()}")
@@ -1774,7 +1867,7 @@ def _link_generation_bin(generation: Path) -> None:
             _atomic_symlink(generation / interpreter_dir / name, script)
 
 
-def write_stable_launchers(generation: Path) -> list[Path]:
+def write_stable_launchers(generation: Path) -> tuple[list[Path], list[Path]]:
     """Make ``~/.local/bin`` name the pointer for every console script.
 
     ``~/.local/bin/lop -> <stable>/current/bin/lop``: one file per entry point,
@@ -1794,27 +1887,39 @@ def write_stable_launchers(generation: Path) -> list[Path]:
     command with a broken one, and that is strictly worse than leaving the
     previous install's launcher in place — so the missing case is a warning and
     a skip, never a link.
+
+    RETURNS ``(written, failed)``, and the failures are a RETURN VALUE rather than
+    a debug note because the caller's message claims the machine adopted the
+    layout: with ``~/.local/bin`` unwritable, the migration printed the whole
+    success block and exited 0 while ``lop`` on PATH still resolved to the LEGACY
+    tree and ``<stable>/bin/python3`` (planted a moment earlier) had the
+    supervised units on the new one — a machine split between two layouts,
+    reported as a clean adoption (design review round 1, D1).
     """
     install_root = _generation_install_root(generation)
     names = _console_script_names(install_root) or (DISTRIBUTION_NAME, "lop")
     interpreter_dir = "Scripts" if os.name == "nt" else "bin"
     written: list[Path] = []
+    failed: list[Path] = []
     for name in names:
         if not (install_root / interpreter_dir / name).exists():
             continue
+        link = _local_bin_dir() / name
         if not (generation / interpreter_dir / name).exists():
             logger.warning(
                 "generation %s has no %s/%s for %s; leaving that launcher alone",
                 generation.name,
                 interpreter_dir,
                 name,
-                _local_bin_dir() / name,
+                link,
             )
+            failed.append(link)
             continue
-        link = _local_bin_dir() / name
         if _atomic_symlink(link, pointer_path() / interpreter_dir / name):
             written.append(link)
-    return written
+        else:
+            failed.append(link)
+    return written, failed
 
 
 def _console_script_names(install_root: Path) -> tuple[str, ...]:
@@ -1927,7 +2032,17 @@ def install_into_generation(
         # ``prune_generations``' marker-age rule is for.
         _remove_tree(generation)
         raise
-    write_stable_launchers(generation)
+    _written, not_written = write_stable_launchers(generation)
+    if not_written:
+        # A WARNING here, not a refusal: this machine's ``~/.local/bin/lop`` already
+        # points THROUGH ``current`` (an earlier install wrote it), so it feeds off
+        # the new generation the moment the flip lands and the install is complete
+        # either way. The MIGRATION is the path where a missing launcher leaves the
+        # machine split, and that one refuses and rolls back.
+        logger.warning(
+            "could not write %s; that launcher still names the previous layout",
+            ", ".join(str(path) for path in not_written),
+        )
     # ``generation`` explicitly, for the same reason the migration passes it: the
     # process running this may be a LEGACY uv-tool install (``lop update`` from a
     # tree that predates the layout), so the this-process gate is False on the
@@ -2001,8 +2116,23 @@ def clone_into_generation(
     # No installer ran, so this tree has no ``bin`` of its own: lay one down
     # before anything points through it (see ``_link_generation_bin``).
     _link_generation_bin(generation)
+    shim_was_absent = not daemon_image_path().exists()
     flip_pointer(generation)
-    write_stable_launchers(generation)
+    _written, not_written = write_stable_launchers(generation)
+    if not_written:
+        # THE MIGRATION REFUSES AND ROLLS BACK, because a migration that cannot
+        # write ``~/.local/bin/lop`` has adopted nothing: `lop` on PATH still runs
+        # the legacy tree while the shim planted a moment later would have the
+        # supervised units on the new layout. Half a layout is harder to reason
+        # about than none (design review round 1, D1).
+        _undo_migration(generation, remove_shim=shim_was_absent)
+        raise UpdateError(
+            "could not write "
+            + ", ".join(str(path) for path in not_written)
+            + "\n`lop` on your PATH would still run the old install, so the migration was "
+            "rolled back: the pointer, the daemon shim and the copied tree are gone and "
+            "this machine is as it was"
+        )
     # ``generation`` explicitly: this process is the LEGACY tree, so the
     # this-process gate in :func:`ensure_daemon_image` cannot see the layout
     # that now exists.
@@ -2136,12 +2266,69 @@ def _real(path: Path) -> Path:
     return Path(os.path.realpath(path))
 
 
+def _undo_migration(generation: Path, *, remove_shim: bool) -> None:
+    """Put the machine back when a migration fails after the flip (D1).
+
+    Best-effort and never raising, for the same reason ``_remove_tree`` is: the
+    caller is about to report the real error, and cleanup that raises would
+    replace it. Each step is narrow on purpose:
+
+    * the pointer is unlinked only when it names THIS generation, so a machine
+      that already had one cannot lose it to a failed migration;
+    * the shim is removed only when this run planted it (``remove_shim``);
+    * the copy goes through ``_remove_tree``, which reports what it could not
+      remove instead of claiming it.
+    """
+    target = current_generation()
+    if target is not None and _real(target) == _real(generation):
+        try:
+            pointer_path().unlink(missing_ok=True)
+        except OSError:  # pragma: no cover — nothing further to do about it
+            logger.warning("could not undo %s", pointer_path(), exc_info=True)
+    if remove_shim:
+        try:
+            daemon_image_path().unlink(missing_ok=True)
+        except OSError:  # pragma: no cover — same
+            logger.warning("could not undo %s", daemon_image_path(), exc_info=True)
+    if not _remove_tree(generation):
+        logger.warning("the refused migration's copy is still at %s", generation)
+
+
+@dataclass(frozen=True)
+class PruneDecision:
+    """One generation's fate, and the reason for it, in the CLI's own words."""
+
+    path: Path
+    removed: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class PrunePlan:
+    """What a prune decided: the removals, and the keeps WITH their reasons.
+
+    The keeps are part of the answer because the command that runs this exists to
+    explain a retention decision. Reporting only the removals left ``nothing to
+    remove`` with three different meanings, and made the one tree a live session
+    was still running from — the single most important thing that output could
+    say — invisible (design review round 1, D3).
+    """
+
+    removed: tuple[Path, ...]
+    decisions: tuple[PruneDecision, ...]
+
+    @property
+    def kept(self) -> tuple[PruneDecision, ...]:
+        """The generations that survived, in the order they were considered."""
+        return tuple(decision for decision in self.decisions if not decision.removed)
+
+
 def prune_generations(
     *,
     keep: int = DEFAULT_KEEP_GENERATIONS,
     referenced: Iterable[str | Path] = (),
     now: float | None = None,
-) -> list[Path]:
+) -> PrunePlan:
     """Delete the generations nothing can still be importing from.
 
     RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
@@ -2155,7 +2342,8 @@ def prune_generations(
     generation is a whole venv — so it runs after every successful install as
     well as on demand from ``lop install prune``. Removals are returned rather
     than only logged, because both callers report them: a silent 136 MB delete is
-    not something this tool gets to do.
+    not something this tool gets to do. The KEEPS are returned too, with their
+    reasons, for the same argument in the other direction (design review D3).
 
     ``.lop-source``-less generations are skipped unless they are older than
     :data:`_PARTIAL_TTL_S`, which is the only shape a ``kill -9`` mid-install
@@ -2163,10 +2351,15 @@ def prune_generations(
     generation always carries a marker). That rule is also what makes a prune
     safe to run while an install is in flight: the tree being built has no
     marker yet, so it is skipped even though nothing references it.
+
+    THE MARGIN COUNTS MARKER-CARRYING GENERATIONS ONLY. An in-flight tree used to
+    hold one of the ``keep`` places while itself being skipped by the age rule,
+    so the margin protected one fewer finished generation than it promises,
+    exactly while an install was running (QA round 2, Q3).
     """
     generations = generations_dir()
     if not generations.is_dir():
-        return []
+        return PrunePlan(removed=(), decisions=())
     moment = time.time() if now is None else now
     wanted: set[Path] = set()
     current = current_generation()
@@ -2179,17 +2372,29 @@ def prune_generations(
         logger.warning(
             "install pointer %s does not resolve; keeping every generation", pointer_path()
         )
-        return []
+        everything = sorted(
+            (path for path in generations.iterdir() if path.is_dir() and not path.is_symlink()),
+            key=lambda path: (path.stat().st_mtime, path.name),
+        )
+        return PrunePlan(
+            removed=(),
+            decisions=tuple(
+                PruneDecision(path, False, "the pointer does not resolve, so nothing is removed")
+                for path in everything
+            ),
+        )
     if current is not None:
         wanted.add(_real(current))
     _sweep_staging_links(moment)
+    named_by_a_record: set[Path] = set()
     for root in referenced:
         try:
             # A record names the venv (``<gen>/tools/local-operator``), and the
             # generation it belongs to is two levels up.
-            wanted.add(_real(Path(root)).parent.parent)
+            named_by_a_record.add(_real(Path(root).parent.parent))
         except OSError:  # pragma: no cover — an unresolvable reference keeps nothing extra
             continue
+    wanted |= named_by_a_record
     entries = sorted(
         # ``is_dir()`` follows symlinks, so it admits a link to a directory; the
         # layout never writes one there (``_reserve_generation`` uses ``mkdir``),
@@ -2199,43 +2404,137 @@ def prune_generations(
         (path for path in generations.iterdir() if path.is_dir() and not path.is_symlink()),
         key=lambda path: (path.stat().st_mtime, path.name),
     )
+
+    def _marker(path: Path) -> bool:
+        return (path / "tools" / DISTRIBUTION_NAME / ".lop-source").is_file()
+
     survivors = [path for path in entries if _real(path) not in wanted]
+    # The margin is over SURVIVORS THAT CARRY A MARKER: an in-flight tree is
+    # skipped by the age rule below, so letting it hold a place would shrink the
+    # margin for finished builds whenever an install was running (QA Q3).
+    carrying = [path for path in survivors if _marker(path)]
+    margin = max(0, len(carrying) - max(0, keep))
     # Resolved for the same reason ``wanted`` is: a set of unresolved paths
     # would never match, and pruning would silently keep every generation
     # forever (found by its own test, not by inspection).
-    removable = {_real(path) for path in survivors[: max(0, len(survivors) - max(0, keep))]}
+    removable = {_real(path) for path in carrying[:margin]}
+
     removed: list[Path] = []
+    decisions: list[PruneDecision] = []
     for path in entries:
-        if _real(path) in wanted:
+        resolved = _real(path)
+        if current is not None and resolved == _real(current):
+            decisions.append(PruneDecision(path, False, "the pointer's target"))
             continue
-        if not (path / "tools" / DISTRIBUTION_NAME / ".lop-source").is_file():
+        if resolved in named_by_a_record:
+            decisions.append(PruneDecision(path, False, "a live or saved session record names it"))
+            continue
+        removal_reason = "superseded, unreferenced"
+        if not _marker(path):
+            removal_reason = f"no .lop-source: crash debris, older than {_ttl_label()}"
             try:
                 in_flight = moment - path.stat().st_mtime < _PARTIAL_TTL_S
             except OSError:  # pragma: no cover — vanished under us, nothing to do
                 continue
             if in_flight:
+                decisions.append(PruneDecision(path, False, "no .lop-source: an install in flight"))
                 continue
-        elif _real(path) not in removable:
+        elif resolved not in removable:
+            decisions.append(PruneDecision(path, False, f"unreferenced, but within --keep {keep}"))
             continue
         if _remove_tree(path):
             removed.append(path)
-    return removed
+            decisions.append(PruneDecision(path, True, removal_reason))
+        else:
+            # A removal candidate that survived the attempt is NOT a removal: it
+            # is kept, and said so, rather than dropped from the answer.
+            decisions.append(PruneDecision(path, False, "could not be removed; it is still there"))
+    return PrunePlan(removed=tuple(removed), decisions=tuple(decisions))
+
+
+def _ttl_label() -> str:
+    """``_PARTIAL_TTL_S`` in the words a person reads: ``1h``, ``30m``."""
+    hours = _PARTIAL_TTL_S / 3600
+    if hours >= 1:
+        return f"{hours:g}h"
+    return f"{_PARTIAL_TTL_S / 60:g}m"
 
 
 def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
-    """``lop install prune``: apply the retention policy, and say what went."""
+    """``lop install prune``: apply the retention policy, and say what it decided."""
     if not generations_dir().is_dir():
         print("no install generations on this machine — nothing to prune")
         return 0
-    removed = prune_generations(keep=keep, referenced=referenced_install_roots())
-    current = current_generation()
-    print(f"generations: {generations_dir()}")
-    print(f"current:     {current.name if current else '(none)'}")
-    if not removed:
-        print("nothing to remove")
-    for path in removed:
-        print(f"removed:     {path.name}")
+    plan = prune_generations(keep=keep, referenced=referenced_install_roots())
+    for line in prune_lines(plan):
+        print(line)
     return 0
+
+
+#: One label width for the whole ``lop install`` group (the CLI's house column
+#: for blocks like this is 22, so labels are padded to 21 and the value starts at
+#: 22; ``status`` was ragged within itself and ``prune`` matched nothing else —
+#: design review D6).
+_PRUNE_LABEL_WIDTH = 21
+
+
+def _field(label: str, value: str) -> str:
+    """``label`` in the group's column, ``value`` after it.
+
+    A label as long as the column itself — ``a new lop would load:`` — keeps its
+    single separating space rather than running into its value, which is what the
+    first cut of this did.
+    """
+    if len(label) < _PRUNE_LABEL_WIDTH:
+        return f"{label:<{_PRUNE_LABEL_WIDTH}}{value}"
+    return f"{label} {value}"
+
+
+def prune_lines(plan: PrunePlan) -> list[str]:
+    """The lines a prune prints — one shape for every caller that renders them.
+
+    SHARED RATHER THAN WRITTEN TWICE: the two front ends used to print the same
+    event as two different sentences with two different identifiers — a bare
+    ``pruned superseded generation <name>`` from the snapshot path and a
+    timestamped ``INFO`` record naming an absolute path from the upgrade path,
+    where it also landed ABOVE the lines that explained what had happened
+    (design review D4).
+
+    THE KEEPS ARE PRINTED TOO, with their reasons (D3). This is the one command
+    whose entire job is a retention decision: naming only the removals left
+    ``nothing to remove`` with three meanings, and made the one tree a live
+    session was still running from invisible.
+    """
+    lines: list[str] = []
+    if not plan.removed:
+        counts = Counter(decision.reason for decision in plan.kept)
+        summary = ", ".join(f"{count} {reason}" for reason, count in counts.items())
+        lines.append(
+            _field(
+                "generations:",
+                f"{len(plan.decisions)}, nothing to remove" + (f" ({summary})" if summary else ""),
+            )
+        )
+    else:
+        lines.append(_field("generations:", str(len(plan.decisions))))
+    for decision in plan.decisions:
+        if decision.reason == "the pointer's target":
+            label = "current:"
+        else:
+            label = "removed:" if decision.removed else "kept:"
+        lines.append(_field(label, f"{decision.path.name}  ({decision.reason})"))
+    return lines
+
+
+def prune_notice_lines(plan: PrunePlan) -> list[str]:
+    """What an UPGRADE prints about a prune: one line per removal, and no more.
+
+    Separate from :func:`prune_lines` because the two audiences are different: an
+    upgrade is reporting a side effect it had to perform, while ``lop install
+    prune`` is answering a question about the retention decision, which needs the
+    keeps and their reasons (design review D3/D4).
+    """
+    return [f"pruned superseded generation {path.name}" for path in plan.removed]
 
 
 def install_migrate_command() -> int:
@@ -2258,7 +2557,10 @@ def install_migrate_command() -> int:
     """
     if _is_generation_install():
         print(f"already using the generation layout: {process_install_root()}")
-        print(f"pointer: {pointer_path()}")
+        # Printed WITH its target, like every other pointer line in the product:
+        # the one question this block invites is which generation the machine is
+        # on, and the answer was a second command away (design review D9).
+        print(f"pointer: {pointer_path()} -> {current_generation() or '(unresolved)'}")
         return 0
     kind = install_kind()
     if kind == InstallKind.EDITABLE:
@@ -2307,6 +2609,28 @@ class SnapshotSource:
     def label(self) -> str:
         """How this build is named to a person: the ref, else the commit, else the path."""
         return self.ref or self.commit or str(self.path)
+
+    @property
+    def install_label(self) -> str:
+        """What ``--from-snapshot`` says it is INSTALLING (design review D8).
+
+        ``label`` alone is the branch name for the directory shape, and a branch
+        name is a claim about the source rather than about the bytes: a directory
+        is installed AS IT STANDS — uncommitted work included — while a ref is
+        archived from ``HEAD``, so the two are different builds of one version.
+        Naming the branch in both cases told the operator nothing about which of
+        the two they were about to get.
+        """
+        if not self.temporary:
+            return str(self.path)
+        return f"{self.label} @ {self.commit[:7]}" if self.commit else self.label
+
+    @property
+    def install_shape(self) -> str:
+        """The other half of that sentence: which SHAPE of source this is."""
+        if not self.temporary:
+            return "working tree as it stands"
+        return "archived from the repository"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -2427,6 +2751,33 @@ def _git_bytes(repo: Path, *args: str) -> bytes | None:
     return completed.stdout if completed.returncode == 0 else None
 
 
+def _human_bytes(total: int) -> str:
+    """``136 MB``, for a number a person reads in a status block."""
+    for unit, step in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if total >= step:
+            return f"{total / step:.0f} {unit}"
+    return f"{total} B"
+
+
+def _tree_size(root: Path) -> int:
+    """Bytes under ``root``, best-effort.
+
+    A ``stat`` walk rather than shelling out to ``du``: this runs inside
+    ``lop install status``, and the number is the one that drives the decision the
+    command is asked about — each generation is a whole venv that ``prune`` exists
+    to reclaim (design review D10). Unreadable entries are skipped rather than
+    raised: a status command must not fail on a tree it cannot fully read.
+    """
+    total = 0
+    for directory, _dirs, files in os.walk(root, onerror=lambda _error: None):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except OSError:  # pragma: no cover — vanished mid-walk
+                continue
+    return total
+
+
 def install_status_command() -> int:
     """``lop install status``: the layout, and what a new ``lop`` would load.
 
@@ -2434,28 +2785,45 @@ def install_status_command() -> int:
     build the pointer names". Every label in the product describes the former;
     on a mixed-generation machine they disagree, and this is where that is
     legible without reading symlinks by hand.
+
+    THE EMPTY STATE EXPLAINS ITSELF (design review D7): ``(unresolved)``,
+    ``(unknown)`` and a header with nothing under it read as three separate
+    failures rather than as the one fact they are — this machine has not adopted
+    the layout — and the command that fixes it was not named.
     """
-    print(f"stable root: {stable_root()}")
+    print(_field("stable root:", str(stable_root())))
     pointer = pointer_path()
     generation = current_generation()
-    print(f"pointer:    {pointer} -> {generation if generation else '(unresolved)'}")
-    print(f"this process: {process_install_root()}")
+    if generation is None:
+        print(_field("pointer:", "(no generation layout on this machine)"))
+    else:
+        print(_field("pointer:", f"{pointer} -> {generation}"))
+    print(_field("this process:", process_install_root()))
     root = current_install_root()
     fresh = _stamp_at(root) if root is not None else None
-    print(f"a new lop would load: {fresh.label() if fresh else '(unknown)'}")
+    if fresh is None:
+        print(_field("a new lop would load:", "(unknown — nothing resolves behind the pointer)"))
+    else:
+        print(_field("a new lop would load:", fresh.label()))
     generations = (
-        sorted(path.name for path in generations_dir().iterdir())
+        sorted(path for path in generations_dir().iterdir() if path.is_dir())
         if generations_dir().is_dir()
         else []
     )
-    print(f"generations ({len(generations)}):")
-    for name in generations:
-        marker = ""
-        if generation is not None and name == generation.name:
-            marker = "  <- current"
-        print(f"  {name}{marker}")
-    for root in referenced_install_roots():
-        print(f"  held by a live session: {root}")
+    if not generations:
+        print(_field("generations:", "none"))
+        print("run `lop install migrate` from an installed `lop` to adopt the layout")
+        return 0
+    total = sum(_tree_size(path) for path in generations)
+    print(f"generations ({len(generations)}, {_human_bytes(total)}):")
+    for path in generations:
+        marker = "  <- current" if generation is not None and path.name == generation.name else ""
+        print(f"  {path.name}{marker}")
+    for held in referenced_install_roots():
+        # Indented under the list deliberately: the label column above is for
+        # this command's own fields, and a record-named tree is a property of one
+        # of the generations rather than a fifth field (design review D6).
+        print(f"  held by a live session: {held}")
     return 0
 
 
@@ -2595,6 +2963,7 @@ def perform_upgrade(
     source: str | Path | None = None,
     commit: str = "",
     ref: str = "",
+    on_prune: Callable[["PrunePlan"], None] | None = None,
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
@@ -2646,12 +3015,21 @@ def perform_upgrade(
         # has already succeeded, and a caller that cannot read the record
         # directory must not be told otherwise.
         try:
-            removed = prune_generations(referenced=referenced_install_roots())
+            plan = prune_generations(referenced=referenced_install_roots())
         except Exception:  # noqa: BLE001 — pruning never fails an upgrade
             logger.debug("generation prune failed", exc_info=True)
         else:
-            for path in removed:
-                logger.info("pruned superseded install generation %s", path)
+            # THE CALLER SAYS IT, not this function: the CLI has already printed
+            # ``installed``/``current install:`` by the time it can, so the
+            # removal lands where it belongs — after the lines that explain it —
+            # instead of as a bare timestamped record above them. ``on_prune`` is
+            # how the two front ends share the sentence (design review D4); with
+            # no caller listening, the log file is still the record.
+            if on_prune is not None:
+                on_prune(plan)
+            else:
+                for line in prune_notice_lines(plan):
+                    logger.info("%s", line)
         return target
     argv, image = installer_invocation(detected, executable=executable)
     if run is not None:
@@ -2706,6 +3084,17 @@ def _mobile_healthz_answers() -> bool:
 
     Used solely to warn about an unsupervised ``lop mobile serve``. Do
     not SIGTERM that process: it is not ours to bounce.
+
+    THE PROBE IS MACHINE-WIDE, NOT HOME-SCOPED, and that is deliberate rather
+    than an oversight: the process it warns about is one a person started by hand
+    in a terminal (``lop mobile serve``), which has no plist and no relationship
+    to ``Path.home()`` — so narrowing it to "this HOME has a plist" would silence
+    exactly the case the warning exists for. The consequence is recorded here
+    because a QA run with an isolated ``HOME`` still sees it: this function can
+    answer 200 for the operator's REAL daemon (QA round 2, Q4).
+    ``_mobile_refresh``'s verdict for that answer is ``unsupervised``, which takes
+    no action by design. A future change that ACTED on this answer would reach a
+    daemon outside the caller's HOME, and would have to solve that first.
     """
     import urllib.error
     import urllib.request
@@ -3129,13 +3518,15 @@ def _print_current_generation() -> None:
 def _generation_upgrade(total: int) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
-    ``lop update --from-snapshot`` uses this directly. The PyPI path reports and
-    refreshes the same way but has already pruned inside
-    :func:`perform_upgrade` (which both front ends call), so it only prints.
+    ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
+    ``installed`` line and then runs the same tail. The prune notice comes from
+    :func:`prune_notice_lines`, the one renderer both front ends use, and it prints
+    AFTER ``current install:`` — the removal reported where it belongs rather than
+    as a bare record above the lines that explain it (design review D4).
     """
     _print_current_generation()
-    for path in prune_generations(referenced=referenced_install_roots()):
-        print(f"pruned superseded generation {path.name}")
+    for line in prune_notice_lines(prune_generations(referenced=referenced_install_roots())):
+        print(line)
     _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return total
 
@@ -3174,7 +3565,12 @@ def _snapshot_command(value: str) -> int:
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print(f"installing {snapshot.label}" + (f" ({snapshot.version})" if snapshot.version else ""))
+    shape = (
+        f"{snapshot.version}, {snapshot.install_shape}"
+        if snapshot.version
+        else snapshot.install_shape
+    )
+    print(f"installing {snapshot.install_label} ({shape})")
     try:
         install_into_generation(
             snapshot.path,
@@ -3253,8 +3649,13 @@ def update_command(
 
     print(f"local-operator {result.installed} (latest is {result.latest})")
     print(f"upgrading via {installer_label(kind)}…")
+    pruned: list[str] = []
     try:
-        installed = perform_upgrade(target=result.latest, kind=kind)
+        installed = perform_upgrade(
+            target=result.latest,
+            kind=kind,
+            on_prune=lambda plan: pruned.extend(prune_notice_lines(plan)),
+        )
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -3262,8 +3663,12 @@ def update_command(
     # Names the layout, not the build: on a machine with generations the build
     # now lives in its own tree and `current` names it, which is the one fact a
     # person watching an upgrade wants to see and cannot otherwise know. Pruning
-    # has already happened inside ``perform_upgrade`` (one place, both front
-    # ends); what went is logged there.
+    # happens inside ``perform_upgrade`` (one place, both front ends); it hands
+    # the decision back through ``on_prune`` so the removal is printed HERE,
+    # after the lines that explain it, in the same words the snapshot path uses
+    # (design review D4).
     _print_current_generation()
+    for line in pruned:
+        print(line)
     _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return 0

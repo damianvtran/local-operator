@@ -94,7 +94,13 @@ def _build_tree(venv: Path, bin_dir: Path, version: str) -> None:
     ``#!/bin/sh`` could not represent a migrated tree, so the test that should
     have caught the blocker passed for a tree that could not exhibit it).
     """
-    for directory in (venv / "bin", venv / "lib" / "python3.12" / "site-packages", bin_dir):
+    # The site-packages directory name is derived from THIS interpreter rather
+    # than hardcoded: a child started from the generation looks for
+    # ``lib/python<major>.<minor>/site-packages`` under its own prefix, so a
+    # hardcoded 3.12 made this file red on any other venv while CI (3.12) stayed
+    # green — a false negative for whoever ran it locally (QA round 2, Q2).
+    version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for directory in (venv / "bin", venv / "lib" / version_dir / "site-packages", bin_dir):
         directory.mkdir(parents=True, exist_ok=True)
     (venv / "pyvenv.cfg").write_text("home = /nonexistent\n", encoding="utf-8")
     interpreter = venv / "bin" / "python3"
@@ -111,7 +117,7 @@ def _build_tree(venv: Path, bin_dir: Path, version: str) -> None:
         )
         script.chmod(0o755)
         os.symlink(script, bin_dir / name)
-    dist = venv / "lib" / "python3.12" / "site-packages" / f"local_operator-{version}.dist-info"
+    dist = venv / "lib" / version_dir / "site-packages" / f"local_operator-{version}.dist-info"
     dist.mkdir(parents=True, exist_ok=True)
     (dist / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
@@ -508,6 +514,54 @@ class TestInstallIntoGeneration:
             update_mod.generations_dir().glob("*")
         ), "the refused copy must be gone, not left on disk"
 
+    def test_remove_tree_retries_the_symlinks_a_bin_holds(self, tmp_path: Path) -> None:
+        """R5-1: the retry's motivating shape is a venv's ``bin/``, links and all.
+
+        A read-only ``bin`` holding a symlink is the shape the retry exists for —
+        that is where a venv keeps its interpreter — and gating the retry on the
+        TARGET being a symlink (rather than on the reported callable) dropped it:
+        ``bin/`` kept the link, never emptied, and ``_remove_tree`` answered False,
+        which is R3-2 reintroduced by its fix (review round 5, R5-1).
+        """
+        _skip_as_root()
+        tree = tmp_path / "tree"
+        (tree / "bin").mkdir(parents=True)
+        os.symlink("/usr/bin/python3", tree / "bin" / "python")
+        (tree / "bin" / "plain").write_text("x", encoding="utf-8")
+        os.chmod(tree / "bin", 0o500)
+        try:
+            assert update_mod._remove_tree(tree) is True
+            assert not tree.exists()
+        finally:
+            if tree.exists():  # pragma: no cover — only on failure
+                os.chmod(tree / "bin", 0o700)
+
+    def test_remove_tree_survives_a_symlink_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R5-2: resolving the root must not break "never raises".
+
+        ``Path.resolve()`` — and ``Path.exists()``, which reaches ELOOP through
+        ``stat()`` — raise ``RuntimeError`` on a loop, and a loop is exactly the
+        input that reaches the helper: ``exists()`` raises, ``is_symlink()`` is
+        True, so the guard does not short-circuit. A cleanup path that raises
+        replaces the caller's real error with a traceback about a tree it was
+        merely tidying.
+
+        ``rmtree`` is stubbed because a looping path ALSO trips this repo's root
+        conftest guard inside rmtree's fd walk (``TypeError: open() missing
+        required argument 'flags'``), which is a harness defect unrelated to the
+        contract under test and recorded as such on the PR. What R5-2 is about is
+        that the function ANSWERS rather than raises, and that is what this
+        pins — with the fix reverted, the failure is a ``RuntimeError`` from
+        ``Path.exists()`` before ``rmtree`` is ever called.
+        """
+        loop = tmp_path / "loop"
+        os.symlink(loop, loop)
+        monkeypatch.setattr(update_mod.shutil, "rmtree", lambda *_a, **_k: None)
+        assert update_mod._remove_tree(loop) is False
+        assert loop.is_symlink()
+
     def test_remove_tree_does_not_chmod_through_a_symlink(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -571,7 +625,7 @@ class TestInstallIntoGeneration:
             return original(path)
 
         monkeypatch.setattr(update_mod, "_remove_tree", _recording)
-        assert update_mod.prune_generations(keep=0) == []
+        assert update_mod.prune_generations(keep=0).removed == ()
         assert link not in attempted, "prune handed a symlinked entry to the remover"
         assert (real / "keep").is_file(), "prune followed a symlink out of generations/"
 
@@ -628,6 +682,60 @@ class TestInstallIntoGeneration:
             os.chmod(copy / "bin", 0o755)
         assert rewritten == []
         assert [path.name for path in failed] == ["lop"]
+
+    def test_a_migration_that_cannot_write_its_launcher_rolls_back(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """D1: half a layout is worse than none, and it must not be reported as success.
+
+        With ``~/.local/bin`` unwritable the migration used to copy the tree, flip
+        the pointer, plant the daemon shim, print the whole success block and exit
+        0 — leaving ``lop`` on PATH running the LEGACY tree while the supervised
+        units had moved to the new one (design review round 1, D1). The refusal
+        must name what it could not write and put the machine back.
+        """
+        _skip_as_root()
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        bin_dir = Path.home() / ".local" / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(bin_dir, 0o500)
+        try:
+            with pytest.raises(UpdateError) as refused:
+                update_mod.clone_into_generation(legacy)
+        finally:
+            os.chmod(bin_dir, 0o700)
+        assert "could not write" in str(refused.value), refused.value
+        assert str(bin_dir / "lop") in str(refused.value), refused.value
+        assert not update_mod.pointer_path().is_symlink(), "the flip must be undone"
+        assert not update_mod.daemon_image_path().exists(), "the shim must be undone"
+        assert not list(update_mod.generations_dir().glob("*")), "the copy must be gone"
+
+    def test_a_symlinked_install_path_still_re_points_the_copy(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """D2: the file's spelling is not necessarily the caller's.
+
+        ``sys.prefix`` is already RESOLVED by CPython while uv wrote the spelling
+        it was given, so on a host with a symlinked install path (``/tmp`` is
+        ``/private/tmp`` on macOS) a string search finds nothing, nothing fails,
+        and the migration reports success with a copy that still executes the
+        legacy venv. The check is on the venv's identity instead.
+        """
+        real = tmp_path / "real-legacy"
+        real.mkdir()
+        link = tmp_path / "legacy-link"
+        os.symlink(real, link)
+        # The tree's own scripts name the LINK, as uv's would: it was installed
+        # through the spelling the caller handed it.
+        _build_tree(link, tmp_path / "legacy-bin", "0.51.9")
+        generation = update_mod.clone_into_generation(real)
+        install_root = generation / "tools" / "local-operator"
+        shebang = (install_root / "bin" / "lop").read_text(encoding="utf-8").splitlines()[0]
+        assert shebang == f"#!{install_root / 'bin' / 'python3'}", shebang
+        activate = install_root / "bin" / "activate"
+        if activate.is_file():
+            assert str(link) not in activate.read_text(encoding="utf-8")
 
     def test_a_flip_that_cannot_happen_is_a_refusal_and_leaves_no_tree(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
@@ -782,7 +890,7 @@ class TestDiskBuild:
 class TestPruning:
     def test_the_pointer_target_is_never_removed(self, home: Path) -> None:
         generations = [_install(f"0.52.{index}") for index in range(5)]
-        removed = update_mod.prune_generations()
+        removed = update_mod.prune_generations().removed
         assert update_mod.current_generation() == generations[-1].resolve()
         assert generations[-1] not in removed
 
@@ -792,14 +900,14 @@ class TestPruning:
         held = generations[0]
         removed = update_mod.prune_generations(
             referenced=[held / "tools" / "local-operator"],
-        )
+        ).removed
         assert held not in removed
         assert held.is_dir()
         assert not any(path == held for path in removed)
 
     def test_the_last_two_unreferenced_generations_survive(self, home: Path) -> None:
         generations = [_install(f"0.52.{index}") for index in range(5)]
-        removed = update_mod.prune_generations()
+        removed = update_mod.prune_generations().removed
         survivors = [path for path in generations if path.is_dir()]
         assert len(survivors) == update_mod.DEFAULT_KEEP_GENERATIONS + 1  # + the pointer's
         assert generations[0] in removed
@@ -812,7 +920,7 @@ class TestPruning:
         in_flight = update_mod.generations_dir() / "20260101T000000Z-writing"
         in_flight.mkdir()
         (in_flight / "tools" / "local-operator").mkdir(parents=True)
-        assert update_mod.prune_generations(keep=0).count(in_flight) == 0
+        assert update_mod.prune_generations(keep=0).removed.count(in_flight) == 0
         assert in_flight.is_dir()
 
     def test_an_abandoned_tree_is_reclaimed_once_it_is_old(self, home: Path) -> None:
@@ -822,9 +930,42 @@ class TestPruning:
         (debris / "tools" / "local-operator").mkdir(parents=True)
         removed = update_mod.prune_generations(
             keep=0, now=time.time() + update_mod._PARTIAL_TTL_S + 1
-        )
+        ).removed
         assert debris in removed
         assert not debris.exists()
+
+    def test_an_in_flight_tree_does_not_consume_a_margin_slot(self, home: Path) -> None:
+        """QA Q3: the margin counts marker-carrying generations only.
+
+        A marker-less tree is skipped by the age rule, so letting it hold one of
+        the ``keep`` places shrank the protection for finished builds exactly while
+        an install was running — the margin's documented job is the opposite.
+        """
+        oldest = _install("0.52.0")
+        middle = _install("0.52.1")
+        newest = _install("0.52.2")
+        aged = time.time() - 100
+        for offset, path in enumerate((oldest, middle, newest)):
+            os.utime(path, (aged + offset, aged + offset))
+        in_flight = update_mod.generations_dir() / "20260101T000000Z-writing"
+        in_flight.mkdir()
+        (in_flight / "tools" / "local-operator").mkdir(parents=True)
+        plan = update_mod.prune_generations(keep=1)
+        assert oldest in plan.removed
+        assert middle not in plan.removed, "the margin must protect a FINISHED build"
+        assert in_flight.is_dir()
+
+    def test_prune_reports_what_it_kept_and_why(self, home: Path) -> None:
+        """D3: the one command whose whole job is a retention decision must explain it."""
+        _install("0.52.0")
+        _install("0.52.1")
+        plan = update_mod.prune_generations()
+        lines = update_mod.prune_lines(plan)
+        text = "\n".join(lines)
+        assert plan.kept, "the keeps are part of the answer"
+        assert "current:" in text, text
+        assert "unreferenced, but within --keep 2" in text, text
+        assert all(decision.reason for decision in plan.decisions), lines
 
     def test_an_interrupted_flips_staging_link_is_swept(self, home: Path) -> None:
         """R-6: a ``kill -9`` between ``os.symlink`` and ``os.rename``.
@@ -850,7 +991,7 @@ class TestPruning:
         assert fresh.is_symlink(), "a concurrent flip's staging link must survive"
 
     def test_pruning_a_machine_with_no_layout_is_a_no_op(self, home: Path) -> None:
-        assert update_mod.prune_generations() == []
+        assert update_mod.prune_generations().removed == ()
 
 
 # -- migration -----------------------------------------------------------------

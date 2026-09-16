@@ -13125,6 +13125,8 @@ class OperatorApp(App[None]):
             install_kind,
             is_git_snapshot,
             perform_upgrade,
+            PrunePlan,
+            prune_notice_lines,
             refresh_mobile_after_upgrade,
             refresh_service_daemons_after_upgrade,
             tui_editable_refusal,
@@ -13158,8 +13160,20 @@ class OperatorApp(App[None]):
             # used to replace the snapshot silently.
             self.call_from_thread(self._system_notice, git_snapshot_notice())
         self.call_from_thread(self._system_notice, f"updating to v{result.latest}…")
+
+        def _report_prune(plan: PrunePlan) -> None:
+            """Say what a prune removed, in the CLI's own sentence.
+
+            The TUI wraps this run in ``file_logging``, so a log record is not
+            something the person watching the upgrade ever sees — the removal
+            has to be a notice (design review D4), and it uses the same renderer
+            the CLI does so the two front ends cannot drift apart.
+            """
+            for line in prune_notice_lines(plan):
+                self.call_from_thread(self._system_notice, line)
+
         try:
-            installed = perform_upgrade(target=result.latest, kind=kind)
+            installed = perform_upgrade(target=result.latest, kind=kind, on_prune=_report_prune)
         except UpdateError as exc:
             if "repo .venv" in str(exc) or kind is InstallKind.EDITABLE:
                 message = tui_editable_refusal()

@@ -929,6 +929,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # The install LAYOUT's own commands. One verb group rather than flags on
     # ``update`` because neither of these installs anything from a network: they
     # manage the trees this machine already has.
+    #
+    # ``--keep``'s default is the REAL one rather than ``None``: argparse renders
+    # ``%(default)s`` from what is declared here, so a ``None`` the dispatcher
+    # later converted meant the help text stated a default that was not the
+    # default, and quoted a Python symbol an operator cannot act on (design
+    # review D5).
+    from local_operator.update import DEFAULT_KEEP_GENERATIONS
+
     install_parser = subparsers.add_parser(
         "install",
         help="Manage the local install generations (layout for the stable `lop` runtime)",
@@ -943,12 +951,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     prune_parser.add_argument(
         "--keep",
         type=int,
-        default=None,
+        default=DEFAULT_KEEP_GENERATIONS,
         metavar="N",
         help=(
-            "How many UNREFERENCED generations to keep (default: %(default)s, from "
-            "update.DEFAULT_KEEP_GENERATIONS). Generations named by a live or saved "
-            "session, and the one `current` points at, are never removed"
+            "How many unreferenced generations to keep (default: %(default)s). A "
+            "generation named by a live or saved session, and the one `current` "
+            "points at, are never removed"
         ),
     )
     install_subparsers.add_parser(
@@ -6994,7 +7002,9 @@ def main() -> int:
 
             action = getattr(args, "install_command", None)
             if action == "prune":
-                keep = getattr(args, "keep", None)
+                # The parser's default IS the policy default, so an explicit
+                # ``--keep`` is the only thing that changes it (D5).
+                keep = getattr(args, "keep", DEFAULT_KEEP_GENERATIONS)
                 return install_prune_command(
                     keep=DEFAULT_KEEP_GENERATIONS if keep is None else max(0, int(keep))
                 )
