@@ -59,13 +59,17 @@ class SettingView(BaseModel):
     # can only render a gated child as enabled and saveable, which is how it
     # shipped.
     #
-    # ADDITIVE AND OPTIONAL, with defaults that keep the response byte-identical
-    # for a client that ignores them: the desktop app and this server release
-    # independently, so an older app must keep working against this server and a
-    # newer app must keep working against an older one. The app reads all three
-    # only when present (`BackendSetting` in the desktop contract), so a server
-    # that predates this field degrades to the previous behaviour rather than
-    # failing.
+    # ADDITIVE AND OPTIONAL. A client that ignores them sees the response it saw
+    # before this field existed - byte-identical for a key that carries none of
+    # the three, and for every other key the change is the addition of these
+    # three keys and nothing else. That matters because the desktop app and this
+    # server release independently: an older app must keep working against this
+    # server and a newer app must keep working against an older one. The app
+    # reads all three only when present (`BackendSetting` in the desktop
+    # contract), so a server that predates them degrades to the previous
+    # behaviour rather than failing. Nothing is withheld and no existing field
+    # changes meaning, which is why the capability stays `features.settings: 1`
+    # rather than moving behind a new bit.
     warning: str = ""
     placeholder: str = ""
     gated_by: str | None = None

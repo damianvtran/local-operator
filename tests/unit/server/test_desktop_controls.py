@@ -557,6 +557,10 @@ async def test_settings_projection_serves_the_registry_authored_annotations(desk
         for field in ("warning", "placeholder", "gated_by"):
             assert field in row, f"{key} is missing {field}"
     for setting in settings_io.SETTINGS:
+        # Named rather than indexed: a key the projection dropped would otherwise
+        # fail this loop as a bare `KeyError`, which names nothing about which key
+        # the registry and the wire disagree about.
+        assert setting.key in rows, f"{setting.key} is not in the projection"
         row = rows[setting.key]
         assert row["warning"] == setting.warning, setting.key
         assert row["placeholder"] == setting.placeholder, setting.key
