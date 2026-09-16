@@ -25,6 +25,14 @@ IS a command is refused; **1** means every leading slash was refused. Nothing is
 on it — no surface is withheld — and its one consumer is the refusal alert's remedy,
 which differs by whether a correct client can reach that refusal at all.
 
+"IS a command" means the word plus an argument the desktop actually consumes — a
+prompt, a value from a list, or a shape the command route validates or forwards
+(`argument_shape` / `argument_words` on the catalogue, see
+[DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md)). So `/compact hello`, `/usage more
+prose` and a draft that merely OPENS with `/mcp logout` are messages, while
+`/mcp logout`, `/login openai` and `/move ~/x` are still refused — each of those
+is a control the composer runs.
+
 Electron **main**, not the renderer, generates a random 32-byte token for each
 managed backend lifetime. Supply it only through `LOCAL_OPERATOR_DESKTOP_TOKEN`
 in that child's environment. Never put it in argv, logs, config files, build

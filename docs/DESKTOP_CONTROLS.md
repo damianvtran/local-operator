@@ -14,9 +14,35 @@ renderer persistence or command receipts.
 ## Catalogue and dispatch
 
 `GET /v1/desktop/commands` returns the shared `slash_commands.SLASH_COMMANDS`:
-name, description, aliases, ArgumentMode, echo, consumes_prompt, destination and
-execution host. There is no desktop copy of the command list. The registry carries
-its destination; the dispatcher only selects execution handlers.
+name, description, aliases, ArgumentMode, echo, consumes_prompt, prefixes_text,
+argument_shape, argument_words, destination and execution host. There is no
+desktop copy of the command list. The registry carries its destination; the
+dispatcher only selects execution handlers.
+
+The three text fields answer ONE question between them — is the text typed after
+this command's word an ARGUMENT the command owns — which is what the messages
+endpoint's admission rule and the composer's planner both read:
+
+* `consumes_prompt` — free text destined for a model (`/goal <objective>`);
+* `prefixes_text` — a value the composer can COMPLETE from a list (`/model gpt-5`);
+* `argument_shape` / `argument_words` — the third source, for text the desktop
+  VALIDATES or FORWARDS rather than completes. `argument_words` is the vocabulary
+  the first token must come from, empty meaning any word:
+  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`);
+  - `provider` — one token naming a provider this install knows, so `/login
+    openai` is the command and `/login zzz` is a message;
+  - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so
+    `/mcp logout` is the command and `/mcp logout seems to cause a crash` is a
+    message;
+  - `any` — arbitrary text a handler or form field takes (`/rename <title>`);
+  - `none` — no text is ever this command's argument (`/compact hello` is a
+    message, which is the shape the operator reported).
+
+A renderer applying those fields reaches the endpoint's own decision; one that
+does not read them keeps its own derivation instead (both keys are additive).
+The two questions differ on purpose for a SELECTOR: `/usage more prose` is prose
+for the admission rule, while the command route still forwards it as a panel
+selection.
 
 `POST /v1/desktop/sessions/{id}/commands` accepts the existing stable UUID
 request_id, command, args and optional images. Every canonical name and alias is

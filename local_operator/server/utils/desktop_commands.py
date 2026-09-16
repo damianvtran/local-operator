@@ -9,8 +9,9 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
+from local_operator.providers.registry import known_provider_ids
 from local_operator.slash_commands import SLASH_COMMANDS
-from local_operator.tui.autocomplete import SlashCommand
+from local_operator.tui.autocomplete import ArgumentShape, SlashCommand
 
 # These are execution handlers, not a copy of the catalogue. A new registry row
 # must choose its desktop destination before it can be offered by this host.
@@ -31,6 +32,25 @@ OWNER_COMMANDS = frozenset(
 )
 
 
+def argument_words(spec: SlashCommand) -> list[str]:
+    """The vocabulary a shape's first token must come from, for the wire.
+
+    Empty for every shape that takes ANY word (``word``, ``any``) and for
+    ``none``. The two that carry one resolve it from the SAME source their
+    validator reads — the MCP subcommand tuple and the provider registry — so a
+    renderer reproduces the endpoint's answer without a second list of its own,
+    which is the drift this field exists to prevent. ``known_provider_ids``
+    includes the legacy aliases because the validator resolves them.
+    """
+    if spec.argument_shape is ArgumentShape.SUBCOMMAND:
+        from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+
+        return sorted(MCP_SUBCOMMANDS)
+    if spec.argument_shape is ArgumentShape.PROVIDER:
+        return list(known_provider_ids())
+    return []
+
+
 def command_catalogue() -> list[dict[str, Any]]:
     return [
         {
@@ -46,6 +66,16 @@ def command_catalogue() -> list[dict[str, Any]]:
             # while a renderer that reads it needs no second vocabulary. See
             # `SlashCommand.prefixes_text` for what it does and does not mean.
             "prefixes_text": spec.prefixes_text,
+            # The THIRD source of "text after this word is the command's
+            # argument": a shape the command route validates or forwards, which
+            # neither of the two booleans above expresses. `argument_words` is
+            # the vocabulary its first token must come from (empty = any word).
+            # Both are additive for the same reason `prefixes_text` is: a
+            # renderer that does not read them keeps its own derivation, and one
+            # that does can answer `/mcp logout` (command) and `/mcp logout seems
+            # to cause a crash` (message) the way this endpoint does.
+            "argument_shape": spec.argument_shape.value,
+            "argument_words": argument_words(spec),
             "destination": spec.desktop_destination,
             "execution": "owner" if spec.name in OWNER_COMMANDS else "native",
         }
