@@ -3177,7 +3177,7 @@
           "Transcription"
         ],
         "summary": "Transcribe Audio File",
-        "description": "Transcribe an audio file using the specified model and parameters.\n\nThe audio file is sent as `multipart/form-data`.",
+        "description": "Transcribe an audio file using the specified model and parameters.\n\nThe audio file is sent as `multipart/form-data`.\n\n`model`, `provider`, `language` and `prompt` are optional and default to\nunset: an omitted field is left out of the upstream request so Radient's\nown configured provider/model default applies. Pass `model` and `provider`\ntogether to pin a specific backend.",
         "operationId": "create_transcription_endpoint_v1_transcriptions_post",
         "requestBody": {
           "content": {
@@ -4271,8 +4271,7 @@
                 "type": "null"
               }
             ],
-            "title": "Model",
-            "default": "gpt-4o-transcribe"
+            "title": "Model"
           },
           "prompt": {
             "anyOf": [
@@ -4329,8 +4328,7 @@
                 "type": "null"
               }
             ],
-            "title": "Provider",
-            "default": "openai"
+            "title": "Provider"
           }
         },
         "type": "object",
