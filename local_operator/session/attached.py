@@ -80,6 +80,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.providers.local import LOCAL_PROVIDER_IDS
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.cold_model import (
     resolve_context_metadata,
@@ -89,6 +90,7 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+    FrontendModelSpec,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -121,6 +123,7 @@ from local_operator.session.transcript import (
     usages_since_newest_shrink,
 )
 from local_operator.session.usage_seed import (
+    denominator_window,
     reading_identity,
     reading_window,
     seed_reported_usage,
@@ -729,6 +732,90 @@ def frontend_attach_refusal(record: SessionRecord) -> str | None:
             f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
         )
     return None
+
+
+def _naming_resolved_no_name(spec: FrontendModelSpec) -> bool:
+    """Whether the RENDER of this spec's model is its own selector.
+
+    ASK NAMING, DO NOT RE-STATE IT. ``model_label``'s ``full`` form is the
+    selector exactly when it refused every candidate it had: a name that merely
+    echoes the id, a RESELLER's listing name (which cannot say which route is
+    answering), and a name two models answer to. A caller that re-derives one of
+    those refusals — the id-echo case was the one an earlier revision copied —
+    disagrees with the band about any model whose listing name is refused for
+    one of the other reasons, and the disagreement is silent: that model keeps
+    painting its bare id while ``naming`` would have accepted the name the
+    conversation's own checkpoint recorded.
+
+    Used by ``AttachedSession._restored_model_specs``, which adopts a
+    checkpoint's display name only when the fresh resolution produced none.
+    """
+    from local_operator.model.naming import resolved_a_name
+
+    return not resolved_a_name(spec.provider, spec.model_id, str(spec.display_name or ""))
+
+
+def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
+    """Whether THIS process resolved a real budget for the pair, or only a fill.
+
+    THE QUESTION IS THE VALUE RULE the band itself applies
+    (``usage_seed.denominator_window``): does this spec carry a window the band can
+    DIVIDE BY, i.e. one that is not ``UNKNOWN_CONTEXT_WINDOW`` (128k)? That is the
+    same question, asked of the same spec, so the window the first frame
+    restores and the window the band refuses cannot disagree.
+
+    WHY NOT ``default_context_window``/``max_context_window``, which is what this
+    predicate used to read: those two fields are PROVIDER PROVENANCE, not the
+    answer. The shipped catalogue states a window through ``context_window``
+    alone — 0 of its 120 rows set either provenance field — so reading them as
+    "did the model layer answer?" reported "nothing answered" for every pair
+    whose resolution carries no provenance, and the checkpoint's window was
+    restored under a fresher one. Measured on the population that needs no
+    history at all, a Codex/OAuth-served conversation resumed on an OpenAI API
+    key (the fresh spec's only budget is the row's 1,050,000, which
+    ``denominator_window`` VOUCHES, so it is a budget and not the placeholder):
+    cold ``110.3%/272k`` where the attach frame paints ``28.6%/1.1M`` (review
+    round 3, blocker 1). The narrowed predicate is also why the mirror direction
+    looked safe: an OAuth opt-out DOES resolve provenance fields, so the
+    one-directional hole was easy to miss.
+
+    THE ONE CARVE-OUT IS THE LOCAL ROUTES, and its signal is the PROVIDER KIND:
+    ``LOCAL_PROVIDER_IDS`` is exactly the set ``build_model_spec`` routes to
+    ``local_model_spec``, whose fallback window its own docstring calls "a
+    conservative working budget, not a claim about the model" — a route FILL
+    rather than an answer, so a vouched window there is not evidence that the
+    model layer answered. What that builder does record is the SERVER'S OWN
+    evidence, in ``default_context_window``/``max_context_window``, and nothing
+    else — so on these routes those two fields are the discrimination, and their
+    absence means the window is the client-side fill. An uncovered local tag's
+    4,096 (``DEFAULT_LOCAL_CONTEXT``) must therefore not displace a checkpoint's
+    32,768, or the first frame paints ``488.2%/4k`` for a 20,000-token reading
+    (review round 1, minor 1).
+
+    Keyed on the constant the BUILDER routes on rather than on a spelling of one
+    route or a magic value (``context_window == 4,096``), because a fill and a
+    real answer leave the same fields behind — there is no spec-level provenance
+    flag to ask, which is the model-layer gap design round 2's D2 defers. Keyed
+    on the same constant, the two cannot drift.
+
+    ONE SOURCE PER FRAME. Both readers of the gate ask THIS function — the
+    state-level window (``_consistent_context``) and the spec-level one
+    (``_restored_model_specs``) — so a frame can never divide by the fresh spec's
+    window while its spec still carries the checkpoint's, or the reverse. The
+    numerator is the conversation's own reading on either side of the branch,
+    because that is the pair the attaching runtime publishes
+    (``frontend_state.refresh_from_session``: ``receipt_context or
+    current.context_tokens`` beside the EFFECTIVE spec's own window), and this is
+    the frame that has to agree with it.
+
+    Asked of the CONFIGURED spec — the one this process just resolved — never
+    of the checkpoint's, whose fields are the answer being judged.
+    """
+    if denominator_window(spec) is None:
+        return False
+    if spec.provider in LOCAL_PROVIDER_IDS:
+        return bool(int(spec.default_context_window or 0) or int(spec.max_context_window or 0))
+    return True
 
 
 class AttachedSession:
@@ -1524,12 +1611,20 @@ class AttachedSession:
           model that will RUN (``reading_identity`` against the effective spec),
           which is the same gate ``_consistent_context`` applies to a checkpoint
           reading. A count measured on another model is not convertible.
-        * ``context_window`` — only from ``reading_window``, which requires a
-          window the spec can VOUCH for: the resolved flag alone is not evidence,
-          because ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with
-          that flag whenever account metadata could not be resolved. Never the
-          spec's 128k placeholder. With no window the strip renders its honest
-          ``window unknown`` state — absolute tokens, no arc.
+        * ``context_window`` — from ``reading_window`` when the receipt can be
+          attributed to this model, else straight from ``denominator_window(spec)``.
+          Both ask the SAME value question (is this a budget or the placeholder),
+          and they differ only in the question ``reading_window`` adds on top of it:
+          whether the reading is ATTRIBUTABLE (a receipt for another model is not
+          this model's reading). A spec's own window is a fact about the model
+          regardless of who measured anything against it, and it is what the band
+          divides by on every later paint, so it is written either way (review
+          round 2, minor 1). The resolved flag alone is NOT evidence, because
+          ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with that flag
+          whenever account metadata could not be resolved — which is why the value
+          rule, not the flag, is the one both callers share. With no window at all
+          the strip renders its honest ``window unknown`` state — absolute tokens,
+          no arc.
         * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced on the
           receipt's own serving identity (a receipt from another model was billed
           at THAT model's rates), and only when the receipt is attributable at
@@ -1586,7 +1681,18 @@ class AttachedSession:
         spec = state.effective_model or state.selected_model
         if spec is None:
             return state.model_copy(update=changes) if changes else state
+        # THE SPEC'S OWN DENOMINATOR, read once because more than one path needs
+        # it: the receipt-seeded numerator below (``reading_window`` prefers the
+        # receipt's attested answer and falls back to this), and the checkpoint
+        # numerator whose checkpoint carried no window of its own. It is the same
+        # number ``tui.app._context_window`` divides by on every later paint, and
+        # the same value rule the seed applies — ``denominator_window`` refuses
+        # the 128k placeholder, so an unknown budget stays unknown rather than
+        # becoming confident.
+        spec_window = denominator_window(spec)
         if seed is None:
+            if state.context_tokens is not None and state.context_window is None and spec_window:
+                changes["context_window"] = spec_window
             return state.model_copy(update=changes) if changes else state
         # ONE attribution for both the numerator and the price, so a reading the
         # receipt cannot be attributed to gets neither.
@@ -1607,6 +1713,20 @@ class AttachedSession:
         # numerator computes a percentage the tokens were never measured on
         # (a checkpoint at 500_000/1_050_000 read as 390.6% of the new window).
         # A checkpoint that carried no window still gets one.
+        #
+        # When the RECEIPT cannot vouch a denominator (a spec whose account
+        # metadata was never resolved, or a reading it cannot attribute), the
+        # state still carries the model's own window, because that is the number
+        # every later paint divides by. Leaving it unset did NOT show "unknown":
+        # ``StatusLine.update`` reads ``None`` as leave-alone, so the first paints
+        # kept whatever the PREVIOUS session had painted. Resuming a 1M
+        # conversation from a settled 128k one read
+        # ``287,491/128,000 = 224.6%`` for two paints (QA round 1, Q2), and a
+        # receipt-seeded numerator with no spec-vouched denominator read the
+        # reported ``287.5k/—`` for two paints before the spec's own refresh
+        # landed 18ms later (Q1). Same spec, same number, one source.
+        if window is None:
+            window = spec_window
         if window is not None and state.context_window is None:
             changes["context_window"] = window
         if (
@@ -1799,6 +1919,34 @@ class AttachedSession:
         return list(rows.values())
 
     @staticmethod
+    def _restored_pair(
+        state: FrontendSessionState, durable: FrontendSessionState
+    ) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+        """The two specs a restored reading is only meaningful between, or ``None``.
+
+        ONE RULE, TWO CONSUMERS. ``_consistent_context`` asks it whether the
+        checkpoint's NUMERATOR is this model's, and ``_restored_model_specs``
+        asks it whether the checkpoint's DENOMINATOR is. They cannot be answered
+        separately: the checkpoint's ``context_tokens`` were measured against the
+        checkpoint's own window, so a numerator taken from one side under a
+        denominator taken from the other is a percentage the tokens were never
+        measured against — the wrong-reading class both methods exist to refuse.
+        A third consumer must call this rather than restating the comparison.
+
+        ``None`` when either side carries no spec, or when the two name
+        different models: the user switched models since the checkpoint was
+        written, so the stored reading describes a model that is not about to
+        run and is not convertible into one that is.
+        """
+        configured = state.selected_model
+        stored = durable.selected_model
+        if configured is None or stored is None:
+            return None
+        if configured.provider != stored.provider or configured.model_id != stored.model_id:
+            return None
+        return configured, stored
+
+    @staticmethod
     def _consistent_context(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
@@ -1814,83 +1962,135 @@ class AttachedSession:
         than converted: the band renders ``—`` for an unknown context, which is
         the same honest degradation it already shows for a model it cannot
         price. The first real turn replaces it with a live reading anyway.
+
+        WHICH MODEL the reading belongs to is ``_restored_pair``, shared with the
+        WINDOW's half of the restore (``_restored_model_specs``) rather than
+        restated here. The DENOMINATOR is not a second question with the same
+        answer: the checkpoint's window is restored only where this process
+        resolved none of its own (``_fresh_spec_states_a_budget``). Where it did,
+        the window is left unset and ``_seed_cold_usage`` fills it from the fresh
+        spec — the number every later paint divides by, and the one the runtime's
+        own attach frame publishes — while the numerator stays, because it is a
+        fact about the conversation either way.
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        same_model = bool(
-            configured is not None
-            and stored is not None
-            and configured.provider == stored.provider
-            and configured.model_id == stored.model_id
-        )
-        if not same_model:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        return {
+        configured, _stored = pair
+        update: dict[str, Any] = {
             "context_tokens": durable.context_tokens,
             "context_is_estimate": durable.context_is_estimate,
-            "context_window": durable.context_window,
         }
+        if not _fresh_spec_states_a_budget(configured):
+            update["context_window"] = durable.context_window
+        return update
 
     @staticmethod
     def _restored_model_specs(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
-        """Model specs for the restored state, keeping the window and the
-        measured context consistent with each other.
+        """Model specs for the restored state, keeping the window, the
+        measured context and the resolved name consistent with each other.
 
-        The synthesised cold spec is built from ``config.yml``, which names the
-        provider and model but carries no metadata — so ``ModelSpec`` supplies
-        its **128k default** for ``context_window``. The restored
-        ``context_tokens`` were measured against the window the runtime
-        actually had (1M on the reference session), and the band divides the
-        restored tokens by the SPEC's window (``_context_window`` in
-        ``tui/app.py`` reads the effective spec, deliberately, because the
-        percentage predicts when the next request overflows). Dividing 322,546
-        by a defaulted 128,000 is how a resumed session painted **268.2%**
-        (design review round 1, D1) — a number that cannot be true, on the one
-        surface that exists to tell the user how much room is left.
+        The synthesised cold spec is built from ``config.yml`` and the journal,
+        which name the provider and model — and, since this process resolves the
+        pair through the catalogue (``cold_model.resolve_saved_model``), whatever
+        metadata this machine can read OFFLINE. Where that is not enough, the
+        restored state is: the session's last runtime wrote a full spec into its
+        checkpoint, and the values the conversation's own history was actually
+        measured and named against are there.
 
-        The checkpoint's own spec is the one those tokens were measured
-        against, so it is the honest denominator. Taken ONLY when the config
-        names the same model: if the user switched models since, the
-        configured spec is right and the stale window would be the wrong
-        answer in the other direction. In that case the numerator is dropped
-        instead (see ``_consistent_context``) rather than divided by a window
-        it was never measured against.
+        The WINDOW is the case this rule was written for. The restored
+        ``context_tokens`` were measured against the window the runtime actually
+        had (1M on the reference session), so dividing 322,546 by a placeholder
+        window is how a resumed session painted **268.2%** (design review round
+        1, D1) — a number that cannot be true, on the one surface that exists to
+        tell the user how much room is left. The checkpoint's own spec is the one
+        those tokens were measured against, so it is the honest denominator.
+
+        Taken on the SAME-MODEL gate the numerator is taken on
+        (``_restored_pair``), which decides WHICH MODEL the reading belongs to —
+        not, as an earlier revision of this docstring had it, that the pair then
+        always travels together. WHICH WINDOW the restored numerator meets is a
+        separate question (``_fresh_spec_states_a_budget``), and the answer is
+        not the checkpoint's wherever this process resolved a budget of its own.
+        That asymmetry is deliberate and it is the one the runtime's own attach
+        frame already follows — ``frontend_state.refresh_from_session`` pairs
+        ``receipt_context or current.context_tokens`` with the EFFECTIVE spec's
+        window — because the band's percentage predicts when the NEXT request
+        overflows, so a restored numerator under a stale denominator misstates
+        the one number this surface exists to report.
+
+        The checkpoint's window is the wrong answer wherever the fresh spec has
+        one. Measured on this branch while the gate was absent: a conversation
+        whose account GREW from 272k to 872k first-painted ``110.3%/272k``
+        against the live frame's ``34.4%/872k`` (usage overstated threefold), and
+        one whose account opted OUT of the maximum first-painted ``45.9%/872k``
+        against the live ``147.1%/272k`` — a calm reading that HIDES an
+        over-budget conversation on the one surface that exists to warn about it
+        (review round 2, blocker 1; design round 2, D1).
+
+        The populations it must KEEP adopting for, because the fresh spec states
+        no answer there and the checkpoint's window is the only real number in
+        the process: an unresolved account (the 128k placeholder, neither
+        ``default`` nor ``max`` set) and an uncovered local tag (the 4,096 route
+        default, the same two fields absent). Those are the reported
+        ``224.6%/128k`` and review round 1's ``488.2%/4k``.
+
+        The NAME rides the same-model gate for its own reason — it is a fact
+        about THIS model that only a runtime which ran it could resolve — and it
+        is taken on naming's own rule (``naming.resolved_a_name``,
+        ``_naming_resolved_no_name``) rather than a copy of one of that rule's
+        three refusals (review round 1, minor 2; review round 2, nit 1).
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        if configured is None or stored is None:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        same_model = (
-            configured.provider == stored.provider and configured.model_id == stored.model_id
-        )
-        if not same_model:
+        configured, stored = pair
+        update: dict[str, Any] = {}
+        # The WINDOW half, on the same rule the state-level half follows
+        # (``_consistent_context``): the checkpoint's window is the answer only
+        # while this process resolved no budget of its own.
+        if not _fresh_spec_states_a_budget(configured):
+            window = int(stored.context_window or 0)
+            if window > 0:
+                update.update(
+                    {
+                        "context_window": window,
+                        "default_context_window": stored.default_context_window,
+                        "max_context_window": stored.max_context_window,
+                    }
+                )
+        # The resolved NAME, and why it needs a gate at all: this process resolves
+        # a name only as far as the catalogue it can read OFFLINE reaches, so a
+        # listing row that answers with the id it was asked about gives it nothing
+        # and the band paints the BARE ID on the first frame, healing to the
+        # conversation's own recorded name only when its runtime attaches. The row
+        # is this model's own record of its own identity (``_restored_pair`` is the
+        # same-model gate), so adopting it can never assert a name onto a different
+        # model.
+        if _naming_resolved_no_name(configured):
+            durable_name = str(stored.display_name or "")
+            if durable_name:
+                update["display_name"] = durable_name
+        if not update:
             return {}
-        # Fresh route metadata outranks an old owner's active window (which
-        # may predate maximum-context support or a changed opt-out setting).
-        if (
-            configured.context_metadata_resolved
-            or configured.default_context_window
-            or configured.max_context_window
-        ):
-            return {}
-        # Only the window is adopted. Everything else on the configured spec
-        # reflects THIS process's config, which is current by definition.
-        window = int(getattr(stored, "context_window", 0) or 0)
-        if window <= 0:
-            return {}
-        update = {
-            "context_window": window,
-            "default_context_window": stored.default_context_window,
-            "max_context_window": stored.max_context_window,
-        }
         return {
             "selected_model": configured.model_copy(update=update),
+            # The EFFECTIVE spec is patched only when it names the pair the update
+            # was derived from. ``stored`` is the checkpoint's SELECTED model, while
+            # an effective spec can name a pinned fallback route instead
+            # (``Session._restore_active_route``), and copying a selected model's
+            # name and window onto a spec that names another model would caption
+            # the fallback with the selection's identity. The cold state sets both
+            # fields from ONE object, so this is an invariant rather than a path
+            # (review round 1, minor 5).
             "effective_model": (
                 state.effective_model.model_copy(update=update)
                 if state.effective_model is not None
-                else None
+                and state.effective_model.provider == stored.provider
+                and state.effective_model.model_id == stored.model_id
+                else state.effective_model
             ),
         }
 
