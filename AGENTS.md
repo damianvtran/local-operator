@@ -546,9 +546,9 @@ changes the `version =` line fails unless its title starts with
 unaffected — the guard reads the version line, not the file.
 
 It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires a code-owner approval but configures **no required status checks**, and
-admins hold a configured bypass (see "Who may merge: two tiers, by code
-ownership"), so an `--admin` merge lands over a red guard. Treat a failing
+requires one approving review but configures **no required status checks**, and
+admins hold a configured bypass (see "Who may merge: two tiers"), so an
+`--admin` merge lands over a red guard. Treat a failing
 `version-bump-guard` as a stop signal rather than an obstacle to route around:
 the job is the reviewer's missing memory, not a lock.
 
@@ -1076,39 +1076,49 @@ the version is live on the public listing. Never claim a version is live from
 a merged PR or a workflow's success — only from the public listing or a
 successful publish call.
 
-## Who may merge: two tiers, by code ownership
+## Who may merge: two tiers
 
-`main` is governed by a ruleset that requires one approving review from a code
-owner (`.github/CODEOWNERS`) and carries a configured **bypass for the admin
-repository role** (`bypass_actors`: `RepositoryRole` 5, `bypass_mode: always`
-— diff this sentence against `gh api repos/<owner>/<repo>/rulesets/<id>` rather
-than trusting it). Those two settings together encode a
+`main` is governed by a ruleset that requires **one approving review**, plus the
+one extra approval GitHub's *Additional approval for unattributed Copilot pull
+requests* adds when a pull request is not attributed to a person (on by default:
+it raises the configured count, so an unattributed PR needs two approvals), and
+carries a configured **bypass for the admin repository role** (`bypass_actors`:
+`RepositoryRole` 5, `bypass_mode: always` — diff this sentence against
+`gh api repos/<owner>/<repo>/rulesets/<id>` rather than trusting it). It no
+longer sets `require_code_owner_review`, and `.github/CODEOWNERS` no longer
+declares an owner for anything: the two were removed together on 2026-09-16,
+because the owner list was what created a review request on every PR the moment
+it opened (four people notified per PR, usually mid-remediation) and a
+code-owner rule with nobody declared is an unsatisfiable control. Those two
+settings together still encode a
 deliberate two-tier policy, and this section exists so nobody "fixes" one half
 without understanding what the other half is for.
 
-**Tier 1 — the PR is a code owner's.** When the agent is **acting for a code
-owner** — running on a code owner's machine and under their account, which is
+**Tier 1 — the PR is the owner's.** When the agent is **acting for the owner** —
+running on the owner's machine and under their account, which is
 the normal case here — the standing agent review gate **is** the approval. A
 clean, fresh, independent agent review round plus green CI is sufficient to
 merge; the agent does not need to find a second human to click approve.
 
 **Tier 2 — the PR is anyone else's.** An outside contributor's PR needs **both**
-a code-owner approval **and** a clean agent review round. The code-owner
-approval is the ruleset's `required_approving_review_count: 1` doing its job;
-the agent round is this file's standing gate. Neither substitutes for the
-other. This tier is the reason the review-count requirement exists and must
-not be lowered: at 0 an outsider could land on `main` with no owner having
-looked at it.
+an approving review **and** a clean agent review round. The approval is the
+ruleset's `required_approving_review_count: 1` doing its job — it must come from
+a collaborator other than the author (`bbqben`, `olafagbemi`, `sherman-tsui`,
+`SanaKetabchi`, or `damianvtran`); with no code owners declared it is no longer
+constrained to that list, and it is the reason this tier still holds. The agent
+round is this file's standing gate. Neither substitutes for the other. This tier
+is the reason the review-count requirement exists and must not be lowered: at 0
+an outsider could land on `main` with nobody having looked at it.
 
 **How the forge records tier 1.** GitHub prohibits approving your own pull
 request (`422 Review Can not approve your own pull request`), and every agent
-here pushes as the code owner's account, so a code owner's agent-authored PR
+here pushes as the owner's account, so an agent-authored PR the owner created
 can never be *clicked* approved by the account that opened it. The ruleset
-anticipates exactly this: the admin-role bypass is the **sanctioned** way a
-code owner's reviewed PR completes, not a hole. So, concretely, for an agent
-acting for a code owner with a clean independent round and green CI: try the
-normal merge first (the other owner may already have approved); if the ruleset
-refuses because no second owner has clicked, complete it with `--admin` **and
+anticipates exactly this: the admin-role bypass is the **sanctioned** way the
+owner's reviewed PR completes, not a hole. So, concretely, for an agent acting
+for the owner with a clean independent round and green CI: try the
+normal merge first (a collaborator may already have approved); if the ruleset
+refuses because nobody else has approved, complete it with `--admin` **and
 disclose that on the PR** in the terms below. Do not sit on finished, reviewed
 work waiting for a click that may never come — and do not pretend the click
 happened.
@@ -1129,35 +1139,42 @@ Two things this does not license:
 - **`--admin` stays disclosed, always — and described accurately.** Whenever a
   merge is completed with `--admin`, say plainly on the PR — and in the release
   notes if it ships — that no human clicked approve, and that the merge
-  completed on the code-owner path with the agent review round as its
-  approval. Do **not** describe it as "bypassing a broken control": the control
+  completed on the agent-review path with the review round as its approval. Say
+  **why** the bypass was needed, in the terms above: an account cannot approve
+  its own pull request, so an agent-authored PR the owner opened cannot be clicked
+  approved by the account that opened it.
+  Do **not** describe it as "bypassing a broken control": the control
   is not broken, and that framing invites someone to remove it. What must never
   happen is a tag that implies a *human* review it never had.
 - **Never use `--admin` on a tier-2 PR.** An outside contributor's PR that
-  lacks a code-owner approval is not finished, however clean its agent round.
-  The bypass is for completing a code owner's own reviewed work, not for
+  lacks an approving review from a collaborator is not finished, however clean
+  its agent round.
+  The bypass is for completing the owner's own reviewed work, not for
   waving through someone else's.
 
-An agent that is **not** acting for a code owner prepares the PR, records the
-review rounds, and hands it to an owner. The owner approves it as a human
+An agent that is **not** acting for the owner prepares the PR, records the
+review rounds, and hands it to the owner. The owner approves it as a human
 first — that click is the tier-2 requirement and nothing else satisfies it —
 and only then merges, or lets their own agent complete the merge.
 
-**One side effect to manage: GitHub requests code owners automatically at PR
-open.** The standing practice is the opposite — human reviewers are added only
-once the agent rounds are clean, so nobody spends attention on a diff that is
-about to change through remediation. The auto-request fires anyway, at the
-moment the PR opens, before any review round exists.
+**No automatic review requests: never notify a human by opening a PR.**
+`.github/CODEOWNERS` declares nothing as of 2026-09-16, so GitHub requests
+nobody when a PR opens — the four-handle ping that used to fire within a second
+of every PR is gone, and PRs are opened **non-draft** again. (For an ordinary
+PR the draft flag existed only to suppress that request; the release-claim lock
+PR still opens as a draft for its own reason, see "Take the lock" above. A draft
+cannot be merged, so for every other PR it now only delays the merge.) Two rules
+replace the automatic routing:
 
-Do not fight it by removing the request and re-adding it later; that produces a
-second notification and looks like churn. Instead, treat the auto-request as
-routing, not as a summons: open the PR **as a draft** when remediation rounds
-are expected, so the request carries the draft signal with it, and mark it
-ready for review once the rounds are clean. A code owner who is auto-requested
-on a non-draft PR should be able to assume the agent rounds are already done.
-Never tag an owner in a *comment* to ask for review unless their review is
-genuinely required — the auto-request is not a comment tag, and a comment tag
-is what says the PR is waiting on that person.
+- **Do not add reviewers to a PR, or tag a person in a comment, unless the
+  operator asks for reviewers on that PR.** A comment tag is what says a PR is
+  waiting on someone; `gh pr edit <n> --add-reviewer <handle>` is the deliberate
+  act when a human review is genuinely wanted.
+- **A PR may be opened non-draft and merged as soon as its agent rounds are
+  clean and fresh.** Nothing is signalled by the draft flag any more. If you do
+  need to pause a PR in public (a stack that must not merge yet), a draft is
+  still the right marker — just do not read it as "the reviewers have been
+  notified".
 
 ### Scope round N+1 to the remediation delta
 
