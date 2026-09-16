@@ -25,17 +25,31 @@ router = APIRouter()
 async def create_transcription_endpoint(
     radient_client: Annotated[RadientClient, Depends(get_radient_client)],
     file: UploadFile = File(...),
-    model: Optional[str] = Form("gpt-4o-transcribe"),
+    # `model` and `provider` are deliberately unset by default: the daemon must not
+    # choose a speech-to-text backend. Radient's agent-server owns that choice (its
+    # configured default provider/model), and `RadientClient.create_transcription`
+    # omits each field from the multipart body when it is None, so the server-side
+    # default governs. Pinning them here was not harmless redundancy: an OpenAI
+    # model id sent alongside a server defaulted to a non-OpenAI provider (e.g.
+    # ElevenLabs Scribe v2) fails outright, so the old defaults silently locked the
+    # talk feature to OpenAI and to one model id. Callers that genuinely need a
+    # specific backend still pass both explicitly, and are forwarded unchanged.
+    model: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     response_format: Optional[str] = Form("json"),
     temperature: Optional[float] = Form(0.0),
     language: Optional[str] = Form(None),
-    provider: Optional[str] = Form("openai"),
+    provider: Optional[str] = Form(None),
 ) -> CRUDResponse[RadientTranscriptionResponseData]:
     """
     Transcribe an audio file using the specified model and parameters.
 
     The audio file is sent as `multipart/form-data`.
+
+    `model`, `provider`, `language` and `prompt` are optional and default to
+    unset: an omitted field is left out of the upstream request so Radient's
+    own configured provider/model default applies. Pass `model` and `provider`
+    together to pin a specific backend.
     """
     if not radient_client.api_key:
         raise HTTPException(
