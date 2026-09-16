@@ -1756,7 +1756,10 @@ async def _run_store_maintenance(
     # Exit during this best-effort window is harmless; the next process retries.
     await _wait_for_store_maintenance_idle_window()
 
-    from local_operator.analytics.backfill import backfill_analytics_session_names
+    from local_operator.analytics.backfill import (
+        backfill_analytics_session_daily,
+        backfill_analytics_session_names,
+    )
     from local_operator.resume import backfill_session_origins, backfill_session_titles
     from local_operator.session.cleanup import cleanup_from_config
     from local_operator.tools.group_reaper import sweep_orphan_groups
@@ -1799,6 +1802,18 @@ async def _run_store_maintenance(
         (
             "analytics session-name backfill",
             lambda: backfill_analytics_session_names(config_dir),
+        ),
+        # Re-derive the per-session day rollup ``aggregate()`` reads. It is
+        # created EMPTY on the release that ships it while the ledger already
+        # holds up to 90 days of calls, so without this pass the panel's first
+        # read after upgrading is still the ledger's 5-13 s scan. Bounded
+        # chunked transactions, newest-first, resumable, and off the event loop
+        # like every other pass here — see the pass's own docstring for what a
+        # user sees while it is incomplete (nothing: refused windows are
+        # answered by the ledger, never by a partial total).
+        (
+            "analytics session-daily rollup backfill",
+            lambda: backfill_analytics_session_daily(config_dir),
         ),
     ]
 
