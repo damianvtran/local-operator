@@ -89,8 +89,18 @@ class TestTheWatch:
     @pytest.fixture(autouse=True)
     def disk(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.state: dict[str, object] = {"build": OLD, "age": 999.0}
+        # THE DISK READ IS ``disk_build``. The watch compares this process's
+        # boot sample against the build a fresh `lop` would load — under the
+        # generation layout that is the POINTER's generation, not this
+        # process's own tree, which is never rewritten. Faking
+        # ``installed_build`` here would fake the boot sample instead and the
+        # tests would be asserting about the runnning build's own tree.
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: self.state["build"])
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: self.state["build"])
         monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: self.state["age"])
+        # No host pointer may leak into a test: the real layout's `current`
+        # symlink would otherwise decide what these cases are about.
+        monkeypatch.setattr(update_mod, "current_install_root", lambda: None)
         monkeypatch.delenv("LOP_BUILD_SETTLE_S", raising=False)
         monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
 
@@ -192,8 +202,19 @@ class TestTheWatch:
             return OLD
 
         monkeypatch.setattr(update_mod, "installed_build", _build)
+        monkeypatch.setattr(update_mod, "disk_build", _build)
         monkeypatch.setenv("LOP_BUILD_PREFIX", "/tmp/fake-install")
         assert buildwatch.boot_build() == OLD
+        assert seen == ["/tmp/fake-install"]
+        # BOTH ends of the comparison are read through the seam: the boot
+        # sample (this process's tree) and the disk sample (the temp tree the
+        # stage flips). A watch that read only one of them through it would
+        # compare a fake against a real install.
+        seen.clear()
+        # A disk read that answers the boot sample is not a move, which is the
+        # rule itself; what this asserts is WHICH root the read was made
+        # against.
+        assert buildwatch.handover_build(OLD) is None
         assert seen == ["/tmp/fake-install"]
 
     def test_an_unreadable_boot_stamp_disables_the_watch(
@@ -271,8 +292,10 @@ class TestMovedAndUnsettled:
     @pytest.fixture(autouse=True)
     def disk(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.state: dict[str, object] = {"build": NEW, "age": 0.0}
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: self.state["build"])
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: self.state["build"])
         monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: self.state["age"])
+        monkeypatch.setattr(update_mod, "current_install_root", lambda: None)
         monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
 
     def test_a_record_with_no_stamp_asks_nothing(self) -> None:
@@ -303,5 +326,5 @@ class TestMovedAndUnsettled:
         def _boom(*_a: object, **_k: object) -> BuildStamp:
             raise RuntimeError("no dist-info")
 
-        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        monkeypatch.setattr(update_mod, "disk_build", _boom)
         assert buildwatch.moved_and_unsettled(OLD.version, OLD.source_ref) is False

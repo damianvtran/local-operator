@@ -32,19 +32,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import (
+    Distribution,
     PackageNotFoundError,
     distribution,
     distributions,
     version,
 )
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -55,6 +58,11 @@ logger = logging.getLogger(__name__)
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
 _CACHE_NAME = "pypi-local-operator.json"
+
+#: The distribution name this module installs and inspects. Named once because
+#: the generation reader resolves it by NAME out of a foreign tree's
+#: ``site-packages`` rather than by importing it.
+DISTRIBUTION_NAME = "local-operator"
 
 #: Six hours. Shorter re-fetches on every other launch for a number that
 #: moves on the order of days; a day would hide a release the user just
@@ -674,6 +682,13 @@ def install_kind(
 #: the marker a single file shared with ``lop-update``.
 PYPI_SOURCE_TOKEN = "pypi"
 
+#: The first token for an install built from a local DIRECTORY whose commit
+#: could not be read (``lop update --from-snapshot <dir>``). Not hex, per
+#: :func:`_looks_like_git_sha`'s constraint on new sentinels, and not
+#: :data:`PYPI_SOURCE_TOKEN` either: a local build is not a wheel from the
+#: index, and the marker is the one place that says where a build came from.
+SNAPSHOT_SOURCE_TOKEN = "snapshot"
+
 
 def _looks_like_git_sha(token: str) -> bool:
     """Is this ``.lop-source`` token a commit, as opposed to a sentinel?
@@ -762,6 +777,7 @@ def write_source_marker(
     version: str,
     commit: str = "",
     ref: str = "",
+    origin: str = PYPI_SOURCE_TOKEN,
 ) -> bool:
     """Record what is installed at ``root`` in ``.lop-source``. Never raises.
 
@@ -784,6 +800,13 @@ def write_source_marker(
     ``pypi <version>`` — honest about having no ref rather than carrying the
     previous install's sha forward.
 
+    ``origin`` is the first token for an install that is NOT a PyPI wheel and
+    has no commit to name (a locally built directory passed to ``lop update
+    --from-snapshot``). It must not be hex or it would read as a commit — see
+    :func:`_looks_like_git_sha`, which anticipates exactly this — and any
+    reader that does not recognise it degrades to "no ref", which for such an
+    install is the truth.
+
     ORDERING IS LOAD-BEARING
     ------------------------
     Callers must write this only AFTER the installer has exited successfully.
@@ -801,9 +824,12 @@ def write_source_marker(
     raising — a missing marker degrades to "compare on version alone", while a
     failed upgrade report would be a worse outcome than an unrecorded one.
     """
-    first = commit if commit else PYPI_SOURCE_TOKEN
+    first = commit if commit else origin
     second = ref if commit else version
-    line = f"{first} {second}\n"
+    # A bare sentinel when there is nothing to say about the second token: the
+    # shape stays ``<token> [<label>]``, and no reader has to cope with a
+    # trailing space that means "the label was empty".
+    line = f"{first} {second}\n" if second else f"{first}\n"
 
     path = Path(root) / ".lop-source"
     fd: int | None = None
@@ -857,19 +883,35 @@ def classify_import_failure(
 ) -> str | None:
     """Name a mid-install import as ``install-mid-update``, or ``None``.
 
-    ``lop-update`` and :func:`perform_upgrade` replace the installed tree IN
-    PLACE, so a process that loaded the old build can hit a lazy
-    ``from local_operator… import x`` the new tree no longer satisfies — the
-    observed shape is precise: the module still resolves, the NAME does not
+    THE LEGACY SHAPE, KEPT AS A SAFETY NET. It was written for a layout that
+    replaced the installed tree IN PLACE — ``lop-update`` and
+    :func:`perform_upgrade` writing 929 files over the tree a long-lived process
+    was importing from — so a process that loaded the old build could hit a lazy
+    ``from local_operator… import x`` the new tree no longer satisfied. The
+    observed shape was precise: the module still resolved, the NAME did not
     (``ImportError: cannot import name '_journal_injection_ids' from
-    'local_operator.session.transcript'``, 605 times on one machine's log).
+    'local_operator.session.runtime.transcript'``, 605 times on one machine's log).
+
+    In-place replacement is no longer how the uv-tool install works: each build
+    lands in its OWN generation and a running process's tree is never rewritten
+    (see ``local_operator.update``'s layout section). So for such a process this
+    classifier now answers ``None`` by construction, and correctly: its own tree
+    did not move, so an ImportError IS ours and must stay an ordinary
+    traceback. It is kept because three populations still have the old shape and
+    a half-replaced tree is exactly what they would see — a pip/pipx install
+    (neither has a layout this product can make atomic), a process launched
+    before this machine migrated, and a ``lop`` started out of the old fixed
+    uv-tool tree.
 
     What separates that from a genuine packaging bug is the STAMP MOVING UNDER
     THE PROCESS. If the install on disk still matches the build this process
     booted from, the miss is ours and must stay an ordinary traceback — so
-    ``None``. A ``boot`` we could not read (``None``) also answers ``None``:
-    without a baseline there is nothing to compare, and guessing here would
-    relabel a real packaging error as an install race.
+    ``None``. ``installed_build`` is the right question here rather than
+    ``disk_build``: it asks whether THIS process's tree moved, and a pointer
+    that moved onto another generation is not that (the files this process
+    imports were never touched). A ``boot`` we could not read (``None``) also
+    answers ``None``: without a baseline there is nothing to compare, and
+    guessing here would relabel a real packaging error as an install race.
 
     ``module`` is what the CALLER was importing, used when the exception itself
     names nothing (some wrappers drop ``name``).
@@ -935,11 +977,16 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     -----------------------------------------------------
     The marker is read from ``prefix``; the dist-info is always the RUNNING
     INTERPRETER's, because :func:`distribution` resolves through ``sys.path``
-    and takes no prefix. In production the two are the same tree — a
-    runtime's ``prefix`` IS its own install — so the distinction is invisible.
-    It shows only through the ``LOP_BUILD_PREFIX`` test seam, where a caller
-    passing a foreign prefix gets an age mixing that prefix's marker with this
-    interpreter's dist-info (review round 1, R1-2).
+    and takes no prefix. In the PRE-generation layout the two were the same
+    tree — a runtime's ``prefix`` WAS its own install — so the distinction was
+    invisible. It is visible in exactly two shapes now, and both are safe:
+    the ``LOP_BUILD_PREFIX`` test seam, where a caller passing a foreign prefix
+    gets an age mixing that prefix's marker with this interpreter's dist-info
+    (review round 1, R1-2); and the generation layout's disk read, where the
+    marker comes from the generation the POINTER names and the dist-info from
+    this process's own — an OLDER mtime, so the max is still the fresh marker
+    and the settle asks exactly the question it is meant to ("has the install
+    the pointer just moved to stopped being written?").
 
     That is deliberate rather than merely tolerated. Scoping the dist-info to
     ``prefix`` means globbing ``<prefix>/lib/*/site-packages/*.dist-info``,
@@ -969,6 +1016,1133 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     if not mtimes:
         return None
     return max(0.0, time.time() - max(mtimes))
+
+
+# ---------------------------------------------------------------------------
+# The generation layout
+# ---------------------------------------------------------------------------
+#
+# WHY (2026-09-15, measured on the reporting host)
+# -----------------------------------------------
+# ``uv tool install --force`` RECREATES ``~/.local/share/uv/tools/local-operator``
+# in place. Every process importing from that tree was reading files that were
+# being deleted and rewritten underneath it: 36 sessions died with no exit
+# record ("the runtime disappeared without exiting cleanly while this turn was
+# running"), and 113 crash reports in ~/Library/Logs/DiagnosticReports named the
+# planted libpython dylib, clustered inside the install window — a process
+# LAUNCHED during the rewrite dies at load. The runtime's own self-refresh is
+# idle-gated BY DESIGN (a busy one never checks), so a runtime with work in
+# flight had no defence at all.
+#
+# There is no fix available inside that shape: the installer owns the tree, and
+# a tree that is rewritten in place cannot be handed over from. So each build
+# gets its OWN generation root and the stable path becomes a POINTER resolved
+# once per process, at exec:
+#
+#     ~/.local/bin/lop -\
+#     ~/.local/bin/local-operator --+--> ~/.local/share/lop/current
+#                                             |
+#                                             v
+#                       ~/.local/share/lop/generations/<id>/
+#                           bin/lop          -> tools/local-operator/bin/lop
+#                           tools/local-operator/         (the venv, sys.prefix)
+#                           tools/local-operator/.lop-source
+#
+# Nothing a running process holds is ever rewritten: its ``sys.path`` names the
+# generation it was launched from, and superseding it is a temp symlink plus
+# ``os.rename`` — atomic, with no instant at which ``current`` is absent or
+# unresolved. A ``lop`` exec that races the flip therefore resolves either the
+# old generation or the new one, never nothing.
+#
+# RESOLUTION IS DONE BY THE KERNEL, NOT BY ``pwd``. ``~/.local/bin/lop`` is a
+# symlink chain and a uv console script's shebang names its OWN generation's
+# interpreter ABSOLUTELY, so the child's ``sys.prefix`` comes out concrete
+# (verified: launching ``<gen>/tools/local-operator/bin/python3`` through
+# ``current`` reports the pointer path, because CPython detects a venv from the
+# invoked path's parent directory — which is why the spawn sites resolve the
+# pointer themselves rather than handing ``current`` to a child; see
+# :func:`current_interpreter`).
+#
+# WHAT THIS MAKES OF THE OLD DEFENCES. The build watch, the settle window and
+# the files-gone probe all still exist and still work; after this they are a
+# CONVERGENCE path rather than a safety path. A mixed-generation fleet is an
+# accepted steady state: a runtime older than ``current`` keeps serving until it
+# goes idle, and the next engage constructs on the current build.
+
+#: The stable root. Deliberately NOT under ``~/.local/share/uv/tools``: uv owns
+#: that tree and rewrites it, which is the whole incident. Read through
+#: ``Path(_STABLE_ROOT).expanduser()`` at every use so a redirected ``HOME``
+#: (an isolated test, a sandbox) moves it — an absolute path captured at import
+#: time would write into the operator's real home from inside a sandbox.
+_STABLE_ROOT = "~/.local/share/lop"
+
+#: Where the console scripts uv would normally write land, so the stable
+#: launchers can be recognised and refreshed without a second constant.
+_LOCAL_BIN = "~/.local/bin"
+
+#: How many UNREFERENCED generations survive a prune. "Unreferenced" means no
+#: live or persisted session record names it and it is not the pointer's
+#: target, so this is the whole margin for a session that has a generation in
+#: flight but no record yet (an engage's first ~1.2 s) and for a terminal whose
+#: record has aged out. Two rather than one because the previous generation is
+#: exactly the one a just-flipped fleet is still reading from.
+DEFAULT_KEEP_GENERATIONS = 2
+
+#: Age at which a generation with no ``.lop-source`` marker is crash debris
+#: rather than an install in flight. Nothing else can leave one: every failure
+#: path removes its own tree, and a finished generation always carries a marker
+#: (written before its first flip) — so "no marker yet" means "uv is still
+#: working in there", and only a ``kill -9`` stretches that past an hour.
+_PARTIAL_TTL_S = 3600.0
+
+
+def stable_root() -> Path:
+    """The one directory whose path never changes for the life of the machine."""
+    return Path(_STABLE_ROOT).expanduser()
+
+
+def generations_dir() -> Path:
+    """Where the generation roots live, one per build."""
+    return stable_root() / "generations"
+
+
+def pointer_path() -> Path:
+    """The ``current`` symlink: the single mutable artefact of the layout.
+
+    Everything else in a generation is written once and never touched, so this
+    is the only file a flip has to be atomic about.
+    """
+    return stable_root() / "current"
+
+
+def daemon_image_path() -> Path:
+    """The stable interpreter path a supervised unit (launchd, systemd) names.
+
+    A SHIM rather than a symlink to the current generation's interpreter, and
+    the difference is measured rather than stylistic: CPython decides "am I in a
+    venv" from the parent directory of the path it was EXECUTED through, so a
+    symlink at this path loses the venv entirely (verified: ``sys.prefix`` came
+    out as the uv-managed base interpreter, with no ``site-packages``), while a
+    script that resolves the pointer itself and execs the concrete path keeps it.
+    It is also the only shape that survives a prune: the unit names THIS path,
+    so a restart after a flip or a prune cannot hit the deleted libpython
+    dylib pin that killed 113 processes on 2026-09-15.
+    """
+    return stable_root() / "bin" / "python3"
+
+
+#: The shim above, written verbatim by :func:`ensure_daemon_image`. Kept as one
+#: constant so the file on disk is comparable byte-for-byte — a rewrite only
+#: happens when it genuinely changed.
+_DAEMON_SHIM = """#!/bin/sh
+# lop's supervised daemons (launchd LaunchAgents, systemd user units) name THIS
+# path. It resolves the install pointer ONCE, here, and execs that generation's
+# interpreter by an absolute path, so the child's sys.path names its own
+# generation rather than the mutable `current` symlink -- and a restart after a
+# flip or a prune can never hit the libpython dylib pin of a tree that is gone.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+gen=$(CDPATH= cd -- "$here/../current" 2>/dev/null && pwd -P) || gen=""
+if [ -z "$gen" ]; then
+    echo "lop: no current install generation ($here/../current is unreadable)" >&2
+    exit 78
+fi
+# Prefer the branded image when it is planted, because that is what Activity
+# Monitor reads (p_comm); the interpreter is the always-present fallback.
+if [ -x "$gen/tools/local-operator/bin/Local Operator" ]; then
+    exec "$gen/tools/local-operator/bin/Local Operator" "$@"
+fi
+exec "$gen/tools/local-operator/bin/python3" "$@"
+"""
+
+
+def _venv_interpreter(root: Path) -> Path:
+    """The interpreter inside the venv ``root``, spelled as its platform does."""
+    if os.name == "nt":  # pragma: no cover — the layout below is POSIX-shaped
+        return root / "Scripts" / "python.exe"
+    return root / "bin" / "python3"
+
+
+def _generation_install_root(generation: Path) -> Path:
+    """The venv (``sys.prefix``) of one generation root.
+
+    Spelled once because three readers depend on agreeing: the installer aims uv
+    at it, ``.lop-source`` is written into it, and pruning matches a record's
+    ``install_root`` against it.
+    """
+    return generation / "tools" / DISTRIBUTION_NAME
+
+
+def current_generation() -> Path | None:
+    """The generation root ``current`` resolves to, or ``None``.
+
+    ``os.readlink`` RATHER THAN ``Path.resolve``, and the difference is real
+    rather than cosmetic: readlink returns what the link NAMES (one check, no
+    chasing), so a flip landing mid-read cannot leave this function resolving a
+    path the link has already stopped naming. ``Path.resolve`` walks the chain
+    and can be caught between steps — measured on this platform, macOS's
+    ``realpath`` raises ``OSError: [Errno 22] Invalid argument`` when the link is
+    replaced underneath it.
+
+    THAT TRANSIENT IS NOT ELIMINATED BY EITHER SPELLING, and the docstring says
+    so because a test measured it: a tight rename loop makes macOS's ``readlink``
+    raise the same ``EINVAL`` occasionally. What the layout guarantees is that
+    such a hiccup is TRANSIENT — the pointer is replaced by ``os.rename``, so it
+    always names a real generation again on the next read — and every caller
+    already has a documented fallback for "no answer": a spawn falls back to
+    this process's interpreter, the build watch sees no move, and
+    :func:`prune_generations` REFUSES TO DELETE ANYTHING (it cannot know which
+    tree is live, so doubt keeps trees). What no reader ever sees is a pointer
+    that names a tree which is not there.
+
+    A symlink whose target genuinely is gone (a generation removed out from
+    under the pointer, an interrupted flip) is ``None`` too, for the same
+    reason: a pointer to nothing is not an install.
+    """
+    try:
+        target = os.readlink(pointer_path())
+    except OSError:
+        return None
+    generation = Path(target)
+    return generation if generation.is_dir() else None
+
+
+def current_install_root() -> Path | None:
+    """The install root the POINTER resolves to, or ``None``.
+
+    This is "what a fresh ``lop`` would load", which is NOT necessarily what
+    this process loaded — the two differ for the whole mixed-generation window
+    and comparing them is the point (see :func:`disk_build` and
+    ``buildwatch.build_changed``).
+
+    ``LOP_INSTALL_ROOT`` overrides it, test-only, exactly as
+    ``LOP_BUILD_PREFIX`` does for the boot sample: the e2e stage has to be able
+    to point a real process at a generation without owning the host's pointer.
+    """
+    override = os.environ.get("LOP_INSTALL_ROOT", "")
+    if override:
+        return Path(override)
+    generation = current_generation()
+    if generation is None:
+        return None
+    return _generation_install_root(generation)
+
+
+def current_interpreter() -> Path | None:
+    """The interpreter of the CURRENT generation, or ``None`` if unreadable.
+
+    CONCRETE, never through ``current``: the pointer is resolved here, once, so
+    the child's ``sys.prefix`` and ``sys.path`` name a generation that no later
+    flip can redirect. Handing ``<pointer>/bin/python3`` to a child instead
+    would leave it importing through the mutable symlink — the failure this
+    whole layout exists to remove.
+    """
+    root = current_install_root()
+    if root is None:
+        return None
+    candidate = _venv_interpreter(root)
+    if not os.access(candidate, os.X_OK):
+        return None
+    return candidate
+
+
+def process_install_root() -> str:
+    """The install root THIS process imports from, as a path string.
+
+    Its own generation, not the pointer's: that is what a session record has to
+    name so pruning can never delete a tree a live session is still reading
+    from. Resolved, because a process launched through the pointer would
+    otherwise name the mutable path and the record would follow a later flip.
+    """
+    try:
+        return str(Path(sys.prefix).resolve())
+    except OSError:  # pragma: no cover — an unresolvable prefix is not fatal
+        return str(sys.prefix)
+
+
+def _site_packages(root: Path) -> Path | None:
+    """The ``site-packages`` directory inside the venv ``root``, or ``None``."""
+    candidates = [root / "Lib" / "site-packages"]
+    candidates.extend(sorted((root / "lib").glob("python*/site-packages")))
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _distribution_at(root: Path) -> Distribution | None:
+    """The ``local-operator`` distribution installed under ``root``, or ``None``.
+
+    SCOPED ON PURPOSE. ``importlib.metadata`` resolves through ``sys.path``
+    unless it is handed a path, and a generation is by construction NOT on this
+    process's path — that is the whole layout — so a bare ``distribution()``
+    would answer about the running build no matter which root was asked about.
+    ``distributions(path=...)`` is the documented scoped read, and the name
+    comparison is what keeps it to our distribution inside a tree that also
+    carries every dependency.
+    """
+    site = _site_packages(root)
+    if site is None:
+        return None
+    try:
+        for found in distributions(path=[str(site)]):
+            name = str(found.metadata["Name"] or "").lower().replace("_", "-")
+            if name == DISTRIBUTION_NAME:
+                return found
+    except Exception:  # noqa: BLE001 — an unreadable tree is "no answer here"
+        logger.debug("distribution lookup failed under %s", root, exc_info=True)
+    return None
+
+
+def _stamp_at(root: Path) -> BuildStamp | None:
+    """The stamp of the install sitting at ``root``, or ``None``.
+
+    Both halves come from that tree: the version out of its own ``dist-info``
+    (via :func:`_distribution_at`, which scopes the lookup to that tree's
+    ``site-packages``) and the ref out of its own ``.lop-source``.
+    """
+    found = _distribution_at(root)
+    if found is None:
+        return None
+    return BuildStamp(version=found.version, source_ref=source_ref(root))
+
+
+def disk_build(root: str | Path | None = None) -> BuildStamp | None:
+    """The build a FRESH ``lop`` would load, or ``None`` when there is none.
+
+    The counterpart of :func:`installed_build`, which keeps "THIS process"
+    semantics: ``lop --version`` and a runtime's boot sample must describe the
+    code in memory, while the build watch, the TUI's skew notice and ``lop
+    refresh`` all have to describe the POINTER. Comparing the two is the only
+    way "the install moved under me" survives a layout where the running tree is
+    never rewritten.
+
+    ``None`` covers three shapes, all of them "no install to fall behind":
+
+    * **this process is not an install at all** — an editable checkout's install
+      on disk is its own working tree. Left unguarded, a developer's runtime
+      would read the global pointer, retire on a flip and be respawned onto the
+      installed ``lop``: a worktree session silently converted into a global
+      one, which is the failure ``design-build-skew`` §6.5 rules out;
+    * **the pointer is unreadable** — no migration yet, a pruned target, an
+      interrupted flip. Every caller treats it as "no evidence of a move", which
+      is the safe direction;
+    * **the generation carries no distribution** — then the version half cannot
+      be answered honestly, and a version-only stamp would be read as a move by
+      whoever compares labels (see ``buildwatch.proves_a_move``).
+
+    ``root`` overrides where the stamp is read from, and it is the e2e seam
+    (``LOP_BUILD_PREFIX``): a temp directory carrying a fake ``.lop-source`` and
+    no distribution of its own, so — exactly as before this layout — the VERSION
+    half comes from this interpreter and only the ref is read there.
+    """
+    if root is not None:
+        target = Path(root)
+        found = _distribution_at(target)
+        if found is not None:
+            # A tree that carries its own metadata answers wholesale, which is
+            # what makes this usable for any root and not just the seam.
+            return BuildStamp(version=found.version, source_ref=source_ref(target))
+        return BuildStamp(version=installed_version(), source_ref=source_ref(target))
+    try:
+        kind = install_kind()
+    except Exception:  # noqa: BLE001 — an unreadable kind is "no install"
+        return None
+    if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
+        return None
+    target = current_install_root()
+    if target is None:
+        return None
+    return _stamp_at(target)
+
+
+def _new_generation_id(token: str, attempt: int = 1) -> str:
+    """A sortable, collision-free directory name for one generation.
+
+    Timestamp first so ``ls`` reads chronologically and a prune can use name
+    order and mtime interchangeably; the build token (short commit, or the
+    version, or ``pypi``) rides along so a human can tell two generations apart
+    without opening them. ``attempt`` is what makes two installs starting in the
+    same second land in two directories instead of one.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    safe = re.sub(r"[^0-9A-Za-z.+-]", "-", token).strip("-") or "build"
+    base = f"{stamp}-{safe[:24]}"
+    return base if attempt <= 1 else f"{base}-{attempt}"
+
+
+def _reserve_generation(token: str) -> Path:
+    """Create this generation's directory exclusively, and return it.
+
+    ``os.mkdir`` WITHOUT ``exist_ok`` is the whole point: two installs starting
+    in the same second must not both aim uv at one path, because uv would then
+    upgrade the tree the other one is still writing instead of building beside
+    it. The loser takes the next name.
+    """
+    try:
+        generations_dir().mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise UpdateError(f"could not create {generations_dir()}: {exc}") from exc
+    for attempt in range(1, 100):
+        candidate = generations_dir() / _new_generation_id(token, attempt)
+        try:
+            os.mkdir(candidate)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise UpdateError(f"could not create {candidate}: {exc}") from exc
+        return candidate
+    raise UpdateError("too many generations share one timestamp")
+
+
+def _generation_env(generation: Path) -> dict[str, str]:
+    """The environment that aims uv at ONE generation root.
+
+    ``UV_TOOL_DIR``/``UV_TOOL_BIN_DIR`` are the whole mechanism — uv honours both
+    (verified on uv 0.9.x: ``<gen>/tools/local-operator`` becomes the venv and the
+    console scripts land in ``<gen>/bin``). The bin directory exists only to keep
+    uv away from the REAL ``~/.local/bin``, whose entries are this layout's
+    stable launchers and must not be rewritten by an installer.
+    """
+    return {
+        **os.environ,
+        "UV_TOOL_DIR": str(generation / "tools"),
+        "UV_TOOL_BIN_DIR": str(generation / "bin"),
+    }
+
+
+def _remove_tree(path: Path) -> None:
+    """Best-effort removal of a tree this module owns.
+
+    Never raises: it runs on the failure paths of an install, where the error
+    the caller is about to report is the one worth keeping.
+    """
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        logger.debug("could not remove %s", path, exc_info=True)
+
+
+def flip_pointer(generation: Path) -> None:
+    """Point ``current`` at ``generation``, atomically.
+
+    A staged symlink plus ``os.rename``, and the staging name is a SIBLING of the
+    pointer so the rename cannot cross a filesystem. ``os.rename`` over an
+    existing symlink is the atomic step: there is no instant at which
+    ``current`` is missing or dangling, so a process that execs ``lop`` while a
+    flip is in flight resolves one generation or the other. The generation is
+    checked to exist first — a pointer to a directory that is not there is the
+    one state every reader of this layout gets to avoid by construction.
+    """
+    if not generation.is_dir():
+        raise UpdateError(f"refusing to point current at a missing generation: {generation}")
+    pointer = pointer_path()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    staged = pointer.with_name(f"{pointer.name}.tmp-{os.getpid()}")
+    try:
+        staged.unlink(missing_ok=True)
+        os.symlink(generation, staged)
+        os.rename(staged, pointer)
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover — already renamed, or unreadable
+            pass
+
+
+def _write_executable(path: Path, text: str) -> bool:
+    """Write ``text`` at ``path`` mode 0755, atomically, if it differs.
+
+    The comparison is what keeps the common path free of writes: a daemon
+    installer runs on every ``lop update``, and rewriting a shim that is already
+    byte-identical would churn the file's mtime for nothing. The write itself is
+    a temp file plus ``os.rename`` in the same directory, so no reader can
+    observe a half-written shim (a launchd restart landing mid-write would
+    otherwise execute whatever prefix had reached the disk).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.read_text(encoding="utf-8") == text:
+            return True
+        handle, name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(name, 0o755)
+            os.rename(name, path)
+        except BaseException:
+            Path(name).unlink(missing_ok=True)
+            raise
+        return True
+    except OSError:
+        logger.debug("could not write %s", path, exc_info=True)
+        return False
+
+
+def daemon_image() -> Path | None:
+    """The stable interpreter path a supervised unit should name, or ``None``.
+
+    THE READ HALF of :func:`ensure_daemon_image`, and separate from it because
+    rendering a plist is not allowed to write: ``lop mobile status`` and every
+    test of ``render_plist`` go through here, and a status command that plants a
+    file is a surprise with no upside.
+
+    ``None`` unless this process is itself a generation install AND the shim is
+    already there. Both halves matter: a pipx or pip install has no generation
+    layout to point at, and a source checkout must not rewrite the plists of the
+    operator's real install. With ``None`` every caller keeps its pre-generation
+    shape, which still works.
+    """
+    if not _is_generation_install():
+        return None
+    if current_generation() is None:
+        return None
+    path = daemon_image_path()
+    return path if path.is_file() else None
+
+
+def ensure_daemon_image() -> Path | None:
+    """Write the stable interpreter shim supervised units name, or ``None``.
+
+    Called from the install paths (a new generation, and the migration), so the
+    file a plist names exists before any plist is rendered against it.
+    """
+    if not _is_generation_install():
+        return None
+    if current_generation() is None:
+        return None
+    path = daemon_image_path()
+    return path if _write_executable(path, _DAEMON_SHIM) else None
+
+
+def _is_generation_install(root: Path | None = None) -> bool:
+    """Is ``root`` (this process's own install by default) one of OUR generations?
+
+    Asked of the path rather than of a marker file because the path is the
+    claim: a generation lives under ``generations_dir()`` and nothing else does.
+    """
+    candidate = Path(process_install_root()) if root is None else root
+    try:
+        resolved = candidate.resolve()
+        generations = generations_dir().resolve()
+    except OSError:  # pragma: no cover — an unresolvable path is not a generation
+        return False
+    return generations in resolved.parents
+
+
+def _local_bin_dir() -> Path:
+    """``~/.local/bin``: where the stable launchers live."""
+    return Path(_LOCAL_BIN).expanduser()
+
+
+def _atomic_symlink(link: Path, target: Path) -> bool:
+    """Point ``link`` at ``target`` with a rename, so no reader sees a gap."""
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() and os.readlink(link) == str(target):
+            return True
+        staged = link.with_name(f"{link.name}.tmp-{os.getpid()}")
+        staged.unlink(missing_ok=True)
+        os.symlink(target, staged)
+        os.rename(staged, link)
+        return True
+    except OSError:
+        logger.debug("could not point %s at %s", link, target, exc_info=True)
+        return False
+
+
+def _link_generation_bin(generation: Path) -> None:
+    """Give a generation its own ``bin``, for a generation uv did not build.
+
+    ``install_into_generation`` gets this for free: uv is aimed at
+    ``<generation>/bin`` with ``UV_TOOL_BIN_DIR`` and writes the console-script
+    shims there itself. :func:`clone_into_generation` runs no installer, so it
+    has to lay the same shape down by hand — and it MUST, because that directory
+    is what the stable launchers point through (``~/.local/bin/lop ->
+    <stable>/current/bin/lop``): a generation without it leaves every launcher on
+    the machine DANGLING, which is a worse state than not having migrated.
+
+    Found by the live walkthrough, not by the unit tests: the migration's
+    "copied" and "pointer" lines printed cleanly while ``~/.local/bin/lop``
+    pointed at nothing.
+    """
+    install_root = _generation_install_root(generation)
+    interpreter_dir = "Scripts" if os.name == "nt" else "bin"
+    for name in _console_script_names(install_root) or (DISTRIBUTION_NAME, "lop"):
+        script = install_root / interpreter_dir / name
+        if script.exists():
+            _atomic_symlink(generation / interpreter_dir / name, script)
+
+
+def write_stable_launchers(generation: Path) -> list[Path]:
+    """Make ``~/.local/bin`` name the pointer for every console script.
+
+    ``~/.local/bin/lop -> <stable>/current/bin/lop``: one file per entry point,
+    written once per install and never otherwise touched, resolving through
+    ``current`` at exec so it needs no maintenance on a flip. The entry points
+    are read out of the generation's own metadata rather than hardcoded here, so
+    a new ``[project.scripts]`` line gets a stable launcher without a second
+    list to keep in step.
+
+    The launchers are written AFTER the flip, and that order is deliberate: the
+    legacy ``~/.local/bin/lop`` (uv's own symlink into the old fixed tree) keeps
+    working until the pointer is in place, so an interrupted install leaves the
+    machine on the build it had rather than with a launcher pointing nowhere.
+
+    A launcher is only written when the path it will name EXISTS. Pointing
+    ``~/.local/bin/lop`` at a target that is not there would replace a working
+    command with a broken one, and that is strictly worse than leaving the
+    previous install's launcher in place — so the missing case is a warning and
+    a skip, never a link.
+    """
+    install_root = _generation_install_root(generation)
+    names = _console_script_names(install_root) or (DISTRIBUTION_NAME, "lop")
+    interpreter_dir = "Scripts" if os.name == "nt" else "bin"
+    written: list[Path] = []
+    for name in names:
+        if not (install_root / interpreter_dir / name).exists():
+            continue
+        if not (generation / interpreter_dir / name).exists():
+            logger.warning(
+                "generation %s has no %s/%s for %s; leaving that launcher alone",
+                generation.name,
+                interpreter_dir,
+                name,
+                _local_bin_dir() / name,
+            )
+            continue
+        link = _local_bin_dir() / name
+        if _atomic_symlink(link, pointer_path() / interpreter_dir / name):
+            written.append(link)
+    return written
+
+
+def _console_script_names(install_root: Path) -> tuple[str, ...]:
+    """Every console script this distribution declares, from its own metadata."""
+    found = _distribution_at(install_root)
+    if found is None:
+        return ()
+    try:
+        return tuple(
+            entry.name
+            for entry in found.entry_points
+            if entry.group == "console_scripts" and entry.name
+        )
+    except Exception:  # noqa: BLE001 — unreadable entry points fall back to the names
+        logger.debug("entry points unreadable at %s", install_root, exc_info=True)
+        return ()
+
+
+def _run_installer_env(argv: list[str], env: dict[str, str]) -> int:
+    """Run one installer argv with ``env``, returning its exit status."""
+    import subprocess
+
+    return int(subprocess.run(argv, check=False, env=env).returncode)
+
+
+def install_into_generation(
+    source: str | Path | None = None,
+    *,
+    runner: Callable[[list[str], dict[str, str]], int] | None = None,
+    version: str = "",
+    commit: str = "",
+    ref: str = "",
+    origin: str = PYPI_SOURCE_TOKEN,
+) -> Path:
+    """Install ONE build into its own generation and point ``current`` at it.
+
+    ``source`` is what uv installs: ``None`` for ``local-operator`` from PyPI
+    (the ``lop update`` path), or a directory holding this project's source
+    (``lop update --from-snapshot``; the host script that pre-builds the mobile
+    web bundle passes its prepared directory here).
+
+    ``runner`` is the test seam — it receives ``(argv, env)`` because the
+    environment IS the mechanism under test: ``UV_TOOL_DIR``/``UV_TOOL_BIN_DIR``
+    are what keep the installer away from every other tree, so a seam that could
+    only see the argv would not be watching the thing that matters.
+
+    ORDER, and every step is load-bearing:
+
+    1. reserve ``generations/<id>`` exclusively; uv installs into it. Nothing
+       references a generation until the flip, so a tree being built is
+       invisible to every reader — and reserving it with ``os.mkdir`` is what
+       keeps a second install from aimng uv at the same path;
+    2. write ``.lop-source`` into the new tree, so the marker is in place BEFORE
+       the generation becomes visible to any reader (and so "no marker" means
+       "still installing" for :func:`prune_generations`);
+    3. flip ``current``;
+    4. write the stable launchers and the daemon shim.
+
+    A failure at step 1 or 2 removes the tree and raises: nothing observable has
+    changed — the pointer never moved — and the caller reports the installer's
+    own error. Step 4 is best-effort by design: the build is already current at
+    that point, and a machine whose sandbox denies a write must not be told the
+    upgrade failed. PRUNING IS THE CALLER'S, not this function's: it is a
+    deletion, and every caller that wants it says so where it can report what
+    went (see ``perform_upgrade``).
+
+    NO STAGING RENAME, deliberately. Building in ``<id>.partial`` and renaming
+    it into place looks tidier and is WRONG here: uv bakes the installation path
+    into the console-script shims it writes under ``UV_TOOL_BIN_DIR``, so every
+    one of them would name the renamed-away directory and dangle. Reserved-and-
+    built-in-place keeps uv's own artefacts pointing at paths that survive.
+    """
+    token = commit[:12] or version or "pypi"
+    generation = _reserve_generation(token)
+    argv = installer_argv(InstallKind.UV_TOOL)
+    if source is not None:
+        # ``--from <dir> local-operator`` is the invocation that gets uv to
+        # resolve the project under ``dir`` and read its name from the tree.
+        argv = [*argv[:-1], "--from", str(source), argv[-1]]
+    try:
+        code = (runner or _run_installer_env)(argv, _generation_env(generation))
+    except OSError as exc:
+        # A missing ``uv``, an unwritable generations dir: the caller gets one
+        # refusal sentence, not a traceback out of a spawn it did not make.
+        _remove_tree(generation)
+        raise UpdateError(f"could not run uv: {exc}") from exc
+    try:
+        if code != 0:
+            raise UpdateError(f"installer exited {code}")
+        write_source_marker(
+            _generation_install_root(generation),
+            version=version,
+            commit=commit,
+            ref=ref,
+            origin=origin,
+        )
+    except BaseException:
+        # Nothing has been flipped, so this tree is nobody's but ours. A
+        # ``kill -9`` cannot reach here — which is exactly what
+        # ``prune_generations``' marker-age rule is for.
+        _remove_tree(generation)
+        raise
+    flip_pointer(generation)
+    write_stable_launchers(generation)
+    ensure_daemon_image()
+    return generation
+
+
+def clone_into_generation(
+    source: str | Path | None = None,
+) -> Path:
+    """Clone an INSTALLED tree into a generation and point ``current`` at it.
+
+    THE MIGRATION, and it is non-destructive on purpose: the legacy fixed tree is
+    copied, never moved or deleted, so a machine that has just adopted the
+    layout still has the install it was running on and can fall back to it by
+    hand. ``source`` defaults to ``sys.prefix`` — the tree the running ``lop``
+    imports from, which for a pre-layout machine IS the fixed tree.
+
+    A real copy rather than hardlinks (the tempting cheap shape): a hardlinked
+    generation shares inodes with a tree that ``uv tool install --force`` is
+    about to rewrite, and this layout's entire promise is that a generation's
+    bytes are written once. 136 MB and ~4.8k files is the honest price of that
+    promise, paid once per machine.
+
+    ``.lop-source`` rides along inside the copied venv, so the generation is
+    stamped with the build it really is — including the ``commit ref`` form that
+    makes two same-version builds distinguishable. A source tree that carries no
+    marker gets one here, because every other reader treats an unmarked
+    generation as an install still in flight (``prune_generations``) and a
+    generation we just adopted is finished by definition.
+    """
+    origin = Path(source) if source is not None else Path(sys.prefix)
+    if not origin.is_dir():
+        raise UpdateError(f"nothing to clone: {origin} is not a directory")
+    token = f"migrate-{source_ref(origin)[:12] or 'legacy'}"
+    generation = _reserve_generation(token)
+    try:
+        shutil.copytree(origin, _generation_install_root(generation), symlinks=True)
+    except (OSError, shutil.Error) as exc:
+        _remove_tree(generation)
+        raise UpdateError(f"could not copy {origin} into {generation.name}: {exc}") from exc
+    install_root = _generation_install_root(generation)
+    if not (install_root / ".lop-source").is_file():
+        found = _distribution_at(install_root)
+        write_source_marker(
+            install_root,
+            version=found.version if found is not None else "",
+            origin=SNAPSHOT_SOURCE_TOKEN,
+        )
+    # No installer ran, so this tree has no ``bin`` of its own: lay one down
+    # before anything points through it (see ``_link_generation_bin``).
+    _link_generation_bin(generation)
+    flip_pointer(generation)
+    write_stable_launchers(generation)
+    ensure_daemon_image()
+    return generation
+
+
+def referenced_install_roots() -> tuple[Path, ...]:
+    """The install roots named by live and persisted records.
+
+    TWO NAMESPACES, because two kinds of long-lived process read a generation:
+    a session runtime (``run/mobile``) and the ``lop serve`` daemon
+    (``run/serve``, whose record has carried a ``prefix`` field all along for
+    the update path). Both are read through their own registry so pruning and
+    the processes that publish records cannot drift apart, and both imports are
+    FUNCTION-LOCAL because they reach the session and server layers: this module
+    is on ``lop --version``'s path and must not drag either in.
+
+    A failure in either reads as "no records from there", which only ever keeps
+    MORE trees — the failure direction that costs disk rather than a running
+    session.
+    """
+    roots: list[Path] = []
+    try:
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        for record, _state in registry.scan(parse=SessionRecord.from_json):
+            value = str(getattr(record, "install_root", "") or "")
+            if value:
+                roots.append(Path(value))
+    except Exception:  # noqa: BLE001 — no readable records means no objection to keep
+        logger.debug("session records unreadable; pruning without them", exc_info=True)
+    try:
+        from local_operator.server import registry as serve_registry
+
+        for serve_record, _state in serve_registry.scan():
+            value = str(getattr(serve_record, "prefix", "") or "")
+            if value:
+                roots.append(Path(value))
+    except Exception:  # noqa: BLE001 — same direction as above
+        logger.debug("serve records unreadable; pruning without them", exc_info=True)
+    return tuple(roots)
+
+
+def _real(path: Path) -> Path:
+    """``path`` with links resolved, and never raising.
+
+    Every comparison in :func:`prune_generations` is between a directory the
+    pointer NAMED and a directory this function LISTED, and the two are two
+    spellings of one path (``/tmp`` is a symlink to ``/private/tmp`` on this
+    platform, and the pointer is written from ``Path.home()``). They must
+    compare equal, so both sides go through here. ``Path.resolve`` is the wrong
+    tool for it: it raises when a component is replaced underneath it
+    (measured — see :func:`current_generation`), and a prune that raised
+    halfway through would be the worst of both outcomes.
+    """
+    return Path(os.path.realpath(path))
+
+
+def prune_generations(
+    *,
+    keep: int = DEFAULT_KEEP_GENERATIONS,
+    referenced: Iterable[str | Path] = (),
+    now: float | None = None,
+) -> list[Path]:
+    """Delete the generations nothing can still be importing from.
+
+    RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
+    pointer's target, when a live or persisted record names its install root, or
+    when it is one of the last ``keep`` generations nothing refers to. The first
+    two are the reason this is safe to run while the machine is busy: a runtime's
+    own tree is never a candidate, and the count is only the margin for a session
+    that has no record yet.
+
+    Deletion is what makes the layout affordable rather than a leak — each
+    generation is a whole venv — so it runs after every successful install as
+    well as on demand from ``lop install prune``. Removals are returned rather
+    than only logged, because both callers report them: a silent 136 MB delete is
+    not something this tool gets to do.
+
+    ``.lop-source``-less generations are skipped unless they are older than
+    :data:`_PARTIAL_TTL_S`, which is the only shape a ``kill -9`` mid-install
+    leaves behind (every ordinary failure removes its own tree, and a finished
+    generation always carries a marker). That rule is also what makes a prune
+    safe to run while an install is in flight: the tree being built has no
+    marker yet, so it is skipped even though nothing references it.
+    """
+    generations = generations_dir()
+    if not generations.is_dir():
+        return []
+    moment = time.time() if now is None else now
+    wanted: set[Path] = set()
+    current = current_generation()
+    if current is None and pointer_path().is_symlink():
+        # A pointer that EXISTS and does not resolve: a flip being renamed, or a
+        # link left dangling by a deleted generation. Either way this function
+        # cannot tell which tree is live, and the answer to "I cannot tell" is
+        # to delete nothing. The marker-age rule below is written the same way,
+        # for the same reason: doubt keeps trees.
+        logger.warning(
+            "install pointer %s does not resolve; keeping every generation", pointer_path()
+        )
+        return []
+    if current is not None:
+        wanted.add(_real(current))
+    for root in referenced:
+        try:
+            # A record names the venv (``<gen>/tools/local-operator``), and the
+            # generation it belongs to is two levels up.
+            wanted.add(_real(Path(root)).parent.parent)
+        except OSError:  # pragma: no cover — an unresolvable reference keeps nothing extra
+            continue
+    entries = sorted(
+        (path for path in generations.iterdir() if path.is_dir()),
+        key=lambda path: (path.stat().st_mtime, path.name),
+    )
+    survivors = [path for path in entries if _real(path) not in wanted]
+    # Resolved for the same reason ``wanted`` is: a set of unresolved paths
+    # would never match, and pruning would silently keep every generation
+    # forever (found by its own test, not by inspection).
+    removable = {_real(path) for path in survivors[: max(0, len(survivors) - max(0, keep))]}
+    removed: list[Path] = []
+    for path in entries:
+        if _real(path) in wanted:
+            continue
+        if not (path / "tools" / DISTRIBUTION_NAME / ".lop-source").is_file():
+            try:
+                in_flight = moment - path.stat().st_mtime < _PARTIAL_TTL_S
+            except OSError:  # pragma: no cover — vanished under us, nothing to do
+                continue
+            if in_flight:
+                continue
+        elif _real(path) not in removable:
+            continue
+        _remove_tree(path)
+        removed.append(path)
+    return removed
+
+
+def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
+    """``lop install prune``: apply the retention policy, and say what went."""
+    if not generations_dir().is_dir():
+        print("no install generations on this machine — nothing to prune")
+        return 0
+    removed = prune_generations(keep=keep, referenced=referenced_install_roots())
+    current = current_generation()
+    print(f"generations: {generations_dir()}")
+    print(f"current:     {current.name if current else '(none)'}")
+    if not removed:
+        print("nothing to remove")
+    for path in removed:
+        print(f"removed:     {path.name}")
+    return 0
+
+
+def install_migrate_command() -> int:
+    """``lop install migrate``: adopt the generation layout for this machine.
+
+    Idempotent by outcome rather than by check: a second run clones the tree the
+    running ``lop`` imported from, which is now the first generation's own venv —
+    a faithful copy of a copy, which is wasteful but harmless. The caller-facing
+    guard is :func:`_is_generation_install`: once this process IS a generation,
+    there is nothing to migrate, and saying so is better than growing a
+    generation per invocation.
+
+    REFUSES A SOURCE CHECKOUT, and that guard is load-bearing rather than
+    tidy: the migration COPIES ``sys.prefix`` into the layout and flips the
+    machine's pointer at the copy, so a developer running it from ``repo/.venv``
+    would point the whole machine's ``lop`` at a copy of a worktree venv — the
+    same accident :func:`_repair_refusal` exists to prevent for the supervised
+    daemons, where a worktree venv repointed the operator's four live plists at
+    itself. Only a durable installed tree has something worth adopting.
+    """
+    if _is_generation_install():
+        print(f"already using the generation layout: {process_install_root()}")
+        print(f"pointer: {pointer_path()}")
+        return 0
+    kind = install_kind()
+    if kind == InstallKind.EDITABLE:
+        print(
+            "refusing to migrate: this interpreter is a source checkout's venv, not an "
+            "installed distribution, so the tree it imports from is one it is still "
+            "being edited in. run `lop install migrate` from an installed `lop`."
+        )
+        return 1
+    if kind == InstallKind.UNKNOWN:
+        print(
+            "refusing to migrate: this interpreter has no install this command can "
+            "identify (no dist-info, no venv of its own), so there is no tree to copy"
+        )
+        return 1
+    try:
+        generation = clone_into_generation()
+    except UpdateError as exc:
+        print(f"could not migrate: {exc}")
+        return 1
+    print(f"copied {Path(sys.prefix)} into {generation}")
+    print(f"pointer {pointer_path()} -> {generation}")
+    print(f"the previous install is untouched at {Path(sys.prefix)}")
+    return 0
+
+
+@dataclass(frozen=True)
+class SnapshotSource:
+    """Where a ``--from-snapshot`` build came from, and how to name it.
+
+    ``path`` is a directory uv can install from. ``commit``/``ref``/``version``
+    are what the ``.lop-source`` marker records; all three may be empty (a
+    hand-passed directory that is not a git repository and has no readable
+    ``pyproject.toml``), which the marker answers with the bare
+    :data:`SNAPSHOT_SOURCE_TOKEN`. ``temporary`` marks a directory THIS module
+    extracted and must therefore remove.
+    """
+
+    path: Path
+    commit: str = ""
+    ref: str = ""
+    version: str = ""
+    temporary: bool = False
+
+    @property
+    def label(self) -> str:
+        """How this build is named to a person: the ref, else the commit, else the path."""
+        return self.ref or self.commit or str(self.path)
+
+
+def _git(repo: Path, *args: str) -> str:
+    """One ``git`` query against ``repo``; ``""`` on any failure.
+
+    Total by design: every caller is recording provenance for a label, and a
+    missing git binary or a directory that is not a repository must cost a
+    blank field rather than the install.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _project_version(root: Path) -> str:
+    """The ``version`` in ``root``'s ``pyproject.toml``, or ``""``.
+
+    Only ever decoration on the marker: the generation's REAL version is read
+    from the installed distribution metadata (``disk_build``), which uv writes
+    from the same tree a moment later.
+    """
+    try:
+        import tomllib
+
+        with (root / "pyproject.toml").open("rb") as handle:
+            return str(tomllib.load(handle)["project"]["version"])
+    except Exception:  # noqa: BLE001 — provenance for a label may never raise
+        return ""
+
+
+def resolve_snapshot(value: str) -> SnapshotSource:
+    """Resolve ``--from-snapshot``'s argument to a directory uv can install.
+
+    Two accepted shapes, and the distinction is what the caller has to hand:
+
+    * **a directory** — installed as it stands. This is the shape a caller that
+      prepares its own tree (a bundle build, a patch set, a CI artifact) needs,
+      and the reason this command does not insist on a git ref;
+    * **a git ref** — archived out of the repository the command runs in. The
+      caller keeps its working tree (including uncommitted work) out of the
+      build by construction, and the commit is recorded, so two builds of one
+      unchanged version stay distinguishable — which is the whole job of the
+      ref half of the marker.
+
+    Raises :class:`UpdateError` with something a person can act on: a ref that
+    does not resolve, a repository that is not there, or an archive with no
+    ``pyproject.toml`` in it are all "this is not a tree I can install" rather
+    than a traceback.
+    """
+    candidate = Path(value).expanduser()
+    if candidate.is_dir():
+        resolved = candidate.resolve()
+        commit = _git(resolved, "rev-parse", "HEAD")
+        return SnapshotSource(
+            path=resolved,
+            commit=commit,
+            ref=_git(resolved, "rev-parse", "--abbrev-ref", "HEAD") if commit else "",
+            version=_project_version(resolved),
+        )
+    repo = Path.cwd()
+    commit = _git(repo, "rev-parse", "--verify", f"{value}^{{commit}}")
+    if not commit:
+        raise UpdateError(
+            f"{value!r} is neither a directory nor a git ref in {repo} "
+            "— pass a path to a source tree, or a ref of the repository you are in"
+        )
+    import io
+    import tarfile
+
+    archive = _git_bytes(repo, "archive", "--format=tar", commit)
+    if archive is None:
+        raise UpdateError(f"could not archive {value!r} from {repo}")
+    target = Path(tempfile.mkdtemp(prefix="lop-snapshot-"))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            # ``filter="data"`` refuses absolute paths and links on extraction.
+            # The bytes come from our own ``git archive``, so this is about the
+            # documented default changing under us in 3.14 rather than about a
+            # hostile tarball — a future interpreter rejects them by default and
+            # the explicit filter keeps the behaviour identical either way.
+            tar.extractall(target, filter="data")
+    except (OSError, tarfile.TarError) as exc:
+        _remove_tree(target)
+        raise UpdateError(f"could not unpack {value!r}: {exc}") from exc
+    if not (target / "pyproject.toml").is_file():
+        _remove_tree(target)
+        raise UpdateError(f"the archive of {value!r} has no pyproject.toml")
+    return SnapshotSource(
+        path=target,
+        commit=commit,
+        ref=value,
+        version=_project_version(target),
+        temporary=True,
+    )
+
+
+def _git_bytes(repo: Path, *args: str) -> bytes | None:
+    """``git``'s binary stdout, or ``None`` when it could not be read."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args], check=False, capture_output=True
+        )
+    except OSError:
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def install_status_command() -> int:
+    """``lop install status``: the layout, and what a new ``lop`` would load.
+
+    The one surface that separates "the build this process loaded" from "the
+    build the pointer names". Every label in the product describes the former;
+    on a mixed-generation machine they disagree, and this is where that is
+    legible without reading symlinks by hand.
+    """
+    print(f"stable root: {stable_root()}")
+    pointer = pointer_path()
+    generation = current_generation()
+    print(f"pointer:    {pointer} -> {generation if generation else '(unresolved)'}")
+    print(f"this process: {process_install_root()}")
+    root = current_install_root()
+    fresh = _stamp_at(root) if root is not None else None
+    print(f"a new lop would load: {fresh.label() if fresh else '(unknown)'}")
+    generations = (
+        sorted(path.name for path in generations_dir().iterdir())
+        if generations_dir().is_dir()
+        else []
+    )
+    print(f"generations ({len(generations)}):")
+    for name in generations:
+        marker = ""
+        if generation is not None and name == generation.name:
+            marker = "  <- current"
+        print(f"  {name}{marker}")
+    for root in referenced_install_roots():
+        print(f"  held by a live session: {root}")
+    return 0
 
 
 def installer_invocation(
@@ -1104,20 +2278,36 @@ def perform_upgrade(
     run: Callable[[list[str]], int] | None = None,
     prefix: str | Path | None = None,
     executable: str | None = None,
+    source: str | Path | None = None,
+    commit: str = "",
+    ref: str = "",
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
     The new wheel is not imported into this interpreter; callers print
     ``target`` rather than asking :func:`installed_version` again.
 
-    On success the ``.lop-source`` marker is rewritten to describe what was
-    just installed — see :func:`write_source_marker`. Without that step the
-    marker kept naming the DISPLACED build: it is written only by the
-    ``lop-update`` shell script, so an upgrade driven from here (``lop
-    update`` and the TUI's ``/update``, which share this function) moved
-    site-packages and left the marker behind, and every ``version@ref`` label
-    and settle-clock reading on the host went on describing a build that was
-    no longer installed.
+    THE uv-tool LAYOUT INSTALLS INTO A NEW GENERATION. That branch routes through
+    :func:`install_into_generation`, which is what makes an upgrade safe to run
+    while ~24 runtimes are importing from the install: the tree they hold is not
+    the tree that changes, and the handover is a pointer flip
+    (:func:`flip_pointer`). Both front ends share this function — ``lop update``
+    and the TUI's ``/update`` — so both get the generation path from one place.
+
+    pip and pipx KEEP TODAY'S BEHAVIOUR, deliberately and with a documented
+    consequence: neither has a directory layout this module can make atomic, so
+    they still rewrite site-packages in place under the running fleet. There is
+    no generation story for them to route through, and inventing one here would
+    be a second installer's worth of work in a change that exists to stop a
+    known, measured failure. ``lop-update`` and the wheel path are the ones the
+    host actually uses.
+
+    ``run`` IS THE OBSERVER SEAM AND IT DOUBLES AS A SAFETY FENCE. A caller that
+    substituted the installer has not produced a tree to point at, and flipping
+    the host's ``current`` onto a directory an injected runner never filled would
+    break every session on the machine — so the injected-runner shape keeps the
+    old behaviour exactly (argv, exit status, marker at ``prefix``) and never
+    touches the pointer.
 
     Ordering is deliberate and load-bearing: the marker is written only after
     the installer has exited 0, because its mtime is the signal a runtime uses
@@ -1130,6 +2320,25 @@ def perform_upgrade(
         raise UpdateError(
             unknown_refusal(prefix=str(prefix) if prefix else None, executable=executable)
         )
+    if detected is InstallKind.UV_TOOL and run is None:
+        # ``target`` is the PyPI version just installed, and this path is always
+        # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
+        # ``commit``/``ref`` describe that case, and leaving them empty is what
+        # makes the marker say ``pypi <version>``.
+        install_into_generation(source, version=target, commit=commit, ref=ref)
+        # Retention, not tidiness: a generation is a whole venv, so a machine
+        # that never pruned would grow by one per release. The policy is
+        # structural (see ``prune_generations``) and best-effort — the upgrade
+        # has already succeeded, and a caller that cannot read the record
+        # directory must not be told otherwise.
+        try:
+            removed = prune_generations(referenced=referenced_install_roots())
+        except Exception:  # noqa: BLE001 — pruning never fails an upgrade
+            logger.debug("generation prune failed", exc_info=True)
+        else:
+            for path in removed:
+                logger.info("pruned superseded install generation %s", path)
+        return target
     argv, image = installer_invocation(detected, executable=executable)
     if run is not None:
         # The injected runner sees the argv alone: it is a seam for tests and for
@@ -1143,12 +2352,13 @@ def perform_upgrade(
     # Only the uv-tool layout has a ``.lop-source`` root to record into, and
     # it is the layout ``lop-update`` shares. pipx and pip installs never had
     # a marker and gain nothing from one: they compare on version alone.
+    #
+    # Reached only through the ``run`` seam now: the real uv-tool upgrade was
+    # handled above, and there the marker is written into the new generation
+    # before it becomes visible (``install_into_generation`` step 2) rather than
+    # into a tree that is already in use.
     if detected is InstallKind.UV_TOOL:
         root = Path(prefix) if prefix is not None else Path(sys.prefix)
-        # ``target`` is the PyPI version just installed, and this path is
-        # always a PyPI wheel: ``installer_argv`` runs `uv tool install
-        # --force local-operator` with no --from, so no git ref exists to
-        # record. Passing no commit is what makes the marker say so.
         if not write_source_marker(root, version=target):
             # Deliberately not fatal: the upgrade itself SUCCEEDED, and a
             # failed marker only costs accuracy in the labels. But without a
@@ -1221,13 +2431,13 @@ def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
     :func:`installer_invocation`: this is a process the product spawns, and
     naming every such process is the point of the change this belongs to. A
     daemon bounce is also the kind of activity an EDR watches.
-    """
-    if sys.executable and Path(sys.executable).exists():
-        from local_operator import procname
 
-        argv0, image = procname.spawn_identity(procname.LABEL_MOBILE_RESTART)
-        return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", "mobile", "restart"], image
-    return None
+    WHICH interpreter travels is :func:`_post_upgrade_invocation`'s argument,
+    and since the generation layout it is NOT necessarily ``sys.executable``.
+    """
+    from local_operator import procname
+
+    return _post_upgrade_invocation(procname.LABEL_MOBILE_RESTART, ["mobile", "restart"])
 
 
 def refresh_mobile_after_upgrade() -> MobileRefresh:
@@ -1291,15 +2501,52 @@ def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
     No PATH ``lop`` fallback, for the reason recorded on the mobile argv: a PATH
     hit can be a different installation entirely.
     """
-    if sys.executable and Path(sys.executable).exists():
-        from local_operator import procname
+    from local_operator import procname
 
-        argv0, image = procname.spawn_identity(procname.LABEL_DAEMONS_REFRESH)
-        return (
-            [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", "update", "--refresh-daemons"],
-            image,
-        )
-    return None
+    return _post_upgrade_invocation(procname.LABEL_DAEMONS_REFRESH, ["update", "--refresh-daemons"])
+
+
+def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], str | None] | None:
+    """``(argv, executable)`` for a child that must run the build just installed.
+
+    THE INTERPRETER MOVED WITH THE GENERATION LAYOUT, and this is where that has
+    teeth. Both helpers above used to name ``sys.executable`` and were right to:
+    the installer rewrote the tree this process runs from, so the running
+    interpreter WAS the new wheel. The generation installer never touches this
+    process's tree — it builds a generation and flips the pointer — which makes
+    ``sys.executable`` precisely the SUPERSEDED build. A repair run from it would
+    render the previous build's LaunchAgent shape and report success, which is
+    the failure those docstrings already call "a no-op wearing the costume of a
+    fix".
+
+    So the child runs the interpreter the pointer resolves to, CONCRETELY
+    (:func:`current_interpreter` — never the mutable ``current`` path, or the
+    child would import through a symlink that a second upgrade can redirect
+    mid-run). ``sys.executable`` stays the answer for a pip/pipx upgrade and for
+    a machine that has not migrated: those installers still rewrite in place, so
+    there the running interpreter genuinely is the new wheel.
+
+    ``None`` — the caller reports "no interpreter to run it with" — only when
+    neither a pointer nor a usable ``sys.executable`` exists.
+    """
+    from local_operator import procname
+
+    interpreter = current_interpreter()
+    if interpreter is None or str(interpreter) == sys.executable:
+        if not (sys.executable and Path(sys.executable).exists()):
+            return None
+        argv0, image = procname.spawn_identity(label)
+        return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
+    # The branded link is planted per venv on first use, so the new tree may not
+    # have one yet; the label rides on the argv either way, which is the axis a
+    # ``ps`` reader sees.
+    return [
+        procname.branded_argv0(label),
+        SAFE_PATH_FLAG,
+        "-m",
+        "local_operator.cli",
+        *tail,
+    ], str(interpreter)
 
 
 def _installed_daemon_plists() -> list[Path]:
@@ -1463,6 +2710,13 @@ def _repair_refusal() -> str | None:
     Prefix equality, not path equality, is the test: a stale plist recording
     ``<prefix>/bin/python3`` and the branded shape recording
     ``<prefix>/bin/Local Operator`` are the SAME install.
+
+    The generation layout adds a THIRD recorded shape — the stable shim
+    (``<stable>/bin/python3``, whose ``parent.parent`` is the stable root rather
+    than a venv) — and it never reaches this comparison: only a generation
+    install renders it, a generation install is a uv tool, and a uv tool answers
+    ``None`` above for the reason question 2 is about (it IS the installation
+    ``lop`` runs from).
     """
     kind = install_kind()
     if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
@@ -1545,8 +2799,92 @@ def daemons_refresh_command() -> int:
     return 0
 
 
-def update_command(*, check: bool = False, refresh_daemons: bool = False) -> int:
-    """``lop update``, ``lop update --check`` and the internal daemon repair.
+def _print_current_generation() -> None:
+    """Name the generation ``current`` now points at, or say nothing.
+
+    Silent when there is no generation layout on this machine (a pip/pipx
+    install, a machine that has not migrated), because there is nothing to say
+    and a line reading "(none)" after a successful upgrade would look like a
+    failure.
+    """
+    generation = current_generation()
+    if generation is not None:
+        print(f"current install: {generation}")
+
+
+def _generation_upgrade(total: int) -> int:
+    """The tail every successful install shares: report, prune, refresh, succeed.
+
+    ``lop update --from-snapshot`` uses this directly. The PyPI path reports and
+    refreshes the same way but has already pruned inside
+    :func:`perform_upgrade` (which both front ends call), so it only prints.
+    """
+    _print_current_generation()
+    for path in prune_generations(referenced=referenced_install_roots()):
+        print(f"pruned superseded generation {path.name}")
+    _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    return total
+
+
+def _snapshot_command(value: str) -> int:
+    """``lop update --from-snapshot <dir-or-ref>``: install a local build.
+
+    The in-repo half of what the out-of-tree ``lop-update`` script does today,
+    and the reason that script can be reduced to a delegator: the archive, the
+    install and the pointer flip all happen here, under this repo's tests.
+
+    Deliberately NOT gated on a PyPI version check. A snapshot's version comes
+    from the tree being installed (its ``pyproject.toml`` still names the last
+    release), so "am I behind PyPI" is not the question being answered —
+    installing the tree is. A git snapshot also still upgrades from PyPI on a
+    plain ``lop update``; nothing here changes that.
+    """
+    kind = install_kind()
+    if kind is InstallKind.EDITABLE:
+        print(editable_refusal(), file=sys.stderr)
+        return 1
+    if kind is not InstallKind.UV_TOOL:
+        # The generation layout is uv-tool only, and so is this command: a pip
+        # or pipx install has no per-generation root for a snapshot to land in,
+        # and pretending otherwise would rewrite site-packages under the
+        # running fleet — the failure this change exists to remove.
+        print(
+            "lop update --from-snapshot installs into a uv-tool generation, "
+            f"and this install is {kind.value} — install it with `uv tool "
+            "install --force --from <dir> local-operator` instead.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        snapshot = resolve_snapshot(value)
+    except UpdateError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"installing {snapshot.label}" + (f" ({snapshot.version})" if snapshot.version else ""))
+    try:
+        install_into_generation(
+            snapshot.path,
+            version=snapshot.version,
+            commit=snapshot.commit,
+            ref=snapshot.ref,
+            origin=SNAPSHOT_SOURCE_TOKEN,
+        )
+    except UpdateError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        if snapshot.temporary:
+            # ``uv`` has copied what it needs; the extract is ours to reclaim,
+            # and leaving 136 MB of tree per install in TMPDIR is how a machine
+            # with a small /tmp dies on a day nobody is looking.
+            _remove_tree(snapshot.path)
+    return _generation_upgrade(0)
+
+
+def update_command(
+    *, check: bool = False, refresh_daemons: bool = False, from_snapshot: str | None = None
+) -> int:
+    """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
     ``--refresh-daemons`` is not an upgrade: it is the repair step that the
     upgrade path runs in a CHILD process from the newly installed wheel, so that
@@ -1554,9 +2892,21 @@ def update_command(*, check: bool = False, refresh_daemons: bool = False) -> int
     :func:`daemons_refresh_command`. It is checked before the PyPI call because
     it must work on any machine, including one whose network is down, and it
     never reports a version. See the architect table for the other codes.
+
+    ``--from-snapshot`` is checked before the PyPI call for the same reason: it
+    installs a build that is already on this machine, so a host with no route to
+    the index (or no wish to use one) must be able to run it. Combining it with
+    ``--check`` is a refusal rather than a precedence rule — the two answer
+    different questions and a caller that asked for both has asked for neither.
     """
     if refresh_daemons:
         return daemons_refresh_command()
+
+    if from_snapshot is not None:
+        if check:
+            print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
+            return 1
+        return _snapshot_command(from_snapshot)
 
     result = check_latest(force=True)
     if result.latest is None:
@@ -1595,5 +2945,11 @@ def update_command(*, check: bool = False, refresh_daemons: bool = False) -> int
         print(str(exc), file=sys.stderr)
         return 1
     print(f"installed {installed}")
+    # Names the layout, not the build: on a machine with generations the build
+    # now lives in its own tree and `current` names it, which is the one fact a
+    # person watching an upgrade wants to see and cannot otherwise know. Pruning
+    # has already happened inside ``perform_upgrade`` (one place, both front
+    # ends); what went is logged there.
+    _print_current_generation()
     _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return 0

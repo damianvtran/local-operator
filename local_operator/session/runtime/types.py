@@ -643,6 +643,14 @@ class SessionRecord:
     #: for PyPI/pipx/editable installs. Needed because same-version rebuilds
     #: are this host's common drift — see ``update.BuildStamp``.
     source_ref: str = ""
+    #: The install ROOT this runtime imports from (``update.process_install_root``)
+    #: — under the generation layout, the one generation this process belongs
+    #: to. It is here for pruning: a generation named by a live record is never
+    #: deleted, and the record is the only place a running runtime's tree is
+    #: written down (``lop install prune`` reads exactly this). ``""`` for a
+    #: runtime older than the field, which pruning reads as "no objection" and
+    #: therefore keeps MORE trees rather than fewer.
+    install_root: str = ""
 
     # -- agent trajectories -------------------------------------------------
     # Same additive contract as the live-state and build-stamp blocks above,

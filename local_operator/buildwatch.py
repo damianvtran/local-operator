@@ -1,9 +1,17 @@
 """One definition of "the install on disk has been replaced under this process".
 
-``lop-update`` (and :func:`local_operator.update.perform_upgrade`) replaces the
-installed tree IN PLACE, so a long-lived process can find itself running a build
-that no longer exists on disk. Two processes on this host must react the same
-way to that: a session runtime (:mod:`local_operator.session.runtime.process`)
+``lop-update`` (and :func:`local_operator.update.perform_upgrade`) used to
+replace the installed tree IN PLACE, so a long-lived process could find itself
+running a build that no longer exists on disk. Under the generation layout it no
+longer does: an install lands in its OWN tree and the stable path is a pointer
+(``local_operator.update`` documents the layout), so what moves is which build
+the POINTER names, not the files any running process holds. The watch is
+unchanged and still worth having, for a reason that has changed rather than
+gone: it is now the CONVERGENCE path that retires a runtime on a superseded
+generation once it is idle, where it used to be the only thing standing between
+a running process and a tree being deleted under it. Two processes on this host
+must react the same way to that: a session runtime
+(:mod:`local_operator.session.runtime.process`)
 and the ``lop serve`` daemon (:mod:`local_operator.server.retire`). Three things
 decide what such a process may do about it — how often to look
 (:data:`BUILD_CHECK_S`), how long a fresh install must sit before it is trusted
@@ -186,7 +194,12 @@ def wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
 
 
 def build_prefix() -> str | None:
-    """Where to read the install stamp from: ``sys.prefix`` in production.
+    """Where to read THIS process's install stamp from: ``sys.prefix``.
+
+    The BOOT sample's prefix, so the e2e stage's fake tree stands in for this
+    process's own generation — which under the generation layout is a different
+    question from :func:`disk_prefix`, and answering them with ONE prefix is how
+    a stamp with this build's version and the pointer's ref gets built.
 
     ``LOP_BUILD_PREFIX`` exists ONLY so the e2e stage can point a real runtime
     (or a real ``lop serve``) at a temp directory carrying a fake
@@ -195,6 +208,40 @@ def build_prefix() -> str | None:
     compare against a marker that never changes — it can never retire early.
     """
     return os.environ.get("LOP_BUILD_PREFIX") or None
+
+
+def disk_marker_prefix() -> str | None:
+    """Where the DISK install's marker — and its age — is read from.
+
+    The POINTER's generation in production, which is the install whose freshness
+    the settle window is about: under the generation layout this process's own
+    tree is written once and never touched, so its marker's age says nothing
+    about whether the build the pointer names has stopped being rewritten. Left
+    as the boot prefix it would read the running tree's old marker and report
+    "settled" about an install that had only just landed — disabling the settle
+    exactly where it is still doing work.
+
+    ``LOP_BUILD_PREFIX`` overrides it for the same reason it overrides the boot
+    prefix: the e2e stage's temp tree stands in for a generation, and its fresh
+    marker is what that stage flips.
+
+    ``None`` means "this interpreter's own tree", which is what
+    :func:`local_operator.update.build_marker_age_s` does with it and what the
+    pre-generation behaviour was. Reachable only when the pointer cannot be
+    resolved, in which case no move can be detected either and the settle is
+    never consulted.
+    """
+    override = os.environ.get("LOP_BUILD_PREFIX")
+    if override:
+        return override
+    from local_operator import update as update_mod
+
+    try:
+        root = update_mod.current_install_root()
+    except Exception:  # noqa: BLE001 — an unreadable pointer is "no answer here"
+        logger.debug("install pointer unreadable", exc_info=True)
+        return None
+    return str(root) if root is not None else None
 
 
 def boot_build() -> "BuildStamp | None":
@@ -238,8 +285,11 @@ def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
       build no longer on disk);
     * **the stamp cannot be resolved into a build at all** — see
       :func:`proves_a_move`, the fail-closed rule QA round 2's OBS-1 asked for;
-    * the exception/unreadable case below, the same direction for the same
-      reason.
+    * **there is no install on disk to compare against** — an editable checkout,
+      or a machine whose pointer cannot be resolved. See
+      :func:`local_operator.update.disk_build`, which is the ONE place that
+      decides; the exception/unreadable case below is the same direction for the
+      same reason.
 
     A DIFFERENT build than the one announced is NOT ``None``: it is the newer
     move, and the caller re-announces onto it rather than leaving for a build
@@ -249,13 +299,12 @@ def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
         return None
     from local_operator import update as update_mod
 
-    prefix = build_prefix()
     try:
-        on_disk = update_mod.installed_build(prefix)
+        on_disk = update_mod.disk_build(build_prefix())
     except Exception:  # noqa: BLE001 — an unreadable stamp is "no change"
         logger.debug("build stamp unreadable; no refresh", exc_info=True)
         return None
-    if on_disk == boot or not proves_a_move(boot, on_disk):
+    if on_disk is None or on_disk == boot or not proves_a_move(boot, on_disk):
         return None
     return on_disk
 
@@ -316,9 +365,8 @@ def _settle_elapsed() -> bool:
     """
     from local_operator import update as update_mod
 
-    prefix = build_prefix()
     try:
-        age = update_mod.build_marker_age_s(prefix)
+        age = update_mod.build_marker_age_s(disk_marker_prefix())
     except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
         # The SETTLE read is guarded for the same reason the stamp read in
         # ``handover_build`` is, and the reason is the consequence rather than

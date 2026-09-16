@@ -159,7 +159,7 @@ async def test_a_moved_install_warns_once_and_names_reload(monkeypatch, tmp_path
         import local_operator.update as update_mod
 
         monkeypatch.setattr(
-            update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
+            update_mod, "disk_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
         )
         app._check_build_skew(reason="test")
         await pilot.pause()
@@ -197,11 +197,11 @@ async def test_a_second_distinct_drift_is_still_announced(monkeypatch, tmp_path)
         import local_operator.update as update_mod
 
         monkeypatch.setattr(
-            update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
+            update_mod, "disk_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
         )
         app._check_build_skew(reason="one")
         monkeypatch.setattr(
-            update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.50.0")
+            update_mod, "disk_build", lambda *_a, **_k: BuildStamp(version="0.50.0")
         )
         app._check_build_skew(reason="two")
         await pilot.pause()
@@ -231,7 +231,7 @@ async def test_a_same_version_rebuild_is_detected_through_its_ref(monkeypatch, t
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.49.0", source_ref="bbbbbbb2222"),
         )
         app._check_build_skew(reason="rebuild")
@@ -265,7 +265,7 @@ async def test_a_matching_build_says_nothing(monkeypatch, tmp_path) -> None:
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         app._check_build_skew(reason="same")
         await pilot.pause()
         notices = _notices(app)
@@ -294,7 +294,7 @@ async def test_a_busy_older_runtime_is_told_it_will_move_over(monkeypatch, tmp_p
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         viewer = _BoundViewer(runtime_version="0.46.23", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -330,7 +330,7 @@ async def test_an_idle_older_runtime_is_refreshed_silently(monkeypatch, tmp_path
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         viewer = _BoundViewer(runtime_version="0.46.23", idle=True)
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -374,7 +374,7 @@ async def test_an_idle_owner_that_stays_still_gets_the_notice(
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         viewer = _BoundViewer(runtime_version="0.46.23", idle=True, refresh_answer=answer)
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -410,7 +410,7 @@ async def test_an_unstamped_idle_owner_that_stays_gets_the_unknown_copy(
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         viewer = _BoundViewer(runtime_version="", idle=True, refresh_answer="raise")
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -452,7 +452,7 @@ async def test_a_non_string_answer_cannot_take_the_window_down(
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         app._session = _BoundViewer(runtime_version="0.46.23", idle=True, refresh_answer=answer)
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -490,7 +490,7 @@ async def test_a_same_version_rebuild_names_only_the_refs(monkeypatch, tmp_path)
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         app._session = _BoundViewer(runtime_version="0.49.0", runtime_source_ref="aaaaaaa1111")
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -521,7 +521,7 @@ async def test_the_version_pair_survives_a_narrow_splash(monkeypatch, tmp_path) 
             app._skew_notice_shown.clear()
             import local_operator.update as update_mod
 
-            monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+            monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
             app._session = _BoundViewer(
                 runtime_version="0.49.8",
                 runtime_source_ref="46a4e9b1234567",
@@ -580,7 +580,7 @@ async def test_a_runtime_without_a_stamp_is_reported_as_predating_it(monkeypatch
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         app._session = _BoundViewer(runtime_version="")
         app._check_build_skew(reason="bind")
         app._check_build_skew(reason="bind-again")
@@ -613,7 +613,7 @@ async def test_a_second_stale_session_gets_its_own_notice(monkeypatch, tmp_path)
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
 
         first = _BoundViewer(runtime_version="", session_id="sessionaaaa1")
         app._session = first
@@ -650,7 +650,7 @@ async def test_disk_drift_is_not_rescoped_by_a_session_swap(monkeypatch, tmp_pat
         import local_operator.update as update_mod
 
         monkeypatch.setattr(
-            update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
+            update_mod, "disk_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
         )
         first = _BoundViewer(runtime_version="0.49.0", session_id="sessionaaaa1")
         app._session = first
@@ -678,7 +678,7 @@ async def test_a_matching_runtime_is_silent(monkeypatch, tmp_path) -> None:
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         app._session = _BoundViewer(runtime_version="0.49.0", runtime_source_ref="abc1234")
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -708,7 +708,7 @@ async def test_a_cold_viewer_is_not_reported_as_a_prehistoric_runtime(
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         cold = _BoundViewer(runtime_version="")
         cold.is_cold = True
         app._session = cold
@@ -760,7 +760,7 @@ async def test_a_failing_disk_read_does_not_break_the_seam(monkeypatch, tmp_path
         def explode(*_a, **_k):
             raise OSError("permission denied")
 
-        monkeypatch.setattr(update_mod, "installed_build", explode)
+        monkeypatch.setattr(update_mod, "disk_build", explode)
         app._check_build_skew(reason="boom")  # must not raise
         await pilot.pause()
         notices = _notices(app)
@@ -991,7 +991,7 @@ async def test_two_stale_sessions_are_told_apart_by_name(monkeypatch, tmp_path) 
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
 
         first = _BoundViewer(
             runtime_version="", session_id="sessionaaaa1", conversation_name="ingest pipeline"
@@ -1033,7 +1033,7 @@ async def test_an_unnamed_session_falls_back_to_the_deictic(monkeypatch, tmp_pat
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
         unnamed = _BoundViewer(runtime_version="", session_id="sessionccccc")
         app._session = unnamed
         app._check_build_skew(reason="bind")
@@ -1063,7 +1063,7 @@ async def test_differing_versions_keep_the_two_arm_form(monkeypatch, tmp_path) -
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.49.0", source_ref="bbbbbbb2222"),
         )
         app._check_build_skew(reason="rebuild")
@@ -1139,7 +1139,7 @@ async def test_a_runtime_newer_than_this_window_is_completely_silent(monkeypatch
         import local_operator.update as update_mod
 
         on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: on_disk)
         viewer = _BoundViewer(
             runtime_version="0.51.30",
             runtime_source_ref="d7f12d3a7",
@@ -1181,7 +1181,7 @@ async def test_a_runtime_newer_than_this_window_is_silent_while_busy(monkeypatch
         import local_operator.update as update_mod
 
         on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: on_disk)
         viewer = _BoundViewer(runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -1211,7 +1211,7 @@ async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_
         await pilot.pause()
         app._loaded_build = BuildStamp(version="0.51.30", source_ref="aaaaaaa1111")
         app._skew_notice_shown.clear()
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: on_disk)
         viewer = _BoundViewer(
             runtime_version="0.51.30", runtime_source_ref="bbbbbbb2222", idle=False
         )
@@ -1229,7 +1229,7 @@ async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_
         await pilot.pause()
         app._loaded_build = on_disk
         app._skew_notice_shown.clear()
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: on_disk)
         viewer = _BoundViewer(
             runtime_version="0.51.30", runtime_source_ref="aaaaaaa1111", idle=False
         )
@@ -1247,7 +1247,7 @@ async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_
 async def test_an_unreadable_disk_falls_back_to_version_order(monkeypatch, tmp_path) -> None:
     """No disk reference: a strictly newer runtime is still recognised.
 
-    ``installed_build()`` raising skips check A too, so the discriminator has
+    ``disk_build()`` raising skips check A too, so the discriminator has
     nothing to compare against. Version ordering is the fallback - weaker (it
     cannot see a ref-only rebuild) but decisive when the versions differ.
     """
@@ -1262,7 +1262,7 @@ async def test_an_unreadable_disk_falls_back_to_version_order(monkeypatch, tmp_p
         def _boom(*_a, **_k):
             raise OSError("no install metadata")
 
-        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        monkeypatch.setattr(update_mod, "disk_build", _boom)
         viewer = _BoundViewer(runtime_version="0.51.30", idle=True)
         app._session = viewer
         app._check_build_skew(reason="bind")
@@ -1300,7 +1300,7 @@ async def test_an_inconclusive_order_keeps_todays_notice(monkeypatch, tmp_path) 
         def _boom(*_a, **_k):
             raise OSError("no install metadata")
 
-        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        monkeypatch.setattr(update_mod, "disk_build", _boom)
         viewer = _BoundViewer(
             runtime_version="0.51.30", runtime_source_ref="bbbbbbb2222", idle=False
         )
@@ -1336,7 +1336,7 @@ async def test_an_unparseable_version_is_not_guessed_at(monkeypatch, tmp_path) -
         def _boom(*_a, **_k):
             raise OSError("no install metadata")
 
-        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        monkeypatch.setattr(update_mod, "disk_build", _boom)
         app._session = _BoundViewer(runtime_version="0.51.30rc1", idle=False)
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1505,7 +1505,7 @@ async def test_a_newer_runtime_is_silent_when_disk_has_moved_again(monkeypatch, 
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
         viewer = _BoundViewer(
@@ -1542,7 +1542,7 @@ async def test_a_newer_runtime_stays_silent_while_busy_in_the_triple(monkeypatch
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
         viewer = _BoundViewer(runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", idle=False)
@@ -1583,7 +1583,7 @@ async def test_a_long_lived_window_does_not_start_speaking_when_disk_moves_again
         # t0: disk == the runtime's build. Silent, and pinned elsewhere too.
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="d7f12d3a7"),
         )
         app._check_build_skew(reason="t0")
@@ -1592,7 +1592,7 @@ async def test_a_long_lived_window_does_not_start_speaking_when_disk_moves_again
         # t1: a second lop-update. The runtime has not moved.
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
         app._check_build_skew(reason="t1")
@@ -1626,7 +1626,7 @@ async def test_an_older_runtime_still_speaks_when_disk_has_moved_again(
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
         viewer = _BoundViewer(runtime_version="0.51.28", runtime_source_ref="8c2015f11", idle=False)
@@ -1661,7 +1661,7 @@ async def test_three_refs_at_one_version_claim_no_direction(monkeypatch, tmp_pat
 
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="ccccccc33"),
         )
         app._session = _BoundViewer(
@@ -1701,7 +1701,7 @@ async def test_a_ref_only_pair_still_uses_the_arrow_when_disk_ranks_it(
         app._skew_notice_shown.clear()
         import local_operator.update as update_mod
 
-        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: on_disk)
         app._session = _BoundViewer(
             runtime_version="0.51.30", runtime_source_ref="aaaaaaa11", idle=False
         )
@@ -1855,7 +1855,7 @@ async def test_one_build_pair_is_announced_once_across_a_disk_move(monkeypatch, 
         # directed copy paints.
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="aaaaaaa11"),
         )
         app._session = _BoundViewer(
@@ -1867,7 +1867,7 @@ async def test_one_build_pair_is_announced_once_across_a_disk_move(monkeypatch, 
         # Disk moves to a third ref; the SAME pair now qualifies as undirected.
         monkeypatch.setattr(
             update_mod,
-            "installed_build",
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="ccccccc33"),
         )
         app._check_build_skew(reason="engage")

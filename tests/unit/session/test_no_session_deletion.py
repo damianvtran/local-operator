@@ -922,6 +922,55 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
     ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    # The generation layout's own trees and pointer. Every path in this block is
+    # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
+    # plus a timestamped generation id this module chose, or from
+    # ``~/.local/bin``: NONE of them is derived from a session id, a config dir,
+    # or other caller input, so none can name a path under the session store.
+    #
+    # ``_remove_tree`` is the sharpest of them and is confined by construction:
+    # its every caller passes either (a) a generation this module RESERVED with
+    # ``os.mkdir`` earlier in the same call, or (b) an entry of
+    # ``generations_dir().iterdir()`` after ``wanted`` has been subtracted —
+    # i.e. a sibling of the reserved name. A record's ``install_root`` is only
+    # ever read to ADD to ``wanted`` (protecting a generation), never to choose
+    # a path to delete, which is why a hostile record cannot redirect it.
+    (
+        "local_operator/update.py::_remove_tree",
+        "shutil.rmtree",
+        "<stable>/generations/<id> — reserved by this call, or listed from generations_dir()",
+    ),
+    (
+        "local_operator/update.py::flip_pointer",
+        "<path>.unlink",
+        "<stable>/current.tmp-<pid> — this call's own staged SYMLINK",
+        2,
+    ),
+    (
+        "local_operator/update.py::flip_pointer",
+        "os.rename",
+        "staged symlink -> <stable>/current; both under the stable root, no directory moves",
+    ),
+    (
+        "local_operator/update.py::_atomic_symlink",
+        "os.rename",
+        "<local bin>/<entry>.tmp-<pid> -> <local bin>/<entry> symlink; no directory moves",
+    ),
+    (
+        "local_operator/update.py::_atomic_symlink",
+        "<path>.unlink",
+        "a previous run's own staging symlink beside the launcher, before re-linking",
+    ),
+    (
+        "local_operator/update.py::_write_executable",
+        "os.rename",
+        "temp FILE -> <stable>/bin/<name>; the shim is a FILE, the dir is never moved",
+    ),
+    (
+        "local_operator/update.py::_write_executable",
+        "<path>.unlink",
+        "cleanup of this function's own mkstemp temp FILE beside the shim",
+    ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
     # The install-provenance marker, written atomically after an upgrade. Both

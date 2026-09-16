@@ -331,8 +331,12 @@ _HINTS: dict[str, str] = {
 #:
 #: ``runtime-retired`` and ``install-mid-update`` are OURS to explain (a
 #: planned retirement that caught a live turn; a lazy import against a
-#: half-replaced install). ``runtime-shutdown`` covers an ordinary termination
-#: signal, ``runtime-killed`` a process that vanished without exiting cleanly,
+#: half-replaced install — the shape the PRE-generation layout produced, still
+#: reachable for a pip/pipx tree and for a process still running out of the old
+#: fixed uv-tool tree, and unreachable by construction once a process belongs to
+#: a generation, whose files are written once and never rewritten).
+#: ``runtime-shutdown`` covers an ordinary termination signal,
+#: ``runtime-killed`` a process that vanished without exiting cleanly,
 #: and ``owner-lost`` the viewer-side verdict that the runtime it was bound to
 #: stopped answering. ``user-stop`` is the one DELIBERATE cause, and it is what
 #: keeps a user's own cancel from being reported as an error.

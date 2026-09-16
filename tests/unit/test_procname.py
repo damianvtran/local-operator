@@ -719,6 +719,43 @@ class TestLaunchdJob:
         assert isinstance(job["ProgramArguments"], list)
         assert job["ProgramArguments"][0] == procname.BRAND
 
+    @pytest.mark.parametrize("role,module,template,fields,extra", ROLES)
+    def test_the_stable_shim_wins_over_the_per_venv_image(
+        self, role, module, template, fields, extra, branded, tmp_path, monkeypatch
+    ):
+        """A unit names a path that survives a flip and a prune.
+
+        The branded link lives inside ONE venv, with a libpython dylib pin
+        beside it, and a supervised unit re-executes its image on every restart:
+        naming that path is what made launchd respawn 113 processes into a tree
+        the installer had already emptied on 2026-09-15. When the machine has the
+        generation layout (``update.daemon_image()`` answers a path) the stable
+        shim is the image and the LABEL stays where it was — the two axes are
+        independent, which is the point of the branded shape.
+        """
+        shim = tmp_path / "bin" / "python3"
+        monkeypatch.setattr(procname, "supervised_image", lambda: shim)
+        label = procname.branded_argv0(template, **fields)
+        job = procname.launchd_job(module, *extra, label=label)
+        assert job == {
+            "Program": str(shim),
+            "ProgramArguments": [label, "-m", module, *extra],
+        }, role
+        assert procname.launchd_program(module, *extra) == [str(shim), "-m", module, *extra]
+
+    def test_no_generation_layout_keeps_the_branded_shape(self, monkeypatch, branded):
+        """A checkout or a pip install must render today's plist, unchanged.
+
+        ``update.daemon_image()`` answers ``None`` there by design, and this
+        pins that the fallback is the branded image rather than something new.
+        """
+        monkeypatch.setattr(procname, "supervised_image", lambda: None)
+        job = procname.launchd_job(
+            "local_operator.wakes.supervisor", label="Local Operator [wakes]"
+        )
+        assert job["Program"] == str(branded)
+        assert procname.launchd_program("local_operator.wakes.supervisor")[0] == str(branded)
+
 
 class TestResumeExecutableRegression:
     """``resume_executable`` must keep returning the ``lop`` LAUNCHER path.

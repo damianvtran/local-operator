@@ -404,6 +404,30 @@ line of prose for a background housekeeping event is the pattern
 overrule; if it does, the copy is one dim line:
 `updated to 0.49.9@f4a70b9` — never a warning.
 
+> **Amended by the generation layout (Phase 1, 2026-09-15).** This section is
+> still the whole rule, and one of its inputs has moved: the "install on disk"
+> this watch re-reads is now the POINTER's generation
+> (`update.disk_build`), not the tree this process loaded — because under the
+> layout that tree is written once and never rewritten, so a re-read of IT can
+> never report a move. `installed_build()` keeps "this process" semantics for
+> the boot sample (`_should_refresh` still compares boot against disk), and the
+> settle window is measured on the disk install's marker
+> (`buildwatch.disk_marker_prefix`).
+>
+> **The idle gate is unchanged, and that is now a design statement rather than a
+> compromise.** A busy runtime is no longer in danger of losing its files to an
+> installer — the incident that made this section urgent — so the gate's job is
+> convergence: a runtime serves the build it loaded until its own work is done,
+> then retires, and the next engage constructs on `current`. A
+> MIXED-GENERATION FLEET IS AN ACCEPTED STEADY STATE
+> (`design-install-generations.md` §4, `design-build-skew.md` §6). The busy
+> runtime's own copy of the install is intact throughout, so the
+> "a busy one never checks" line above no longer describes a hole; it describes
+> a schedule.
+>
+> **The boundary-latched refresh — a busy runtime re-checking when its turn
+> settles — is Phase 2** and is not part of this change.
+
 ### 3.3 Viewer-side belt: resume/bind against a stale idle runtime
 
 `_check_build_skew`'s C branch (`app.py:14957-15011`) becomes:

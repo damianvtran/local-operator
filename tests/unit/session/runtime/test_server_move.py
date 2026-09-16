@@ -101,6 +101,7 @@ async def test_a_move_does_NOT_require_a_newer_build_on_disk(monkeypatch) -> Non
     """The one term this op drops, and the whole reason it is not a reuse of
     ``refresh_if_idle`` — which would answer "kept: build on disk matches"."""
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: BOOT)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: BOOT)
     handle = MovableHandle(reason="")
     server, sent = _rig(handle)
     viewer = _conn("attach")
