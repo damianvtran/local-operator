@@ -139,9 +139,12 @@ def _entry(name: str) -> dict[str, Any]:
 
     # ``profile.instructions`` is the exact string the loader holds and
     # ``install_seed`` writes, so hashing it cannot describe a body the app
-    # would not run. What is published is a description of the INSTALLED role,
-    # which is also why tags come from ``seed_tags`` (the encoding install
-    # writes) and the category is ``ROLE_TAG`` (what install sets).
+    # would not run. The published fields are the seed's own two texts — this
+    # ``description`` is the short one the seed file declares, while
+    # ``when_to_use`` is what install persists into the registry's description
+    # field (``agent_profiles.py`` prefers the routing text) — and the tags and
+    # category come from ``seed_tags`` and ``ROLE_TAG``, the encodings install
+    # itself writes, so nothing here is a second spelling of an installed value.
     instructions = profile.instructions
     return {
         "name": name,

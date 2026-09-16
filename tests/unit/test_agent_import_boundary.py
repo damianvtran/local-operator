@@ -16,7 +16,12 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from local_operator.agents import AgentData, AgentRegistry, agent_name_key
+from local_operator.agents import (
+    MAX_AGENT_NAME_CHARS,
+    AgentData,
+    AgentRegistry,
+    agent_name_key,
+)
 
 
 def _archive(tmp_path: Path, metadata: object) -> Path:
@@ -76,7 +81,7 @@ def test_repeated_import_preserves_existing_profile_and_private_files(tmp_path):
     # The second import reuses the first's name, so it lands under a suffix and
     # says so. Without the note the caller reports a successful import of an
     # agent the user cannot find under the name they asked for.
-    assert second.name == f"{first.name} (2)"
+    assert second.name == f"{first.name}-2"
     assert renamed_from == first.name
 
 
@@ -110,22 +115,36 @@ def test_import_suffixes_a_name_already_held_in_ANY_case(tmp_path):
     first, _ = registry.import_agent(_named_archive(tmp_path / "a", "coder"))
     second, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
     assert first.name == "coder"
-    assert second.name == "Coder (2)"
+    assert second.name == "Coder-2"
     assert renamed_from == "Coder"
     # The existing row is untouched: a collision renames the newcomer, it never
     # overwrites or mutates what the operator already had.
     assert registry.get_agent_by_name("coder") == first
-    assert registry.get_agent_by_name("Coder (2)") == second
+    assert registry.get_agent_by_name("Coder-2") == second
+
+
+def _assert_publishable(name: str) -> None:
+    """The rules BOTH validators share (contract §1.4 / ``write_profile``).
+
+    A name the import invents has to satisfy these or the user ends up with a
+    row the hub refuses — and the UI's §6.3 pre-validation refuses it too, with
+    no explanation of where the name came from. Spelling them out here means a
+    future suffix cannot quietly introduce a space or exceed the cap.
+    """
+
+    assert 1 <= len(name) <= MAX_AGENT_NAME_CHARS, name
+    assert not any(char.isspace() or char in "/\\" for char in name), name
+    assert not name.startswith(("-", ".")) and not name.endswith(("-", ".")), name
 
 
 def test_import_takes_the_first_free_suffix(tmp_path):
-    """``(2)``, ``(3)`` … — including past a row that already looks suffixed.
+    """``-2``, ``-3`` … — including past a row that already looks suffixed.
 
     The suffix is appended to the incoming name VERBATIM, so an archive whose
-    published name is literally ``Scout (2)`` lands under ``Scout (2) (2)``
-    rather than the implementation trying to parse an existing suffix out of a
+    published name is literally ``Scout-2`` lands under ``Scout-2-2`` rather
+    than the implementation trying to parse an existing suffix out of a
     user-authored name. What matters here is the fourth line: the counter has to
-    notice that ``Scout (2)`` is taken and skip to ``Scout (3)``.
+    notice that ``Scout-2`` is taken and skip to ``Scout-3``.
     """
 
     registry = AgentRegistry(tmp_path / "config")
@@ -133,12 +152,63 @@ def test_import_takes_the_first_free_suffix(tmp_path):
     for index, incoming in (
         ("a", "Scout"),
         ("b", "Scout"),
-        ("c", "Scout (2)"),
+        ("c", "Scout-2"),
         ("d", "Scout"),
     ):
         imported, _ = registry.import_agent(_named_archive(tmp_path / index, incoming))
         names.append(imported.name)
-    assert names == ["Scout", "Scout (2)", "Scout (2) (2)", "Scout (3)"]
+    assert names == ["Scout", "Scout-2", "Scout-2-2", "Scout-3"]
+    for name in names:
+        _assert_publishable(name)
+
+
+def test_the_suffix_is_a_hyphen_so_the_row_can_still_be_published(tmp_path):
+    """The contract's ``" (N)"`` spelling was wrong for both validators.
+
+    A space is refused by the hub's name rule (§1.4) and by ``write_profile``,
+    so a suffixed row spelled with one could never be published: the user pulls
+    an agent, holds a name that collides, and is handed something the hub will
+    not take. The note the route returns is what the UI turns into "Imported as
+    \"Coder-2\" — you already have an agent called \"Coder\"".
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    registry.import_agent(_named_archive(tmp_path / "a", "Coder"))
+    imported, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
+    assert imported.name == "Coder-2"
+    assert renamed_from == "Coder"
+    assert " " not in imported.name
+    _assert_publishable(imported.name)
+
+
+def test_a_name_at_the_cap_truncates_the_BASE_so_the_suffix_survives(tmp_path):
+    """128 characters plus ``-2`` is refused by the hub, so the base gives way.
+
+    A hub-legal name is allowed to be exactly :data:`MAX_AGENT_NAME_CHARS` long,
+    so appending a suffix to one overflows the cap by the length of the suffix.
+    Truncating the suffix to fit would re-create the collision the suffix exists
+    to avoid, so the base is cut instead and the result stays a legal name.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    base = "c" * MAX_AGENT_NAME_CHARS
+    assert len(base) == MAX_AGENT_NAME_CHARS
+    first, _ = registry.import_agent(_named_archive(tmp_path / "a", base))
+    assert first.name == base
+
+    second, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", base))
+    assert renamed_from == base
+    assert len(second.name) == MAX_AGENT_NAME_CHARS
+    assert second.name == base[: MAX_AGENT_NAME_CHARS - 2] + "-2"
+    # The published name's PREFIX is what survives, so the renamed row still
+    # reads as the agent the user asked for.
+    assert second.name[:-2] == base[:-2]
+    _assert_publishable(second.name)
+
+    third, _ = registry.import_agent(_named_archive(tmp_path / "c", base))
+    assert len(third.name) == MAX_AGENT_NAME_CHARS
+    assert third.name == base[: MAX_AGENT_NAME_CHARS - 2] + "-3"
+    _assert_publishable(third.name)
 
 
 def test_resolve_import_name_is_pure_and_reports_the_incoming_name(tmp_path):
@@ -149,7 +219,7 @@ def test_resolve_import_name_is_pure_and_reports_the_incoming_name(tmp_path):
     assert registry.resolve_import_name("Scout") == ("Scout", None)
     registry.import_agent(_named_archive(tmp_path / "a", "Scout"))
     before = len(registry.list_agents())
-    assert registry.resolve_import_name("scout") == ("scout (2)", "scout")
+    assert registry.resolve_import_name("scout") == ("scout-2", "scout")
     assert len(registry.list_agents()) == before
 
 

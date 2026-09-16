@@ -290,6 +290,32 @@ def agent_name_key(name: str) -> str:
     return " ".join(normalized.split())
 
 
+#: The longest legal agent name, and the ONE bound two validators already
+#: agree on: the hub's instruction-set validator (cross-repo contract §1.4,
+#: enforced with 422 ``invalid_instruction_set``) and this repo's own profile
+#: routes (``server/routes/desktop_profiles.py`` — ``max_length=128`` on both
+#: the create and the mutation payloads). A name this side invents has to fit
+#: both, or a pull produces a row the user can never publish.
+MAX_AGENT_NAME_CHARS = 128
+
+
+def _collision_free_name(name: str, suffix: int) -> str:
+    """The ``<base>-<n>`` candidate, truncated to stay within the name cap.
+
+    A module-level function, not a closure, because the name it produces is
+    tested against the registry and then stored: one construction path is what
+    keeps the tested name and the stored name from drifting apart.
+
+    The suffix is never truncated. ``MAX_AGENT_NAME_CHARS - len(tail)`` is at
+    least 1 for any suffix a registry could reach (a 127-digit suffix would
+    need more rows than the collection can hold), so the result is a legal name
+    at the cap rather than one over it.
+    """
+
+    tail = f"-{suffix}"
+    return f"{name[: MAX_AGENT_NAME_CHARS - len(tail)]}{tail}"
+
+
 class AgentRegistry:
     """
     Registry for managing agents and their conversation histories.
@@ -950,12 +976,24 @@ class AgentRegistry:
         The suffix is visible, editable, and reversible, which is why the
         contract chooses it (cross-repo contract §3.6).
 
-        Collisions are found with :func:`agent_name_key`, so ``coder`` blocks
-        an incoming ``Coder`` — the local namespace stays case-sensitive, but
-        two rows whose keys collide are exactly the pair the resolver cannot
-        tell apart. The candidate name is built from the incoming name
-        VERBATIM (not from its key) so the reported and stored name is the one
-        the archive published.
+        The suffix is a HYPHEN (``Coder-2``), not the ``" (N)"`` spelling the
+        contract's prose used. That spelling is refused by BOTH validators in
+        the standard: the hub's name rule forbids whitespace (§1.4) and
+        ``write_profile`` refuses it too, so a ``"Coder (2)"`` row could
+        never be published — the pull would hand the user an agent the hub will
+        not take. Collisions are found with :func:`agent_name_key`, so ``coder``
+        blocks an incoming ``Coder``: the local namespace stays case-sensitive,
+        but two rows whose keys collide are exactly the pair the resolver cannot
+        tell apart. The candidate is built from the incoming name VERBATIM (not
+        from its key), so the stored and reported name keeps the published one.
+
+        The result always fits :data:`MAX_AGENT_NAME_CHARS`, because the cap is
+        the second half of the same defect: a hub-legal 128-character name plus
+        a suffix is 130 characters, which the hub refuses and the UI's §6.3
+        pre-validation would then reject with no explanation. The truncation
+        cuts the BASE and keeps the suffix — the suffix is what makes the name
+        free, so losing part of it would re-create the collision it exists to
+        avoid.
 
         One implementation for both import paths: the legacy ZIP import and
         the hub pull have to agree about what "already exists" means, or the
@@ -964,8 +1002,10 @@ class AgentRegistry:
 
         key = agent_name_key(name)
         if not key:
-            # Nothing to compare against: a blank name is rejected by the
-            # model, so treating it as a collision here would invent one.
+            # Nothing to compare against. ``AgentData.name`` is a bare
+            # required ``str``, so a blank or whitespace-only name really does
+            # import; what it must not do is "collide" with every other blank
+            # one, which is what returning a suffix here would mean.
             return name, None
 
         self._refresh_if_needed()
@@ -974,9 +1014,11 @@ class AgentRegistry:
             return name, None
 
         suffix = 2
-        while agent_name_key(f"{name} ({suffix})") in taken:
+        candidate = _collision_free_name(name, suffix)
+        while agent_name_key(candidate) in taken:
             suffix += 1
-        return f"{name} ({suffix})", name
+            candidate = _collision_free_name(name, suffix)
+        return candidate, name
 
     def list_agents(self) -> List[AgentData]:
         """
@@ -1769,7 +1811,7 @@ class AgentRegistry:
         For security, serialized execution context (`context.pkl`) is not imported.
 
         The published name is kept when the registry does not already hold it,
-        and suffixed (``Coder (2)``) when it does — see
+        and suffixed (``Coder-2``) when it does — see
         :meth:`resolve_import_name` for why a collision renames rather than
         refuses (cross-repo contract §3.6).
 
@@ -1780,7 +1822,7 @@ class AgentRegistry:
             Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
                 the name it was renamed FROM when a local agent already held
                 the published name. The caller reports that; it is what lets
-                the UI say "Imported as \"Coder (2)\" — you already have an
+                the UI say "Imported as \"Coder-2\" — you already have an
                 agent called \"Coder\"" instead of appearing to have imported
                 something the user cannot find under the name they asked for.
 

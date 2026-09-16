@@ -265,7 +265,7 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
     # here: the import lands under the contract's suffix and the response says
     # what it was renamed from, instead of appearing under a name it does not
     # have (contract §3.6).
-    assert imported_agent.name == f"{original_agent.name} (2)"
+    assert imported_agent.name == f"{original_agent.name}-2"
     assert import_data["result"]["renamed_from"] == original_agent.name
     assert imported_agent.description == original_agent.description
     assert imported_agent.security_prompt == original_agent.security_prompt
