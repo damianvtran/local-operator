@@ -120,6 +120,36 @@ def _build_tree(venv: Path, bin_dir: Path, version: str) -> None:
     (dist / "entry_points.txt").write_text(entry_points, encoding="utf-8")
 
 
+def _skip_as_root() -> None:
+    """Skip a file-mode test when this process ignores file modes."""
+    if getattr(os, "geteuid", lambda: 1)() == 0:  # pragma: no cover — root ignores modes
+        pytest.skip("file modes do not bind this process")
+
+
+def _clear_inside_generation(target: Path, generation: Path) -> None:
+    """Remove a directory ONLY if it is a real directory inside ``generation``.
+
+    WHY A GUARD IN A TEST HELPER (review round 3, R3-4). ``_real_generation``
+    below deletes the copied tree's ``site-packages`` so it can be replaced by a
+    link, and on 2026-09-16 the fixture was momentarily changed so that
+    ``install_root`` was a symlink at this checkout: the glob then resolved
+    THROUGH it and the delete took this worktree's own
+    ``.venv/lib/python3.12/site-packages`` with it. A venv had to be rebuilt. The
+    containment check and the symlink refusal turn that shape into a loud failure
+    instead of a lost environment.
+
+    The removal lives in here rather than at the call site so a future edit cannot
+    check and then delete a different path.
+    """
+    if target.is_symlink():
+        raise AssertionError(f"refusing to remove the symlink {target}")
+    if not target.is_dir():
+        raise AssertionError(f"refusing to remove {target}: not a directory")
+    if not target.resolve().is_relative_to(generation.resolve()):
+        raise AssertionError(f"refusing to remove {target}: outside {generation}")
+    shutil.rmtree(target)
+
+
 #: What the child prints: the same call a runtime makes to stamp
 #: ``SessionRecord.install_root``. Run in a child rather than imported here
 #: because the value under test is what a RUNNING process reports.
@@ -143,7 +173,10 @@ def _real_generation(name: str, version: str = "0.55.10") -> Path:
     install_root = generation / "tools" / "local-operator"
     _build_tree(install_root, generation / "bin", version)
     site_packages = next(install_root.glob("lib/python*/site-packages"))
-    shutil.rmtree(site_packages)
+    # ``install_root`` must NOT be a symlink: the glob above would follow it out
+    # of the generation, and the removal below would delete this checkout's venv
+    # instead (see ``_remove_inside_generation`` — it happened, 2026-09-16).
+    _clear_inside_generation(site_packages, install_root)
     os.symlink(next(Path(sys.prefix).glob("lib/python*/site-packages")), site_packages)
     return install_root
 
@@ -152,10 +185,13 @@ def _reported_root(interpreter: Path, cwd: Path) -> Path:
     """``process_install_root()`` exactly as a child of ``interpreter`` reports it.
 
     ``__PYVENV_LAUNCHER__`` is stripped unconditionally rather than checked for:
-    this machine's ``lop`` exports it to its children, and an inherited value
-    makes a macOS child report the launcher's prefix instead of its own
-    (``docs/design-install-generations.md`` §3.2). ``cwd`` is the temp directory
-    the caller owns, so neither child can satisfy the import by accident through
+    it is exported down the process tree by the launcher on macOS, and an
+    inherited value makes the child report the LAUNCHER's prefix instead of its
+    own — observed first-hand while measuring a real ``lop`` session's children,
+    not read out of a doc (review round 3, R3-5: an earlier version of this
+    comment cited a section that does not discuss the variable, so the claim is
+    recorded here where the strip is). ``cwd`` is the temp directory the caller
+    owns, so neither child can satisfy the import by accident through
     ``sys.path[0]`` pointing at the checkout.
     """
     env = {key: value for key, value in os.environ.items() if key != "__PYVENV_LAUNCHER__"}
@@ -429,29 +465,95 @@ class TestInstallIntoGeneration:
             update_mod.install_into_generation(runner=_explode, version="0.52.0")
         assert list(update_mod.generations_dir().iterdir()) == []
 
-    def test_a_script_that_cannot_be_repointed_fails_the_migration(
+    def test_a_read_only_bin_fails_the_migration_and_takes_the_copy_with_it(
         self, home: Path, tmp_path: Path
     ) -> None:
-        """R2-4: the migration's one promise is that the copy runs from the copy.
+        """R2-4 (R3-1): the refusal, reached by the shape that actually reaches it.
 
-        A copy whose ``lop`` could not be re-pointed must not flip the pointer and
-        report success: the operator would be left running the legacy venv through
-        a "successful" migration, which is R-1's symptom with a success message.
-        The copy is removed on the way out, so the machine is as it was.
+        The migration's one promise is that the copy runs from the copy: a copy
+        whose console scripts could not be re-pointed must not flip the pointer and
+        print success, because the operator would then be running the legacy venv
+        through a "successful" migration — R-1's symptom with a success message.
 
-        Permissions, rather than a monkeypatched ``_rebind_scripts``, because the
-        failure being tested is exactly the one a real migration meets.
+        THE READ-ONLY THING IS THE ``bin`` DIRECTORY, not the script. A ``chmod
+        000`` on the legacy script never arrives here: ``copytree`` opens the
+        source for reading, so the same permission stops the COPY and the test
+        passes on a different refusal that merely shares the word "lop" (review
+        round 3, R3-1 — measured, and it passed with this refusal disabled).
+        ``copytree`` writes the files before ``copystat`` tightens the copy's
+        directory mode, so a 0555 source directory copies fine and the REBINDING
+        write is what fails, which is the branch this covers.
+
+        Both halves of the promise are asserted, because both were wrong in the
+        last round: the refusal names the scripts, and the copy is REAL gone —
+        ``shutil.rmtree`` cannot empty a 0555 directory, so the second assertion
+        fails without ``_remove_tree``'s chmod-and-retry (review round 3, R3-2).
         """
-        if getattr(os, "geteuid", lambda: 1)() == 0:  # pragma: no cover — root ignores the mode
-            pytest.skip("file modes do not bind this process")
+        _skip_as_root()
         legacy = tmp_path / "legacy-venv"
         _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
-        os.chmod(legacy / "bin" / "lop", 0o000)
-        with pytest.raises(UpdateError) as refused:
-            update_mod.clone_into_generation(legacy)
+        os.chmod(legacy / "bin", 0o555)
+        try:
+            with pytest.raises(UpdateError) as refused:
+                update_mod.clone_into_generation(legacy)
+        finally:
+            # So pytest's own cleanup of ``tmp_path`` is not fighting the mode.
+            os.chmod(legacy / "bin", 0o755)
+        assert "could not re-point" in str(refused.value), refused.value
         assert "lop" in str(refused.value), refused.value
         assert not update_mod.pointer_path().is_symlink(), "the pointer must not move"
-        assert not list(update_mod.generations_dir().glob("*")), "no half-built generation"
+        assert not list(
+            update_mod.generations_dir().glob("*")
+        ), "the refused copy must be gone, not left on disk"
+
+    def test_remove_tree_says_whether_the_tree_is_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R3-2's second half: a caller that PRINTS a removal must not be lied to.
+
+        ``prune_generations`` reports the paths it removed, so what
+        ``_remove_tree`` answers is what keeps a ``removed:`` line honest when a
+        tree cannot be deleted. The read-only shape is the one that could not be:
+        that is why write bits are restored and the call retried.
+        """
+        _skip_as_root()
+        read_only = tmp_path / "read-only"
+        (read_only / "bin").mkdir(parents=True)
+        (read_only / "bin" / "lop").write_text("#!/bin/sh\n", encoding="utf-8")
+        os.chmod(read_only / "bin", 0o555)
+        assert update_mod._remove_tree(read_only) is True
+        assert not read_only.exists(), "the write-bit retry must empty a read-only tree"
+
+        def _refuse(*_args: object, **_kwargs: object) -> None:
+            raise OSError("still there")
+
+        stubborn = tmp_path / "stubborn"
+        stubborn.mkdir()
+        monkeypatch.setattr(update_mod.shutil, "rmtree", _refuse)
+        assert update_mod._remove_tree(stubborn) is False
+        assert stubborn.exists()
+
+    def test_rebind_reports_the_scripts_it_could_not_rewrite(self, tmp_path: Path) -> None:
+        """R2-4: the helper's report, asserted at the call site rather than through a refusal.
+
+        ``clone_into_generation`` can only act on what this returns, so the report
+        is worth asserting directly: a silent "[]" here is the whole defect.
+        """
+        _skip_as_root()
+        source, copy = tmp_path / "source", tmp_path / "copy"
+        for root in (source, copy):
+            (root / "bin").mkdir(parents=True)
+        for root in (source, copy):
+            # The COPY names the SOURCE, which is what a verbatim copy of a real
+            # install looks like and why the rewrite has anything to do.
+            (root / "bin" / "lop").write_text(f"#!{source}/bin/python3\n", encoding="utf-8")
+        os.chmod(copy / "bin", 0o555)
+        try:
+            rewritten, failed = update_mod._rebind_scripts(copy, source)
+        finally:
+            os.chmod(copy / "bin", 0o755)
+        assert rewritten == []
+        assert [path.name for path in failed] == ["lop"]
 
     def test_a_flip_that_cannot_happen_is_a_refusal_and_leaves_no_tree(
         self, home: Path, monkeypatch: pytest.MonkeyPatch

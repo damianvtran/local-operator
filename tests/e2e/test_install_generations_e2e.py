@@ -21,15 +21,18 @@ So these cells drive the PRODUCTION machinery around a real runtime:
   that resolves the generation ``current`` names — a console script the fixture
   writes with an absolute shebang, exactly as ``uv`` does.
 
-Each generation's venv is a symlink to this checkout's venv, which is what makes
-the cells cheap: the process really does import from
-``<stable>/generations/<id>/tools/local-operator/...``, which the cells assert
-from the CHILD's own record (``SessionRecord.install_root`` — the runtime's
+Each generation is a REAL directory (:func:`_plain_generation`) whose
+``lib/python*/site-packages`` is a symlink to this checkout's, which is what makes
+the cells cheap AND the assertions honest: the child really imports from
+``<stable>/generations/<id>/tools/local-operator/...``, and because its venv
+directory is not a symlink, its own record names that generation — the premise
+the busy-runtime cell asserts from ``SessionRecord.install_root`` (the runtime's
 report of ``sys.prefix``), never from ``ps``: the runners' ``ps`` prints argv
 (truncated at 80 columns) on Linux and the resolved image on macOS, so neither
-shows a launch path (review round 1, R-4). Nothing in the install path needs a
-136 MB copy to be exercised. The
-symlink is never written to — the installs only ever create NEW generations.
+shows a launch path (review rounds 1-3, R-4/R2-1). Nothing in the install path
+needs a 136 MB copy to be exercised. Only the linked ``site-packages`` is shared
+with the checkout, and nothing in these cells writes to it — the installs only
+ever create NEW generations.
 
 Isolation follows ``AGENTS.md``'s rule for every cell here: ``HOME`` and the
 config dir are per-test, and the child environment is rebuilt with EVERY

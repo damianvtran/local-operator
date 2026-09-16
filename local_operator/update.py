@@ -1407,16 +1407,54 @@ def _generation_env(generation: Path) -> dict[str, str]:
     }
 
 
-def _remove_tree(path: Path) -> None:
-    """Best-effort removal of a tree this module owns.
+def _remove_tree(path: Path) -> bool:
+    """Best-effort removal of a tree this module owns; ``True`` when it is gone.
 
-    Never raises: it runs on the failure paths of an install, where the error
-    the caller is about to report is the one worth keeping.
+    Never raises: it runs on the failure paths of an install, where the error the
+    caller is about to report is the one worth keeping.
+
+    IT RESTORES WRITE BITS AND RETRIES, because the trees this is called on can be
+    read-only. The shape is not hypothetical: a migration from a ``bin/`` without
+    write permission fails the rebinding step (that is the shape the refusal is
+    for), and ``shutil.rmtree`` needs write permission on every directory it
+    empties — so the refusal promising "the copy is removed" left the ~136 MB copy
+    behind, and ``lop install prune``, which removes through this same helper,
+    reported such a generation as removed while it stayed on disk (review round 3,
+    R3-2). The retry is scoped to the tree being deleted and only ever ADDS write
+    permission, which is what makes it safe in a function that must not raise.
+
+    The return value exists for the same reason: a caller that PRINTS a removal
+    has to know whether one happened.
     """
+    if not path.exists() and not path.is_symlink():
+        return True
+
+    def _with_write_bits(
+        function: Callable[[str], object], target: str, error: BaseException
+    ) -> None:
+        # ``rmtree`` hands us the call that failed. For an unlink inside a
+        # directory that is not writable, the missing bit is the PARENT's, so both
+        # it and the target get their owner bits back before the one retry.
+        for candidate in {Path(target).parent, Path(target)}:
+            try:
+                os.chmod(candidate, os.stat(candidate).st_mode | 0o700)
+            except OSError:  # pragma: no cover — gone, or not ours to chmod
+                logger.debug("could not make %s writable", candidate, exc_info=error)
+        try:
+            function(target)
+        except OSError:
+            logger.debug("could not remove %s", target, exc_info=error)
+
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(path, onexc=_with_write_bits)
     except OSError:
         logger.debug("could not remove %s", path, exc_info=True)
+    if path.exists() or path.is_symlink():
+        # Announced rather than swallowed: every caller's message about this tree
+        # (a refusal, a ``removed:`` line) claims it is gone.
+        logger.warning("could not remove %s; it is still on disk", path)
+        return False
+    return True
 
 
 def flip_pointer(generation: Path) -> None:
@@ -2141,8 +2179,8 @@ def prune_generations(
                 continue
         elif _real(path) not in removable:
             continue
-        _remove_tree(path)
-        removed.append(path)
+        if _remove_tree(path):
+            removed.append(path)
     return removed
 
 

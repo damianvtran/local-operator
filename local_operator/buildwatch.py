@@ -293,9 +293,10 @@ def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
 
     A DIFFERENT build than the one announced is NOT ``None``: it is the move the
     caller re-announces onto rather than leaving for a build that has already been
-    replaced. A build that is strictly OLDER than the boot stamp is ``None`` — see
-    :func:`is_older` — because leaving for a lagging pointer would walk the fleet
-    backwards (review round 1, R-3).
+    replaced. A build strictly older than the boot stamp **by version** is
+    ``None`` — see :func:`is_older`, which orders versions only, so an equal
+    version with a differing ref is still a move — because leaving for a lagging
+    pointer would walk the fleet backwards (review round 1, R-3; round 3, R3-6).
     """
     if boot is None:
         return None
