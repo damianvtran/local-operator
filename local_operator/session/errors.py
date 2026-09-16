@@ -288,12 +288,13 @@ class SessionStoreUnavailable(OSError):
 
     WHY AN ``OSError`` SUBCLASS rather than a plain ``Exception``: every call
     site that already TOLERATES an unreadable store -- the phone daemon's
-    search and listing, the CLI's ``/resume`` picker, the retention policy --
-    tolerates it with ``except OSError``, and a parallel hierarchy would
-    silently change their catch shape. Subclassing leaves those tolerances
-    exactly as they were, while giving the sites that must NOT tolerate it
-    (the catalogue, whose answer a UI adopts as membership) something typed to
-    catch and map to a retryable sentence instead of an empty listing.
+    search, the CLI's ``/resume`` picker, the retention policy -- tolerates it
+    with ``except OSError``, and a parallel hierarchy would silently change
+    their catch shape. Subclassing leaves those tolerances exactly as they
+    were, while giving the sites that must NOT tolerate it (the catalogue and
+    the phone's durable listing, whose answers a UI adopts as membership)
+    something typed to catch and map to a retryable sentence instead of an
+    empty listing.
 
     The message names no directory: this one is not echoed to a client -- the
     list route answers with its own vetted 503 sentence, the rule the module

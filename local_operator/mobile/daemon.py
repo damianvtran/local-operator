@@ -101,6 +101,21 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 #: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
 SUMMARIES_CACHE_TTL_S = 1.0
 
+#: The wire name for "the durable half of this listing could not be re-read".
+#:
+#: The phone's conversation list is MEMBERSHIP: the client replaces everything
+#: it is showing with this frame, so a read that failed may not be published as
+#: an empty list any more than it may be on the desktop sidebar. When the scan
+#: cannot be walked the daemon now serves the last listing it actually read and
+#: names the failure here, so a client can say "couldn't refresh" instead of
+#: rendering a confident negative.
+#:
+#: DELIBERATELY ITS OWN WORD, not one of ``session.catalog.DECORATION_SOURCES``:
+#: those name decorations whose failure costs a MARK while the rows stand, and
+#: this names a failure of the read the rows THEMSELVES came from. A renderer
+#: that treated the two as one vocabulary would under-report this one.
+DEGRADED_DURABLE_LISTING = "sessions"
+
 
 def _durable_fold_cache():
     """The daemon-wide cache of incremental durable folds (see
@@ -285,6 +300,19 @@ class SessionTable:
         self._durable_rows_cache: dict[str, Any] | None = None
         self._durable_rows_at = 0.0
         self._durable_rows_task: asyncio.Task[dict[str, Any]] | None = None
+        # The last durable listing that was actually READ, kept SEPARATELY from
+        # the cache above because the two stop being the same question the
+        # moment a read fails: ``_durable_rows_cache`` is cleared on every
+        # structural change (that is what invalidation means), while this is
+        # the fallback a failed re-read is answered from -- a failed read must
+        # never be published as an empty conversation list, which is the defect
+        # this pair exists to stop. Only ever replaced by a read that succeeded.
+        self._durable_rows_last_good: dict[str, Any] | None = None
+        #: Whether the most recent durable re-read FAILED. Published beside the
+        #: rows (see ``listing_degraded``) so the marker and the rows cannot
+        #: disagree: it is set exactly on the failed path and cleared on the
+        #: next successful one.
+        self._durable_listing_degraded = False
         self._summaries_cache: list[dict[str, Any]] | None = None
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
@@ -302,10 +330,13 @@ class SessionTable:
         """
         self._durable_rows_cache = None
         self._durable_rows_at = 0.0
+        # ``_durable_rows_last_good`` is deliberately NOT cleared: this method
+        # is about the cache being STALE, and a re-read that then fails has to
+        # be answerable from the last true listing rather than from nothing.
         self._summaries_cache = None
         self._summaries_at = 0.0
 
-    async def _refresh_durable_rows(self) -> dict[str, Any]:
+    async def _refresh_durable_rows(self) -> dict[str, Any] | None:
         """Single-flight TTL refresh of the durable listing rows.
 
         Runs ``recent_session_rows`` OFF the event loop: it stats and reads a
@@ -313,9 +344,26 @@ class SessionTable:
         under contention — blocking work that froze every SSE stream on this
         loop while it ran. A concurrent caller joins the in-flight task
         instead of starting a second scan.
+
+        ``strict=True``, because this listing is MEMBERSHIP on the phone: the
+        client replaces its conversation list with this frame, so a store that
+        cannot be walked must not be published as "you have no conversations".
+        The scan raises instead, and the failure is answered with the last
+        listing that WAS read (``_durable_rows_last_good``) plus the marker
+        ``listing_degraded`` reports — never with an empty list. That is the
+        same contract the desktop route states for its own refusal: keep the
+        rows you have and retry; the difference is only that this side holds
+        the rows, so it can honour it itself.
+
+        Returns ``None`` when there is nothing to serve: the read failed and no
+        listing has ever been read on this daemon (a cold start against a store
+        that cannot be opened). The caller falls back to an empty listing, which
+        is the only answer left -- and the marker says so, so a client can tell
+        it apart from a store with no conversations in it.
         """
         from local_operator.paths import config_dir
         from local_operator.resume import recent_session_rows
+        from local_operator.session.errors import SessionStoreUnavailable
 
         task = self._durable_rows_task
         if task is not None and not task.done():
@@ -340,7 +388,7 @@ class SessionTable:
             # cost 24.6% of the picker's open on a 151-session store.
             rows = {
                 row.id: row._replace(created_at=session_created_at(directory / "sessions" / row.id))
-                for row in recent_session_rows(directory, 100)
+                for row in recent_session_rows(directory, 100, strict=True)
             }
             dates = {}
             for session_id in live_ids - rows.keys():
@@ -356,15 +404,42 @@ class SessionTable:
         self._durable_rows_task = task
         try:
             rows = await task
+        except SessionStoreUnavailable:
+            # A store that exists but could not be walked. Logged (the operator
+            # could not otherwise reconstruct why a phone list went quiet) and
+            # answered from the last listing that was read -- never from an
+            # empty one.
+            logger.warning("phone listing could not read the session store", exc_info=True)
+            if self._durable_rows_task is task:
+                self._durable_rows_task = None
+            self._durable_listing_degraded = True
+            # Stamp the attempt: the TTL is a backoff here as much as a
+            # freshness bound, or a store that stays unreadable would be
+            # rescanned on every repaint of every phone screen.
+            self._durable_rows_at = time.monotonic()
+            return self._durable_rows_last_good
         except BaseException:
             # A failed scan must not poison the shared task: the next caller
             # retries instead of awaiting a raised future forever.
             if self._durable_rows_task is task:
                 self._durable_rows_task = None
             raise
+        self._durable_listing_degraded = False
         self._durable_rows_cache = rows
         self._durable_rows_at = time.monotonic()
+        self._durable_rows_last_good = rows
         return rows
+
+    def listing_degraded(self) -> list[str]:
+        """What could not be read for the listing being published.
+
+        Always a list, so a client reads it without a presence check, and empty
+        when the durable half was read on the most recent attempt. The values
+        are the phone's own (see ``DEGRADED_DURABLE_LISTING``) rather than the
+        desktop's decoration names, because this reports the read the ROWS came
+        from while those report decorations on rows that were read.
+        """
+        return [DEGRADED_DURABLE_LISTING] if self._durable_listing_degraded else []
 
     async def summaries(self) -> list[dict[str, Any]]:
         """Reconcile live generations with durable conversations by session id.
@@ -385,8 +460,18 @@ class SessionTable:
 
         async def _build() -> list[dict[str, Any]]:
             rows = self._durable_rows_cache
-            if rows is None or time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
+            # The timestamp alone decides freshness, and it is stamped by a
+            # FAILED attempt too: a store that cannot be walked must not be
+            # rescanned on every repaint of every phone screen, and the fallback
+            # below is what answers in the meantime.
+            if time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
                 rows = await self._refresh_durable_rows()
+            if rows is None:
+                # Nothing was ever read and the read is failing now, so there is
+                # no listing to serve — empty, with ``listing_degraded`` naming
+                # the read that failed so a client need not render that as "you
+                # have no conversations".
+                rows = self._durable_rows_last_good or {}
             from local_operator.session.attention import AttentionStore
 
             identities = {f"session/{session_id}" for session_id in rows}
@@ -2333,11 +2418,29 @@ def build_app(daemon: MobileDaemon):
         response.headers["Cache-Control"] = "no-store"  # the SPA shell; assets are hashed
         return response
 
+    async def _list_frame() -> dict[str, Any]:
+        """The session-list payload, in ONE place because it goes out two ways.
+
+        ``/api/sessions`` and the ``sessions`` event frame are the same answer
+        on two transports, and the phone's home screen reads the SECOND — so a
+        marker added to only one of them would be a marker the screen never
+        sees. The name is the thing a client keys on, so it is spelled once.
+
+        ``degraded`` is present on every frame, empty when the durable half was
+        read: the same additive shape the desktop listing uses, so a client can
+        tell "nothing to report" from "this server is too old to know" (see
+        ``DEGRADED_DURABLE_LISTING``).
+        """
+        return {
+            "sessions": await daemon.table.summaries(),
+            "degraded": daemon.table.listing_degraded(),
+        }
+
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
             return denied
-        return JSONResponse({"sessions": await daemon.table.summaries()})
+        return JSONResponse(await _list_frame())
 
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
@@ -2415,11 +2518,11 @@ def build_app(daemon: MobileDaemon):
 
         async def stream():
             try:
-                yield _sse("sessions", {"sessions": await daemon.table.summaries()})
+                yield _sse("sessions", await _list_frame())
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("sessions", {"sessions": await daemon.table.summaries()})
+                        yield _sse("sessions", await _list_frame())
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
