@@ -173,7 +173,9 @@ def render_plist(config_dir: Path) -> dict[str, object]:
         # what makes installing a supervised unit notify 'python3 is running in
         # the background'. The trade-off that shape accepts is recorded in
         # ``procname.launchd_job``; with no link to plant this is byte-for-byte
-        # the plist this function wrote before.
+        # the plist this function wrote before. On a machine with the generation
+        # layout ``Program`` is the stable shim instead (see
+        # ``procname.supervised_image``) and the label is unchanged.
         **procname.launchd_job(
             "local_operator.wakes.supervisor",
             label=procname.branded_argv0(procname.LABEL_WAKES),

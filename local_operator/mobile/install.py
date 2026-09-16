@@ -128,6 +128,10 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     is running in the background'. The trade-off that shape accepts is recorded
     in ``procname.launchd_job``; a machine where no link can be planted gets
     byte-for-byte this plist as it was before.
+
+    ``Program`` is the STABLE shim on a machine with the generation layout, and
+    the role label does not move with it — see ``procname.supervised_image`` for
+    why a path inside this venv is unsafe for a unit launchd may restart.
     """
     return {
         "Label": LABEL,

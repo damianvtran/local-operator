@@ -45,6 +45,7 @@ def _conn(kind: str) -> _ClientConn:
 def stale(monkeypatch):
     """The server booted on OLD; the disk now carries NEW, settled."""
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: NEW)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: NEW)
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
     monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
 
@@ -116,6 +117,7 @@ async def test_a_busy_stale_runtime_is_kept(stale) -> None:
 @pytest.mark.asyncio
 async def test_a_matching_build_is_kept(stale, monkeypatch) -> None:
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: OLD)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: OLD)
     handle = RefreshableHandle(reason="")
     server, sent = _rig(handle)
     viewer = _conn("attach")
@@ -151,6 +153,7 @@ async def test_an_unsettled_install_is_kept(stale, monkeypatch) -> None:
     # And the genuinely-matching shape still answers as it always did, from the
     # same code path: the distinction is the settle window, not a new default.
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: OLD)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: OLD)
     assert await _ask(server, sent, viewer) == "kept: build on disk matches"
     assert handle.stopped is False
 

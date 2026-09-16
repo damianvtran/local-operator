@@ -106,6 +106,7 @@ def disk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     state: dict[str, Any] = {"build": OLD, "age": 999.0}
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: state["build"])
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: state["build"])
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: state["age"])
     monkeypatch.delenv("LOP_BUILD_SETTLE_S", raising=False)
     monkeypatch.delenv("LOP_BUILD_STAGGER_S", raising=False)
@@ -280,6 +281,7 @@ async def test_no_boot_stamp_means_no_watch(disk: dict[str, Any], monkeypatch) -
         raise RuntimeError("no dist-info")
 
     monkeypatch.setattr(update_mod, "installed_build", _unreadable)
+    monkeypatch.setattr(update_mod, "disk_build", _unreadable)
     app, publisher = FakeApp(), FakePublisher(_record())
     task, stop, exited = await _start(app, publisher)
 

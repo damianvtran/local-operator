@@ -288,7 +288,13 @@ def _under_real_store(candidate: object) -> bool:
         else:
             return False
         resolved = path.resolve()
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, RuntimeError):
+        # ``RuntimeError`` is what ``Path.resolve`` raises for a symlink LOOP,
+        # and this guard is deciding whether a path is the real store — a
+        # question it must answer rather than raise on. Without this, a test that
+        # hands a looping link to ``shutil.rmtree`` dies inside the guard with a
+        # traceback about the harness, not the behaviour under test (found while
+        # covering ``update._remove_tree``'s own loop case, review round 5 R5-2).
         return False
     return resolved == _REAL_STORE or _REAL_STORE in resolved.parents
 

@@ -789,6 +789,39 @@ def spawn_identity(label: str, **fields: object) -> tuple[str, str | None]:
     return branded_argv0(label, **fields), str(link)
 
 
+def supervised_image() -> Path | None:
+    """The STABLE interpreter a supervised unit should name, or ``None``.
+
+    WHY SUPERVISED UNITS NEED A DIFFERENT ANSWER from the one
+    :func:`spawn_identity` and :func:`launchd_job` gave before. A unit is
+    executed again on every restart, hours or weeks after it was installed, so
+    the image it names has to survive things a running process does not care
+    about: a generation flip, and the PRUNE that reclaims the generation it left.
+    Naming the branded hardlink — which lives inside one venv, with a libpython
+    dylib pin beside it — is what killed 113 processes on 2026-09-15: launchd
+    respawned them out of a tree the installer had already emptied, and dyld
+    aborted at load. The stable path is a shim that resolves the pointer at exec
+    (``update._DAEMON_SHIM``), so the only path a unit names is one that never
+    moves.
+
+    ``None`` means "this machine has no generation layout", and every caller
+    keeps exactly the shape it shipped before: the branded image, else
+    ``sys.executable``. A pip/pipx install and a source checkout answer ``None``
+    by design — pointing the operator's plists at a pointer a worktree does not
+    own would be worse than the naming it buys.
+
+    Function-local import: ``update`` reaches ``urllib`` and ``subprocess``, and
+    this module is on every process's startup path.
+    """
+    try:
+        from local_operator import update
+
+        return update.daemon_image()
+    except Exception:  # noqa: BLE001 — a name is decoration, and never a failure
+        logger.debug("stable supervised image unavailable", exc_info=True)
+        return None
+
+
 def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, object]:
     """The ``Program``/``ProgramArguments`` pair for a LaunchAgent.
 
@@ -826,11 +859,31 @@ def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, 
     the pre-branding plist — ``launchd_program``'s argv, no ``Program`` key —
     when no branded image can be planted, so rung 3 of the ladder is the shape
     these installers already shipped.
+
+    THE GENERATION LAYOUT RE-POINTS THE IMAGE, to a STABLE path rather than to
+    this venv's branded link, and leaves the label where it is. See
+    :func:`supervised_image`: a unit is re-executed on every restart, including
+    after the tree it was installed from has been pruned, so naming a path
+    inside one venv is what launchd respawned processes into on 2026-09-15.
+    ``ProgramArguments[0]`` is unchanged, so the name macOS shows for the login
+    item is the same in both shapes.
     """
     try:
         link = ensure_branded_interpreter()
     except Exception:  # noqa: BLE001
         link = None
+    # The generation layout WINS over the branded link when this machine has it:
+    # see :func:`supervised_image` for the crash that makes a per-venv image path
+    # unsafe for a unit launchd may restart after the tree is gone. The label
+    # still rides at ``ProgramArguments[0]``, which is what macOS's Background
+    # Task Management names the login item by — so the row a person reads is
+    # unchanged either way.
+    stable = supervised_image()
+    if stable is not None:
+        return {
+            "Program": str(stable),
+            "ProgramArguments": [branded_argv0(label) if label else BRAND, "-m", module, *args],
+        }
     if link is None:
         return {"ProgramArguments": launchd_program(module, *args)}
     return {
@@ -854,6 +907,12 @@ def launchd_program(module: str, *args: str, label: str | None = None) -> list[s
     System Settings > Login Items listed a bare ``python3``. Pointing element 0
     at the branded hardlink makes both read "Local Operator".
 
+    The generation layout moves element 0 to the STABLE shim
+    (:func:`supervised_image`) and leaves the rest of the argv alone, for the
+    reason recorded there: this shape re-executes element 0 on every restart, so
+    a path inside the tree an install (or a prune) replaced is a process that
+    dies at load.
+
     ``label`` is not passed as argv[0] here the way a ``Popen`` label is:
     the two axes collapse into one string and it must remain a real executable
     path. Callers that want the label want :func:`launchd_job`.
@@ -862,6 +921,12 @@ def launchd_program(module: str, *args: str, label: str | None = None) -> list[s
     byte-for-byte the plist these installers wrote before.
     """
     del label  # see docstring: launchd cannot separate the image from argv[0]
+    stable = supervised_image()
+    if stable is not None:
+        # Element 0 is BOTH the image and argv[0] in this shape, so the stable
+        # shim is named here and the argument list is unchanged — see
+        # :func:`supervised_image` for why a per-venv path cannot be named.
+        return [str(stable), "-m", module, *args]
     try:
         link = ensure_branded_interpreter()
     except Exception:  # noqa: BLE001

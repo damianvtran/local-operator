@@ -1086,7 +1086,7 @@ class RuntimeServer:
         # Imported function-locally although ``update`` is stdlib-only, because
         # server.py sits near the CLI startup path and the house style there
         # (see ``app.py``'s update imports) is to keep it off the import graph.
-        from local_operator.update import installed_build
+        from local_operator.update import installed_build, process_install_root
 
         # ``LOP_BUILD_PREFIX`` is the e2e stage's seam only (see
         # ``process._build_prefix``): the boot stamp and the reaper's re-read
@@ -1149,6 +1149,13 @@ class RuntimeServer:
             # rides every rewrite without a second code path.
             version=build.version,
             source_ref=build.source_ref,
+            # The tree THIS runtime imports from. Under the generation layout a
+            # process belongs to exactly one generation and the record is where
+            # that is written down; ``lop install prune`` reads it so a tree a
+            # live session is still reading is never deleted. Resolved, so a
+            # process launched through the pointer records the generation it
+            # really got rather than the mutable path it came in through.
+            install_root=process_install_root(),
         )
         # A resumed conversation has ALREADY run its turns under an earlier
         # process, and the record must say so from its FIRST publish. Until

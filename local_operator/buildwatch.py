@@ -1,9 +1,17 @@
 """One definition of "the install on disk has been replaced under this process".
 
-``lop-update`` (and :func:`local_operator.update.perform_upgrade`) replaces the
-installed tree IN PLACE, so a long-lived process can find itself running a build
-that no longer exists on disk. Two processes on this host must react the same
-way to that: a session runtime (:mod:`local_operator.session.runtime.process`)
+``lop-update`` (and :func:`local_operator.update.perform_upgrade`) used to
+replace the installed tree IN PLACE, so a long-lived process could find itself
+running a build that no longer exists on disk. Under the generation layout it no
+longer does: an install lands in its OWN tree and the stable path is a pointer
+(``local_operator.update`` documents the layout), so what moves is which build
+the POINTER names, not the files any running process holds. The watch is
+unchanged and still worth having, for a reason that has changed rather than
+gone: it is now the CONVERGENCE path that retires a runtime on a superseded
+generation once it is idle, where it used to be the only thing standing between
+a running process and a tree being deleted under it. Two processes on this host
+must react the same way to that: a session runtime
+(:mod:`local_operator.session.runtime.process`)
 and the ``lop serve`` daemon (:mod:`local_operator.server.retire`). Three things
 decide what such a process may do about it — how often to look
 (:data:`BUILD_CHECK_S`), how long a fresh install must sit before it is trusted
@@ -186,7 +194,12 @@ def wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
 
 
 def build_prefix() -> str | None:
-    """Where to read the install stamp from: ``sys.prefix`` in production.
+    """Where to read THIS process's install stamp from: ``sys.prefix``.
+
+    The BOOT sample's prefix, so the e2e stage's fake tree stands in for this
+    process's own generation — which under the generation layout is a different
+    question from :func:`disk_prefix`, and answering them with ONE prefix is how
+    a stamp with this build's version and the pointer's ref gets built.
 
     ``LOP_BUILD_PREFIX`` exists ONLY so the e2e stage can point a real runtime
     (or a real ``lop serve``) at a temp directory carrying a fake
@@ -195,6 +208,40 @@ def build_prefix() -> str | None:
     compare against a marker that never changes — it can never retire early.
     """
     return os.environ.get("LOP_BUILD_PREFIX") or None
+
+
+def disk_marker_prefix() -> str | None:
+    """Where the DISK install's marker — and its age — is read from.
+
+    The POINTER's generation in production, which is the install whose freshness
+    the settle window is about: under the generation layout this process's own
+    tree is written once and never touched, so its marker's age says nothing
+    about whether the build the pointer names has stopped being rewritten. Left
+    as the boot prefix it would read the running tree's old marker and report
+    "settled" about an install that had only just landed — disabling the settle
+    exactly where it is still doing work.
+
+    ``LOP_BUILD_PREFIX`` overrides it for the same reason it overrides the boot
+    prefix: the e2e stage's temp tree stands in for a generation, and its fresh
+    marker is what that stage flips.
+
+    ``None`` means "this interpreter's own tree", which is what
+    :func:`local_operator.update.build_marker_age_s` does with it and what the
+    pre-generation behaviour was. Reachable only when the pointer cannot be
+    resolved, in which case no move can be detected either and the settle is
+    never consulted.
+    """
+    override = os.environ.get("LOP_BUILD_PREFIX")
+    if override:
+        return override
+    from local_operator import update as update_mod
+
+    try:
+        root = update_mod.current_install_root()
+    except Exception:  # noqa: BLE001 — an unreadable pointer is "no answer here"
+        logger.debug("install pointer unreadable", exc_info=True)
+        return None
+    return str(root) if root is not None else None
 
 
 def boot_build() -> "BuildStamp | None":
@@ -238,24 +285,29 @@ def handover_build(boot: "BuildStamp | None") -> "BuildStamp | None":
       build no longer on disk);
     * **the stamp cannot be resolved into a build at all** — see
       :func:`proves_a_move`, the fail-closed rule QA round 2's OBS-1 asked for;
-    * the exception/unreadable case below, the same direction for the same
-      reason.
+    * **there is no install on disk to compare against** — an editable checkout,
+      or a machine whose pointer cannot be resolved. See
+      :func:`local_operator.update.disk_build`, which is the ONE place that
+      decides; the exception/unreadable case below is the same direction for the
+      same reason.
 
-    A DIFFERENT build than the one announced is NOT ``None``: it is the newer
-    move, and the caller re-announces onto it rather than leaving for a build
-    that has already been replaced.
+    A DIFFERENT build than the one announced is NOT ``None``: it is the move the
+    caller re-announces onto rather than leaving for a build that has already been
+    replaced. A build strictly older than the boot stamp **by version** is
+    ``None`` — see :func:`is_older`, which orders versions only, so an equal
+    version with a differing ref is still a move — because leaving for a lagging
+    pointer would walk the fleet backwards (review round 1, R-3; round 3, R3-6).
     """
     if boot is None:
         return None
     from local_operator import update as update_mod
 
-    prefix = build_prefix()
     try:
-        on_disk = update_mod.installed_build(prefix)
+        on_disk = update_mod.disk_build(build_prefix())
     except Exception:  # noqa: BLE001 — an unreadable stamp is "no change"
         logger.debug("build stamp unreadable; no refresh", exc_info=True)
         return None
-    if on_disk == boot or not proves_a_move(boot, on_disk):
+    if on_disk is None or on_disk == boot or not proves_a_move(boot, on_disk):
         return None
     return on_disk
 
@@ -293,9 +345,63 @@ def proves_a_move(boot: "BuildStamp", on_disk: "BuildStamp") -> bool:
         # Nothing at all could be read: no dist-info, no marker. A stamp like
         # this labels as "unknown" and is not a build to leave for.
         return False
+    if is_older(on_disk, boot):
+        # A move BACKWARDS is not a handover to leave for. Reachable whenever the
+        # pointer lags the build a process loaded — a migrated host whose legacy
+        # uv-tool tree is still advanced in place by ``uv tool install --force``
+        # has exactly that shape — and acting on it retires a running runtime
+        # onto the older build (review round 1, R-3).
+        #
+        # This covers VERSION-orderable lags only. A lag by commit alone (equal
+        # version, older ref) is still a move here: the ref cannot be ordered
+        # without asking git, and refusing every different ref would break the
+        # same-version rebuild the ref comparison exists to detect (see
+        # ``is_older``).
+        return False
     if on_disk.source_ref:
         return True
     return on_disk.version != boot.version
+
+
+def is_older(candidate: "BuildStamp", than: "BuildStamp") -> bool:
+    """Is ``candidate`` an OLDER build than ``than``, by version?
+
+    Only versions can be ordered here: the ref is a commit id, and ``lop-update``
+    builds from ``main`` while ``pyproject.toml`` still names the last release, so
+    two genuinely different builds routinely share one version string. Equal
+    versions therefore answer ``False`` — "not older", because the direction is
+    unknown rather than backwards.
+
+    WHAT THAT LEAVES UNSHIELDED, stated here because the prose elsewhere ("a
+    lagging pointer no longer retires a live runtime onto it") is narrower than
+    this function: an EQUAL version with a differing ref still reads as a move, so
+    a pointer lagging by commit alone is still followed. Deliberate, not
+    overlooked — that shape is this host's ordinary one (a rebuild of the same
+    version is exactly what the ref comparison exists to detect), and abstaining
+    on it would leave the fleet that cannot order refs permanently unconverged,
+    which is a worse failure than following a hand-run downgrade of an unchanged
+    version. Review round 2, R2-3.
+
+    WHERE THE ORDER MATTERS (review round 1, R-3). Under the pre-generation
+    layout a differing stamp could only mean "the tree this process holds was
+    rewritten", which is forward in practice. The compared tree is now the one the
+    POINTER names (``update.disk_build``), and a pointer may legitimately LAG: a
+    host that has adopted the layout while its legacy uv-tool tree keeps being
+    advanced in place has an older generation under ``current`` than the build its
+    processes loaded. Unordered, that difference read as an update — the runtime's
+    soft refresh and hard-stale bound would retire a live runtime onto the OLDER
+    build, ``_spawn_interpreter`` would engage the fleet onto it, and the TUI's
+    drift notice printed the two labels reversed ("was updated … 0.55.11 →
+    0.55.10"). Ordered once here so the runtime, the spawn path and the notice
+    cannot disagree.
+    """
+    from local_operator.update import parse_version
+
+    candidate_version = parse_version(candidate.version)
+    other_version = parse_version(than.version)
+    if candidate_version is None or other_version is None:
+        return False
+    return candidate_version < other_version
 
 
 def _settle_elapsed() -> bool:
@@ -316,9 +422,8 @@ def _settle_elapsed() -> bool:
     """
     from local_operator import update as update_mod
 
-    prefix = build_prefix()
     try:
-        age = update_mod.build_marker_age_s(prefix)
+        age = update_mod.build_marker_age_s(disk_marker_prefix())
     except Exception:  # noqa: BLE001 — an unreadable marker is "not settled", not a dead watcher
         # The SETTLE read is guarded for the same reason the stamp read in
         # ``handover_build`` is, and the reason is the consequence rather than
@@ -349,12 +454,12 @@ def build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     caller tells them apart; this function answers only "may I act now", which
     is what both of its callers need.
     """
-    newer = handover_build(boot)
-    if newer is None:
+    on_disk = handover_build(boot)
+    if on_disk is None:
         return None
     if not _settle_elapsed():
         return None
-    return newer
+    return on_disk
 
 
 def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
@@ -375,10 +480,10 @@ def pending_build(boot: "BuildStamp | None") -> "BuildStamp | None":
     shape ``handover_build`` refuses — in those the settle window is not what is
     being described.
     """
-    newer = handover_build(boot)
-    if newer is None or _settle_elapsed():
+    on_disk = handover_build(boot)
+    if on_disk is None or _settle_elapsed():
         return None
-    return newer
+    return on_disk
 
 
 def moved_and_unsettled(version: str, source_ref: str) -> bool:

@@ -45,7 +45,9 @@ def render_plist(config_base: Path | None = None) -> dict[str, object]:
     ``sys.executable`` here is what made installing notify that 'python3 is
     running in the background'. The trade-off that shape accepts is recorded in
     ``procname.launchd_job``; with no link to plant this is the same plist as
-    before.
+    before. On a machine with the generation layout ``Program`` is the stable
+    shim instead (see ``procname.supervised_image``) and the role label is
+    unchanged.
     """
     base = config_base if config_base is not None else config_dir()
     return {
@@ -136,7 +138,11 @@ def install() -> None:
         text = (
             "[Unit]\nDescription=Radient personal tunnel\nAfter=network-online.target\n"
             "[Service]\nType=simple\n"
-            f"ExecStart={quoted(sys.executable)} -m local_operator.tunnels.service\n"
+            # The stable shim when this machine has the generation layout, else
+            # this process's interpreter: a unit restarts, and a path inside a
+            # tree a flip or a prune replaced is a daemon that dies at load.
+            f"ExecStart={quoted(str(procname.supervised_image() or sys.executable))} "
+            "-m local_operator.tunnels.service\n"
             f"Environment={quoted('LOCAL_OPERATOR_CONFIG_DIR=' + str(config_dir()))}\n"
             "Restart=on-failure\nRestartSec=10\nUMask=0077\n"
             "[Install]\nWantedBy=default.target\n"

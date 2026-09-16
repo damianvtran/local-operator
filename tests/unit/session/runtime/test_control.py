@@ -1193,6 +1193,11 @@ async def test_an_unsettled_install_is_reported_as_unsettled_not_current(
             "installed_build",
             lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
         )
+        monkeypatch.setattr(
+            update_mod,
+            "disk_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
         monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
 
         async def _matches(*_args: Any, **_kwargs: Any) -> dict[str, str]:
@@ -1246,6 +1251,11 @@ async def test_the_retired_hedge_is_settled_here_instead_of_read_as_current(
         monkeypatch.setattr(
             update_mod,
             "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
+        )
+        monkeypatch.setattr(
+            update_mod,
+            "disk_build",
             lambda *_a, **_k: BuildStamp(version="0.49.9", source_ref="f4a70b9cdef"),
         )
         # The install moved, and NOBODY has judged it yet — which is what the
@@ -1309,6 +1319,7 @@ def _make_stale(monkeypatch: pytest.MonkeyPatch, server: Any) -> None:
     monkeypatch.setattr(
         update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.9")
     )
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: BuildStamp(version="0.49.9"))
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
     monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
 
@@ -1355,6 +1366,7 @@ async def test_refresh_reports_a_current_runtime_as_nothing_to_do(
     same = BuildStamp(version="0.49.8", source_ref="46a4e9b1234567")
     server._boot_build = same
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: same)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: same)
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
     monkeypatch.delenv("LOP_BUILD_PREFIX", raising=False)
     try:
