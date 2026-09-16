@@ -2815,6 +2815,21 @@ class Editor(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
         key = event.key
+        # LF is Enter. sidekick.nvim, tmux send-keys, expect and every editor
+        # integration end a line with LF (0x0a); textual 8.2.8 decodes that to
+        # the key name `ctrl+j`, and every Enter meaning below gated on the
+        # literal "enter", so the byte did nothing at all (measured on the
+        # composer: `"alpha"` + `\n` left "alpha" in the buffer, unsubmitted,
+        # while `"alpha"` + `\r` submitted). Normalised HERE, ahead of every
+        # branch, rather than as a second arm on the submit site: the credential
+        # mint, both pickers and the ambiguity gate all own Enter, and a
+        # submit-only branch would send the draft from states where Enter does
+        # something else — measured, an LF with the `/credential` picker open
+        # submitted the bare command word, and one during a live masked capture
+        # submitted the mask and dropped the capture. One rewrite is what makes
+        # the byte indistinguishable from Enter, which is the whole point.
+        if key == "ctrl+j":
+            key = "enter"
         # A CSI-modifier vertical chord IS its plain arrow, and is rewritten to
         # one here so that every handler below — both pickers, history, the
         # caret — sees the key it already gates on. This is the whole fix for
