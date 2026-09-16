@@ -244,10 +244,25 @@ class UserMessageStart(SessionEvent):
 class AssistantMessageEnd(SessionEvent):
     """The streaming assistant message is complete."""
 
-    def __init__(self, text: str, message_id: str = "") -> None:
+    def __init__(
+        self,
+        text: str,
+        message_id: str = "",
+        *,
+        stop_reason: str | None = None,
+        has_tool_calls: bool = False,
+    ) -> None:
         super().__init__()
         self.text = text
         self.message_id = message_id
+        # The ONLY thing that distinguishes mid-turn narration from the final
+        # answer. The harness sets both on the message immediately before it
+        # yields the end event, and this event used to discard them — so the
+        # app saw every finalized message as identical prose and could not
+        # honour `display.narration`. Keyword-only with defaults: reduced
+        # producers and synthetic test messages construct this positionally.
+        self.stop_reason = stop_reason
+        self.has_tool_calls = has_tool_calls
 
 
 class HistoryRowsSettled(SessionEvent):
@@ -841,7 +856,17 @@ class EventController:
         self._assistant_buffer = text
         self._flush_assistant()
         self._stop_flush_timer()
-        self._post(AssistantMessageEnd(text, event.message.id))
+        message = event.message
+        # `getattr` with a default on both: reduced event producers and
+        # synthetic test messages do not always carry these fields.
+        self._post(
+            AssistantMessageEnd(
+                text,
+                message.id,
+                stop_reason=getattr(message, "stop_reason", None),
+                has_tool_calls=bool(getattr(message, "tool_calls", None)),
+            )
+        )
         # Keep the context reading live THROUGH the turn, not just after it.
         # One agentic turn is many model calls; each reports the context size
         # it ran against, and that is the only signal the band can move on
