@@ -18,6 +18,17 @@ one field they are allowed to differ on is named in the test.
 Cold-path style, mirroring ``test_desktop_notifications.py``: no runtime, no
 bridge, no session, no HTTP. The e2e module drives the same objects over real
 loopback HTTP.
+
+The third subject is the per-session STATUS channel (the ``session_status``
+frame), which closed a latency gap rather than a notification gap: the row's
+status is derived by the backend, and the only way a client could learn a new one
+was to re-read the whole list, so an answered gate or a finished turn took up to
+30 s to appear on a row nobody was looking at. Its tests are grouped under "The
+per-session status channel" at the end of this file and pin four separate things:
+the frame carries the LIST'S OWN pair (parity, so a second derivation cannot
+appear), a heartbeat publishes nothing (the anti-aggressive-poll property), the
+feed stays a READER (no reap, no bridge, no runtime), and the tick's cost is a
+SYSCALL COUNT rather than a duration.
 """
 
 from __future__ import annotations
@@ -25,9 +36,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +56,7 @@ from local_operator.server.utils.desktop_feed import (
     BURST_LIMIT,
     DesktopFeed,
     FeedSubscription,
+    _fingerprint,
 )
 from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
 from local_operator.server.utils.desktop_sessions import (
@@ -48,13 +64,17 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.session.attention import AttentionStore
+from local_operator.session.catalog import WEDGED_STATUS, load_catalog
+from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
     desktop_delivery_present,
     desktop_viewing_session,
     reset_cache,
 )
+from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 from local_operator.tui.notify import BODY_BACKGROUND_DIGEST, background_digest_title
+from local_operator.wakes.store import write_entry
 
 
 @pytest.fixture(autouse=True)
@@ -287,7 +307,21 @@ def test_the_doorbell_delivers_a_completion_with_no_bridge_anywhere(tmp_path):
         # that timer is wired to `_tick`.
         feed = _feed(root)
         subscription = feed.subscribe()
-        task = asyncio.create_task(_drain(feed, subscription, 3))
+
+        async def until_notified() -> list[Any]:
+            # Drained UNTIL THE FRAME IT IS ABOUT, not for a fixed count: the
+            # envelope carries several frame types now (the ``catalogue``
+            # invalidation, and the ``session_status`` edge the completion also
+            # produces), so a count is a statement about how many OTHER channels
+            # happened to fire in this tick rather than about the one under test.
+            collected: list[dict[str, Any]] = []
+            async for frame in feed.events(subscription):
+                collected.append(frame)
+                if frame["type"] == "notification":
+                    return collected
+            return collected
+
+        task = asyncio.create_task(until_notified())
         try:
             await asyncio.sleep(0.3)
             await asyncio.to_thread(_publish, root, sid)
@@ -966,3 +1000,565 @@ def test_a_digest_names_its_members_tokens_and_does_not_preclaim_them(tmp_path, 
         # member claimed by the digest's surface is no longer available to a
         # later individual frame or to another feed instance.
         assert store.claim_delivery(identity, member["completion_token"], "tui") is False
+
+
+# ---------------------------------------------------------------------------
+# The per-session status channel
+#
+# THE DEFECT THIS SECTION PINS. The row's status is a BACKEND-DERIVED value with
+# one home (``catalog.CatalogEntry.status_code``/``status``), and until now the
+# only way any client could learn a new one was to re-read the whole list: the
+# attention channel ships ``row.attention`` and never ``row.status``, and no feed
+# watched ``run/mobile`` or the wake index at all. So an answered gate on a row
+# the user was not looking at could take 30 s to appear, and a completion needed
+# a list even when the ``attention`` frame had already arrived.
+#
+# WHAT IS ASSERTED HERE, in one line each: the pair is the LIST'S OWN (parity, so
+# a second derivation cannot appear); a heartbeat publishes nothing (the
+# anti-aggressive-poll property); revisions are monotone and the list carries the
+# same stamp; the probe is a READER (it reaps nothing and acquires no bridge); a
+# status that predates the connection is never replayed; the tick's syscall
+# budget is a COUNT, not a duration; and ``wedged`` — the transition no file
+# write announces — arrives on the probe's clock.
+#
+# NO WALL-CLOCK ASSERTION APPEARS BELOW. The property each test asserts is
+# structural (which frame, from which filesystem state, at which syscall cost),
+# and this repo's timing section is explicit that a bound calibrated on this box
+# is a bet on machine load rather than a fact about the code.
+# ---------------------------------------------------------------------------
+
+
+#: A pid that cannot be alive on either platform we run on: macOS's ``max_pid``
+#: is 99998 and Linux's ``pid_max`` cannot exceed 2**22. That is what lets a test
+#: plant a PROVEN-DEAD record without forking anything to produce a corpse.
+_DEAD_PID = 9_000_000
+
+
+def _record(session_id: str, *, pid: int | None = None, **fields: Any) -> SessionRecord:
+    """A discovery record for one session, owned by THIS test process by default.
+
+    The pid defaults to the test process's own because the status channel's
+    verdict is a fact about a pid and a beat: a fabricated live pid would make
+    every assertion below depend on which pids the machine happens to have.
+    """
+    return SessionRecord(
+        pid=os.getpid() if pid is None else pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="a conversation",
+        cwd=str(Path.cwd()),
+        model_label="mock",
+        control_port=1,
+        control_key="0" * 64,
+        **fields,
+    )
+
+
+def _record_publish(root: Path, session_id: str, **fields: Any) -> Path:
+    """Write a record through the REAL writer, so the doorbell sees a real write."""
+    return registry.publish(_record(session_id, **fields), root)
+
+
+#: A pid that is ALIVE and is not this process. Discovery records are keyed by
+#: pid (``record_path``), so two records for two different sessions need two pids
+#: — and ``os.kill(1, 0)`` answers EPERM on every platform we run on, which
+#: ``registry.pid_alive`` reads as "alive, not ours", the same as it reads for any
+#: other user's process.
+_FOREIGN_LIVE_PID = 1
+
+
+@contextlib.contextmanager
+def _extra_live_pid() -> Iterator[int]:
+    """One more real live pid, for a test that needs three records at once.
+
+    Spawned rather than invented: the pid is what ``classify`` reads, so a
+    fabricated one would only be a live-looking number until the day the machine
+    answered for it. Killed in the ``finally`` whatever the test does.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
+
+
+def _listable_session(root: Path, session_id: str) -> Path:
+    """A session the catalogue LISTS: a directory with a transcript in it.
+
+    The parity assertions below compare against ``load_catalog``, so the session
+    has to be one the catalogue actually returns rather than one only the feed
+    knows about — an empty directory is listed by neither scanner and would make
+    the comparison vacuous.
+    """
+    directory = _session(root, session_id)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    return directory
+
+
+def _wake(root: Path, session_id: str, *, dormant: bool = False) -> Path | None:
+    """Arm (or arm-and-dormant) one session's wake entry, through the real writer.
+
+    ``stopped_at`` is the index's own marker of a STRICTLY stopped session (its
+    wakes will never fire), which is the ``dormant`` spelling in the catalogue.
+    """
+    preserve = {"stopped_at": int(time.time() * 1000)} if dormant else None
+    return write_entry(
+        root,
+        session_id,
+        cwd=str(Path.cwd()),
+        schedules=[{"next_due_at": int(time.time() * 1000) + 60_000, "cwd": str(Path.cwd())}],
+        preserve=preserve,
+    )
+
+
+def _statuses(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame["type"] == "session_status"]
+
+
+@contextlib.contextmanager
+def _io_watch(registry_dir: Path) -> Iterator[dict[str, Any]]:
+    """Count the filesystem calls one block makes, and which files it read.
+
+    The counting pattern ``tests/unit/session/test_catalog_scan_cost.py`` uses for
+    the same kind of claim: the property is "one stat and no record reads on a
+    quiet tick", which a COUNT states exactly and a duration only approximates
+    once machine load is in the picture.
+    """
+    counts: dict[str, Any] = {
+        "stat": 0,
+        "lstat": 0,
+        "scandir": 0,
+        "record_reads": 0,
+        "scandir_paths": [],
+    }
+    originals: dict[str, Any] = {}
+    for name in ("stat", "lstat", "scandir"):
+        real = getattr(os, name)
+        originals[name] = real
+
+        def wrap(real: Callable[..., Any] = real, name: str = name) -> Any:
+            def counting(*args: Any, **kwargs: Any) -> Any:
+                counts[name] += 1
+                if name == "scandir" and args:
+                    counts["scandir_paths"].append(str(args[0]))
+                return real(*args, **kwargs)
+
+            return counting
+
+        setattr(os, name, wrap())
+    real_read_text = Path.read_text
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.parent == registry_dir:
+            counts["record_reads"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    setattr(Path, "read_text", read_text)
+    try:
+        yield counts
+    finally:
+        setattr(Path, "read_text", real_read_text)
+        for name, real in originals.items():
+            setattr(os, name, real)
+
+
+def test_the_gate_edge_publishes_once_with_the_backends_own_spelling(tmp_path):
+    """THE REPORTED SYMPTOM: an answered gate took up to 30 s to appear.
+
+    The only trace an answered gate leaves is the discovery record
+    ``set_record_pending`` writes, and the feed watched nothing that could see
+    it. The frame carries the pair the LIST derives — asserted here on the
+    backend's own spelling and label, because the feed composes neither.
+    """
+    root = tmp_path
+    sid = "e1" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    # The 1 s probe is gated SHUT for this test, so every frame below has to come
+    # over the DOORBELL — the 10 Hz path the reported symptom is about. Without
+    # this the test would also pass on the slow clock, which is the bound the
+    # change exists to remove.
+    feed._status_probed_at = time.monotonic()
+
+    _record_publish(root, sid, pending="approval")
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert [frame["session_id"] for frame in frames] == [sid], frames
+    assert frames[0]["payload"] == {"code": "approval", "label": "Approval needed", "revision": 1}
+
+    # The answer clears the gate. Exactly one more frame, and its code is the
+    # post-gate one: the pair changed, which is the whole emission rule.
+    _record_publish(root, sid)
+    _tick(feed)
+    cleared = _statuses(_queued(subscription))
+    assert len(cleared) == 1, cleared
+    assert cleared[0]["payload"] == {"code": "attached", "label": "Open", "revision": 2}
+    # ...and the doorbell ended with its cache current, which is what makes the
+    # NEXT quiet tick cheap rather than a re-read.
+    assert feed._registry_fingerprint == _fingerprint(feed._registry_dir)
+    asyncio.run(feed.close())
+
+
+def test_a_first_record_is_delivered_by_the_doorbell_and_not_the_probe(tmp_path):
+    """A session the feed has NEVER cached still rides the 10 Hz clock.
+
+    The doorbell's rule is "re-read the records whose own file moved", and a
+    session that had no record has no cached file to compare against — so the
+    directory moves and nothing the fast path knows about does. Waiting for the
+    probe there would make a runtime starting up (or an exec run appearing) an
+    order of magnitude slower than the edges this channel exists for, and would
+    make the first edge of every cold session the slow one. The fallback that
+    answers it looks properly once, and only on a tick whose directory already
+    moved — the quiet tick still costs one stat and no reads.
+    """
+    root = tmp_path
+    sid = "eb" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    feed._status_probed_at = time.monotonic()  # the probe cannot fire
+
+    _record_publish(root, sid, pending="approval")
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert [frame["session_id"] for frame in frames] == [sid], frames
+    assert frames[0]["payload"]["code"] == "approval"
+    asyncio.run(feed.close())
+
+
+def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
+    """THE ANTI-AGGRESSIVE-POLL PROPERTY, and why the dedupe is on the PAIR.
+
+    Every live session rewrites its whole record every 15 s
+    (``HEARTBEAT_INTERVAL_S``) through the same staged write every real edge
+    uses. A feed that published on "the record file moved" would emit a frame per
+    live session per heartbeat, forever — strictly worse than the 5 s poll this
+    replaces. The pair is read from
+    ``pending``/``busy``/``detached``/``leaving``, none of which a heartbeat
+    touches, so the answer must be: nothing, even though the doorbell RINGS.
+    """
+    root = tmp_path
+    sid = "e2" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _record_publish(root, sid, pending="approval")
+    _tick(feed)
+    assert len(_statuses(_queued(subscription))) == 1
+
+    for _ in range(3):
+        _record_publish(root, sid, pending="approval")
+        # THE CLAIM UNDER TEST IS NOT "NOTHING HAPPENED". The directory really
+        # moved, so the doorbell really rang and the record really was re-read;
+        # asserting that here is what stops this test passing on a feed that
+        # simply failed to notice the write.
+        assert _fingerprint(feed._registry_dir) != feed._registry_fingerprint
+        _tick(feed)
+        assert _statuses(_queued(subscription)) == []
+    asyncio.run(feed.close())
+
+
+def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
+    """PARITY: the frame is a second CALLER of the precedence, never a home.
+
+    The design's whole safety argument is that the feed cannot disagree with the
+    list about what a row's status is, because both come through
+    ``catalog.status_of``. This is the test that fails if a second derivation is
+    ever written: it compares the two SURFACES' answers for the same on-disk
+    state, so a re-ordered branch or a code named by hand in the feed shows up as
+    a disagreement instead of as a green suite.
+    """
+    root = tmp_path
+    gate, working, resident, armed, dormant, finished, failed, cold = (
+        f"{index:012x}" for index in range(8)
+    )
+    for session_id in (gate, working, resident, armed, dormant, finished, failed, cold):
+        _listable_session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    # Three live pids, because a record is keyed by one: this process, pid 1, and
+    # a spawned sleeper. Each session below gets its own, so no write can clobber
+    # another's record.
+    with _extra_live_pid() as spare:
+        _record_publish(root, gate, pending="approval")
+        _record_publish(root, working, pid=_FOREIGN_LIVE_PID, busy=True)
+        _record_publish(root, resident, pid=spare, detached=True)
+        _wake(root, armed)
+        _wake(root, dormant, dormant=True)
+        _publish(root, finished, kind="complete")
+        _publish(root, failed, kind="error")
+        _tick(feed)
+        frames = {
+            frame["session_id"]: frame["payload"] for frame in _statuses(_queued(subscription))
+        }
+
+        listed = {entry.id: (entry.status_code, entry.status) for entry in load_catalog(root)}
+    # Every state with an EVENT behind it is announced...
+    assert set(frames) == {gate, working, resident, armed, dormant, finished, failed}
+    # ...and each frame carries exactly what the list derives for the same
+    # on-disk state. Nothing else in this file needs to know what the vocabulary
+    # is, which is the point: there is one precedence and both surfaces call it.
+    for session_id, payload in frames.items():
+        assert (payload["code"], payload["label"]) == listed[session_id], session_id
+    # A session nothing happened to is not a candidate at all: no frame, because
+    # its pair (``recent``) is what the client's own list already says.
+    assert cold not in frames
+    assert listed[cold] == ("recent", "Recent")
+    asyncio.run(feed.close())
+
+
+def test_the_wake_index_is_watched_both_ways(tmp_path):
+    """Arming AND disarming a wake, which the record doorbell cannot see at all.
+
+    The index lives outside ``run/mobile``, so nothing about a wake moves the
+    directory the doorbell watches. The disarm direction is the one a candidate
+    set built from the CURRENT index would miss: the entry is gone, so the
+    session is not in the index any more — and the row would keep a wake glyph
+    until the next 30 s poll.
+    """
+    root = tmp_path
+    sid = "e5" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _wake(root, sid)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    armed = _statuses(_queued(subscription))
+    assert [frame["payload"]["code"] for frame in armed] == ["scheduled"]
+
+    # Disarmed: the entry is REMOVED from the index, which is the case that is
+    # invisible to a diff of nothing.
+    from local_operator.wakes.store import remove_entry
+
+    remove_entry(root, sid)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    disarmed = _statuses(_queued(subscription))
+    assert [frame["payload"]["code"] for frame in disarmed] == ["recent"]
+    assert disarmed[0]["payload"]["revision"] > armed[0]["payload"]["revision"]
+    asyncio.run(feed.close())
+
+
+def test_revisions_are_monotone_and_the_lists_stamp_agrees(tmp_path):
+    """The two writers' ordering token, over HTTP's own path.
+
+    Both the frame and the list ship the same fact now, and the client's rule is
+    "keep the frame's value if the epochs match and the frame's revision is
+    higher". That rule is only sound if the counter is per session, strictly
+    increasing, and carried by the list at exactly the value the last frame had —
+    which is what this asserts end to end, through ``DesktopSessions.list``.
+    """
+    root = tmp_path
+    sid = "e3" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    revisions = []
+    for fields in ({"pending": "approval"}, {"busy": True, "pending": None}, {}):
+        _record_publish(root, sid, **fields)
+        _tick(feed)
+        published = _statuses(_queued(subscription))
+        assert published, fields
+        revisions.append(published[-1]["payload"]["revision"])
+    assert revisions == [1, 2, 3]
+
+    pool = DesktopSessions(root)
+    rows = asyncio.run(pool.list(50, status_stamps=feed.status_stamps()))
+    row = next(entry for entry in rows if entry["id"] == sid)
+    assert row["status_epoch"] == feed.epoch
+    assert row["status_revision"] == 3
+    assert row["status"]["code"] == "attached"
+
+    # ADDITIVE, proven rather than asserted: a caller that passes no stamps gets
+    # the response it always got, byte for byte in the fields that matter.
+    plain = asyncio.run(pool.list(50))
+    for entry in plain:
+        assert "status_revision" not in entry
+        assert "status_epoch" not in entry
+
+
+def test_a_preexisting_status_is_not_replayed_to_a_new_connection(tmp_path):
+    """``_take_baseline`` primes the pair, so history is not news.
+
+    The same no-flood rule the attention baseline applies: a client that connects
+    to a machine with a gate already parked learns it from the ``open`` snapshot's
+    list, not from a frame about a transition that happened before it arrived.
+    """
+    root = tmp_path
+    sid = "e6" * 6
+    _listable_session(root, sid)
+    _record_publish(root, sid, pending="approval")
+    _wake(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    for _ in range(3):
+        feed._status_probed_at = 0.0
+        _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+
+    # ...and the very next CHANGE still arrives, so this is a baseline and not a
+    # feed that has gone quiet for good.
+    _record_publish(root, sid)
+    _tick(feed)
+    assert [frame["payload"]["code"] for frame in _statuses(_queued(subscription))] == ["attached"]
+    asyncio.run(feed.close())
+
+
+def test_a_stale_heartbeat_publishes_wedged_with_no_write(tmp_path):
+    """The transition NO doorbell can see: an age crossing.
+
+    ``live -> wedged`` is ``HEARTBEAT_TIMEOUT_S`` elapsing with the file
+    untouched, so the record's fingerprint does not move and the doorbell stays
+    silent by construction. The write below is the test's way of AGEING the beat;
+    the caches are then refreshed to the state on disk, which is the statement
+    "the feed has already seen this file exactly as it is" — i.e. exactly the
+    situation production is in when time alone crosses the timeout.
+    """
+    root = tmp_path
+    sid = "e7" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    path = _record_publish(root, sid)
+    _tick(feed)
+    assert [frame["payload"]["code"] for frame in _statuses(_queued(subscription))] == ["attached"]
+
+    aged = _record(sid)
+    aged.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 30.0
+    path.write_text(json.dumps(aged.to_json()), encoding="utf-8")
+    feed._registry_fingerprint = _fingerprint(feed._registry_dir)
+    feed._record_fingerprints[sid] = _fingerprint(path)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+
+    wedged = _statuses(_queued(subscription))
+    assert [frame["payload"]["code"] for frame in wedged] == ["wedged"]
+    # The label is the one home's sentence, with the measured age appended — the
+    # same string the sidebar's tooltip shows.
+    assert wedged[0]["payload"]["label"].startswith(WEDGED_STATUS)
+    asyncio.run(feed.close())
+
+
+def test_the_probe_is_a_reader(tmp_path):
+    """READ-ONLY: no reap, no bridge, no runtime — the property this route lives by.
+
+    ``registry.scan`` sweeps a proven-dead record aside by default, and the feed
+    calls it once a second: without ``reap=False`` the desktop app's feed would be
+    the process that destroys the evidence an incident reader is about to look at.
+    A dead record is not a status either — it is NO record, which is the view the
+    list lands on too.
+    """
+    root = tmp_path
+    dead, live = "e8" * 6, "e9" * 6
+    _listable_session(root, dead)
+    _listable_session(root, live)
+    pool = DesktopSessions(root)
+    feed = DesktopFeed(root, bridged=lambda: set(pool.bridges))
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    dead_path = registry.publish(_record(dead, pid=_DEAD_PID), root)
+    _record_publish(root, live)
+    feed._registry_fingerprint = None  # the doorbell sees both writes
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    # A SECOND pass of the probe, which is where a reaping scan would have moved
+    # the file: one tick could pass on the doorbell alone.
+    feed._status_probed_at = 0.0
+    _tick(feed)
+
+    assert dead_path.exists(), "the feed reaped a record it does not own"
+    assert sorted(path.name for path in (root / "run" / "mobile").glob("*.json")) == sorted(
+        [dead_path.name, f"{os.getpid()}.json"]
+    )
+    # The live session's frame is the positive control: the tick above really did
+    # read the directory, so the dead record's silence is a decision rather than a
+    # feed that never looked.
+    frames = _statuses(_queued(subscription))
+    assert {frame["session_id"] for frame in frames} == {live}
+    assert frames[-1]["payload"]["code"] == "attached"
+    assert pool.bridges == {}, "the feed acquired a session bridge"
+    asyncio.run(feed.close())
+
+
+def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
+    """THE I/O BUDGET, as a COUNT. One extra stat is the whole cost of watching.
+
+    The record doorbell is one ``os.stat`` on ``run/mobile`` added to a tick that
+    already made three (the attention store and its two journal sidecars), and on
+    a store where nothing moved it must read NOTHING: not one record, not the
+    wake index, no SQL. Every later byte on this path is paid per event rather
+    than per tick, which is the difference between this and the whole-list refetch
+    it replaces.
+    """
+    root = tmp_path
+    sid = "ea" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _record_publish(root, sid)
+    _tick(feed)
+    _queued(subscription)
+
+    # Both probes are gated shut, so what is measured is the DOORBELL's cost: the
+    # catalogue probe legitimately walks the sessions directory at 1 Hz, and
+    # including it would measure a different claim.
+    feed._catalogue_probed_at = time.monotonic()
+    feed._status_probed_at = time.monotonic()
+    with _io_watch(feed._registry_dir) as counts:
+        _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+    assert counts["stat"] + counts["lstat"] <= 4, counts
+    assert counts["record_reads"] == 0, counts
+    assert counts["scandir"] == 0, counts
+    asyncio.run(feed.close())
+
+
+def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_path):
+    """ONE READ PER LIVE RECORD PER SECOND, and O(live records) rather than O(store).
+
+    The 1 s probe is the authoritative clock for the transitions no write
+    announces, and the bound the design puts on it is that it scales with the
+    RECORD population — a handful — and never with the session store, which is
+    the 120 ms ``sessions.list`` it exists to make unnecessary.
+    """
+    root = tmp_path
+    live = [f"{index:012x}" for index in range(4)]
+    for session_id in live:
+        _listable_session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    # A record per session needs a pid per session (the file is named for the
+    # pid), and the scan reads every record file whatever its verdict, so these
+    # are distinct and deliberately not live: this test measures the READS.
+    for index, session_id in enumerate(live):
+        _record_publish(root, session_id, pid=_DEAD_PID + index)
+    _tick(feed)
+    _queued(subscription)
+
+    feed._catalogue_probed_at = time.monotonic()  # see the note above
+    feed._status_probed_at = 0.0
+    with _io_watch(feed._registry_dir) as counts:
+        _tick(feed)
+    assert counts["record_reads"] == len(live), counts
+    assert str(root / "sessions") not in counts["scandir_paths"], counts
+    asyncio.run(feed.close())
