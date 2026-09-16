@@ -2172,3 +2172,83 @@ async def test_the_abort_op_really_terminates_live_children(tmp_path) -> None:
     assert session.running_subagents() == 0
     assert "stopped 3 subagents" in receipt
     await session.dispose()
+
+
+# --- /mcp LISTING on a routed session -----------------------------------------
+#
+# The regression these cover: the listing test read `manager.servers`, an
+# attribute `McpManager` has never had, so its emptiness branch was taken on
+# every session whose slash command routes to the owner. An explicit
+# `/mcp list` therefore answered "no MCP servers configured." — every fresh
+# viewer, and the phone projection, which shares this handler — while the same
+# session's transcript was listing its configured servers failing to start by
+# name. The sibling producers in the TUI never had the bug, which is why the
+# bare `/mcp` typed locally rendered the right listing and `/mcp list` did not.
+
+
+class _NameManager:
+    """A manager exposing the REAL roster accessor, and nothing else.
+
+    Deliberately without ``servers``: that phantom attribute is what the
+    listing test used to read, and a double that carried it would keep the
+    old bug green.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._names = list(names)
+
+    def get_all_server_names(self) -> list[str]:
+        return list(self._names)
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager(["alpha-stdio", "beta-oauth"])
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    # A BLOCK is the instruction to render the listing; the notice below is the
+    # refusal to. Which one comes back is the whole defect.
+    assert result.kind == "block", result
+    assert result.data == {"type": "mcp"}
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer() -> None:
+    """A session whose MCP discovery failed carries no manager at all."""
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    assert session.mcp_manager is None
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+
+
+@pytest.mark.asyncio
+async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command() -> None:
+    """A slash surface has no error page to render an exception on.
+
+    Reading one attribute too far takes the whole app down with it, so a
+    manager that cannot answer — a facade older than the accessor, a discovery
+    that half-failed — has to degrade to the empty answer instead of raising.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+
+    class _Mute:
+        def get_all_server_names(self) -> list[str]:
+            raise RuntimeError("no roster")
+
+    session.mcp_manager = _Mute()
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
