@@ -945,8 +945,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nothing" — the reading that deletes the most whole venvs, on the one
         command whose entire job is deleting them. argparse renders this as exit 2
         with a usage line, the same shape as any other bad option.
+
+        ``int`` RAISES ``ValueError`` FOR ANYTHING NON-NUMERIC and this function
+        let it through, which is why ``--keep foo`` printed ``invalid
+        _generation_count value: 'foo'`` — this function's Python name on the
+        operator's screen, on a surface the generation PR had just cleaned of
+        exactly that (R7-2). Caught here rather than left to argparse because
+        argparse's message is derived from the function it was handed and cannot be
+        given a better one; ``TypeError`` cannot arrive, since argparse passes the
+        command line's own ``str``.
         """
-        count = int(value)
+        try:
+            count = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected a whole number, got {value!r}") from None
         if count < 0:
             raise argparse.ArgumentTypeError(f"expected 0 or more, got {count}")
         return count
