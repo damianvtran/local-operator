@@ -2124,6 +2124,57 @@ MovePickerScreen .move-picker {
 }
 
 
+/* ── /links: the URL picker ────────────────────────────────────────────── *
+ *
+ * A content-sized card over the dimmed transcript, like `/move`: a short list
+ * the user reads and picks from, not a surface they navigate to. `height: auto`
+ * is what makes that true, and Python's row budget is the ONLY cap — the
+ * `max-height: 100%` here exists to stop a taller-than-screen card from
+ * introducing a scrollbar, not to size it. Two caps that both bite is how
+ * `SessionPickerScreen` shipped a budget of 74 inside a sheet capped at 80
+ * with the narrower winning silently; `LinkPickerScreen._row_budget` spends
+ * the screen height itself, so nothing here should be read as a second
+ * opinion about how many rows fit.
+ *
+ * `width: auto` and `max-width: 100` likewise: `_card_width` measures the
+ * content and caps it, and the sheet only says how far it may go. */
+LinkPickerScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+LinkPickerScreen .link-picker {
+    width: auto;
+    max-width: 100;
+    height: auto;
+    max-height: 100%;
+    background: $lo-overlay;
+    padding: 1 2;
+    overflow: hidden;
+}
+
+#link-picker-body {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+    overflow: hidden;
+}
+
+/* Shown in place of the card on a terminal too small to draw one, where the
+ * alternative is a dimmed screen that says nothing at all. A SIBLING of the
+ * card rather than a row inside it, so the card's pinned contract — either the
+ * footer is on screen or nothing drew — is untouched: one row, no ground of its
+ * own, and `dim` because it explains a degraded frame rather than being
+ * anything to act on. Same shape as `#copy-picker-too-small`. */
+#link-picker-too-small {
+    width: 100%;
+    height: 1;
+    content-align: center middle;
+    text-align: center;
+    color: $lo-dim;
+}
+
+
 /* ── /analytics /usage: the aggregated token-consumption screen ────────── *
  *
  * The same centred card over a dimmed transcript as `/resume`, because it is

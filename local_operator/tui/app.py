@@ -197,6 +197,7 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
+from local_operator.tui.link_targets import LinkTarget, build_link_targets, is_openable
 from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
@@ -270,6 +271,7 @@ from local_operator.tui.widgets.editor import (
     substitute_credentials,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.org_chart_view import (
@@ -13643,7 +13645,9 @@ class OperatorApp(App[None]):
     #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
     #: in flight resolves to the session the user asked for, and a command frame
     #: is ended by the transition instead of raced with it.
-    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings", "/resume"})
+    _SAVED_LOCAL_COMMANDS = frozenset(
+        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume"}
+    )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
         """One authority boundary for Enter, shortcuts and async continuations.
@@ -16980,6 +16984,81 @@ class OperatorApp(App[None]):
                 notice("copied — note that answer was cut off before it finished", "warning")
 
         self.push_screen(CopyPickerScreen(targets), _copy_choice)
+
+    def _cmd_links(self, notice: NoticeFn) -> None:
+        """``/links`` — pick a URL out of the conversation and open it.
+
+        The route the terminal cannot take. lop holds mouse reporting, and a
+        terminal that is reporting mouse events to an application does not run
+        its own click-to-open gesture — so the OSC-8 hyperlink the transcript
+        paints is correct on screen and unclickable, and the same is true of a
+        bare URL, which the terminal's link detection would otherwise catch.
+        Shift+click is the terminal's own bypass and never reaches the app
+        (Ghostty documents that the program cannot detect it), so the app has to
+        offer the URL itself. The picker is where it does, on every terminal,
+        for every scheme the app will open.
+
+        The list is the URLs of the MESSAGES — the user's prompts and the agent's
+        answers — newest first. Tool output is deliberately not scanned: a URL a
+        tool printed is not a link the user was reading, and listing it would
+        bury the two or three they were.
+
+        The two empty answers stay TWO, the rule ``/copy`` records: "the first
+        answer is still coming" and "nothing here is a link" are different
+        states with different fixes, and one string for both sends the user to
+        wait for something that will not arrive.
+        """
+        targets = build_link_targets(self._transcript_view().blocks())
+        if not targets:
+            if self._turn_is_live():
+                notice("no links yet — the first answer is still coming", "warning")
+            else:
+                notice("no links — nothing in this conversation is a web address", "warning")
+            return
+
+        def _open_choice(target: LinkTarget | None) -> None:
+            # Dismissed with Esc — nothing said, the silence a cancelled picker
+            # keeps everywhere else in this app.
+            if target is None:
+                return
+            # A worker rather than an await here: the launcher waits on a
+            # child process, and the modal's dismiss callback runs inside the
+            # screen stack's own teardown. `open_browser_quietly` is itself
+            # what keeps that child's output off the frame.
+            self.run_worker(self._open_link(target, notice), group="open-link")
+
+        self.push_screen(LinkPickerScreen(targets), _open_choice)
+
+    async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
+        """Hand ONE url to the browser, and say what happened.
+
+        The scheme is re-checked HERE, at the boundary, rather than trusted from
+        the extraction that built the list. This is the one place in the app that
+        gives a string to a browser, and the string can come from anything the
+        model or a tool wrote; a single guard at the point of use is what makes
+        the rule true of every route that ever reaches it, including one added
+        later that does not go through :func:`build_link_targets`.
+
+        ``open_browser_quietly`` rather than ``webbrowser.open`` for the reason
+        its own docstring records: the stdlib spawns the browser with fd 1 and
+        fd 2 INHERITED, so ``xdg-open: no method available`` or a browser's
+        chatter lands in the middle of the Textual frame. The same helper the
+        MCP login flow uses, so the two cannot drift in how they open a browser.
+        """
+        from local_operator.mcp.auth import open_browser_quietly
+
+        if not is_openable(target.url):
+            notice("only http and https links can be opened", "warning")
+            return
+        opened = await open_browser_quietly(target.url)
+        if opened:
+            notice(f"opening {target.url}")
+        else:
+            # The URL is repeated because this is the one failure the user can
+            # work around: select it from the row and paste it themselves. A
+            # receipt that only said "could not open" would send them back to
+            # the picker to read what it would not open.
+            notice(f"no browser available — the link is {target.url}", "warning")
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -28585,6 +28664,8 @@ class OperatorApp(App[None]):
             self._cmd_stop(arg, notice)
         elif command == "/copy":
             self._cmd_copy(notice)
+        elif command == "/links":
+            self._cmd_links(notice)
         elif command == "/approvals":
             self._cmd_approvals(arg, notice)
         elif command == "/skills":
