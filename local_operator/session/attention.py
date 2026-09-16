@@ -572,9 +572,20 @@ def _classify_orphaned_run(
       SIGKILL rung is not executing;
     * a stop recorded in the wake index (the in-process stop path) →
       ``interrupted`` / ``user-stop``, no detail;
+    * THE RUNTIME'S OWN OPEN TURN JOURNAL ROW (``runtime/journal.py``) → a
+      NAMED involuntary cause: ``runtime-shutdown`` when the row itself recorded
+      the signal the runtime was leaving on (a stop sweep that reached its
+      target), ``install-mid-update`` when the install on disk moved away from
+      the build the row booted from (the install-window tear), and
+      ``runtime-killed`` otherwise. This rung is what turns the third case below
+      from an inference into a fact: an open row IS the runtime's own statement
+      that a turn was in flight and never ended, which is the evidence the two
+      rungs below cannot have. It sits BELOW the marker rungs deliberately — a
+      marker is a killer's attestation that someone asked for this, and nothing
+      about an unfinished turn may outrank a record that the stop was ordered;
     * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
-      the record's build, pid and start time as the detail — this is the case
-      study's shape, and the one that used to read as a user cancel;
+      the record's build, pid and start time as the detail — the legacy path,
+      reached unchanged when no journal row survives;
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
 
@@ -662,6 +673,18 @@ def _classify_orphaned_run(
             DELIBERATE_CUT_OFF_CAUSE,
             render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
         )
+    # THE RUNTIME'S OWN STATEMENT, preferred over every inference below it.
+    # Imported function-locally for the same reason the ``incidents`` import
+    # above is: this runs at session boot, and an instrument that cannot be
+    # read must degrade to the legacy rungs rather than stop a session opening.
+    try:
+        from local_operator.session.runtime import journal
+
+        row = journal.open_row_after_death(directory)
+        if row is not None:
+            return journal.death_verdict(row)
+    except Exception:  # noqa: BLE001 — unreadable evidence is not a dead session
+        logger.debug("turn journal evidence unreadable for %s", directory.name, exc_info=True)
     if dead is not None:
         return (
             "error",
