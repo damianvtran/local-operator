@@ -304,7 +304,11 @@ def format_duration(ms: int) -> str:
 
 
 def build_wake_schedule(
-    request: dict[str, Any], existing: list[WakeSchedule], now_ms: int
+    request: dict[str, Any],
+    existing: list[WakeSchedule],
+    now_ms: int,
+    *,
+    pinned_due_ms: int | None = None,
 ) -> WakeBuildResult:
     """Validate a wake-create request. Returns ``{"schedule": WakeSchedule}``
     or ``{"error": str, "malformed": bool}`` — it returns the error text
@@ -316,6 +320,14 @@ def build_wake_schedule(
     Recognized request keys: ``message`` (required), ``in`` or ``at`` (one
     required), plus optional ``every``, ``until``, ``limit``. Ids ``w1``..``w16``
     are assigned automatically to the first free slot.
+
+    ``pinned_due_ms`` is the EDIT case, and it is the only caller that is not
+    a create: it supplies the row's existing instant so a request that changes
+    only the message or the cadence keeps the time the row is already anchored
+    to, and it SKIPS the past-time guard below — an overdue row is exactly the
+    row a user most often wants to reword, and refusing it with "wake time is
+    in the past" would make that text uncorrectable. Nothing that resolves its
+    own instant may pass it.
     """
     message = request.get("message")
     if not isinstance(message, str) or not message.strip():
@@ -334,7 +346,9 @@ def build_wake_schedule(
 
     in_val = request.get("in")
     at_val = request.get("at")
-    if in_val is not None:
+    if pinned_due_ms is not None:
+        next_due_at = int(pinned_due_ms)
+    elif in_val is not None:
         duration = parse_wake_duration(str(in_val))
         if duration is None:
             return {
@@ -359,11 +373,13 @@ def build_wake_schedule(
         }
 
     # Past-at grace: up to PAST_AT_GRACE_MS in the past is accepted and fires
-    # immediately; anything older is a user mistake worth surfacing.
-    if next_due_at < now_ms - PAST_AT_GRACE_MS:
-        return {"error": "wake time is in the past.", "malformed": False}
-    if next_due_at < now_ms:
-        next_due_at = now_ms
+    # immediately; anything older is a user mistake worth surfacing. A pinned
+    # instant is exempt (see the parameter's docstring).
+    if pinned_due_ms is None:
+        if next_due_at < now_ms - PAST_AT_GRACE_MS:
+            return {"error": "wake time is in the past.", "malformed": False}
+        if next_due_at < now_ms:
+            next_due_at = now_ms
 
     every_ms: int | None = None
     every_val = request.get("every")
@@ -394,6 +410,18 @@ def build_wake_schedule(
         if limit < 1:
             return {"error": "'limit' must be a positive integer.", "malformed": True}
 
+    # A one-shot already fires exactly once, so `until`/`limit` promise a
+    # behaviour the schedule does not have. REFUSED HERE rather than in each
+    # caller: the CLI had this rule to itself (``cli.py``), which meant the
+    # agent's own tool silently accepted a bound that did nothing — and the
+    # desktop arm/cancel/edit routes are the third caller that would have had
+    # to remember it. One sentence, one place.
+    if every_ms is None and (until_at is not None or limit is not None):
+        return {
+            "error": "'until' and 'limit' bound a repeat — add an 'every' interval.",
+            "malformed": True,
+        }
+
     used = {schedule.id for schedule in existing}
     wake_id: str | None = None
     for i in range(1, MAX_WAKE_SCHEDULES + 1):
@@ -415,6 +443,84 @@ def build_wake_schedule(
         created_at=now_ms,
     )
     return {"schedule": schedule}
+
+
+#: The request keys an edit may move. A key PRESENT with value ``None`` is a
+#: deliberate clear (``limit: null`` drops the bound); an absent key keeps the
+#: row's current value. That distinction is why the callers pass
+#: ``model_dump(exclude_unset=True)`` rather than a plain dump.
+_EDIT_KEYS = ("message", "in", "at", "every", "until", "limit")
+
+
+def build_wake_edit(
+    request: dict[str, Any], existing: list[WakeSchedule], wake_id: str, now_ms: int
+) -> WakeBuildResult:
+    """Validate an EDIT of one existing row, addressed by ``wake_id``.
+
+    A merge, then the SAME validator a create goes through — so the cap, the
+    message bound, the interval floor and the bound-on-a-one-shot rule are
+    enforced once, in :func:`build_wake_schedule`, for every writer (the
+    agent's tool, the CLI, and the desktop arm/edit routes).
+
+    Two things an edit does that a create cannot, and both are why this is a
+    function rather than a flag on the caller's side:
+
+    - **The id survives.** The validator allocates the first FREE slot, which
+      is not necessarily the row's own id (a cancel+arm leaves holes; ``w5``
+      alone in a list would be reissued ``w2``). The built row is re-pinned to
+      the id the caller addressed, so an edit never renames the thing the user
+      is looking at.
+    - **The time is only moved when the request asks.** A request that changes
+      the message and nothing else keeps the row's existing instant, past or
+      future, through ``pinned_due_ms``; ``fired_count`` and ``created_at``
+      ride along for the same reason (an edit is the same row, not a new one).
+    """
+    target = next((schedule for schedule in existing if schedule.id == wake_id), None)
+    if target is None:
+        ids = ", ".join(schedule.id for schedule in existing) or "none"
+        return {
+            "error": f"no wake schedule with id '{wake_id}' (known: {ids}).",
+            "malformed": False,
+        }
+
+    merged: dict[str, Any] = {"message": target.message}
+    if target.every_ms is not None:
+        # Rendered and re-parsed rather than carried as an int: the validator
+        # parses `every` from text, and routing the value through the same
+        # formatter a user would see keeps ONE parser for intervals.
+        merged["every"] = format_duration(target.every_ms)
+    if target.until_at is not None:
+        # An OFFSET-BEARING ISO string, not the naive local one: an ambiguous
+        # wall-clock reading across a DST fold would move an untouched `until`
+        # by an hour through a pure round trip.
+        merged["until"] = datetime.fromtimestamp(target.until_at / 1000.0).astimezone().isoformat()
+    if target.limit is not None:
+        merged["limit"] = target.limit
+    for key in _EDIT_KEYS:
+        if key in request:
+            merged[key] = request[key]
+
+    moves_time = "in" in request or "at" in request
+    if not moves_time:
+        merged.pop("in", None)
+        merged.pop("at", None)
+    outcome = build_wake_schedule(
+        merged,
+        [schedule for schedule in existing if schedule.id != wake_id],
+        now_ms,
+        pinned_due_ms=None if moves_time else target.next_due_at,
+    )
+    if "error" in outcome:
+        return outcome
+    return {
+        "schedule": outcome["schedule"].model_copy(
+            update={
+                "id": target.id,
+                "fired_count": target.fired_count,
+                "created_at": target.created_at,
+            }
+        )
+    }
 
 
 def advance_wake_schedule(schedule: WakeSchedule, now_ms: int) -> WakeAdvanceResult:
