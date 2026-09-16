@@ -34,9 +34,19 @@ endpoint's admission rule and the composer's planner both read:
   - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so
     `/mcp logout` is the command and `/mcp logout seems to cause a crash` is a
     message;
-  - `any` — arbitrary text a handler or form field takes (`/rename <title>`);
-  - `none` — no text is ever this command's argument (`/compact hello` is a
-    message, which is the shape the operator reported).
+  - `any` — the command owns its trailing text, whatever it says (`/rename
+    <title>`, `/move <path>`, and every row the two booleans above already
+    carry);
+  - `none` — NO source at all: the booleans above are false for this row and no
+    shape applies, so text after the word is a message (`/compact hello`, which
+    the desktop runs and silently discards).
+
+  **Precedence**: `consumes_prompt` and `prefixes_text` decide FIRST and are the
+  whole answer when either is true; the shape is asked after them for text
+  neither can describe. A row the booleans carry publishes `any` rather than
+  `none`, so reading the shape alone, or OR-ing all three, gives the same answer
+  — `none` never means "ask the booleans". The field is emitted on every row
+  (never omitted), so no consumer has to infer a default.
 
 A renderer applying those fields reaches the endpoint's own decision; one that
 does not read them keeps its own derivation instead (both keys are additive).

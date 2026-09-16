@@ -242,6 +242,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # same fact `consumes_prompt` carries for the TUI (see the field's
         # docstring).
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.fork",
     ),
     # The switch receipt names the old AND new label — strictly more than the
@@ -265,6 +268,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # message: `/model gpt-5` is the model command, while
         # `/mcp logout seems to cause a crash` is prose. See the field docstring.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.model",
     ),
     # Next to `/model` because it is the same question one level down: which
@@ -283,6 +289,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is the level name, a value this command owns.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.effort",
     ),
     # Beside `/effort` because they are the two dials on the SAME request, and a
@@ -305,8 +314,13 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # OPTIONAL: bare `/fast` toggles, and the space offers on/off/status for
         # a user who wants to name the resulting state rather than flip into it.
         arguments=ArgumentMode.OPTIONAL,
-        # The word is the on/off CHOICE the desktop's picker offers (`fields[].value`),
-        # so `/fast on` is the command and `/fast maybe` is prose.
+        # WORD: ONE whitespace-free token is the command, and the picker's
+        # on/off list is PRESENTATION (`choices` on the field), not the admission
+        # rule — so `/fast maybe` is refused too, because the desktop runs the
+        # whole-draft form whatever the token says. The vocabulary this shape may
+        # carry (`command_argument_words`) is empty here and honoured by both
+        # arms, so declaring one later is a one-line change rather than a second
+        # rule.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.fast",
     ),
@@ -327,6 +341,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # desktop's `inline` list, which is the second half of the union the
         # field docstring describes.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="appearance",
     ),
     # The listing is the receipt.
@@ -363,9 +380,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "search",
         "Configure web search providers and load balancing",
-        # `filter=args`: the desktop's own `/search` fixes that filter to `web-search`
-        # and reads no word, but a whole-draft `/search <word>` is a control the
-        # composer runs (`whole`) while a sentence after the word is prose.
+        # `filter=args`: the route's presentation payload carries the word. The
+        # desktop's own `/search` fixes that filter to `web-search` and reads no
+        # word, so this is one of the two DELIBERATE EXCEPTIONS to the criterion
+        # (see `ArgumentShape`) — kept because a whole-draft `/search <word>` is a
+        # control the composer runs, while a sentence after the word is prose.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="settings.search",
     ),
@@ -404,8 +423,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "context",
         "Show prompt, tool-schema and message token usage",
-        # OWNER-dispatched, so the runtime receives the text; one selector word.
-        argument_shape=ArgumentShape.WORD,
+        # NONE, and the criterion is why: a shape is published only where the
+        # desktop's command path USES the trailing text. This one DROPS it —
+        # `_slash_result` calls `_context_slash_result(SlashResult)` with no args
+        # (`app.py`) and `native_action` has no branch, so `/context x` would run
+        # the command and silently discard `x` exactly as `/compact hello` does.
+        # That is the operator's own complaint, so the text is prose.
         desktop_destination="session.context",
     ),
     # `session.diagnostics` rather than a reuse of `analytics`: both read the
@@ -483,6 +506,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         consumes_prompt=True,
         # The trailing text is the objective, this command's own argument.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.goal",
     ),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
@@ -505,6 +531,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # The trailing text is the loop instruction or count, this command's own
         # argument.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.loop",
     ),
     # NOT an exception, and the reason IS the feature. The question does reach
@@ -520,6 +549,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         consumes_prompt=True,
         # The trailing text is the aside question, this command's own argument.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.aside",
     ),
     # NOT an echo, and the receipt is the reason. The pass narrates itself
@@ -538,9 +570,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "stop",
         "End this session, another by name/pid, or all — /resume reopens it",
         arguments=ArgumentMode.OPTIONAL,
-        # The picker owns the targets (`targets=[session_id]`); the word is the same
-        # target vocabulary the TUI's `/stop <target>` takes, and a sentence after the
-        # word is prose.
+        # The word is the same TARGET vocabulary the TUI's `/stop <target>` takes,
+        # and the second of the two DELIBERATE EXCEPTIONS to the criterion (see
+        # `ArgumentShape`): the desktop's picker owns `targets=[session_id]` and
+        # drops the word, but a whole-draft `/stop <word>` is a control the
+        # composer runs while a sentence after the word is prose.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="sessions.stop",
     ),
@@ -557,6 +591,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is the mode name, a value this command owns.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.approvals",
     ),
     # The listing is the receipt.
@@ -675,6 +712,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # is the team command, while a draft that merely opens with the word is
         # prose. See the field docstring.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.team",
     ),
     # Same echo reasoning as `/team`, which this command mirrors surface for
@@ -696,6 +736,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         consumes_prompt=True,
         # Name AND message are this command's own argument, exactly as `/team`.
         prefixes_text=True,
+        # ANY, not the NONE default: the command owns its trailing text
+        # whatever it says (see ArgumentShape's precedence note).
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.agent",
     ),
 ]
@@ -747,37 +790,67 @@ def command_prefixes_text(spec: SlashCommand) -> bool:
     return spec.consumes_prompt or spec.prefixes_text
 
 
-def _is_single_word(args: str) -> bool:
-    """One whitespace-free token, the shape of every desktop SELECTOR argument."""
-    return len(args.split()) == 1
+def _is_single_word(args: str, words: tuple[str, ...]) -> bool:
+    """One whitespace-free token, optionally drawn from ``words``.
+
+    ``words`` empty means "any single token" — the published reading of an empty
+    ``argument_words``. The vocabulary is a parameter rather than a second lookup
+    so this arm and the two below cannot disagree with the catalogue about which
+    words a shape accepts: both read :func:`command_argument_words`.
+    """
+    parts = args.split()
+    if len(parts) != 1:
+        return False
+    return not words or parts[0] in words
+
+
+def command_argument_words(spec: SlashCommand) -> tuple[str, ...]:
+    """The vocabulary a shape's first token must come from; empty means any word.
+
+    THE ONE derivation, read by the validators below AND by the desktop
+    catalogue's ``argument_words``, so the word a renderer accepts and the word
+    this endpoint accepts cannot drift. A shape whose vocabulary is live or
+    elsewhere — the provider registry, the MCP subcommands — is resolved HERE,
+    lazily, for the same reason ``slash_commands`` imports no provider SDK at
+    module scope: this is the module every host imports first.
+    """
+    if spec.argument_shape is ArgumentShape.PROVIDER:
+        from local_operator.providers.registry import known_provider_ids
+
+        return known_provider_ids()
+    if spec.argument_shape is ArgumentShape.SUBCOMMAND:
+        from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+
+        return tuple(sorted(MCP_SUBCOMMANDS))
+    return ()
 
 
 def _is_provider(args: str) -> bool:
-    """Whether ``args`` names a provider THIS INSTALL knows.
+    """Whether ``args`` is one token naming a provider THIS INSTALL knows.
 
     The command route's own lookup (``get_provider_definition``, which resolves
-    legacy aliases too), called here rather than re-implemented, so ``/login
-    openai`` and ``/login zzz`` get one answer on both paths. Imported lazily
-    because this module is deliberately the light one every host imports first.
+    legacy aliases too) reached through the vocabulary the catalogue publishes,
+    so ``/login openai`` and ``/login zzz`` get one answer on both paths —
+    including for an alias, which a hand-listed vocabulary would have missed.
     """
     from local_operator.providers.registry import get_provider_definition
 
     return get_provider_definition(args.strip()) is not None
 
 
-def _is_mcp_invocation(args: str) -> bool:
+def _is_mcp_invocation(args: str, words: tuple[str, ...]) -> bool:
     """``<subcommand> [name]`` — the shape the MCP setup form exists for.
 
     The command route's own parse, moved here so the route and the admission
-    test cannot drift: at most two tokens, the first a real subcommand, the
-    second a server name. Anything else is prose, which is what keeps ``/mcp
-    logout seems to cause a crash`` (the operator's own draft) a message.
+    test cannot drift: at most two tokens, the first a real subcommand (from the
+    published vocabulary), the second a server name. Anything else is prose, which
+    is what keeps ``/mcp logout seems to cause a crash`` (the operator's own
+    draft) a message.
     """
     from local_operator.mcp.config import SERVER_NAME_RE
-    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
 
     parts = args.split()
-    if not parts or len(parts) > 2 or parts[0] not in MCP_SUBCOMMANDS:
+    if not parts or len(parts) > 2 or (words and parts[0] not in words):
         return False
     return len(parts) == 1 or bool(SERVER_NAME_RE.fullmatch(parts[1]))
 
@@ -811,17 +884,23 @@ def command_argument_is_used(spec: SlashCommand, args: str) -> bool:
     """
     if not args.strip():
         return True
+    # The BOOLEANS FIRST, and they are the whole answer when either is true: the
+    # shape is the third source, asked only for text neither can describe. The
+    # boolean-carried rows declare ``ANY`` as well, so a consumer that reads this
+    # field alone (or ORs the three facts) reaches the same answer — and ``NONE``
+    # can never be misread as "the booleans decide".
     if command_prefixes_text(spec):
         return True
     shape = spec.argument_shape
+    words = command_argument_words(spec)
     if shape is ArgumentShape.ANY:
         return True
     if shape is ArgumentShape.WORD:
-        return _is_single_word(args)
+        return _is_single_word(args, words)
     if shape is ArgumentShape.PROVIDER:
         return _is_provider(args)
     if shape is ArgumentShape.SUBCOMMAND:
-        return _is_mcp_invocation(args)
+        return _is_mcp_invocation(args, words)
     return False
 
 
@@ -845,7 +924,9 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
         return None
     if spec.argument_shape is ArgumentShape.PROVIDER and not _is_provider(args):
         return "Choose a provider in the authentication panel"
-    if spec.argument_shape is ArgumentShape.SUBCOMMAND and not _is_mcp_invocation(args):
+    if spec.argument_shape is ArgumentShape.SUBCOMMAND and not _is_mcp_invocation(
+        args, command_argument_words(spec)
+    ):
         return "Use the MCP setup form for configuration and secret references"
     return None
 
@@ -860,17 +941,28 @@ def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:
     follows on the same line.
 
     A draft containing a NEWLINE is never a whole-draft command, and that is
-    load-bearing rather than incidental. The composer decides with the CARET in
-    hand, per LINE: a body that opens with a command word is prose there whenever
-    the caret is off the command line (QA round 2 Q4's shape), and a draft whose
-    last line is EMPTY — a paste or a Shift+Enter leaves the caret there — is
-    prose too. This endpoint has no caret, so any newline at all means prose; the
-    earlier "interior newline only" test sent the two hosts in opposite
-    directions on a draft whose only newline TRAILED (the composer planned `send`
-    for it, which this route then refused — the permanent-refusal class this test
-    exists to remove). Whitespace that is not a newline still does not make prose:
-    leading and trailing spaces are stripped, so `  /compact` and `/compact   `
-    are the command, because neither turns the draft into two lines.
+    load-bearing rather than incidental. The composer decides per LINE with the
+    CARET in hand: a body that opens with a command word is prose there whenever
+    the caret is off the command line (QA round 2 Q4's shape), so this endpoint,
+    which has no caret, reads any newline as prose rather than trying to guess a
+    line.
+
+    WHY THAT IS THE RIGHT RELAXATION even though a trailing newline can be a
+    `whole` plan on the current consumer: a `whole` plan runs the command IN the
+    composer and never posts the draft here, so accepting it is unreachable in
+    practice and cannot turn a control into paid chat. Measured both ways —
+    round 2's review drove the composer head (`fix/slash-prose-and-highlight`,
+    which decides from this wire field) and measured `whole` for a command word
+    followed only by a newline (`/usage`, `/compact`, `/login openai`, `/mcp
+    logout`) and for the whitespace-only tails (spaces, a blank line, a CRLF); the
+    older planner on `main` plans `send` for those same drafts at an end-of-draft
+    caret, which is exactly the refusal this rule removes. Both hosts are served
+    by accepting them, and neither is served by the earlier "interior newline
+    only" test, which sent them in opposite directions.
+
+    Whitespace that is not a newline still does not make prose: leading and
+    trailing spaces are stripped, so `  /compact` and `/compact   ` are the
+    command, because neither turns the draft into two lines.
 
     Anything that is not a whole-draft command is accepted as a message.
     """
@@ -879,7 +971,16 @@ def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:
     stripped = text.strip()
     if not stripped:
         return None
-    word, _, rest = stripped.partition(" ")
+    # The SAME boundary the tokenizer uses. `slash_command_for` splits a line on
+    # arbitrary whitespace, so cutting on a LITERAL space here read
+    # `/usage\rfix it` as `(usage, "it")` — one WORD-shaped token, therefore a
+    # 422 — while both composers read it as `/usage` plus the two-token argument
+    # `fix it` and plan `send`. Planned prose and refused here is the
+    # permanent-refusal class. `split(None, 1)` leaves `/goal\tship it` and
+    # `/usage\ton` deciding exactly as they did (one token either way).
+    parts = stripped.split(None, 1)
+    word = parts[0]
+    rest = parts[1] if len(parts) == 2 else ""
     if not word.startswith("/"):
         return None
     spec = slash_command_for(word)

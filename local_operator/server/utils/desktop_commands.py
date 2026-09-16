@@ -9,9 +9,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from local_operator.providers.registry import known_provider_ids
-from local_operator.slash_commands import SLASH_COMMANDS
-from local_operator.tui.autocomplete import ArgumentShape, SlashCommand
+from local_operator.slash_commands import SLASH_COMMANDS, command_argument_words
+from local_operator.tui.autocomplete import SlashCommand
 
 # These are execution handlers, not a copy of the catalogue. A new registry row
 # must choose its desktop destination before it can be offered by this host.
@@ -35,20 +34,13 @@ OWNER_COMMANDS = frozenset(
 def argument_words(spec: SlashCommand) -> list[str]:
     """The vocabulary a shape's first token must come from, for the wire.
 
-    Empty for every shape that takes ANY word (``word``, ``any``) and for
-    ``none``. The two that carry one resolve it from the SAME source their
-    validator reads — the MCP subcommand tuple and the provider registry — so a
-    renderer reproduces the endpoint's answer without a second list of its own,
-    which is the drift this field exists to prevent. ``known_provider_ids``
-    includes the legacy aliases because the validator resolves them.
+    A thin adapter over ``slash_commands.command_argument_words`` — the ONE
+    derivation, so the word the catalogue publishes and the word the endpoint
+    accepts cannot drift (round 2's MINOR-2: the validator's ``WORD`` arm ignored
+    the vocabulary while a consumer honoured it for every shape). Empty for every
+    shape that takes ANY word; ``ArgumentShape`` states which those are.
     """
-    if spec.argument_shape is ArgumentShape.SUBCOMMAND:
-        from local_operator.session.frontend_state import MCP_SUBCOMMANDS
-
-        return sorted(MCP_SUBCOMMANDS)
-    if spec.argument_shape is ArgumentShape.PROVIDER:
-        return list(known_provider_ids())
-    return []
+    return list(command_argument_words(spec))
 
 
 def command_catalogue() -> list[dict[str, Any]]:

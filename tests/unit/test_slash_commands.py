@@ -150,6 +150,18 @@ WHOLE_DRAFT_TABLE = [
     ("/login zzz", None),
     ("/mcp zzz", None),
     ("/stop now and then", None),
+    # A command whose path DROPS the trailing text is prose, by the same criterion
+    # that keeps `/compact hello` prose: `context`'s owner dispatch calls
+    # `_context_slash_result` with no args and `native_action` has no branch.
+    ("/context x", None),
+    # The word/argument split is the TOKENIZER's boundary, not a literal space:
+    # `/usage\rfix it` is `usage` plus the two-token argument `fix it` (prose),
+    # which is how both composers read it. Pinned because splitting on `" "` here
+    # read it as one WORD-shaped token and refused a draft planned as prose.
+    ("/usage\rfix it", None),
+    # ...while the tab-separated forms still decide as they always did.
+    ("/goal\tship it", "goal"),
+    ("/usage\ton", "usage"),
 ]
 
 

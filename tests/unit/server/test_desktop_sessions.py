@@ -6225,6 +6225,10 @@ MESSAGE_DRAFTS = [
     "/compact\nhello",
     "/team ops\n",
     "/compact\n   ",
+    # The criterion's prose side: the command drops this text (`context`), and the
+    # word/argument split is the tokenizer's, so a CR separator is not a word end.
+    "/context x",
+    "/usage\rfix it",
     "/tema",
     "/etc/hosts is wrong",
     "/tmp/test\n\nThe above is a test file path",

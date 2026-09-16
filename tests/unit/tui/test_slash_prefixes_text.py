@@ -156,8 +156,12 @@ ARGUMENT_SHAPE_POLICY = {
     "analytics": ArgumentShape.WORD,
     # The same target vocabulary `/stop <target>` takes.
     "stop": ArgumentShape.WORD,
-    # OWNER-dispatched: the runtime receives the text.
-    "context": ArgumentShape.WORD,
+    # NONE, and the criterion is why: a shape is published only where the
+    # desktop's command PATH uses the trailing text, and this one DROPS it —
+    # `_slash_result` calls `_context_slash_result(SlashResult)` with no args and
+    # `native_action` has no branch, so `/context x` runs the command and throws
+    # `x` away. Same class as `/compact hello`, which is the operator's report.
+    "context": ArgumentShape.NONE,
     # ONE token naming a provider THIS INSTALL knows — the route's own lookup, so
     # `/login openai` is the command and `/login zzz` is prose.
     "login": ArgumentShape.PROVIDER,
@@ -193,20 +197,25 @@ ARGUMENT_SHAPE_POLICY = {
     # The route refuses typed text outright: the secret is entered in the masked
     # form, so no text is ever this command's argument.
     "credential": ArgumentShape.NONE,
-    # --- carried by the two booleans, so the shape stays NONE -----------------
+    # --- ANY: the rows the two booleans already carry -------------------------
     # `consumes_prompt` says the text is a prompt; `prefixes_text` says it is a
-    # value from a list. The shape answers only what neither can describe, and
-    # the test below asserts the three never overlap.
-    "goal": ArgumentShape.NONE,
-    "loop": ArgumentShape.NONE,
-    "btw": ArgumentShape.NONE,
-    "fork": ArgumentShape.NONE,
-    "team": ArgumentShape.NONE,
-    "agent": ArgumentShape.NONE,
-    "model": ArgumentShape.NONE,
-    "effort": ArgumentShape.NONE,
-    "approvals": ArgumentShape.NONE,
-    "theme": ArgumentShape.NONE,
+    # value from a list. Both decide FIRST, and these rows say `ANY` here rather
+    # than inheriting `none` — the command owns its trailing text whatever it
+    # says — so a consumer that reads this field ALONE does not plan prose for a
+    # control this endpoint refuses (round 2's MAJOR-1: the field published
+    # `none` for these rows while every published definition of `none` said
+    # "never"). Reading the shape first, or OR-ing all three sources, is now
+    # correct either way.
+    "goal": ArgumentShape.ANY,
+    "loop": ArgumentShape.ANY,
+    "btw": ArgumentShape.ANY,
+    "fork": ArgumentShape.ANY,
+    "team": ArgumentShape.ANY,
+    "agent": ArgumentShape.ANY,
+    "model": ArgumentShape.ANY,
+    "effort": ArgumentShape.ANY,
+    "approvals": ArgumentShape.ANY,
+    "theme": ArgumentShape.ANY,
 }
 
 
@@ -267,19 +276,41 @@ def test_every_registered_command_states_an_argument_shape() -> None:
     )
 
 
-def test_a_command_carried_by_the_booleans_does_not_also_declare_a_shape() -> None:
-    """The shape answers what the booleans cannot, so the three never overlap.
+def test_the_boolean_carried_rows_declare_any_not_none() -> None:
+    """`any` is published explicitly on every row a boolean carries.
 
-    A prompt-consuming or list-valued command's text is already its own; adding a
-    shape would be a second statement of the same fact, and a reviewer reading
-    the admission rule could not tell which one decided. Structural, so a later
-    edit that adds a shape to `/goal` fails here rather than silently shadowing
-    ``consumes_prompt``.
+    The reverse of this test used to pin the opposite (a boolean-carried row must
+    NOT declare a shape), which was right only while `none` meant "ask the
+    booleans". Every published definition of `none` says "never", so a consumer
+    reading the field first planned PROSE for 37 whole-draft controls this
+    endpoint refuses — round 2's MAJOR-1. The spelling is now: the booleans decide
+    first, AND a row they carry declares `any`, so `none` can only ever mean "no
+    source at all".
+    """
+    boolean_carried = {
+        command.name
+        for command in SLASH_COMMANDS
+        if command.consumes_prompt or command.prefixes_text
+    }
+    declared = {command.name for command in SLASH_COMMANDS if command.prefixes_text} | {
+        command.name for command in SLASH_COMMANDS if command.consumes_prompt
+    }
+    assert boolean_carried == declared
+    shapes = {command.name: command.argument_shape for command in SLASH_COMMANDS}
+    assert {name for name in boolean_carried if shapes[name] is not ArgumentShape.ANY} == set()
+
+
+def test_none_is_reserved_for_rows_neither_boolean_carries() -> None:
+    """The other half, stated so `none` cannot drift back into a total answer.
+
+    A `none` row must have both booleans false: if one were true, the published
+    shape would contradict what the endpoint does with the row (it WOULD own the
+    text), which is the contradiction round 2 found in the other direction.
     """
     offenders = [
         command.name
         for command in SLASH_COMMANDS
-        if command.argument_shape is not ArgumentShape.NONE
+        if command.argument_shape is ArgumentShape.NONE
         and (command.consumes_prompt or command.prefixes_text)
     ]
     assert offenders == []

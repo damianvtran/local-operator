@@ -31,7 +31,9 @@ prompt, a value from a list, or a shape the command route validates or forwards
 [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md)). So `/compact hello`, `/usage more
 prose` and a draft that merely OPENS with `/mcp logout` are messages, while
 `/mcp logout`, `/login openai` and `/move ~/x` are still refused — each of those
-is a control the composer runs.
+is a control the composer runs. The two booleans decide FIRST and a row they
+carry publishes `any` rather than `none`, so a client may read the shape alone or
+OR the three facts and reach the same answer.
 
 Electron **main**, not the renderer, generates a random 32-byte token for each
 managed backend lifetime. Supply it only through `LOCAL_OPERATOR_DESKTOP_TOKEN`
