@@ -203,3 +203,107 @@ The before column is the diagnosis restated: on `origin/main` a real `AppBlur`
 posted to the app changes nothing, because Textual's own `_on_app_blur` only
 sets a flag and refreshes bindings. The focused row is unchanged by design —
 this gates on focus, it does not slow down animation anyone can see.
+
+## info-snapshot-before.json / info-snapshot-after.json
+
+`scripts/bench_info_snapshot.py` measures one `/info` open — the
+`collect_snapshot` call the TUI's `/info` screen and the desktop's
+`GET /v1/desktop/info` both make, the probes underneath it, and the route itself
+(through the real FastAPI app, and with `--http` through a real uvicorn daemon on
+a loopback socket). Run:
+
+```sh
+.venv/bin/python scripts/bench_info_snapshot.py --runs 5 --json bench/info-snapshot-after.json
+.venv/bin/python scripts/bench_info_snapshot.py --http --json /tmp/info-after.json  # adds a socket
+.venv/bin/python scripts/bench_info_snapshot.py --no-route --json /tmp/info-quick.json
+```
+
+`--tree <checkout>` measures another checkout — `git worktree add --detach
+/tmp/lo-base <sha>`, with its own venv — which is how the two columns below were
+captured. The script prints the `local_operator/__init__.py` it resolved, checks
+that the daemon it boots for `--http` imports that same tree, and writes that
+path into each artifact: a benchmark that measured the wrong tree is worse than
+none. The `check:` lines are verdicts on the measurement (the fixture's sessions
+were listed and measured, the two readers agree, the route's response carried
+the fixture), not on taste; the millisecond ceilings are applied only when the
+machine is not oversubscribed (both load averages are in the artifact), while the
+probe's own ceiling is applied either way, since the regression it guards is two
+orders of magnitude deep.
+
+The fixture is 12 spawned processes with real session records published into a
+temp config root — a dozen live sessions is the reported case. The records are
+re-published before every section, because a record past `HEARTBEAT_TIMEOUT_S`
+(45 s) classifies as `wedged` and wedged rows are not probed at all: without that
+refresh the later sections measure a read with an empty fleet in it, which looks
+fast and means nothing. It is also why every route row reports how many fixture
+rows came back in the response. `~/.local-operator` is never touched.
+`--extra-pids` adds real long-lived session processes to the equivalence section,
+so the two readers are compared over 170-500 MB footprints and not only over
+parked interpreters. The process names in those rows are recorded REDACTED
+(`Local Operator [session]` rather than the session id, a path's basename rather
+than the path): the artifacts are committed, and a session id names one of the
+operator's own sessions.
+
+The two committed artifacts were captured before the redaction existed in the
+script, and are the recorded runs with that transformation—and only that
+one—applied to them, through the script's own `_process_label` / `_display_path`:
+every measured field in them is byte-identical to the run that produced them
+(verified field by field at capture time, since a re-run on this machine would
+have measured a different load regime rather than the same one twice).
+
+| | Before (`ddd213ae7`) | After |
+| --- | --- | --- |
+| `session_resource_usage`, 12 pids, median | 5,068 ms | **41.8 ms** |
+| `collect_snapshot`, median of 5 | 5,758 ms | **221 ms** |
+| `collect_snapshot`, first call in a cold process | 7,447 ms | 6,366 ms |
+| `GET /v1/desktop/info`, median (real daemon) | 5,444 ms | **171 ms** |
+| `GET /v1/desktop/info`, first request after boot | 6,065 ms | **907 ms** |
+| fixture sessions with a footprint in the response | 0 / 12 | 12 / 12 |
+| `proc_pid_rusage`, per pid | absent | 5.7 us (median; max 25 ms under this load) |
+| `top -l1` dump, measured for reference | 9,532 ms | 15,017 ms |
+| worst \|delta\| against the `top` MEM column (parked fixture pids) | not comparable | 0.005 % |
+
+Both columns were captured minutes apart on this machine at **19x and 35x the
+CPU count** (1-minute load 267 and 488 on 14 CPUs), which is the regime this
+repo is worked in rather than a fault in either row: every wall time here is
+inflated by whatever else the box was running, and the after column was measured
+under the heavier load of the two.
+
+What the rows say, in order:
+
+- The **read** is the whole story. `session_resource_usage` went from 5,068 ms to
+  41.8 ms because the macOS footprint no longer comes from one `top -l1` dump of
+  the entire process table: `proc_pid_rusage` answers per pid in microseconds
+  (5.7 us median) and the batched `ps` for RSS (25.9 ms) is now the only
+  subprocess on the path. The dump is still paid by any pid the direct read
+  cannot cover — another account's process answers `EPERM` — and the reference
+  row above is what that costs when it happens.
+- **`collect_snapshot`'s first call in a cold process is unchanged**, and that is
+  the honest reading rather than a regression: a bare interpreter pays the whole
+  `/info` import graph plus the agent/config metadata scans (~1.4-2.1 s on this
+  machine in a calmer window), and at 35x load that is 6.4 s. It is not what the
+  desktop pays, because the backend daemon has the application imported before it
+  answers anything — the row that describes the real first open is the route's
+  first request, 907 ms on the same loaded box.
+- **The before column lost the data entirely.** Its 0 / 12 footprint row is not
+  a rendering difference: the dump took longer than the module's 5 s subprocess
+  timeout (5,068 ms of the read is exactly that timeout being hit), so
+  `session_resource_usage` degraded to "unknown" and the panel printed em dashes
+  for every session's memory. The after column answers for all 12.
+- The **equivalence** rows are what make this a speed change and not a different
+  number: on the same parked pids `ri_phys_footprint` agrees with the `top` MEM
+  column to within 0.005 % (both report the kernel's phys-footprint accounting;
+  `top` prints three significant digits, which is the entire difference). The
+  structural proof that the hardcoded struct offset is the right field is the
+  `rusage layout` check — `ri_resident_size` sits at offset 64 and equals `ps`
+  RSS byte for byte on every parked fixture pid (worst delta 0 bytes), so the
+  footprint at 72 is where the v1/v2 layout puts it. On the running sessions
+  (`--extra-pids`) the two readers differ by up to 4.2 %, which is the session
+  allocating between `top`'s sampling instant and the direct read, and is why
+  that column is reported but not gated.
+- **Overlap is not worth a thread pool here.** The `blocks` section times each
+  collector on its own: the ceiling such a pool could buy is the sum of the
+  independent ones minus the longest (69.5 ms at 35x load, 26.8-43.7 ms in
+  calmer windows), and two of the five blocks cannot overlap anyway because
+  `process` and `agents` are built from the sessions block's output. That is why
+  the read is still serial.
