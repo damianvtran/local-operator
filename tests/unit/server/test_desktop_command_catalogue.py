@@ -96,6 +96,28 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     assert shapes["rename"] == "any"
     assert shapes["usage"] == "word"
     assert shapes["compact"] == "none"
+    # The boolean-carried rows publish `any` EXPLICITLY, not the `none` default:
+    # every published definition of `none` says "no source at all", so a consumer
+    # reading this field alone must not plan prose for a whole-draft control the
+    # endpoint refuses (round 2's MAJOR-1). The wire is where the consumer reads
+    # it, so the pin belongs here as well as in the registry test.
+    assert {row["name"] for row in rows if row["consumes_prompt"] or row["prefixes_text"]} == {
+        "goal",
+        "loop",
+        "btw",
+        "fork",
+        "team",
+        "agent",
+        "model",
+        "effort",
+        "approvals",
+        "theme",
+    }
+    for row in rows:
+        if row["consumes_prompt"] or row["prefixes_text"]:
+            assert row["argument_shape"] == "any", row["name"]
+        if row["argument_shape"] == "none":
+            assert not row["consumes_prompt"] and not row["prefixes_text"], row["name"]
 
     words = {row["name"]: row["argument_words"] for row in rows}
     assert words["mcp"] == sorted(MCP_SUBCOMMANDS)
@@ -106,12 +128,17 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     assert words["usage"] == [] and words["compact"] == [] and words["rename"] == []
 
     # And the wire vocabulary really is what the validators answer with, so a
-    # renderer applying it reaches the endpoint's own decision.
+    # renderer applying it reaches the endpoint's own decision. Both arms now take
+    # the vocabulary from the same `command_argument_words`, which is what these
+    # calls exercise rather than a second lookup.
     for provider in known_provider_ids():
         assert _is_provider(provider) is True
     assert _is_provider("zzz") is False
-    assert _is_mcp_invocation(words["mcp"][0]) is True
-    assert _is_mcp_invocation("logout seems to cause a crash") is False
+    mcp_words = tuple(words["mcp"])
+    assert _is_mcp_invocation(mcp_words[0], mcp_words) is True
+    assert _is_mcp_invocation("logout seems to cause a crash", mcp_words) is False
+    assert _is_mcp_invocation("zzz", mcp_words) is False
+    assert _is_mcp_invocation("add my-server", mcp_words) is True
     assert SERVER_NAME_RE.fullmatch("my-server") is not None
 
 

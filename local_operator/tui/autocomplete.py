@@ -68,6 +68,16 @@ class ArgumentShape(Enum):
     VALIDATES or FORWARDS: the MCP subcommand and server name, a provider id, a
     selection, a filter, a path, a title.
 
+    PRECEDENCE, and it is published so a consumer may OR the three facts rather
+    than nest them: ``consumes_prompt`` and ``prefixes_text`` are read FIRST and
+    are the whole answer when either is true. The shape is asked only after them,
+    and a row that one of the booleans already carries declares ``ANY`` anyway —
+    the command owns its trailing text, whatever it says — so a reader who takes
+    the shape first, or who ORs the three, still reaches the same answer. ``NONE``
+    is therefore reserved for rows where the booleans are false AND no shape
+    applies; it is emitted explicitly rather than omitted, so no consumer has to
+    infer a default.
+
     Read on the desktop's ADMISSION rule (``slash_commands.
     command_argument_is_used``) and by the command route's own validator, so
     "is this trailing text this command's argument" has exactly one answer per
@@ -84,25 +94,53 @@ class ArgumentShape(Enum):
     and is wrong in both directions: ``/login`` is ``REQUIRED`` yet its word is a
     provider id the route validates, while ``/usage`` is no ``ArgumentMode`` list
     at all yet ``/usage on`` is a control the composer runs.
+
+    THE CRITERION, stated because a shape is a decision per command and a reader
+    has to be able to check one: a shape is published only where the desktop's
+    command PATH uses the trailing text — a handler that reads it (a title, a
+    path, a session selection), a presentation payload that carries it
+    (``selection``, ``filter``, ``selected``, a choice field), or a validator that
+    judges it (the provider id, the MCP subcommand). Where the path DROPS the text
+    the shape is ``NONE`` and the text is prose: ``/compact hello`` and
+    ``/context x`` both run a command that silently discards what followed, which
+    is the operator's own report against ``/compact``.
+
+    TWO DELIBERATE EXCEPTIONS, named here so the criterion is not read as a law
+    the table breaks silently: ``/search <word>`` (the desktop fixes its filter to
+    ``web-search`` and reads no word) and ``/stop <word>`` (the picker owns
+    ``targets=[session_id]``) keep ``WORD``. Both are whole-draft controls the
+    composer RUNS, so a sentence after the word is prose while a single word is
+    not — and refusing the one-token form is the safe direction for a guard whose
+    whole purpose is that a control never becomes paid model chat.
     """
 
-    #: No argument. Text after the word is prose, whatever it says.
+    #: No argument AT ALL from any source: the two booleans are false for this
+    #: row and no shape applies, so text after the word is prose, whatever it
+    #: says. Read AFTER the booleans — see the precedence note above; a row they
+    #: carry never says this (`/goal` is ``ANY``, not ``NONE``).
     NONE = "none"
     #: ONE whitespace-free token — a selector the desktop forwards as a
     #: ``selection``/``filter``/``selected`` value (a view, a mode, a session id).
     #: A sentence here is prose, which is what keeps `/usage more prose` a message.
+    #: The vocabulary is ``slash_commands.command_argument_words``, empty for this
+    #: shape's rows and honoured by BOTH arms (the validator and the catalogue),
+    #: so a row needing one has a single place to declare it.
     WORD = "word"
     #: One token naming a provider THIS INSTALL knows — the route's own lookup
     #: (``get_provider_definition``), so ``/login openai`` is the command and
-    #: ``/login zzz`` is prose.
+    #: ``/login zzz`` is prose. A ``WORD`` whose vocabulary is the provider ids.
     PROVIDER = "provider"
     #: ``<subcommand> [name]`` — the MCP shape the command route validates
     #: against ``MCP_SUBCOMMANDS`` and ``SERVER_NAME_RE``. At most two tokens, so
     #: ``/mcp logout`` is the command while ``/mcp logout seems to cause a crash``
     #: is prose.
     SUBCOMMAND = "subcommand"
-    #: Any text at all: a handler or a form field takes it (a session title, a
-    #: working directory, a path).
+    #: The command owns its trailing text, whatever it says — a handler or a form
+    #: field takes it (a session title, a working directory, a path), or one of the
+    #: two booleans above already carries it. Declared explicitly on those boolean
+    #: rows rather than left to the default: ``NONE`` means "no source at all",
+    #: and a consumer that reads this field alone must not plan prose for a control
+    #: the endpoint refuses.
     ANY = "any"
 
 
@@ -206,16 +244,21 @@ class SlashCommand:
     #: a list). See :class:`ArgumentShape` for the values and why neither of the
     #: other two can stand in for it.
     #:
+    #: PRECEDENCE: the two booleans are read FIRST and are the whole answer when
+    #: either is true; this field is asked after them. A row the booleans already
+    #: carry declares :attr:`ArgumentShape.ANY` explicitly — "the command owns its
+    #: trailing text, whatever it says" — because the default below means NO
+    #: source at all, and the field is published so a consumer may read it alone
+    #: or OR the three facts and still be right.
+    #:
     #: Keyword-only and defaulting to :attr:`ArgumentShape.NONE` for the reason
     #: ``echo`` and ``consumes_prompt`` do: a command that has not stated a shape
     #: gets the behaviour that changes nothing — text after it is PROSE, which is
     #: the direction that cannot turn a user's message into a command.
     #:
-    #: The ADMISSION rule reads this after the two booleans, so a command that
-    #: consumes a prompt or a listed value does not need to name a shape as well
-    #: (``/goal`` is ``NONE`` here and still owns its text). ``SLASH_COMMANDS`` is
-    #: pinned entry-by-entry in ``tests/unit/tui/test_slash_prefixes_text.py`` so a
-    #: new command cannot be added without stating this choice.
+    #: ``SLASH_COMMANDS`` is pinned entry-by-entry in
+    #: ``tests/unit/tui/test_slash_prefixes_text.py`` so a new command cannot be
+    #: added without stating this choice.
     argument_shape: ArgumentShape = field(default=ArgumentShape.NONE, kw_only=True)
 
     @property
