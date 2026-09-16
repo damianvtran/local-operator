@@ -246,6 +246,48 @@ def test_the_boot_record_is_readable_by_a_successor_for_another_pid(tmp_path: Pa
     assert journal.recorded_boot_build(killed_pid, root=root) is not None
 
 
+def test_the_exit_path_touches_no_filesystem_when_nothing_was_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The instrument must not add work to an exit path that owes it nothing.
+
+    Two reasons, and the second is the sharp one. ``test_process_reaper`` TIMES
+    ``_clean_exit`` (it asserts the spread of three elapsed times stays under
+    40 ms), so work added there for a host with no record is a timing regression
+    on someone else's test. And the withdrawal is not free even when it finds
+    nothing: ``registry.unpublish`` resolves ``run_dir()``, which MKDIRS the
+    namespace — so an unguarded call makes every clean exit create a directory it
+    has nothing to put in.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(process, "_boot_record_pid", None)
+
+    process._clear_boot_record()
+
+    assert not (
+        tmp_path / "cfg" / "run"
+    ).exists(), "a process with no boot record must not create (or touch) the namespace"
+
+
+def test_the_exit_path_withdraws_the_record_this_process_wrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """And the positive half: what this process published, it withdraws."""
+    from local_operator.session.runtime import process
+
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    journal.write_boot_record("sess-clean", update.BuildStamp("1.0.0", "aaa"))
+    monkeypatch.setattr(process, "_boot_record_pid", os.getpid())
+    assert journal.read_boot_record(os.getpid()) is not None
+
+    process._clear_boot_record()
+
+    assert journal.read_boot_record(os.getpid()) is None
+
+
 # ---------------------------------------------------------------------------
 # The classifier's preference order
 # ---------------------------------------------------------------------------

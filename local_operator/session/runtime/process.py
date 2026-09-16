@@ -640,6 +640,15 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
     _clear_boot_record()
 
 
+#: The pid whose boot record THIS process published, or ``None``.
+#:
+#: Process-level rather than per-handle because the artifact is: one boot record
+#: per process, written once at boot. It exists so the exit path can answer "do I
+#: have a record to withdraw?" with a comparison instead of a filesystem call
+#: (see :func:`_clear_boot_record` for why that matters).
+_boot_record_pid: int | None = None
+
+
 def _bind_boot_instrumentation(
     handle: object, *, session_id: str = "", cwd: str = ""
 ) -> "journal.TurnJournal | None":
@@ -657,6 +666,7 @@ def _bind_boot_instrumentation(
     artifacts cannot disagree about the build a comparison between them rests
     on.
     """
+    global _boot_record_pid
     try:
         from local_operator import update as update_mod
         from local_operator.session.runtime import journal
@@ -671,6 +681,7 @@ def _bind_boot_instrumentation(
 
     try:
         journal.write_boot_record(identity, build, cwd=cwd)
+        _boot_record_pid = os.getpid()
     except OSError:
         logger.warning("session runtime: could not write its boot record", exc_info=True)
 
@@ -710,7 +721,19 @@ def _clear_boot_record() -> None:
     the 2026-09-15 fleet could not establish about itself. Withdrawing here is
     also what keeps ``run/host`` bounded — one record per unaccounted death,
     not one per runtime ever spawned.
+
+    THE GUARD IS NOT AN OPTIMISATION. Nothing is attempted when this process
+    never published a record, and that is load-bearing twice over. The exit path
+    is TIMED by the reaper's own tests (``test_process_reaper`` measures the
+    spread of ``_clean_exit`` elapsed times to 40 ms), so an instrument must not
+    add work to it for a host that has no record to withdraw — an in-process
+    session, a reduced handle, every test that never binds instrumentation.
+    And the withdrawal is not free even when it does nothing: it resolves
+    ``run_dir()``, which MKDIRS the namespace, so an unconditional call would
+    make every clean exit create a directory it has nothing to put in.
     """
+    if _boot_record_pid != os.getpid():
+        return
     try:
         from local_operator.session.runtime import journal
 
