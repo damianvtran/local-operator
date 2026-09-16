@@ -75,7 +75,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.session.session_search import search_store
-from local_operator.slash_commands import slash_command_for
+from local_operator.slash_commands import slash_command_for, whole_draft_command
 
 logger = logging.getLogger(__name__)
 
@@ -726,12 +726,26 @@ class Prompt(Input):
     def nonempty(self):
         if not self.text.strip() and not self.images:
             raise ValueError("Enter a message or attach an image")
-        # Slash controls must never accidentally become paid model chat. The
-        # caller resolves them through commands, including the native UI forms.
+        # A slash CONTROL must never become paid model chat, and this is the one
+        # test that decides it: a draft that, as a whole, IS a command was meant
+        # for the command endpoint. Anything else — every multi-line draft, every
+        # leading command word followed by prose, every path and every sentence —
+        # is a message and is accepted (the operator's own report: a three-line
+        # draft opening with "/mcp logout …" was refused forever by the blanket
+        # `lstrip().startswith("/")` this replaces).
+        #
+        # The predicate is `slash_commands.whole_draft_command`, not a second
+        # inline test, because the composer plans the same draft and a second
+        # derivation is how a prose draft gets planned as `send` and then refused
+        # here with no way to resend it.
         if len(self.model_dump_json().encode()) > 900_000:
             raise ValueError("Message exceeds the canonical control-frame limit")
-        if self.text.lstrip().startswith("/"):
-            raise ValueError("Use the command endpoint for slash commands")
+        command = whole_draft_command(self.text)
+        if command is not None:
+            raise ValueError(
+                f"/{command[0].name} is a command, not a message. "
+                "Send it on its own, or move it below your text."
+            )
         return self
 
 

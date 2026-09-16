@@ -4662,7 +4662,11 @@ async def test_the_move_route_is_advertised_by_session_move_only(move_api) -> No
     # that cannot consume it must keep its move controls disabled even here.
     assert features["session_move"] == 2
     assert features["frontend_replace"] == 1
-    assert features["commands"] == 1
+    # 2 since the messages endpoint's slash policy was narrowed to accept a
+    # message that merely BEGINS with a command word (a whole-draft command is
+    # still refused). Unrelated to move, which is the point of the assertion: no
+    # other key in this map is bumped to advertise a route.
+    assert features["commands"] == 2
     assert features["session_catalogue"] == 3
 
 
@@ -6201,3 +6205,109 @@ def test_a_stamped_page_still_names_a_failed_attention_read(tmp_path, monkeypatc
     assert row["degraded"] == ["attention"], "and so does the marker beside it"
     assert "attention" not in row
     assert calls["n"] == 2, "the catalogue's read succeeded; the second one is the failure"
+
+
+#: Drafts a user may legitimately SEND as a message. Every one of them opened
+#: with a slash token and was refused by the blanket `lstrip().startswith("/")`
+#: test this PR replaces — the operator's own three-line report is the last row.
+MESSAGE_DRAFTS = [
+    "/compact hello",
+    "/usage more prose",
+    "/mcp logout seems to cause a crash",
+    "/team ops fix this\nand then ship it",
+    "/usage\nfix it",
+    "/compact\nhello",
+    "/tema",
+    "/etc/hosts is wrong",
+    "/tmp/test\n\nThe above is a test file path",
+    "fix this /usage",
+    "hello\n/team ops",
+    "what does /usage mean?",
+    (
+        "/mcp logout seems to cause a crash on the TUI,\n"
+        "can you review and fix that issue,\n"
+        "replicate it and then fix and test end to end"
+    ),
+]
+
+#: Drafts that, as a WHOLE, are a command and so belong on the command endpoint.
+#: `SlashCommand.prefixes_text` is what separates these from the list above: an
+#: argument the command owns (a prompt or a picker value) keeps the whole-draft
+#: form a command; prose after a command that owns nothing is a message.
+COMMAND_DRAFTS = [
+    "/compact",
+    "/usage",
+    "/model gpt-5",
+    "/theme dark",
+    "/effort high",
+    "/approvals plan",
+    "/goal ship it",
+    "/team ops fix this",
+    "/team",
+    "/mcp",
+    "  /compact",
+]
+
+
+def test_the_messages_route_accepts_prose_that_opens_with_a_command_word(monkeypatch):
+    """The admission boundary, through the ROUTE rather than the model.
+
+    A 422 here means the body validator refused the draft; anything else means it
+    was admitted and the request went on to the session lookup, which answers 404
+    for the deliberately non-existent session used below. That 404 is therefore
+    the POSITIVE evidence this test needs — asserting merely `!= 422` would also
+    pass on a 500.
+
+    Asserting through the route matters because the composer plans the same draft
+    in another process: a draft planned as prose and refused here is refused
+    forever, with no resend that clears it, which is exactly the operator's
+    report.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "policy-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    headers = {"Authorization": "Bearer policy-token"}
+    body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+
+    with TestClient(app) as client:
+        for text in MESSAGE_DRAFTS:
+            response = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/messages",
+                headers=headers,
+                json={**body, "text": text},
+            )
+            assert response.status_code == 404, (
+                text,
+                response.status_code,
+                response.text,
+            )
+        for text in COMMAND_DRAFTS:
+            response = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/messages",
+                headers=headers,
+                json={**body, "text": text},
+            )
+            assert response.status_code == 422, (text, response.status_code, response.text)
+
+
+def test_the_refusal_message_is_the_one_the_ui_can_act_on():
+    """The 422 is now reachable only from a client bug or a version skew.
+
+    After this narrowing a correct renderer never reaches it — the planner runs a
+    whole-draft command as `whole` — so the sentence must name the command and
+    the remedy rather than describe every leading slash as a command. Asserted at
+    the MODEL, not through the response body: the app's validation-error shaper
+    deliberately replaces a 422 body with an opaque sentence, so the wire cannot
+    be the place this string is pinned. The desktop UI surfaces the model's own
+    sentence verbatim, which is why it is pinned at all.
+    """
+    with pytest.raises(ValueError, match="/compact is a command, not a message"):
+        Prompt.model_validate(
+            {
+                "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "text": "/compact",
+            }
+        )
