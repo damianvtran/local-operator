@@ -41,7 +41,7 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
-from local_operator.session.catalog import load_catalog
+from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
 from local_operator.session.cold_model import resolve_birth_effort
 from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
@@ -2734,7 +2734,9 @@ class DesktopSessions:
         says so in ``degraded`` instead of presenting the defaults as verdicts.
         The field is always present and always a list, so a client can read it
         without a presence check; ``attention`` below stays sparse because it
-        is a per-row fact rather than a read-level one.
+        is a per-row fact rather than a read-level one — and when THAT read is
+        the one that failed, the affected rows name it in ``degraded``, so an
+        absent ``attention`` key is never published as "nothing unread".
 
         ``status_stamps`` is ``(epoch, {session_id: revision})`` from the desktop
         feed, and it exists because TWO writers now ship the same fact: this row's
@@ -2761,10 +2763,28 @@ class DesktopSessions:
         def rows() -> list[dict[str, Any]]:
             entries = load_catalog(self.root, limit=limit)[:limit]
             attention: dict[str, dict[str, Any]] = {}
-            with contextlib.suppress(sqlite3.Error, OSError):
+            # NOT ``contextlib.suppress``: the suppression was silent, so this
+            # route answered ``degraded: []`` -- "everything about this page was
+            # read" -- while the ``attention`` key it could not build was simply
+            # absent, which a client renders as "nothing unread". That is the
+            # same confidently-wrong negative the catalogue's own attention read
+            # is written to stop (``session.catalog.load_catalog``), one read
+            # further out: the catalogue reads this store for the ROW's unseen
+            # mark, and this is a second read of it for the wire's per-row
+            # ``attention`` object, so a transient SQLITE_BUSY can hit one and
+            # not the other.
+            #
+            # The failure is named on the rows rather than carried beside them
+            # for the reason the catalogue states: every consumer walks the rows,
+            # and a sibling value is a second channel a caller can forget.
+            attention_degraded = False
+            try:
                 attention = AttentionStore(self.root / "attention.db").state_many(
                     f"session/{entry.id}" for entry in entries
                 )
+            except (sqlite3.Error, OSError):
+                logger.warning("desktop listing could not read attention state", exc_info=True)
+                attention_degraded = True
             result = []
             for entry in entries:
                 row = entry.row._asdict()
@@ -2786,6 +2806,12 @@ class DesktopSessions:
                         "degraded": list(entry.row.degraded),
                     }
                 )
+                if attention_degraded and DECORATION_ATTENTION not in row["degraded"]:
+                    # Deduped rather than appended blindly: the catalogue's own
+                    # read of this store may already have named it on the row,
+                    # and a source listed twice is a renderer that has to guess
+                    # whether it means anything.
+                    row["degraded"].append(DECORATION_ATTENTION)
                 if f"session/{entry.id}" in attention:
                     row["attention"] = attention[f"session/{entry.id}"]
                 if status_stamps is not None:
