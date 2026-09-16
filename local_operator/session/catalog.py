@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -405,6 +405,52 @@ class CatalogEntry:
         return f"{base} — {sentence}"
 
 
+def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:
+    """Build one row's :class:`CatalogEntry` from the attention state beside it.
+
+    THE ONE CONSTRUCTION SITE, and that is the point of the function. Every
+    feature of the entry above ``status_code`` — the precedence itself, the
+    ``shows_completion_mark`` predicate, the reason sentences, the ranking — is
+    derived state, and a second place that assembled an entry from the same two
+    inputs would be free to derive it differently while every existing test
+    stayed green. So the list (``load_catalog``) and the desktop feed (which
+    publishes the derived pair as a frame) both come through here.
+
+    ``attention`` is ONE session's state as ``AttentionStore.state_many``
+    returns it (``unseen``/``kind``/``completion_token``/``anchor_id``/
+    ``reason``), or ``None``/``{}`` for a session with no state yet. Read
+    defensively by key: an absent store contributes the empty state, which is
+    exactly what ``state_many`` hands back for an unknown conversation.
+    """
+    state = attention or {}
+    return CatalogEntry(
+        row,
+        bool(state.get("unseen", False)),
+        str(state.get("kind") or ""),
+        str(state.get("completion_token") or ""),
+        str(state.get("anchor_id") or ""),
+        str(state.get("reason") or ""),
+    )
+
+
+def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``(status_code, status)`` for one row — the transport spelling and the label.
+
+    A second CALLER of the precedence, never a second home: it builds the same
+    :class:`CatalogEntry` :func:`entry_for` builds — the same one
+    ``load_catalog`` builds — and returns the same two properties from it. The
+    desktop feed publishes this pair as a ``session_status`` frame; the list
+    ships it on every row. If the two ever disagree, one of them is not calling
+    this function.
+
+    Present because the feed has a ``SessionRow`` and an attention state and
+    nothing else: it must not read ``CatalogEntry``, re-order the branches, or
+    name a code itself. See :func:`entry_for`.
+    """
+    entry = entry_for(row, attention)
+    return entry.status_code, entry.status
+
+
 def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
     """Stable identities survive refreshes, including deterministic recency ties."""
     return tuple(sorted(entries, key=lambda entry: entry.rank))
@@ -755,19 +801,7 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     except (sqlite3.Error, OSError):
         logger.debug("catalog attention unavailable", exc_info=True)
     entries = list(
-        rank_entries(
-            [
-                CatalogEntry(
-                    row,
-                    bool(attention.get(identities[row.id], {}).get("unseen", False)),
-                    str(attention.get(identities[row.id], {}).get("kind") or ""),
-                    str(attention.get(identities[row.id], {}).get("completion_token") or ""),
-                    str(attention.get(identities[row.id], {}).get("anchor_id") or ""),
-                    str(attention.get(identities[row.id], {}).get("reason") or ""),
-                )
-                for row in rows
-            ]
-        )
+        rank_entries([entry_for(row, attention.get(identities[row.id])) for row in rows])
     )[:limit]
     named = {
         row.id: row
