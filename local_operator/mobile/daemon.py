@@ -2932,6 +2932,11 @@ def build_app(daemon: MobileDaemon):
         changes) plus a substring match over name/id (filter_rows semantics).
         A row that matched only on its conversation body is marked so the
         phone can say why it surfaced.
+
+        The same ``degraded`` marker the two listing routes carry, for the same
+        reason: this is the route the shipped ``#/past`` screen renders, and its
+        empty branch is what a failed read must not reach (see
+        ``_search_sessions``).
         """
         denied = gate(request)
         if denied is not None:
@@ -2941,8 +2946,8 @@ def build_app(daemon: MobileDaemon):
             limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
         except ValueError:
             limit = 40
-        rows = await asyncio.to_thread(_search_sessions, query, limit)
-        return JSONResponse({"sessions": rows, "query": query})
+        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit)
+        return JSONResponse({"sessions": rows, "query": query, "degraded": degraded})
 
     async def api_directories(request: Request) -> Response:
         """The new-session form's cwd picker: home plus the directories of
@@ -3073,7 +3078,7 @@ def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     ], []
 
 
-def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
+def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]], list[str]]:
     """Past sessions matching ``query`` by name, id, or conversation body.
 
     One call into ``session_search.search_store``, which is the SAME admission,
@@ -3088,19 +3093,28 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     name, or a soft match) rather than its visible name, so the phone can say
     why it is on screen instead of showing a row with no visible reason.
 
-    No try/except around the call, and the honest reason is not "only a broken
-    store raises": the index build degrades on its own (an absent or corrupt
-    cache costs a rebuild, never a raise), and a store whose ``sessions/``
-    directory cannot be read is reported as ZERO matches rather than as an
-    error, because ``resume._scan_sessions`` swallows that ``OSError`` so every
-    listing surface survives it (see ``search_store``). What is NOT caught here
-    is anything else — a bug in the search must not be laundered into a
-    confident "nothing matched".
+    STRICT, and the marker comes back with the rows for the same reason the
+    history route's does: this is the query the shipped ``#/past`` screen runs
+    on mount (``mobile/web/src/screens/past-sessions.tsx``, with an empty
+    ``q``), and it renders the answer as the WHOLE list. An unreadable store
+    delivered here as zero matches is the membership lie this change exists to
+    stop — "no past sessions yet" about a history that was never read.
+    ``search_store`` tolerates that ``OSError`` by design for the display-only
+    callers; the phone's history screen is not one of them any more, so it asks
+    for ``strict=True`` and answers with the marker instead.
+
+    What is NOT caught here is anything else — a bug in the search must not be
+    laundered into a confident "nothing matched".
     """
     from local_operator.paths import config_dir
+    from local_operator.session.errors import SessionStoreUnavailable
     from local_operator.session.session_search import search_store
 
-    matches = search_store(config_dir(), query, limit=limit)
+    try:
+        matches = search_store(config_dir(), query, limit=limit, strict=True)
+    except SessionStoreUnavailable:
+        logger.warning("phone search could not read the session store", exc_info=True)
+        return [], [DEGRADED_DURABLE_LISTING]
     return [
         {
             "id": match.row.id,
@@ -3110,7 +3124,7 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
             "forked": match.row.forked,
         }
         for match in matches
-    ]
+    ], []
 
 
 def _tmp_dir() -> str:

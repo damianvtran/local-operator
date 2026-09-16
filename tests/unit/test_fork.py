@@ -1292,10 +1292,14 @@ class TestTheMobileSurfaceCarriesTheForkMark:
         fork_id = fork_session(tmp_path, PARENT_ID)
         monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
 
-        empty = {row["id"]: row for row in daemon_mod._search_sessions("")}
+        # ``(rows, degraded)`` for the same reason ``_past_sessions`` is: the
+        # search route is the listing the shipped history screen renders, so a
+        # store it could not read is marked rather than answered as no matches.
+        empty_rows, _empty_degraded = daemon_mod._search_sessions("")
+        empty = {row["id"]: row for row in empty_rows}
         assert empty[fork_id]["forked"] is True
 
-        hits = daemon_mod._search_sessions("fork")
+        hits, _hits_degraded = daemon_mod._search_sessions("fork")
         assert [row["id"] for row in hits] == [fork_id]
 
 
