@@ -315,6 +315,18 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
     try:
         record = _wait_for_record(config, session_id)
         assert record.pid == child.pid
+        # The tree this generation names, and the distribution inside it,
+        # captured before anything moves. Both reads are portable to an
+        # interpreter that is not in a venv — CI runs this stage on the runner's
+        # own framework Python, which has no ``pyvenv.cfg`` — and both name real
+        # files the RUNNING runtime imports from, so they cannot be satisfied by
+        # an empty shell of a tree.
+        launched_from = (first / "tools" / "local-operator").resolve()
+        site_packages = next(launched_from.glob("lib/python*/site-packages"))
+        recorded = sorted(
+            entry.name for entry in site_packages.iterdir() if "local_operator" in entry.name
+        )
+        assert recorded, "the fixture must point at a tree with this distribution in it"
 
         sent = _wake(config, session_id, BUSY_TEXT)
         assert sent.returncode == 0, sent.stdout + sent.stderr
@@ -336,8 +348,18 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(headless_tui_env: Path)
         assert _wait_for_record(config, session_id).pid == child.pid
         assert _incidents(directory) == [], "an install must not cut a turn off"
         # And the tree it was launched from is untouched: the install wrote a
-        # NEW generation, not over this one.
-        assert (first / "tools" / "local-operator" / "pyvenv.cfg").is_file()
+        # NEW generation, not over this one. The same path, still the same tree,
+        # still carrying the same distribution — the version of this assertion
+        # that looked for ``pyvenv.cfg`` failed on both CI legs (2026-09-16,
+        # head 57523116f) because the runner's interpreter is not in a venv.
+        assert (first / "tools" / "local-operator").resolve() == launched_from
+        assert site_packages.is_dir(), "the running generation's site-packages vanished"
+        assert (
+            sorted(
+                entry.name for entry in site_packages.iterdir() if "local_operator" in entry.name
+            )
+            == recorded
+        ), "the install wrote over the tree the runtime is importing from"
     finally:
         _reap(child)
 
