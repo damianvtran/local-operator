@@ -171,11 +171,19 @@ def test_a_scan_probes_for_the_whole_quiet_population_in_one_fork(
     asks: list[list[str]] = []
 
     class _NoFork:
-        """The real ``subprocess``, minus the fork: answers "no zombies"."""
+        """``subprocess`` minus the fork, answering the way ``ps`` would.
+
+        It must ANSWER rather than return nothing: a batch that answers nothing is
+        the FAILURE path, which falls back to probing per record by design (QA
+        round 2, Q6), so a silent shim would measure the fallback instead of the
+        batching this test is about. ``S`` is an ordinary sleeping process — the
+        answer a live pid gets.
+        """
 
         def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             asks.append([str(item) for item in argv])
-            return subprocess.CompletedProcess(argv, 0, stdout="")
+            answered = "".join(f"{pid} S\n" for pid in str(argv[-1]).split(","))
+            return subprocess.CompletedProcess(argv, 0, stdout=answered)
 
     monkeypatch.setattr(procstate, "subprocess", _NoFork())
     # Three pids that are alive and not ours: this process, launchd/init (which
@@ -216,6 +224,151 @@ def test_a_scan_probes_for_the_whole_quiet_population_in_one_fork(
     finally:
         child.kill()
         child.wait()
+
+
+#: How long a spawned ``true`` is given to become a zombie. A child that exits
+#: immediately is unreaped the moment it is waitable, so this is a formality on
+#: every platform we run on — it exists so a fixture that never becomes a zombie
+#: fails loudly instead of reading as a probe bug.
+ZOMBIE_WAIT_S = 5.0
+
+
+def _zombies(count: int) -> list[subprocess.Popen[bytes]]:
+    """``count`` REAL zombies: children that exited and are never reaped.
+
+    A zombie is the state QA round 2's Q5 needs — ``kill(pid, 0)`` still answers
+    "alive" and only ``ps``/``/proc`` disagree — and it is the one liveness fixture
+    that cannot be fabricated: an invented pid either does not exist (and no probe
+    is spent on it) or belongs to a live process. The callers reap these in their
+    ``finally``.
+    """
+    children = [subprocess.Popen([sys.executable, "-c", "pass"]) for _ in range(count)]
+    deadline = time.time() + ZOMBIE_WAIT_S
+    try:
+        for child in children:
+            while not procstate.is_zombie(child.pid):
+                if time.time() > deadline:
+                    raise AssertionError(f"child {child.pid} never became a zombie")
+                time.sleep(0.02)
+    except BaseException:
+        for child in children:
+            child.wait()
+        raise
+    return children
+
+
+def test_a_zombie_population_costs_one_probe_not_one_per_corpse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q5: the batch's verdict must travel as the ANSWER, not as a policy flag.
+
+    The first version of the batch handed ``verdicts[pid]`` to ``classify`` as
+    ``check_zombie``, which is the POLICY ("should I ask?"), not the answer — so
+    a ``True`` ("this pid is a zombie") sent the record straight back to
+    ``pid_alive(check_zombie=True)`` for its own ``ps``. The verdicts stayed
+    right, so only the cost showed it, on exactly the sub-population whose owner
+    is already gone: QA measured 201 forks per probe and a 0.5 Hz doorbell at 200
+    zombie records, which is round 1's Q1 symptom again.
+
+    Counted as FORKS, and asserted platform-neutrally by counting the two probe
+    entry points rather than ``subprocess``: ``zombie_states`` is the batch and
+    ``is_zombie`` is the per-pid fallback, so "one batch, no singles" is the
+    property on macOS (where both fork) and on Linux (where neither does).
+    """
+    import json
+
+    children = _zombies(3)
+    singles: list[int] = []
+    batches: list[list[int]] = []
+    real_is_zombie = registry.is_zombie
+    real_states = registry.zombie_states
+
+    def counted_single(pid: int) -> bool:
+        singles.append(pid)
+        return real_is_zombie(pid)
+
+    def counted_batch(pids: list[int]) -> dict[int, bool]:
+        batches.append(list(pids))
+        return real_states(list(pids))
+
+    monkeypatch.setattr(registry, "is_zombie", counted_single)
+    monkeypatch.setattr(registry, "zombie_states", counted_batch)
+    directory = registry.run_dir(tmp_path)
+    try:
+        for index, child in enumerate(children):
+            record = make_record(pid=child.pid)
+            record.session_id = f"z{index}"
+            record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
+            (directory / f"{child.pid}.json").write_text(
+                json.dumps(record.to_json()), encoding="utf-8"
+            )
+        states = [state for _record, state in registry.scan(root=tmp_path)]
+    finally:
+        for child in children:
+            child.wait()
+    assert states == ["stale"] * len(children), "a corpse was reported as answering"
+    assert singles == [], "a proven zombie was sent back for its own probe (Q5)"
+    assert len(batches) == 1, batches
+    assert sorted(batches[0]) == sorted(child.pid for child in children)
+
+
+def test_a_batch_that_answers_nothing_falls_back_to_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q6: a batch failure degrades to the PROBE, never to a verdict.
+
+    One ``ps`` now covers the whole quiet set, so its failure is population-wide:
+    reading a missing answer as "not a zombie" painted "Not answering · process
+    alive" over every corpse in the set at once — the U10 class of wrongness,
+    self-healing only on the next successful probe. The batch exists to bound the
+    cost of a whole population's answers, so a population that gets no answers
+    pays the per-record cost it paid before the batch, and the verdicts stay
+    right. That trade is affordable because the failure it covers is rare: the
+    batch answers 200 pids in ~13 ms against its own 1.0 s timeout.
+    """
+    import json
+
+    children = _zombies(1)
+    child = children[0]
+    living_pid = os.getpid()
+    singles: list[int] = []
+    real_is_zombie = registry.is_zombie
+
+    def counted_single(pid: int) -> bool:
+        singles.append(pid)
+        return real_is_zombie(pid)
+
+    monkeypatch.setattr(registry, "is_zombie", counted_single)
+    directory = registry.run_dir(tmp_path)
+
+    def write_record(pid: int, session_id: str) -> None:
+        record = make_record(pid=pid)
+        record.session_id = session_id
+        record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
+        (directory / f"{pid}.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
+
+    try:
+        write_record(child.pid, "z1")
+        write_record(living_pid, "z2")
+        # The whole batch fails: no answer for anybody.
+        monkeypatch.setattr(registry, "zombie_states", lambda pids: {})
+        states = {record.pid: state for record, state in registry.scan(root=tmp_path, reap=False)}
+        assert states[child.pid] == "stale", "a missing answer was read as a verdict"
+        assert states[living_pid] == "wedged"
+        assert sorted(singles) == sorted([child.pid, living_pid]), "the fallback did not probe"
+
+        # And a PARTIAL answer is used where it exists and probed where it does
+        # not — the fallback is per record, not per scan. ``reap=False`` above and
+        # here because a reaping scan would move the corpse's record aside and the
+        # second scenario would find nothing to classify.
+        monkeypatch.setattr(registry, "zombie_states", lambda pids: {living_pid: False})
+        singles.clear()
+        states = {record.pid: state for record, state in registry.scan(root=tmp_path, reap=False)}
+        assert states == {living_pid: "wedged", child.pid: "stale"}
+        assert singles == [child.pid], singles
+    finally:
+        for zombie in children:
+            zombie.wait()
 
 
 def test_scan_tolerates_torn_records(tmp_path: Path) -> None:
