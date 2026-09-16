@@ -906,8 +906,8 @@ async def errors() -> AsyncIterator[None]:
         # path answers by declining the live daemon and spawning a second one
         # over it. ``code`` is what removes the guess: 401/403 mean the
         # credential was refused, any other ANSWERED status means a daemon
-        # answered. Same named-condition shape as ``DaemonRetiring`` and
-        # ``MoveIndeterminate`` above, for the same reason.
+        # answered. Same named-condition shape as ``DaemonRetiring`` above and
+        # ``MoveIndeterminate`` below, for the same reason.
         #
         # THE CODE IS INERT UNTIL A CLIENT READS IT, and that half is not in
         # this repository: the classification lands in the app (the change that
