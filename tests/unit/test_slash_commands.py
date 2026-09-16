@@ -3,8 +3,14 @@
 import subprocess
 import sys
 
+import pytest
+
 from local_operator.session.frontend_state import _slash_capabilities
-from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
+from local_operator.slash_commands import (
+    SLASH_COMMANDS,
+    slash_command_for,
+    whole_draft_command,
+)
 
 
 def test_canonical_frontend_capabilities_cover_the_shared_registry() -> None:
@@ -31,3 +37,126 @@ def test_command_metadata_import_never_loads_the_textual_app() -> None:
         check=True,
     )
     assert result.stdout.strip() == "headless registry: ok"
+
+
+#: What a WHOLE draft invokes: the command's own name when the draft IS a
+#: command, ``None`` when the draft is PROSE. Re-probed against this tree.
+#:
+#: The operator's report is the last block: a three-line draft whose first line
+#: began with ``/mcp logout …`` was refused by the messages endpoint forever,
+#: because the endpoint's blanket ``lstrip().startswith("/")`` test called it a
+#: command and the composer had correctly planned it as prose. Nothing could
+#: resend it. Every row here is one of the shapes that test got wrong.
+WHOLE_DRAFT_TABLE = [
+    # A bare word IS the command — Enter on the pre-selected picker row is
+    # "accepting the suggestion", so the endpoint must keep refusing it. A
+    # renderer that could not run it (capability off, dispatcher unwired) would
+    # otherwise spend a paid turn on it.
+    ("/compact", "compact"),
+    ("/usage", "usage"),
+    # Word + the value the command takes, on the same line.
+    ("/model gpt-5", "model"),
+    ("/theme dark", "theme"),
+    ("/effort high", "effort"),
+    ("/approvals plan", "approvals"),
+    ("/loop stop", "loop"),
+    # A start command's whole-draft form is still the command (`/goal clear` and
+    # `/goal <objective>` are both forms of it); only the ARMED, whole-draft
+    # `/goal` route is #209's business, and that is the composer's call.
+    ("/goal ship it", "goal"),
+    ("/goal", "goal"),
+    ("/team ops fix this", "team"),
+    ("/fork --switch here", "fork"),
+    ("/btw what is this", "btw"),
+    # A name-list command with NO name typed is the command: the list is open
+    # in the picker and the listing IS the answer.
+    ("/team", "team"),
+    ("/mcp", "mcp"),
+    # Aliases resolve to the same entry, so an alias spelling must not get a
+    # different admission answer from its primary.
+    ("/teams ops go", "team"),
+    ("/models gpt-5", "model"),
+    ("/agents ops", "agent"),
+    # Surrounding whitespace is not part of the claim: this is still `/compact`.
+    ("  /compact", "compact"),
+    ("/compact   ", "compact"),
+    # --- prose: the shapes the blanket leading-slash test refused -----------
+    # A no-arg command followed by prose. The operator named this one first:
+    # "`/compact` used to run and silently eat `hello`".
+    ("/compact hello", None),
+    ("/usage more prose", None),
+    # A non-prefixing command word opening a draft: prose, so an MCP invocation
+    # is never invented out of a sentence.
+    ("/mcp logout seems to cause a crash", None),
+    # A start command whose argument spans lines. The endpoint has no caret, so
+    # it cannot tell "the command owns this" from "the user is still typing" —
+    # and refusing it here would rebuild the permanent refusal this test exists
+    # to prevent.
+    ("/team ops fix this\nand then ship it", None),
+    # QA round 2's Q4 shape, which is why the caret rule is not load-bearing for
+    # safety: `/usage` takes no argument, so the body on the next line is prose.
+    ("/usage\nfix it", None),
+    ("/compact\nhello", None),
+    # THE OPERATOR'S DRAFT, verbatim.
+    (
+        "/mcp logout seems to cause a crash on the TUI,\n"
+        "can you review and fix that issue,\n"
+        "replicate it and then fix and test end to end",
+        None,
+    ),
+    # A word that names nothing, a path, a mid-sentence token, a token on a
+    # later line — all prose, all accepted.
+    ("/tema", None),
+    ("/etc/hosts is wrong", None),
+    ("/tmp/test\n\nThe above is a test file path", None),
+    ("fix this /usage", None),
+    ("can you check /usage for me", None),
+    ("hello\n/team ops", None),
+    # No leading slash at all is obviously prose; pinned so the predicate is
+    # never rewritten to refuse on a substring test.
+    ("what does /usage mean?", None),
+    ("", None),
+    ("   ", None),
+]
+
+
+@pytest.mark.parametrize("draft,expected", WHOLE_DRAFT_TABLE)
+def test_whole_draft_command_matches_the_policy_table(draft: str, expected: str | None) -> None:
+    resolved = whole_draft_command(draft)
+    if expected is None:
+        assert resolved is None, f"{draft!r} must be PROSE, got /{resolved[0].name}"
+    else:
+        assert resolved is not None, f"{draft!r} must be the /{expected} command, got prose"
+        assert resolved[0].name == expected
+
+
+def test_an_interior_newline_makes_a_draft_prose_whatever_it_opens_with() -> None:
+    """Stated separately because the rule is load-bearing, not incidental.
+
+    Every prefixing command is reachable single-line, so the newline rule is the
+    one thing standing between a body that opens with a command word and the
+    permanent refusal the operator reported. The predicate strips first, so what
+    matters is that the newline is INTERIOR — a draft that only TRAILS one
+    (`/team ops\\n`) is still the command, and that is deliberate: the composer
+    sends on Enter, and a trailing newline is the user's own whitespace, not a
+    second line. The shapes below all carry text on both sides of the newline.
+    """
+    drafts = [
+        "/team ops fix this\nand ship it",
+        "/team ops fix this\n\nand ship it",
+        "/goal ship it\nand then verify",
+        "/loop keep going\nuntil the suite is green",
+        "/usage\nfix it",
+        "/compact\nhello",
+        "/model gpt-5\nplease check the logs",
+        "/mcp logout\nseems to be broken",
+        "hello\n/team ops",
+        "/tmp/test\n\nThe above is a test file path",
+    ]
+    for draft in drafts:
+        assert "\n" in draft.strip(), draft  # the newline must be interior
+        assert whole_draft_command(draft) is None, draft
+
+    # The trailing-newline counterpart, pinned so the interior rule is not
+    # widened into "any whitespace at all is prose".
+    assert whole_draft_command("/team ops\n") is not None

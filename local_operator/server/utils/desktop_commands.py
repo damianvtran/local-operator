@@ -40,6 +40,12 @@ def command_catalogue() -> list[dict[str, Any]]:
             "arguments": spec.arguments.value,
             "echo": spec.echo,
             "consumes_prompt": spec.consumes_prompt,
+            # The desktop's half of the messages-endpoint admission rule: an
+            # ADDITIVE field, so a renderer that predates it ignores the key and
+            # falls back to its own `promptCommands ∪ inlineArgument` derivation,
+            # while a renderer that reads it needs no second vocabulary. See
+            # `SlashCommand.prefixes_text` for what it does and does not mean.
+            "prefixes_text": spec.prefixes_text,
             "destination": spec.desktop_destination,
             "execution": "owner" if spec.name in OWNER_COMMANDS else "native",
         }

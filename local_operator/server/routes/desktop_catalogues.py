@@ -29,6 +29,11 @@ class CommandMetadata(BaseModel):
     arguments: Literal["none", "optional", "required"]
     echo: bool
     consumes_prompt: bool
+    #: Whether text after this command's word is an ARGUMENT the command owns on
+    #: the DESKTOP (see ``SlashCommand.prefixes_text``). ADDITIVE with a default,
+    #: so a response produced before this field existed still validates — the
+    #: renderer ignores the key or falls back to its own derivation.
+    prefixes_text: bool = False
     destination: str
     execution: Literal["owner", "native"]
 

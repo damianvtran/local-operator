@@ -125,6 +125,33 @@ class SlashCommand:
     #: ``SLASH_COMMANDS`` is pinned entry-by-entry in ``test_slash_echo.py`` so a
     #: new command must state this choice.
     consumes_prompt: bool = field(default=False, kw_only=True)
+    #: Whether text typed AFTER this command's word is an ARGUMENT the command
+    #: owns, on the DESKTOP — so ``/model gpt-5`` is the model command with its
+    #: value rather than a message, while ``/mcp logout seems to be broken`` is a
+    #: message that happens to open with a command word.
+    #:
+    #: Keyword-only and defaulting to FALSE for the same reason ``echo`` and
+    #: ``consumes_prompt`` do. It is the UNION of two things the composer can
+    #: complete: the free-text prompt (``consumes_prompt``) and the value chosen
+    #: from a list (``inline`` in the renderer's ``picker-registry``, whose
+    #: contents are a host presentation fact and deliberately not mirrored here).
+    #:
+    #: NOT the same question as ``arguments is not ArgumentMode.NONE``, and this is
+    #: the trap. ArgumentMode answers "does a space open a VALUE LIST in this
+    #: terminal", which is TRUE for ``/login``, ``/move``, ``/stop``, ``/mcp`` and
+    #: ``/rename`` — all of which the DESKTOP presents as a picker or a form and
+    #: deliberately refuses hand-typed arguments for
+    #: (``desktop_sessions.py:657-678``). The desktop's answer for those is "that
+    #: trailing text is prose", which is what makes ``/mcp logout seems to cause a
+    #: crash`` a message instead of a malformed MCP invocation.
+    #:
+    #: It is the desktop's half of the ONE rule the messages endpoint and the
+    #: composer both read (``slash_commands.command_prefixes_text``). Two
+    #: derivations of "is this trailing text the command's argument" is the
+    #: second-decision defect class this repo has already paid for: the route and
+    #: the planner answering differently turns a prose draft into a permanent
+    #: refusal no resend can clear.
+    prefixes_text: bool = field(default=False, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

@@ -19,6 +19,12 @@ update action rather than call a route the backend does not have. See
 all-command acceptance matrix and the new control routes. A missing route means an older backend;
 show an update/setup action rather than falling back to an unprotected write.
 
+`features.commands` versions the messages endpoint's slash policy: **2** means a draft
+that merely BEGINS with a command word is a message, and only a text that as a whole
+IS a command is refused; **1** means every leading slash was refused. Nothing is gated
+on it — no surface is withheld — and its one consumer is the refusal alert's remedy,
+which differs by whether a correct client can reach that refusal at all.
+
 Electron **main**, not the renderer, generates a random 32-byte token for each
 managed backend lifetime. Supply it only through `LOCAL_OPERATOR_DESKTOP_TOKEN`
 in that child's environment. Never put it in argv, logs, config files, build
@@ -520,9 +526,11 @@ whole call when `/v1/capabilities` does not advertise `features.session_search`
 
 Images use the runtime's `{data_b64,mime_type}` shape (png/jpeg/gif/webp), at most8;
 the encoded message/command body must fit900,000bytes. Empty prompts without an
-image, invalid base64 and slash text on `/messages` return422 before runtime binding.
-The existing Electron request transport currently has a smaller262,144byte body
-budget: this checkpoint does not claim larger native image uploads work.
+image, invalid base64 and a text that as a whole IS a command on `/messages`
+return422 before runtime binding; a draft that merely BEGINS with a command word is
+accepted as a message (`features.commands >= 2`). The existing Electron request
+transport currently has a smaller262,144byte body budget: this checkpoint does not
+claim larger native image uploads work.
 
 The command endpoint now accepts every shared canonical command and alias.
 Runtime controls return actual SlashResult data; native/interactive controls return

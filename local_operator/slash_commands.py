@@ -217,6 +217,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Branch this chat; --switch here, --window elsewhere; <message> starts work",
         echo=True,
         consumes_prompt=True,
+        # The trailing text is the branch's starting instruction, so a message
+        # that merely OPENS with `/fork` is still prose — the desktop half of the
+        # same fact `consumes_prompt` carries for the TUI (see the field's
+        # docstring).
+        prefixes_text=True,
         desktop_destination="session.fork",
     ),
     # The switch receipt names the old AND new label — strictly more than the
@@ -236,6 +241,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # three-route sentence; `/help` needs only the persist command's name.
         "Switch model; /model default saves it for new sessions",
         aliases=("models",),
+        # The trailing selector is a value this command owns, not the start of a
+        # message: `/model gpt-5` is the model command, while
+        # `/mcp logout seems to cause a crash` is prose. See the field docstring.
+        prefixes_text=True,
         desktop_destination="session.model",
     ),
     # Next to `/model` because it is the same question one level down: which
@@ -252,6 +261,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # the printed ladder could never be — the rungs are OFFERED rather than
         # transcribed by hand from a line of prose.
         arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is the level name, a value this command owns.
+        prefixes_text=True,
         desktop_destination="session.effort",
     ),
     # Beside `/effort` because they are the two dials on the SAME request, and a
@@ -289,6 +300,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # OPTIONAL: a bare `/theme` reports the active theme, and the space
         # offers every registered ramp with the current one marked.
         arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is the theme name, a value this command owns — the
+        # desktop's `inline` list, which is the second half of the union the
+        # field docstring describes.
+        prefixes_text=True,
         desktop_destination="appearance",
     ),
     # The listing is the receipt.
@@ -417,6 +432,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Set the goal and start work; show or clear it",
         echo=True,
         consumes_prompt=True,
+        # The trailing text is the objective, this command's own argument.
+        prefixes_text=True,
         desktop_destination="session.goal",
     ),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
@@ -436,6 +453,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # refusal, i.e. after the user needed it (UX round 1, U6).
         "Loop toward a goal: /loop <goal text>, /loop <n>, or /loop stop to cancel",
         consumes_prompt=True,
+        # The trailing text is the loop instruction or count, this command's own
+        # argument.
+        prefixes_text=True,
         desktop_destination="session.loop",
     ),
     # NOT an exception, and the reason IS the feature. The question does reach
@@ -449,6 +469,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "btw",
         "Ask a side question off the record (esc closes it)",
         consumes_prompt=True,
+        # The trailing text is the aside question, this command's own argument.
+        prefixes_text=True,
         desktop_destination="session.aside",
     ),
     # NOT an echo, and the receipt is the reason. The pass narrates itself
@@ -480,6 +502,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # the same job `PERSIST_HINT` does on `/model`.
         "Show or set tool approval mode; add default to keep it",
         arguments=ArgumentMode.OPTIONAL,
+        # Trailing text is the mode name, a value this command owns.
+        prefixes_text=True,
         desktop_destination="session.approvals",
     ),
     # The listing is the receipt.
@@ -578,6 +602,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # inline `/team` reassembles to the front (name from the autofill, the
         # draft as the request) rather than eating the draft as the name.
         consumes_prompt=True,
+        # Name AND request are this command's own argument: `/team ops fix this`
+        # is the team command, while a draft that merely opens with the word is
+        # prose. See the field docstring.
+        prefixes_text=True,
         desktop_destination="session.team",
     ),
     # Same echo reasoning as `/team`, which this command mirrors surface for
@@ -597,6 +625,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # The message AFTER the agent name is a prompt the persona is given, so
         # an inline `/agent` reassembles to the front like `/team`.
         consumes_prompt=True,
+        # Name AND message are this command's own argument, exactly as `/team`.
+        prefixes_text=True,
         desktop_destination="session.agent",
     ),
 ]
@@ -620,6 +650,54 @@ def slash_command_for(text: str) -> SlashCommand | None:
         return None
     name = token[1:]
     return next((entry for entry in SLASH_COMMANDS if name in entry.names), None)
+
+
+def command_prefixes_text(spec: SlashCommand) -> bool:
+    """Whether text typed after ``spec``'s word is an argument the command owns.
+
+    The union of the two vocabularies a host can follow the word with: free text
+    destined for a model (``consumes_prompt``) and a value chosen from a list
+    (``prefixes_text``, which the desktop carries for exactly that reason). One
+    predicate, read by the messages endpoint's admission test and by the desktop
+    composer's planner.
+
+    It exists so the route and the planner cannot answer "is this trailing text
+    the command's argument" differently. That second decision is a named defect
+    class here: the composer decided with the caret in hand while the endpoint
+    decided on the leading word, so a prose draft could be planned as prose and
+    then refused by the route forever — a refusal no resend clears.
+    """
+    return spec.consumes_prompt or spec.prefixes_text
+
+
+def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:
+    """The command a WHOLE draft invokes, or ``None`` when the draft is PROSE.
+
+    The ONE answer to "would this text have been a control rather than a
+    message", stated as the whole-draft branch of the composer's own rule
+    (``slash-submit.ts``): a command claims a draft only when the draft IS the
+    command — its word, plus (for a command that takes one) the argument that
+    follows on the same line.
+
+    A MULTI-LINE draft is never a whole-draft command, and that is load-bearing
+    rather than incidental. The composer decides with the CARET in hand and this
+    endpoint has no caret: a body that opens with a command word is prose there
+    whenever the caret is off the command line (QA round 2 Q4's shape), so
+    refusing one here would re-create the permanent refusal this test replaces.
+    Anything that is not a whole-draft command is accepted as a message.
+    """
+    stripped = text.strip()
+    if not stripped or "\n" in stripped:
+        return None
+    word, _, rest = stripped.partition(" ")
+    if not word.startswith("/"):
+        return None
+    spec = slash_command_for(word)
+    if spec is None:
+        return None
+    if rest.strip() and not command_prefixes_text(spec):
+        return None
+    return spec, rest
 
 
 def primary_slash_name(command: str) -> str:
