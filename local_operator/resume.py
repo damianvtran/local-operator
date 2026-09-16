@@ -1396,7 +1396,11 @@ def _is_hidden_origin(origin: str) -> bool:
 
 
 def _recent_sessions_with_origin(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    strict: bool = False,
 ) -> list[tuple[str, float, str]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
@@ -1412,8 +1416,12 @@ def _recent_sessions_with_origin(
     stat — use :func:`_scan_sessions` directly.
 
     ``revalidate`` is forwarded verbatim; see :func:`_scan_sessions`.
+    ``strict`` is forwarded the same way, and exists so a caller building a
+    MEMBERSHIP listing through :func:`recent_session_rows` (the phone's
+    history) can declare that for itself rather than only through the
+    catalogue; see that function.
     """
-    return _scan_sessions(config_dir, limit, revalidate=revalidate)[0]
+    return _scan_sessions(config_dir, limit, revalidate=revalidate, strict=strict)[0]
 
 
 def _store_error_detail(error: OSError) -> str:
@@ -1490,15 +1498,19 @@ def _scan_sessions(
 
     ``strict=True`` makes a store that exists but cannot be WALKED an error
     (:class:`~local_operator.session.errors.SessionStoreUnavailable`) instead
-    of an empty listing, and the caller declaring it is the one whose answer a
-    UI adopts as membership — ``session.catalog.load_catalog``, which feeds the
-    desktop sidebar and the TUI's. A missing store is an empty answer in both
-    modes; see the ``FileNotFoundError`` boundary below. Left off by default
-    because the other callers document the opposite contract for good reason
-    (search, the phone's listing, the ``/resume`` picker and the retention
-    policy all answer display-only questions, where an error is worse than an
-    empty answer) and because flipping it for them is a behaviour change to
-    eight surfaces this change has no evidence about.
+    of an empty listing, and the caller declaring it is one whose answer a UI
+    adopts as MEMBERSHIP -- ``session.catalog.load_catalog``, which feeds the
+    desktop sidebar and the TUI's, and ``recent_session_rows(strict=True)``,
+    which feeds the phone's conversation list. A missing store is an empty
+    answer in both modes; see the ``FileNotFoundError`` boundary below. Left
+    off by default because the OTHER callers document the opposite contract for
+    good reason (search, the ``/resume`` picker and the retention policy all
+    answer display-only questions, where an error is worse than an empty
+    answer) and because flipping it for them is a behaviour change to eight
+    surfaces this change has no evidence about. The phone's listing is
+    deliberately NOT in that list any more: it publishes rows the client
+    replaces wholesale, so an empty answer there is the same membership lie
+    this parameter exists to stop, and its own caller declares that.
 
     ``hidden_names`` is every directory this scan established is NOT the user's
     own session — whether it was skipped from cache or re-read. It exists for
@@ -2277,7 +2289,9 @@ def _condense(text: str, max_chars: int) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
-def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[SessionRow]:
+def recent_session_rows(
+    config_dir: Path, limit: int | None = None, *, strict: bool = False
+) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
     Layered over :func:`recent_sessions` rather than replacing it: the CLI's
@@ -2313,9 +2327,27 @@ def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[Sess
     3,000-session store, on this synchronous UI-thread path. That is the exact
     "unmarked is the cheap path" property :func:`recent_sessions` documents at
     length, and it must not be given back here.
+
+    ``strict=True`` forwards to the scan, so a store that exists but cannot be
+    WALKED raises :class:`~local_operator.session.errors.SessionStoreUnavailable`
+    instead of answering an empty list. It is off by default because these
+    callers answer display-only questions in the sense that matters -- a
+    picker, a search, a recovery listing -- and an error is worse for them than
+    an empty answer; flipping the default would be a behaviour change to eight
+    surfaces this parameter has no evidence about.
+
+    THE PHONE'S HISTORY IS NOT ONE OF THOSE, and it is the reason the parameter
+    exists at all. ``mobile.daemon`` builds its durable listing from these rows
+    and publishes them as the phone's conversation list, which the client
+    REPLACES wholesale -- so an unreadable store read as "no conversations" is
+    the same confidently-wrong membership this whole change removes from the
+    desktop and TUI sidebars, one surface out. That caller passes
+    ``strict=True`` and keeps the last listing it did read.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit):
+    for session_id, mtime, origin in _recent_sessions_with_origin(
+        config_dir, limit, strict=strict
+    ):
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
