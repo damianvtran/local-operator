@@ -234,6 +234,30 @@ async def test_session_adopts_request_metadata_without_changing_compaction(tmp_p
 
 @pytest.mark.asyncio
 async def test_cold_resume_does_not_restore_pre_maximum_window(tmp_path, monkeypatch):
+    """PR #631's rule, restored: the ACCOUNT's current window governs the first frame.
+
+    A restored reading's ``context_tokens`` were measured against the window the
+    runtime had when it wrote them, and it is tempting to conclude that its
+    denominator must travel with it. It must not, whenever this process resolved a
+    budget of its own: the band's percentage predicts when the NEXT request
+    overflows (``tui.app._context_window``), and the account's own maximum reaches
+    this spec NOW through ``context_spec_for_access``. Adopting the checkpoint's
+    window instead is how the first frame came to say ``110.3%/272k`` on a session
+    the live frame calls ``34.4%/872k`` — and, in the opt-out direction,
+    ``45.9%/872k`` on one the live frame calls ``147.1%/272k`` and paints in danger
+    red (review round 2, blocker 1; design round 2, D1).
+
+    The discrimination is ``_fresh_spec_states_a_budget``, on the VALUE rule the band
+    itself applies (``usage_seed.denominator_window``): the fresh spec's window is
+    one the band can divide by, so the model layer answered for this pair and the
+    checkpoint's window is then the stale one. (The two provenance fields this
+    docstring used to name are NOT the signal — 0 of the 120 shipped rows set them,
+    so a pair whose resolution states its window on ``context_window`` alone read as
+    "nothing answered" there; review round 3, blocker 1.) The populations where it
+    did NOT answer are the ones that still adopt, and
+    ``test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominator``
+    below pins that half.
+    """
     from local_operator.config import ConfigManager
     from local_operator.providers import failover
     from local_operator.session.attached import AttachedSession
@@ -325,8 +349,30 @@ def test_api_route_recovers_public_limit_after_unavailable_oauth(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("access_kind", ["offline", "missing-account", "missing-auth"])
-async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkeypatch, access_kind):
+async def test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominator(
+    tmp_path, monkeypatch, access_kind
+):
+    """The half of the rule that still ADOPTS: the account answered nothing at all.
+
+    ``context_spec_for_access`` writes ``UNKNOWN_CONTEXT_WINDOW`` (128k) TOGETHER
+    WITH ``context_metadata_resolved: True`` whenever it could not resolve the
+    account, so neither the flag nor the value can tell this population from a
+    resolved 128k budget. What distinguishes it is that the placeholder is not a
+    denominator at all — ``denominator_window`` refuses it, so this process
+    resolved no budget of its own (``_fresh_spec_states_a_budget``) — and the
+    checkpoint's window is then the only real denominator in the process, which a
+    restored reading keeps.
+
+    This is the reported defect's own population: without the adoption, the cold
+    frame divides a restored reading by the 128k placeholder and paints
+    ``224.6%/128k`` where the conversation holds 287,491 tokens against a 1M
+    budget. The value refusal survives where it belongs — ``reading_window``
+    still refuses the placeholder as a receipt's denominator, which is the STATE
+    level of the same paint (see
+    ``test_a_cold_openai_session_does_not_divide_by_the_placeholder_window``).
+    """
     from local_operator.config import ConfigManager
+    from local_operator.model.configure import UNKNOWN_CONTEXT_WINDOW
     from local_operator.providers import failover
     from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import (
@@ -348,8 +394,14 @@ async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkey
     remote = AttachedSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
     state = await remote._synthesise_cold_state(str(tmp_path))
     assert state.selected_model is not None
-    assert state.selected_model.context_window == 128000
+    assert (
+        state.selected_model.context_window == UNKNOWN_CONTEXT_WINDOW
+    ), "precondition: an unreachable account resolves to the placeholder, not to a budget"
     assert state.selected_model.context_metadata_resolved
+    assert (
+        state.selected_model.default_context_window is None
+        and state.selected_model.max_context_window is None
+    ), "precondition: the placeholder states no window this process could divide by"
     legacy = FrontendSessionState(
         session_id="cold",
         epoch="legacy",
@@ -357,11 +409,22 @@ async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkey
             provider="openai", model_id="gpt-5.6-sol", context_window=1050000
         ),
     )
-    assert remote._restored_model_specs(state, legacy) == {}
+    restored = remote._restored_model_specs(state, legacy)
+    adopted = restored["selected_model"]
+    assert adopted.context_window == 1050000, (
+        "with no budget resolved here, the checkpoint's window is the only real "
+        "denominator in the process"
+    )
+    assert (adopted.provider, adopted.model_id) == ("openai", "gpt-5.6-sol")
+    assert (
+        adopted.display_name == state.selected_model.display_name
+    ), "only the window is adopted: the rest of the spec is this process's own resolution"
     # JSON snapshots must preserve provenance through attach/replay, including
     # the absence of positive provider limit metadata.
-    restored = FrontendSessionState.model_validate_json(state.model_dump_json())
-    assert remote._restored_model_specs(restored, legacy) == {}
+    round_tripped = FrontendSessionState.model_validate_json(state.model_dump_json())
+    assert remote._restored_model_specs(round_tripped, legacy)["selected_model"].context_window == (
+        1050000
+    )
 
 
 @pytest.mark.asyncio
