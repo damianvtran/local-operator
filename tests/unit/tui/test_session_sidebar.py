@@ -3003,6 +3003,22 @@ async def test_the_pinned_header_never_overclaims(height):
         if missing:
             assert note, f"{len(missing)} pinned row(s) off-window and no note: {missing}"
             assert f"+{len(missing)} more pinned" in note[0], note[0]
+
+            # POSITION, not just presence: the note belongs to the ★ Pinned
+            # section, so it sits immediately after the last pinned ENTRY and
+            # before anything that opens the next section. Matching on the
+            # first non-pinned entry put it under `Active Sessions` — headers
+            # carry `entry=None`, so the search walked straight past one — and
+            # a note reading "+1 more pinned" under that heading says the
+            # opposite of what it means.
+            index = next(i for i, (kind, _e) in enumerate(rows) if kind == "note:pinned-overflow")
+            before = rows[index - 1]
+            assert (
+                before[1] is not None and sidebar._section_of(before[1]) == 0
+            ), f"the note follows {before[0]!r}, not the last pinned entry"
+            assert not any(
+                kind.startswith("header:") for kind, _e in rows[:index] if kind != "header:pinned"
+            ), "the note sits after a later section's header"
         else:
             assert not note, f"nothing is missing but the note rendered: {note}"
         assert len(lines) <= sidebar.size.height
