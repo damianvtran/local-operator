@@ -865,6 +865,11 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   for the trust model.
 - **Credential hygiene.** Keys live in a local credential store, are entered
   through hidden prompts, and are kept out of transcripts.
+- **Endpoint protection.** A full install registers per-user services, which
+  behaviour-based EDR can read as persistence. See
+  [docs/ENDPOINT_PROTECTION.md](./docs/ENDPOINT_PROTECTION.md) for the inventory
+  of what is installed and persisted, how the artefacts are signed, and how to
+  allow-list by path.
 
 ## 📝 Examples
 
