@@ -461,6 +461,11 @@ def _run_driver(args: argparse.Namespace) -> None:
     records: dict[str, list[dict[str, Any]]] = {side: [] for side, _ in trees}
     cache: dict[str, list[dict[str, Any]]] = {side: [] for side, _ in trees}
     sizes = {session_id: _journal_bytes(store, session_id) / 1e6 for session_id in sessions}
+    #: Per-worker host load, in the OUTPUT rather than only in the console: a
+    #: reader of the JSON has to be able to see what weather the milliseconds
+    #: were taken in, and "the box was quiet" is exactly the claim this harness
+    #: must never make implicitly.
+    loads: list[dict[str, Any]] = []
     started = time.time()
     for round_index in range(args.rounds):
         for session_id in sessions:
@@ -474,6 +479,15 @@ def _run_driver(args: argparse.Namespace) -> None:
                     record["side"] = side
                 records[side].extend(payload["records"])
                 cache[side].extend(payload["cache"])
+                loads.append(
+                    {
+                        "round": round_index,
+                        "session": session_id,
+                        "side": side,
+                        "load_before": payload["load_before"],
+                        "load_after": payload["load_after"],
+                    }
+                )
                 print(
                     f"round {round_index} session {session_id} side {side}: "
                     f"{len(payload['records'])} rows, load {payload['load_before'][0]}",
@@ -490,17 +504,18 @@ def _run_driver(args: argparse.Namespace) -> None:
         "store": str(store),
         "sessions": sessions,
         "load_average_at_end": [round(value, 2) for value in os.getloadavg()],
+        "load_average_per_worker": loads,
         "trees": {side: _provenance(root) for side, root in trees},
         "records": records,
         "cache": cache,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2) + "\n")
+    observed = [worker["load_before"][0] for worker in loads] or [os.getloadavg()[0]]
     print(
-        f"\nhost load average at end: "
-        f"{' '.join(f'{value:.2f}' for value in os.getloadavg())} "
-        f"(this machine runs at 150-270; the milliseconds below are weather, the "
-        f"rows-decoded column is not)\n"
+        f"\nhost load average across the workers: {min(observed):.2f}-{max(observed):.2f}, "
+        f"{os.getloadavg()[0]:.2f} at the end (this machine runs at 150-270; the "
+        f"milliseconds below are weather, the rows-decoded column is not)\n"
     )
     print(_table(records, sessions, sizes))
     print()
