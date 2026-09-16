@@ -13,6 +13,7 @@ the PR records which emulators were genuinely exercised and which were not.
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 import pytest
@@ -485,3 +486,107 @@ class TestTerminalAppDoesNotStealFocus:
 
         assert "activate" not in TERMINAL_SCRIPT
         assert "activate" not in ITERM_SCRIPT
+
+
+class _RecordingStdin:
+    """A child's stdin that records what it was fed and survives ``close()``.
+
+    ``io.BytesIO`` is the obvious stand-in and the wrong one: the backend closes
+    the pipe after writing the script, and a closed ``BytesIO`` raises on read —
+    so the assertion that the script REACHED the child would be testing the
+    double. This keeps the bytes.
+    """
+
+    def __init__(self) -> None:
+        self.written = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        self.written += data
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestTheAppleBackendReportsWhatOsascriptDid:
+    """U11. The spawn reported a LANDING off a successful stdin write alone.
+
+    ``tell application "Terminal"`` fails AFTER the script has been consumed on
+    every machine that declines automation consent, holds a locked or foreign
+    GUI session, or has moved Terminal.app — and the spawn answered True into
+    the teeth of it. True is also what SUPPRESSES the receipt, so the user was
+    back to a click that did nothing and said nothing, on the rung that is the
+    default destination for anyone without the desktop app installed.
+
+    The answer is now ``osascript``'s EXIT STATUS, waited for BOUNDED — the same
+    shape ``resume_click._launch_once`` already used for the app launcher twenty
+    lines away in the ladder, where a timeout counts as success so a live
+    process is never killed and never held.
+
+    No osascript is started here (this file's first rule); the process boundary
+    is doubled, so what is under test is the decision rather than the plumbing.
+    """
+
+    class _OsascriptStub:
+        """A child that consumes the script, then answers however it is told."""
+
+        def __init__(self, exit_status: int | None, hangs: bool = False) -> None:
+            self.stdin = _RecordingStdin()
+            self._exit_status = exit_status
+            self._hangs = hangs
+            self.waited: float | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waited = timeout
+            if self._hangs:
+                raise subprocess.TimeoutExpired("osascript", timeout if timeout else 0.0)
+            assert self._exit_status is not None
+            return self._exit_status
+
+    def _spawn_with(self, launch: ForkLaunch, monkeypatch: pytest.MonkeyPatch, stub: Any) -> bool:
+        # Doubled at the process boundary the backend actually uses, so `spawn`'s
+        # own decisions (what it writes, what it waits for, what it answers) are
+        # the code under test rather than a mock of them.
+        monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: stub)
+        return TerminalAppBackend().spawn(launch, {})
+
+    def test_a_tell_application_that_fails_is_not_a_landing(
+        self, launch: ForkLaunch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = self._OsascriptStub(exit_status=1)
+        assert self._spawn_with(launch, monkeypatch, stub) is False
+        # The script really did reach the child: the failure is the ANSWER, not
+        # a write that never happened.
+        assert b"do script" in stub.stdin.written
+        assert stub.stdin.closed
+
+    def test_a_window_that_opens_is_still_reported(
+        self, launch: ForkLaunch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stub = self._OsascriptStub(exit_status=0)
+        assert self._spawn_with(launch, monkeypatch, stub) is True
+
+    def test_a_hung_osascript_is_success_and_never_held(
+        self, launch: ForkLaunch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A launcher still alive after the bound is one that is running, and
+        the bound is what keeps the old no-wait property (a wedged osascript
+        cannot hold the click's process) while still reading the exit status of
+        every real one."""
+        from local_operator.spawn.apple import APPLESCRIPT_EXIT_TIMEOUT_S
+
+        stub = self._OsascriptStub(exit_status=None, hangs=True)
+        assert self._spawn_with(launch, monkeypatch, stub) is True
+        assert stub.waited == APPLESCRIPT_EXIT_TIMEOUT_S
+        assert 0 < APPLESCRIPT_EXIT_TIMEOUT_S <= 5
+
+    def test_the_same_rule_covers_iterm2(
+        self, launch: ForkLaunch, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both subclasses share ``spawn``, and both had the defect."""
+        stub = self._OsascriptStub(exit_status=1)
+        monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: stub)
+        assert ITerm2Backend().spawn(launch, {}) is False

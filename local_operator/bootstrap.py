@@ -35,6 +35,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.logger import get_logger
 from local_operator.model.configure import ModelConfiguration, configure_model
+from local_operator.model.effort import configured_effort
 from local_operator.types import OperatorType
 
 if TYPE_CHECKING:
@@ -156,6 +157,14 @@ def resolve_model_configuration(
             model_name=model_name,
             credential_manager=credential_manager,
             env_config=env_config,
+            # The configured birth-default effort, so the spec the SERVER REPORTS
+            # agrees with the one the session will actually run (design D3).
+            # Clamped inside ``configure_model`` against this spec's ladder, so a
+            # level this model cannot express lands on its nearest rung rather
+            # than 400ing. A speech model has no ladder and must NOT pass this —
+            # see ``server/routes/speech.py``, which calls ``configure_model``
+            # directly and leaves the parameter at its ``None`` default.
+            reasoning_effort=configured_effort(config_manager),
             **chat_args,
         )
     except Exception as exc:

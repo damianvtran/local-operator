@@ -1,5 +1,3 @@
-import type { SnapshotRef } from "./state";
-
 export interface AXValue { value?: unknown }
 export interface AXNode {
   nodeId: string;
@@ -9,6 +7,19 @@ export interface AXNode {
   name?: AXValue;
   childIds?: string[];
   properties?: Array<{ name: string; value: AXValue }>;
+}
+
+/* The ref handle for one snapshot, declared here rather than in `state.ts`
+ * because `compactAX` is what PRODUCES it (and this file already owns the AX
+ * vocabulary — `AXNode`, `AXValue`). It has to be declared inside `driver/`:
+ * this module is vendored into a host that has no `state.ts`, and a type-only
+ * import of one would leave the vendored copy with a dangling import, since
+ * `import type` is erased at runtime but still resolved by `tsc`. `state.ts`
+ * therefore imports it from here and re-exports it, so every existing
+ * `from "./state"` site stays valid. */
+export interface SnapshotRef {
+  backendNodeId: number;
+  epoch: number;
 }
 
 const LANDMARKS = new Set(["banner", "main", "navigation", "complementary", "contentinfo", "form", "region"]);

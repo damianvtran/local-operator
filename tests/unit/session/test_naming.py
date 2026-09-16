@@ -8,6 +8,9 @@ failure modes that used to live only as comments on the TUI tests.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import pytest
 
 from local_operator.session import naming
@@ -142,6 +145,65 @@ async def test_generate_title_returns_none_on_provider_failure() -> None:
         raise RuntimeError("429 rate limited")
 
     assert await naming.generate_title("fix the login redirect loop", boom) is None
+
+
+@pytest.mark.asyncio
+async def test_ask_for_title_logs_the_swallowed_provider_failure(caplog) -> None:
+    """The module docstring promises "its failures go to the log file" — before
+    the fix the failure was swallowed with NO log line at all, and "sessions
+    don't get a name" was diagnosable only by analytics archaeology. The line
+    names the exception type and message (the provider's own words carry the
+    diagnosis: "authentication failed (HTTP 401)") and never the prompt or any
+    user content."""
+
+    async def boom(system: str, prompt: str) -> str:
+        raise RuntimeError("authentication failed (HTTP 401): invalid key")
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.naming"):
+        assert (
+            await naming._ask_for_title("system text", "prompt text not in the log", boom, 30)
+            is naming.CALL_FAILED
+        )
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "conversation naming call failed" in message
+    assert "RuntimeError" in message
+    assert "authentication failed (HTTP 401)" in message
+    assert "prompt text" not in message
+
+
+@pytest.mark.asyncio
+async def test_ask_for_title_logs_a_timeout_without_the_prompt(caplog) -> None:
+    """A stall spends the whole budget and used to vanish the same way."""
+
+    async def never(system: str, prompt: str) -> str:
+        await asyncio.sleep(60)
+        return "<title>x</title>"
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.naming"):
+        assert (
+            await naming._ask_for_title("system", "prompt never logged", never, 0.05)
+            is naming.CALL_FAILED
+        )
+    assert len(caplog.records) == 1
+    assert "timed out" in caplog.records[0].getMessage()
+    assert "prompt never logged" not in caplog.records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_ask_for_title_is_silent_on_cancellation(caplog) -> None:
+    """Cancellation is a routine shutdown of the detached naming task, not a
+    failure — a WARNING per session at exit would be noise, so the cancel arm
+    stays out of the log entirely (return value still CALL_CANCELLED)."""
+
+    async def cancelled(system: str, prompt: str) -> str:
+        raise asyncio.CancelledError()
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.naming"):
+        assert (
+            await naming._ask_for_title("system", "prompt", cancelled, 30) is naming.CALL_CANCELLED
+        )
+    assert caplog.records == []
 
 
 @pytest.mark.asyncio

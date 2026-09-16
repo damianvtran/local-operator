@@ -48,6 +48,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, cast
 
+# The two custom-message markers this module writes and classifies. Defined in
+# the shared vocabulary module (see its docstring): a runner barred from
+# importing ``session.peer`` still has to render a hub or peer delivery, and
+# this module's own closure is why ``HUB_MESSAGE_TYPE`` could not stay here.
+#
+# That closure still reaches six barred modules (``paths``, ``session``,
+# ``session.attachments``, ``session.creation``, ``session.spend``,
+# ``session.transcript``), and the residual is INERT only while nothing on a
+# runner's import path imports this module -- which is true today, and is a
+# constraint someone has to keep rather than a property of the layout. The
+# isolation denylist cannot see it: no runner module imports this one, so a new
+# runner import here would quietly put those six back on an episode's path.
+# Moving a marker INTO this file is therefore never the fix -- see
+# ``harness/message_types.py``.
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import (
     AgentEvent,
     AsideResult,
@@ -57,19 +75,12 @@ from local_operator.harness.types import (
     ModelSpec,
     StaleAside,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
 
 if TYPE_CHECKING:
     from local_operator.session.session import Session
 
 logger = logging.getLogger(__name__)
-
-#: ``CustomMessage.custom_type`` of a hub message in either direction. The
-#: session's transcript→LLM converter renders it as a user message carrying
-#: ``details["text"]`` (see ``_default_convert_to_llm``); persisted like any
-#: other message entry, so a resumed child still sees what it was told.
-HUB_MESSAGE_TYPE = "hub_message"
 
 #: Additive host-only rows used by the subagent viewer. Child-facing hub
 #: messages remain ordinary message entries because replay must still deliver

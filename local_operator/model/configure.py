@@ -29,6 +29,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -40,12 +41,18 @@ from local_operator.harness.types import (
     StreamEvent,
     Usage,
 )
+from local_operator.model import tariff
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
-from local_operator.model.effort import default_effort, supported_efforts
+from local_operator.model.effort import (
+    default_effort,
+    resolve_effort_in,
+    supported_efforts,
+)
 from local_operator.model.ids import normalised_id as _normalised_id
 from local_operator.model.registry import (
     ModelInfo,
+    _hosting_qualified_bare_id,
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
@@ -467,6 +474,206 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
 _OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
 
+#: The DeepSeek-hosted models that run DeepSeek's THINKING MODE, and therefore
+#: demand the reasoning echo documented on ``ModelSpec.requires_reasoning_echo``
+#: (with the live measurements behind it).
+#:
+#: A FAMILY rule rather than a set of ids, for two reasons. The dated snapshots
+#: are real ids a user can pin -- ``deepseek-v4-flash-0731`` is a shipped row
+#: here and ``/models`` lists whatever the vendor currently serves -- and every
+#: one of them renders the same thinking-mode template, so a literal set would
+#: 400 the moment a new snapshot shipped. And the two legacy rows must stay OFF
+#: for the opposite reason: ``deepseek-chat`` is the non-thinking chat model,
+#: and ``deepseek-reasoner`` predates this validator -- the R1-era API REJECTED
+#: an input ``reasoning_content`` outright, so a placeholder sent there would be
+#: the very 400 this capability exists to prevent.
+#:
+#: The separator accepts a dot as well as a dash: the vendor ships dotted ids
+#: (``deepseek-v4.1-flash``) beside hyphenated ones, and a family rule that
+#: silently dropped a dotted id would send it a key-less request -- the exact
+#: 400 this capability exists to prevent. Anchored, so it must be matched
+#: against the FAMILY (see :func:`_served_model_family`) rather than against a
+#: route-namespaced id: ``deepseek/deepseek-v4.1-flash`` is the same weights,
+#: and an anchored rule applied to the namespaced spelling silently matches
+#: nothing at all.
+_DEEPSEEK_THINKING_MODELS = re.compile(r"^deepseek-(?:flash|v4)(?:[.-]|$)")
+
+
+def _served_model_family(model_id: str) -> str:
+    """The model's own family name, with any route NAMESPACE removed.
+
+    Aggregators namespace what they route -- OpenRouter lists this family as
+    ``deepseek/deepseek-v4.1-flash`` and Radient carries the same
+    ``vendor/model`` shape -- and a HuggingFace-style id carries an owner
+    prefix too. The validator this capability answers to belongs to the
+    weights, not to the namespace, so every family rule here is matched against
+    the LAST path segment. Exactly one namespace is dropped (whatever precedes
+    the final ``/``): deeper prefixes are all the same idea, and a rule that
+    stripped only a known vendor list would stop matching the day a new
+    aggregator shipped.
+
+    Only a ``/`` namespace is stripped, and that is a KNOWN limit rather than
+    an oversight: ``build_model_spec`` receives the caller's model NAME, not a
+    route id, so the harness's own normalised ``provider_smodel`` spelling the
+    marker table above documents (``minimax_sminimax-m3``) is not a shape that
+    reaches here -- no live caller passes one, and one that did would match
+    nothing and silently lose the family rule. Splitting on ``:`` or ``_s`` too
+    would be dead code claiming coverage it does not have; if a caller ever
+    starts passing a route id, widen this and add its row to the derivation
+    table at the same time (review round 1, NIT 2).
+    """
+    return model_id.rpartition("/")[2]
+
+
+#: The native endpoint's own effort ladder for the thinking models it hosts
+#: natively: it documents none/low/high/max, high by default.
+_DEEPSEEK_DIRECT_EFFORTS: tuple[str, ...] = ("none", "low", "high", "max")
+
+#: The ids that ladder is documented for -- the native endpoint's own model
+#: list, NOT a family rule: ``deepseek-v4-flash-0731`` is a real id a user can
+#: pin on the same endpoint and it ships no ladder at all, so a regex here would
+#: offer rungs the route rejects.
+_DEEPSEEK_DIRECT_MODELS = frozenset(
+    {
+        "deepseek-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    }
+)
+
+
+def reasoning_echo_required(provider: str, model_id: str) -> bool:
+    """Whether requests to ``(provider, model_id)`` must echo reasoning back.
+
+    THE authoritative statement of the thinking-mode echo rule, and the reason
+    it is a function rather than a line inside :func:`build_model_spec`: the
+    capability has TWO readers now -- the spec builder, and ``ModelSpec``'s own
+    construction-time derivation (``harness/types.py``), which exists because a
+    spec built outside the builder silently dropped the flag and turned a
+    recoverable refusal into a dead turn. Two spellings of one rule is how the
+    two drift, so both call this.
+
+    Family-keyed, not route-keyed: the validator belongs to the WEIGHTS, so the
+    same id reached through an aggregator carries the same contract (see
+    ``ModelSpec.requires_reasoning_echo`` for why one 200 from a lenient host is
+    not evidence about the route). The legacy ``deepseek-chat`` /
+    ``deepseek-reasoner`` rows stay OFF: the former does not run thinking mode,
+    and the latter predates this validator -- its API rejected an input
+    ``reasoning_content`` outright.
+
+    A LOCAL user-operated server is excluded, and that exclusion is load-bearing
+    rather than an optimisation. ``build_model_spec`` returns ``local_model_spec``
+    for those providers before any rule runs, and this function is now reachable
+    from ``ModelSpec``'s construction as well -- so without the check the two
+    paths would disagree, which is the whole defect being removed. The reason the
+    local route is left alone is not "the vendor is not involved": a server the
+    user runs themselves has its own template and its own operator in front of
+    it, so a placeholder sentence per assistant turn would be sent on a route
+    nobody measured a refusal on.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    if provider in LOCAL_PROVIDER_IDS:
+        return False
+    return bool(_DEEPSEEK_THINKING_MODELS.match(_served_model_family(model_id.casefold())))
+
+
+def deepseek_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
+    """The native ladder for a direct-DeepSeek route, or ``()`` when not one.
+
+    The builder's own single spelling of the ladder and of the ids it is
+    documented for, so ``build_model_spec`` no longer restates either inline.
+
+    ``()`` is the honest answer for every other route -- including an
+    AGGREGATOR route to these same ids, which owns its own effort gate and
+    default (see ``build_model_spec``), and the dated snapshots, which the
+    endpoint serves with no ladder.
+
+    **Deliberately NOT called from ``ModelSpec``'s construction hook**, and that
+    is a review outcome rather than an oversight. The ladder is not only a wire
+    input: it decides whether the status band paints an effort segment at all,
+    and the cold viewer and the desktop draft preview render specs built by that
+    path -- so deriving it there moved a rendered surface for a backend
+    resilience fix. It also gave the ladder a SECOND owner that cannot see a
+    provider listing, while this function's branches below run behind
+    ``build_model_spec``'s listing precedence. One owner, and it is the one that
+    can resolve a listing.
+
+    Accepts the ``<hosting>/`` qualified spelling of the id for the same reason
+    :func:`build_model_spec` strips it: one string is the ``provider/model``
+    spelling of a model NAME, and a caller may hand either form to either
+    entry point. Idempotent -- feeding it an already-bare id strips nothing.
+    """
+    from local_operator.model.registry import _hosting_qualified_bare_id
+
+    bare = _hosting_qualified_bare_id(provider, model_id)
+    if bare is not None:
+        model_id = bare
+    if provider != "deepseek" or model_id not in _DEEPSEEK_DIRECT_MODELS:
+        return ()
+    return _DEEPSEEK_DIRECT_EFFORTS
+
+
+#: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
+#: model's provider emits at the head of the content channel, keyed on the MODEL
+#: id like :data:`_SAMPLING_POLICY` and for the same reason -- the template
+#: belongs to the model, so the same weights leak the same token on the direct
+#: route, on OpenRouter and on Radient, and a provider-keyed rule would fix one
+#: route and leave the rest carrying the defect.
+#:
+#: **The defect.** MiniMax M3 served through OpenRouter splits one turn across
+#: two channels -- ``reasoning_content`` for the thinking, ``content`` for the
+#: answer -- and the closing half of the template's boundary token is emitted at
+#: the joint, so the reply the harness assembles begins with ``</mm:think>``
+#: welded to a byte-perfect action batch. The strict decoder refuses a reply that
+#: does not START with a JSON value (``_decode_leading_json``, deliberately: it
+#: must never guess where a value begins), so the whole turn was billed and
+#: discarded as ``malformed-json``. Measured over the sealed campaign (329
+#: rejection artifacts, 17 replies carrying the token, all at offset 0, all
+#: CLOSING tags and zero opening tags -- see ``ModelSpec
+#: .reasoning_boundary_markers`` for why that asymmetry is an authorship
+#: signature rather than prose).
+#:
+#: **Why an empty fallback rather than a guess.** A token this table does not
+#: list is not stripped, and the reply keeps the strict parser and the ordinary
+#: corrective re-prompt it has today. Adding a row is an evidence-backed claim
+#: that the model's rendered chat template puts that exact string at the head of
+#: the content channel; the cost of being wrong is asymmetric, because a strip
+#: REMOVES bytes the model sent. Unanchored and case-insensitive, so an
+#: aggregator prefix (``minimax/minimax-m3``) and the harness's own normalised
+#: spelling (``minimax_sminimax-m3``, observed in a sealed run's route) both
+#: match. FIRST MATCH WINS, so a narrower row must precede a broader one.
+#:
+#: Deliberately NOT scoped by ``_USER_SUPPLIED_MODEL_PROVIDERS``, unlike
+#: sampling: that exemption exists because a per-request sampling value would
+#: OVERRULE the publisher's tuning. Nothing here is an assertion about tuning --
+#: the token is a property of the model's chat template whichever route renders
+#: it -- so a locally-served MiniMax gets the same treatment and keeps it.
+_REASONING_BOUNDARY_MARKERS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    # -- MiniMax -----------------------------------------------------------
+    # Matches ``minimax/minimax-m3`` (OpenRouter), a bare ``MiniMax-M3`` and the
+    # normalised ``minimax_sminimax-m3``. Only the CLOSING token is declared:
+    # zero opening tags were observed in the corpus, and declaring a token
+    # nothing emits would be an unmeasured strip rather than an absorbed one.
+    (re.compile(r"minimax"), ("</mm:think>",)),
+)
+
+
+def _reasoning_boundary_markers(model_id: str) -> tuple[str, ...]:
+    """The boundary markers declared for ``model_id``; empty when unlisted.
+
+    Split out of ``build_model_spec`` so the table's shape is testable on its
+    own (the drift pin mutates it and asserts the SPEC moved), and so the
+    fallback is one statement rather than one branch per caller.
+    """
+
+    lowered = model_id.casefold()
+    for pattern, markers in _REASONING_BOUNDARY_MARKERS:
+        if pattern.search(lowered):
+            return markers
+    return ()
+
 
 def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
     """Derive a harness ``ModelSpec`` from the model's resolved metadata.
@@ -482,7 +689,30 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     are derived from ``context_window``, so an under-reported window compacts a
     conversation that had eight times the room, and an absent one disables
     compaction until the provider rejects the request.
+
+    The model NAME is canonicalised here, at the one boundary every path builds a
+    spec through — the resume of a stored selection, a fallback hop, ``/model``,
+    a tier, the server, ``ModelConfiguration`` — because ``model_id`` is not a
+    label: it is what the request body carries (``providers/clients.py
+    ::_build_body``, ``"model": request.model.model_id``). A caller that spells
+    the name ``<hosting>/<id>``, which is this harness's own ``provider/model``
+    selector spelling, would otherwise put a name the provider has never heard of
+    on the wire. Measured against ``api.deepseek.com``: ``deepseek-flash`` → HTTP
+    200, ``deepseek/deepseek-flash`` → HTTP 400 "The supported API model names are
+    deepseek-flash, deepseek-v4-pro, but you passed deepseek/deepseek-flash."
+    Canonicalising here also lets every rule below read the real id — the family
+    and thinking-mode matches, the effort ladder, ``direct_deepseek``.
+
+    The strip is ONE leading ``<hosting>/`` and only when that prefix names THIS
+    hosting (see :func:`~local_operator.model.registry
+    ._hosting_qualified_bare_id`), so an aggregator's genuine vendor namespace is
+    never rewritten; aggregator and local hostings are excluded outright there,
+    because both serve ids that legitimately begin with their own name
+    (``openrouter/auto``; ``ollama/hf.co/...``).
     """
+    bare_name = _hosting_qualified_bare_id(hosting, model_name)
+    if bare_name is not None:
+        model_name = bare_name
     from local_operator.providers.registry import (
         AGGREGATOR_PROVIDERS,
         get_provider_definition,
@@ -536,7 +766,26 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
     listing_levels = _listing_effort(canonical, model_name)
-    effort_levels = listing_levels if listing_levels else supported_efforts(model_name)
+    # The native endpoint documents none/low/high/max, high by default. Scope
+    # this to the route: aggregators own their own effort gate (and defaults).
+    # Both the ladder and the echo rule come from ``model.configure``'s own
+    # helpers rather than being spelled here, because ``ModelSpec``'s
+    # construction hook derives the ECHO too (see ``harness/types.py``) and two
+    # spellings of either rule is how the builder and a directly built spec end
+    # up disagreeing about the same model. The LADDER has this one owner on
+    # purpose -- it is a rendered input as well as a wire one, and a hook cannot
+    # see a provider listing.
+    direct_levels = deepseek_effort_ladder(canonical, model_name)
+    direct_deepseek = bool(direct_levels)
+    fallback_levels = direct_levels or supported_efforts(model_name)
+    # Whether requests to this model must echo reasoning back on every
+    # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
+    # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
+    # pinned 0731 snapshot runs the same thinking-mode validator while shipping
+    # no ladder at all. See ``ModelSpec.requires_reasoning_echo`` for the
+    # measurements, including why the earlier route-keyed form was wrong.
+    requires_reasoning_echo = reasoning_echo_required(canonical, model_name)
+    effort_levels = listing_levels if listing_levels is not None else fallback_levels
     # THE LADDER and THE SEED are two separate questions with two different
     # answers, and conflating them is what made two earlier revisions wrong.
     #
@@ -619,7 +868,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # membership guard is for a listing that NARROWS below the table's
         # default; seed nothing rather than clamping to a neighbouring rung no
         # source stated.
-        table_default = default_effort(model_name)
+        table_default = "high" if direct_deepseek else default_effort(model_name)
+        if canonical == "deepseek" and info is not None and info.reasoning_default_effort:
+            table_default = info.reasoning_default_effort
         reasoning_effort = table_default if table_default in effort_levels else None
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
     # looks like: `claude-opus-5` matches none of the markers below — it says
@@ -629,6 +880,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     reasoning = bool(effort_levels) or any(
         marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research")
     )
+    if info is not None and isinstance(getattr(info, "reasoning", None), bool):
+        reasoning = bool(info.reasoning)
+        if not reasoning:
+            effort_levels = ()
+            reasoning_effort = None
     # Keyed on the model, not on the provider that fronts it. `claude-opus-5`
     # returns 200 through OpenRouter only because the aggregator strips the
     # parameters before forwarding — the model never honoured them on either
@@ -741,10 +997,15 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         default_context_window=getattr(info, "default_context_window", None),
         max_context_window=getattr(info, "max_context_window", None),
         max_output_tokens=max_output,
-        supports_tools=True,
+        supports_tools=(
+            bool(info.supports_tools)
+            if info is not None and isinstance(getattr(info, "supports_tools", None), bool)
+            else True
+        ),
         supports_images=supports_images,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
+        requires_reasoning_echo=requires_reasoning_echo,
         base_url=definition.base_url if definition else None,
         reasoning=reasoning,
         supports_sampling_params=supports_sampling_params,
@@ -756,6 +1017,12 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # diverge as soon as the user picks a level, which is precisely when
         # `/effort auto` needs the original still recorded somewhere.
         reasoning_default_effort=reasoning_effort,
+        # Keyed on the model id and NOT gated on the route or the provider: the
+        # token is the model's chat template's, so the same weights leak it on
+        # every route that renders that template. An unlisted id (and every
+        # local-provider spec, which returns above) declares none, which leaves
+        # the strict parser and the corrective re-prompt exactly as they were.
+        reasoning_boundary_markers=_reasoning_boundary_markers(model_name),
         # Derived from the CANONICAL provider and the model together, because
         # the fast-mode dialect belongs to the route rather than to the model
         # (`model.speed` opens with why). `canonical` and not `hosting`: the
@@ -1191,27 +1458,17 @@ _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 def _credential_file_names(provider: str) -> list[str]:
     """The ``CredentialManager`` keys worth trying for ``provider``.
 
-    ``env_key_name`` answers this for the plain-string ``env_keys`` form and
-    returns ``None`` for the callable one, which today is exactly ``anthropic``.
-    Stopping there would leave half of the defect in place: an install whose key
-    came from ``local-operator credential update ANTHROPIC_API_KEY`` writes the
-    credential FILE, so the listing would still go out unauthenticated. The
-    provider table already declares the key name that command writes, so it is the
-    right second source — a second hard-coded map here could drift from the one
-    the CLI, the server schema and the setup prompt all read.
+    Delegates to :func:`~local_operator.providers.registry.credential_file_names`,
+    which is where this question is answered for the whole repo. It lived here
+    first; the mobile picker needed the identical answer, and two readers of the
+    two ``env_keys`` forms is exactly how one of them ends up handling only the
+    plain-string form and dropping ``anthropic``. Kept as a module-private alias
+    rather than deleted because this module's call sites read better against a
+    local name and the indirection costs nothing.
     """
-    from local_operator.providers.registry import env_key_name
+    from local_operator.providers.registry import credential_file_names
 
-    name = env_key_name(provider)
-    if name:
-        return [name]
-
-    from local_operator.model.registry import SupportedHostingProviders
-
-    for detail in SupportedHostingProviders:
-        if detail.id == provider:
-            return list(detail.requiredCredentials)
-    return []
+    return credential_file_names(provider)
 
 
 def _catalogue_api_key(provider: str) -> str:
@@ -1376,11 +1633,7 @@ def _info_from_discovery(
     putting that on the import path would cost every CLI invocation.
     """
     try:
-        from local_operator.model.discovery import (
-            DEFAULT_TIMEOUT_S,
-            available_models,
-            sane_listing_max_tokens,
-        )
+        from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
 
         secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(provider)
         rows, status = available_models(
@@ -1410,6 +1663,20 @@ def _info_from_discovery(
     if row is None:
         logger.debug("%s listing (%s) has no entry for %s", provider, status, model_name)
         return fallback
+
+    return info_from_discovered_model(provider, model_name, row, fallback)
+
+
+def info_from_discovered_model(
+    provider: str, model_name: str, row: "DiscoveredModel", fallback: ModelInfo
+) -> ModelInfo:
+    """Project an already authenticated listing without another credential lookup.
+
+    The HTTP catalogue and runtime resolution must share field precedence. A
+    second fetch here could use a different account than the route's dependency
+    and silently replace the inventory the caller was actually authorized for.
+    """
+    from local_operator.model.discovery import sane_listing_max_tokens
 
     # Keyed on the id the CALLER asked for, not on ``row.id``: the match above
     # may have gone through id normalisation, and ``build_model_spec`` looks the
@@ -1454,7 +1721,27 @@ def _info_from_discovery(
         # already carries ``Optional[bool]`` with the same meaning, and
         # ``build_model_spec`` reads ``is not None`` before trusting it.
         info.supports_images = row.supports_images
+    if row.supports_tools is not None:
+        info.supports_tools = row.supports_tools
+    if row.reasoning is not None:
+        info.reasoning = row.reasoning
+    if provider == "deepseek" and row.reasoning_default_effort is not None:
+        info.reasoning_default_effort = row.reasoning_default_effort
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
+    # Presence survives the listing cache: zero-price/false flags and valid
+    # small output limits must not turn into static guesses at this last hop.
+    native_fields = {
+        "context_window": "context_window",
+        "max_tokens": "max_tokens",
+        "input_price": "input_price",
+        "output_price": "output_price",
+        "cache_read_price": "cache_reads_price",
+        "cache_write_price": "cache_writes_price",
+        "supports_prompt_cache": "supports_prompt_cache",
+    }
+    for field in row.authoritative_fields:
+        if field in native_fields:
+            setattr(info, native_fields[field], getattr(row, field))
     return info
 
 
@@ -1756,7 +2043,7 @@ def _resolve_model_info_cached(
                 "max_context_window": None,
             }
         )
-    if oauth or _listing_can_correct(info):
+    if oauth or canonical == "deepseek" or _listing_can_correct(info):
         # EVERY provider, not just the aggregators. The gate used to be
         # `canonical in LISTING_PROVIDERS`, which left a hole that the model picker
         # turned into a routine path: the picker offers whatever a provider's live
@@ -1769,7 +2056,9 @@ def _resolve_model_info_cached(
         # Reached when the registry is missing the window or BOTH prices, and ALSO
         # when its limits are a dated transcription of this very listing — see
         # `_listing_can_correct`. A row that is complete and first-hand still costs
-        # nothing: no HTTP call, no cache read, no listing scan.
+        # nothing: no HTTP call, no cache read, no listing scan. DeepSeek is an
+        # exception: /models owns inventory/capabilities even when our documented
+        # fallback is complete. Its cached listing must get first refusal.
         #
         # The two cases get different budgets. Missing data is BLOCKING — the
         # session has no context window until the listing answers — so it keeps the
@@ -1788,7 +2077,10 @@ def _resolve_model_info_cached(
             timeout=None if _needs_enrichment(info) else _REFRESH_TIMEOUT_S,
         )
     route_context = (info.context_window, info.default_context_window, info.max_context_window)
-    if _needs_enrichment(info):
+    if _needs_enrichment(info) and canonical != "deepseek":
+        # DeepSeek's missing fields use documented native fallbacks, not an
+        # aggregator route's prices or capabilities. Unknown future ids stay
+        # unknown until the provider publishes those details.
         # STILL incomplete after the provider's own listing had its turn, which for
         # every DIRECT provider is the normal outcome rather than a failure: none of
         # them quote money in `/v1/models`, and for an id the registry has not been
@@ -2212,6 +2504,7 @@ def configure_model(
     presence_penalty: Optional[float] = None,
     stop: Optional[list[str]] = None,
     seed: Optional[int] = None,
+    reasoning_effort: str | None = None,
 ) -> ModelConfiguration:
     """Configure a model for ``hosting``.
 
@@ -2300,6 +2593,30 @@ def configure_model(
         sampling_overrides["top_p"] = top_p
     if sampling_overrides:
         spec = spec.model_copy(update=sampling_overrides)
+    # The CONFIGURED default effort (``model_effort``), clamped into THIS spec's
+    # ladder — the spec's, not ``model.effort``'s table, because an aggregator
+    # listing can NARROW the ladder below the table's (see ``resolve_effort_in``
+    # and ``build_model_spec``). A level the chosen model cannot express lands on
+    # its nearest rung rather than reaching the wire, where the client's
+    # membership re-check would drop it while the status band still named it —
+    # the split-brain ``resolve_effort_in``'s docstring documents.
+    #
+    # ``reasoning_default_effort`` is deliberately NOT touched: that is what
+    # ``/effort auto`` restores, and it must stay the MODEL's own documented
+    # default, not the configured one. Overwriting it here would make ``auto``
+    # mean "the configured default", which is the opposite of the withdrawal the
+    # command performs (D4).
+    #
+    # Only when the caller passed a truthy level: ``None`` is "no opinion" and
+    # leaves the spec builder's own seeding (Anthropic's ``high``) alone. The
+    # guard also skips a needless ``model_copy`` when the resolved value equals
+    # what the spec already carries.
+    if reasoning_effort:
+        clamped = resolve_effort_in(
+            spec.reasoning_efforts, spec.reasoning_default_effort, reasoning_effort
+        )
+        if clamped is not None and clamped != spec.reasoning_effort:
+            spec = spec.model_copy(update={"reasoning_effort": clamped})
     # Radient base URL is env-overridable (legacy EnvConfig behaviour).
     if canonical == "radient" and env_config is not None:
         base_url = env_config.radient_api_base_url
@@ -2527,6 +2844,55 @@ class SessionStreamFn:
     """
 
     USAGE_CHECK_TTL_S = 60.0
+
+    # -- cache affinity retirement ------------------------------------------
+    #: Consecutive warm turns with no prefix reuse before a host is retired.
+    #: TWO, not one: a single miss is ordinary (a host restarts, an entry is
+    #: evicted early under load), and retiring on it would churn the pin as
+    #: badly as having none. Two CONSECUTIVE misses on a host that is still
+    #: being handed a warm prefix is a pattern rather than an accident.
+    PROVIDER_STRIKES_TO_RETIRE = 2
+    #: A gap longer than this is charged to the CLOCK, not to the host.
+    #: Host-side cache entries expire on a documented ~10-minute timer, so a
+    #: miss after a long pause says nothing about whether the host caches; 300s
+    #: sits well inside that window so an expiry can never be mistaken for
+    #: deadness.
+    PROVIDER_STRIKE_MAX_GAP_S = 300.0
+    #: Below this the prefix is too small for "no reuse" to mean anything —
+    #: a short prompt may sit under the host's minimum cacheable block.
+    PROVIDER_STRIKE_MIN_PROMPT_TOKENS = 8192
+    #: Reuse below max(this, 2% of the previous prompt) counts as no reuse.
+    PROVIDER_STRIKE_MIN_CACHED_TOKENS = 1024
+    PROVIDER_STRIKE_MIN_CACHED_FRACTION = 0.02
+    #: Two strikes only pair into a retirement if they are this close in time.
+    #:
+    #: Separate from ``PROVIDER_STRIKE_MAX_GAP_S`` above, which bounds the gap
+    #: between a turn and ITS PREDECESSOR (was the prefix still plausibly warm
+    #: when we sent it?). This one bounds the gap between the two STRIKES, and
+    #: without it strike bookkeeping had no clock at all: a cold turn at 09:00
+    #: and another at 17:00 paired into a retirement as if they were
+    #: consecutive evidence about the same warm prefix (review round 1,
+    #: blocker-2). They are not — eight hours apart they are two independent
+    #: first misses, each of which the "one miss is ordinary" reasoning behind
+    #: ``PROVIDER_STRIKES_TO_RETIRE`` already forgives.
+    #:
+    #: Sized at twice the per-turn gap so a genuinely consecutive pair (two
+    #: turns each inside the warm window) always counts, while anything that
+    #: needed an idle stretch in between does not.
+    #:
+    #: Residual window, noted so it is not re-derived (review round 2,
+    #: MINOR-2): turns served by OTHER hosts neither strike nor clear, so a
+    #: strike can sit for up to this long while the conversation is busy
+    #: elsewhere and then pair with a later miss. Kept anyway — two misses
+    #: inside ten minutes are fair evidence about a host regardless of what ran
+    #: between them, and tightening it would start forgiving real cache death.
+    PROVIDER_STRIKE_PAIR_MAX_GAP_S = 600.0
+    #: Hard ceiling on retirements per (conversation, model). ``ignore`` is a
+    #: HARD filter on OpenRouter's side, so an unbounded set walks a
+    #: conversation toward "no eligible endpoints" — a routing optimisation
+    #: must never be able to make a model unreachable. At the cap the harness
+    #: stops retiring and keeps serving on whatever remains.
+    MAX_RETIRED_PROVIDERS = 3
     DEFAULT_USAGE_BLOCK_MS = 5 * 60 * 1000
 
     #: How many blocked accounts the recovery walk may probe at once.
@@ -2602,6 +2968,50 @@ class SessionStreamFn:
             on_settle=self._on_route_settle,
             on_fast_refused=self._on_fast_refused,
         )
+        # model_id -> the aggregator display name that served this
+        # conversation's last turn on that model. Read by ``__call__`` to pin
+        # the next request (``ChatRequest.provider_affinity``) and written by
+        # ``_record_stream`` from ``StreamEndEvent.served_provider``.
+        #
+        # Deliberately NOT folded into ``_route_state``: that state is about
+        # harness routes and quotas and is CLEARED on a model switch, whereas a
+        # cache pin must survive a detour to another model and back — the host
+        # still holds this conversation's prefix when we return to it. Keyed by
+        # model id for the same reason: two models on one provider are two
+        # different prefixes on two different hosts.
+        #
+        # Memory-only by design: a resumed session re-acquires its pin after a
+        # single cold call, which is cheaper than persisting a hint that a
+        # 10-minute host-side expiry may already have invalidated.
+        self._provider_affinity: dict[str, str] = {}
+        # model_id -> {host: consecutive warm turns that returned no prefix
+        # reuse}. A pin is only worth holding if the host actually caches, and
+        # upstreams differ enormously: one measured 38% of same-host turns
+        # cached while its peers managed 99%, and its misses billed at full
+        # input price (33x a cache read). Without this the pin would loyally
+        # hold a conversation on a cache-dead host, which is worse than the
+        # churn it replaces.
+        self._provider_strikes: dict[str, dict[str, int]] = {}
+        # model_id -> {host: monotonic time of its most recent strike}. Strikes
+        # only pair into a retirement when they are close together (see
+        # ``PROVIDER_STRIKE_PAIR_MAX_GAP_S``): without a clock on the counter,
+        # a cold turn in the morning and another in the afternoon added up to
+        # a retirement as though they were consecutive evidence about one warm
+        # prefix (review round 1, blocker-2).
+        self._provider_strike_at: dict[str, dict[str, float]] = {}
+        # model_id -> hosts retired for THIS conversation, sent as
+        # `provider.ignore`. Per conversation and per model because cache
+        # deadness is observed per prefix, not globally — another session's
+        # experience of the same host is not evidence about this one's.
+        self._provider_retired: dict[str, set[str]] = {}
+        # The last turn's wall clock per model, so an IDLE gap is not charged
+        # to the host: a cache entry expires on a timer (~10 min documented),
+        # and a miss after a long pause is an expiry, not evidence of a host
+        # that does not cache.
+        self._provider_last_turn_at: dict[str, float] = {}
+        # model_id -> whether the "at the retirement cap" line has been logged
+        # already, so it is said once rather than on every later strike.
+        self._provider_retire_capped: dict[str, bool] = {}
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
         # tool calls would bust the provider cache and make one task reason at
@@ -2684,6 +3094,250 @@ class SessionStreamFn:
             openrouter_provider_preferences=_openrouter_provider_preferences(self._settings),
         )
 
+    def _affinity_enabled(self, request: ChatRequest) -> bool:
+        """Whether this request may read or write the cache affinity pin.
+
+        Pinning a conversation to the host that served its last turn is what
+        keeps an OpenRouter prompt cache warm — the default route is
+        price-weighted load balancing across many upstream hosts and every
+        switch bills the whole prefix uncached. It is also, by construction, a
+        REFUSAL to let OpenRouter re-shop the call, so each condition below is
+        a place where that trade is not ours to make.
+        """
+        model = request.model
+        # OpenRouter only. Radient aggregates too, but its routing was never
+        # measured here and shipping an unmeasured pin on it would be guessing
+        # on someone else's latency and availability.
+        if model.provider != "openrouter":
+            return False
+        # No server-side prompt cache means nothing to keep warm, so the pin
+        # would buy a narrowed host pool and nothing at all.
+        if not model.supports_prompt_cache:
+            return False
+        # A ``:nitro``/``:floor`` variant asks OpenRouter to sort by throughput
+        # or price BY DEFINITION. Honouring a sticky pin on top of that would
+        # quietly defeat the suffix the user typed. Cheap insurance — the gate
+        # below also refuses when `sort` is configured — but the suffix is a
+        # per-model opinion that never appears in the settings mapping.
+        if ":" in model.model_id:
+            return False
+        # A naming errand or other isolated one-shot has no warm prefix of its
+        # own, so it gains nothing; more importantly, letting one MOVE the pin
+        # would drag the real conversation onto whatever host answered an
+        # unrelated question.
+        if request.isolated:
+            return False
+        providers = self._settings.get("providers") if isinstance(self._settings, Mapping) else None
+        openrouter = providers.get("openrouter") if isinstance(providers, Mapping) else None
+        if isinstance(openrouter, Mapping) and openrouter.get("provider_affinity") is False:
+            return False
+        # The user's own routing opinion wins outright. Any of these four keys
+        # expresses a host preference, and `order` disables sticky routing on
+        # OpenRouter's side anyway — so a pin would either fight the setting or
+        # be silently overridden by it. `_build_body` repeats this check as
+        # defence in depth; this one keeps the pin from being WRITTEN at all.
+        prefs = _openrouter_provider_preferences(self._settings) or {}
+        if prefs.keys() & {"order", "only", "ignore", "sort"}:
+            return False
+        return True
+
+    def _clear_cache_affinity_evidence(self, reason: str) -> None:
+        """Void every strike and retirement this conversation has recorded.
+
+        Called when a compaction REPLACES the conversation's prefix (review
+        round 1, blocker-2). Every strike and retirement is a claim about one
+        specific prefix — "this host was given these exact tokens and returned
+        no reuse". A compaction rewrites the transcript into a summary, so the
+        prefix those claims were made about no longer exists and the evidence
+        is void: a host barred on the old prefix has never been asked about the
+        new one, and `provider.ignore` has no removal path of its own, so
+        without this a good host stays barred for the rest of the conversation
+        (and for every fork of it) on evidence that expired.
+
+        Cleared for EVERY model, not just the compacting request's: the prefix
+        is the conversation's, and a sibling model's retirements were learned
+        against that same replaced transcript. Over-clearing costs at most two
+        turns of re-discovery; under-clearing permanently bars a host that
+        caches, which is the failure this fixes.
+
+        The pins themselves are deliberately LEFT standing. A pin is a
+        statement about which host is holding this conversation, and the
+        compaction summary is sent to that same host — keeping the conversation
+        there across the boundary is the whole point of the feature.
+
+        KNOWN ASYMMETRY, recorded so the next reader does not re-derive it
+        (review round 2, MINOR-1): because this wipes the slate, the first cold
+        turn after a compaction is strike 1, so a host that then suffers ONE
+        ordinary eviction is retired on what is effectively a single genuine
+        miss rather than two. Left as is on evidence that cuts against the
+        pessimistic reading: the first post-boundary turn is usually WARM, not
+        cold — its prefix is the system blocks the host still holds plus the new
+        summary, and the floor is ``max(1024, 2%)``, so above a ~1-2k system
+        prefix that turn clears the floor and CLEARS the record instead of
+        striking it. The blast radius is bounded by ``MAX_RETIRED_PROVIDERS``
+        and the next compaction lifts the bar again, so this is strictly better
+        than not clearing at all — which is the failure that made the clear
+        necessary.
+        """
+        if not (self._provider_strikes or self._provider_retired):
+            return
+        logger.debug(
+            "cache affinity: clearing %d strike record(s) and %d retirement set(s) — %s",
+            len(self._provider_strikes),
+            len(self._provider_retired),
+            reason,
+        )
+        self._provider_strikes.clear()
+        self._provider_strike_at.clear()
+        self._provider_retired.clear()
+        self._provider_retire_capped.clear()
+
+    def _apply_cache_affinity(self, request: ChatRequest) -> ChatRequest:
+        """Stamp this conversation's host pin and retirements onto a request.
+
+        The pin sits beside ``prompt_cache_key`` because the two are the same
+        idea at two levels: the key asks the AGGREGATOR to route stickily, and
+        this names the host it actually chose last time. Measured on
+        ``deepseek-v4.1-flash``, the key alone does not hold under load (7-9
+        host switches over 18 turns, ~57-64% cached share); naming the host cut
+        that to 4 switches and ~77%.
+
+        Applied per MODEL, so a mid-turn fallback to another model carries no
+        pin from the model it left. The gate refuses isolated requests in BOTH
+        directions — see ``_affinity_enabled``.
+        """
+        if request.purpose == "compaction":
+            # A compaction REPLACES this conversation's prefix, which voids
+            # every strike and retirement recorded against the old one (review
+            # round 1, blocker-2). Done on the REQUEST rather than after the
+            # summary lands because this is the harness's only sighting of the
+            # boundary; a compaction that then fails costs at most the two
+            # turns of re-discovery, while a missed one bars a good host
+            # permanently — `provider.ignore` has no removal path of its own.
+            self._clear_cache_affinity_evidence("compaction replaces the cached prefix")
+        pin = self._provider_affinity.get(request.model.model_id)
+        retired = self._provider_retired.get(request.model.model_id)
+        if not (pin or retired) or not self._affinity_enabled(request):
+            return request
+        update: dict[str, Any] = {}
+        if pin:
+            update["provider_affinity"] = pin
+        # The retired set outlives the pin it replaced: after a host is retired
+        # the conversation has no pin until another host serves it, and it must
+        # not be routed straight back onto the host it just left.
+        if retired:
+            update["provider_avoid"] = sorted(retired)
+        return request.model_copy(update=update)
+
+    def _score_cache_affinity(
+        self,
+        request: ChatRequest,
+        served: str,
+        usage: "Usage | None",
+        *,
+        now: float,
+        model_id: str | None = None,
+    ) -> None:
+        """Judge whether the host we PINNED is actually caching, and retire it.
+
+        The pin assumes a held host keeps the prefix warm. Measured against
+        real endpoints that assumption does not hold uniformly: same-host cache
+        share ran 99% on some upstreams and 38% on another, whose misses billed
+        at full input price. Holding a conversation on a host like that is
+        strictly worse than the load balancing the pin replaced, so affinity
+        needs a way to notice and leave.
+
+        Only a turn we ASKED FOR and RECEIVED can strike. A fallback to some
+        other host is expected-cold (it was never given this prefix) and says
+        nothing about the host we wanted, so charging it a strike would retire
+        innocent hosts during exactly the load that caused the fallback.
+
+        ``model_id`` names the model that ACTUALLY served, which on a mid-turn
+        failover is not ``request.model`` (review round 1, major-1); the caller
+        reads it off the stamped ``Usage``. Defaulted for the direct-call path
+        and for tests that score one request in isolation.
+        """
+        # ONLY a real conversation turn carries evidence about the turn's warm
+        # prefix (review round 1, blocker-2). A `compaction` request is a
+        # fresh write-once prefix by construction — its own `context_tokens_
+        # hint=0` says so — and a `compaction_advisor` call is a cold-ish
+        # aside; both MISS by design. Scoring them charged the conversation's
+        # host for being cold on prompts it was never given the prefix for,
+        # and two adjacent cold-by-design calls retired a host measured at
+        # 99.6% cache share. A miss here has to mean "this host does not
+        # cache", and outside a turn it does not.
+        if request.purpose != "turn":
+            return
+        model_id = model_id or request.model.model_id
+        previous_at = self._provider_last_turn_at.get(model_id)
+        self._provider_last_turn_at[model_id] = now
+        # Only the host we asked for is on trial (see docstring).
+        if request.provider_affinity != served:
+            return
+        if previous_at is None or (now - previous_at) >= self.PROVIDER_STRIKE_MAX_GAP_S:
+            # An idle gap: the entry may simply have expired on the clock.
+            return
+        prompt_tokens = usage.input_tokens if usage else 0
+        if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
+            return
+        cached = usage.cache_read_tokens if usage else 0
+        floor = max(
+            self.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
+            int(prompt_tokens * self.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
+        )
+        strikes = self._provider_strikes.setdefault(model_id, {})
+        strike_at = self._provider_strike_at.setdefault(model_id, {})
+        if cached >= floor:
+            # Any real reuse clears the record: the host is caching, and past
+            # misses under load must not accumulate toward a later retirement.
+            strikes.pop(served, None)
+            strike_at.pop(served, None)
+            return
+        count = strikes.get(served, 0) + 1
+        previous_strike_at = strike_at.get(served)
+        if (
+            previous_strike_at is not None
+            and (now - previous_strike_at) > self.PROVIDER_STRIKE_PAIR_MAX_GAP_S
+        ):
+            # The earlier strike is too old to pair with this one, so this is a
+            # FIRST strike rather than the second (review round 1, blocker-2).
+            # "Two consecutive misses" is only evidence when the two are about
+            # the same stretch of conversation; hours apart they are two
+            # independent single misses, and a single miss is ordinary.
+            count = 1
+        strikes[served] = count
+        strike_at[served] = now
+        if count < self.PROVIDER_STRIKES_TO_RETIRE:
+            return
+        retired = self._provider_retired.setdefault(model_id, set())
+        if served in retired:
+            return
+        if len(retired) >= self.MAX_RETIRED_PROVIDERS:
+            # Logged once per model, not per turn: at the cap this branch is
+            # reached on every subsequent strike and would otherwise repeat.
+            if not self._provider_retire_capped.get(model_id):
+                self._provider_retire_capped[model_id] = True
+                logger.debug(
+                    "cache affinity: not retiring %s for %s — already at the "
+                    "%d-host cap; `ignore` is a hard filter and an unbounded "
+                    "set risks leaving no eligible endpoint",
+                    served,
+                    model_id,
+                    self.MAX_RETIRED_PROVIDERS,
+                )
+            return
+        retired.add(served)
+        strikes.pop(served, None)
+        strike_at.pop(served, None)
+        if self._provider_affinity.get(model_id) == served:
+            del self._provider_affinity[model_id]
+        logger.debug(
+            "cache affinity: retiring %s for %s — %d warm turns with no prefix reuse",
+            served,
+            model_id,
+            count,
+        )
+
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
         """Create a conversation owner sharing only auth and HTTP transport.
 
@@ -2702,6 +3356,24 @@ class SessionStreamFn:
         )
         self._transport.owners += 1
         child._parent_session_id = self._session_id
+        if cache_lineage_id:
+            # A TRUE transcript fork replays a byte-identical prefix, so the
+            # parent's host is genuinely warm for it — the same reasoning that
+            # makes the fork inherit ``cache_lineage_id`` in the first place. A
+            # fresh delegated prompt (no lineage) shares no prefix and must not
+            # inherit a pin that would only narrow its host pool.
+            #
+            # A COPY, never the parent's dict: the child re-pins on its own
+            # ends, and letting that move the parent's pin would hand the
+            # parent a host chosen for a conversation it is not having.
+            child._provider_affinity = dict(self._provider_affinity)
+            # The retirements travel with it, deep-copied for the same reason:
+            # they were learned against THIS prefix, which the fork replays, so
+            # the child would otherwise re-discover each dead host the
+            # expensive way.
+            child._provider_retired = {
+                model: set(hosts) for model, hosts in self._provider_retired.items()
+            }
         return child
 
     @property
@@ -4646,6 +5318,14 @@ class SessionStreamFn:
             if ladder.index(effort) > ladder.index(ceiling):
                 effort = ceiling
         if effort is not None:
+            # A bare ``model_copy``, deliberately NOT ``ChatRequest.with_model``:
+            # this is the per-turn EFFORT fit, so the model is unchanged, the
+            # published ceiling the bound was derived from cannot have moved
+            # and there is nothing to re-derive. ``with_model`` exists for a
+            # request aimed at a DIFFERENT spec -- the failover hops, which all
+            # route through it (review R2-n2). If the bound ever becomes
+            # effort-aware, this is the second site that has to change with
+            # ``with_model`` and the validator (review R2-n3).
             request = request.model_copy(
                 update={"model": request.model.model_copy(update={"reasoning_effort": effort})}
             )
@@ -4666,6 +5346,8 @@ class SessionStreamFn:
             # cache on prefix CONTENT, so a fork hits there on byte-identity
             # alone and is unaffected either way.
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
+
+        request = self._apply_cache_affinity(request)
 
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message
@@ -4741,6 +5423,55 @@ class SessionStreamFn:
                     outcome = str(stop_reason)
                 if stop_reason in ("error", "aborted") or getattr(event, "error", None):
                     ok = False
+                served = getattr(event, "served_provider", None)
+                if served and stop_reason is not None and stop_reason not in ("error", "aborted"):
+                    # Re-pin IMMEDIATELY when the served host differs from the
+                    # current pin, with no hysteresis: that host is the one
+                    # that now holds this conversation's prefix, while the old
+                    # host's entry is already decaying (OpenRouter documents a
+                    # ~10-minute sticky expiry, and DeepSeek needs a full
+                    # prefix match from token 0). Keeping the older pin would
+                    # aim at the colder cache.
+                    #
+                    # Only on a SUCCESSFUL end: a host that errored or was
+                    # aborted mid-stream did not necessarily ingest the prefix.
+                    # Wrapped because a routing optimisation must never be able
+                    # to break a turn — the same contract as the analytics
+                    # recording this loop already does.
+                    try:
+                        if not request.isolated and self._affinity_enabled(request):
+                            event_usage = getattr(event, "usage", None) or final_usage
+                            # Key on the model that ACTUALLY served, not the
+                            # one the request named (review round 1, major-1).
+                            # ``stream_with_failover`` rewrites the request to
+                            # a fallback and stamps the serving spec onto
+                            # ``Usage.model_id`` for exactly this bug class
+                            # (see ``failover._stamped``): reading
+                            # ``request.model`` here filed the pin under the
+                            # PRIMARY while the host it names belongs to the
+                            # fallback, so the primary was later asked for a
+                            # host that never served it and the fallback's own
+                            # cache evidence was lost. ``None`` means "not
+                            # stamped" \u2014 a primary success or a direct call \u2014
+                            # and then the request is the honest answer.
+                            served_model_id = (
+                                getattr(event_usage, "model_id", None) or request.model.model_id
+                            )
+                            # Score BEFORE re-pinning: the judgement is about
+                            # the host this request ASKED for, and the pin is
+                            # about to be overwritten with the host that
+                            # answered.
+                            self._score_cache_affinity(
+                                request,
+                                str(served),
+                                event_usage,
+                                now=time.monotonic(),
+                                model_id=served_model_id,
+                            )
+                            if str(served) not in self._provider_retired.get(served_model_id, ()):
+                                self._provider_affinity[served_model_id] = str(served)
+                    except Exception:  # noqa: BLE001 — routing hints never break a turn
+                        pass
                 yield event
         except BaseException as exc:
             ok = False
@@ -4920,6 +5651,8 @@ def calculate_cost(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    moment: datetime | None = None,
 ) -> float:
     """Cost of a request from per-million token pricing.
 
@@ -4934,10 +5667,28 @@ def calculate_cost(
     they were read, so they were billed at something, and free is the one answer
     that is certainly wrong.
 
+    A time-of-use row (``ModelInfo.time_of_use``) is stored at its PEAK list
+    rates, so the four rates are multiplied by the schedule's scale for
+    ``moment`` — ALL FOUR, after the ``None`` cache fallbacks above, so a token
+    charged at the fallback input rate is scaled exactly as the input rate it
+    borrowed. A row with no schedule is unaffected at every moment, which is
+    every row but DeepSeek's two live ids today.
+
+    ``moment`` defaults to the wall clock, i.e. **the window in force when this
+    is called**. That default is a deliberate one: every caller in-tree that
+    omits it is a LIVE caller (the status band, subagent rows, the evaluation
+    runner) where "now" is exactly right, and a wrong-by-one-window answer is at
+    most 2x in either direction. Defaulting to PEAK instead would be
+    systematically wrong for the ~79% of the week that is off-peak — the very
+    complaint this models. The durable ledger does NOT rely on this default: it
+    passes the call's own recorded timestamp (see
+    :func:`tariff.moment_for`).
+
     Raises:
         ValueError: on any arithmetic failure (keeps the legacy contract).
     """
     try:
+        scale = tariff.scale_for(model_info, moment)
         cache_read_price = model_info.cache_reads_price
         if not cache_read_price:
             cache_read_price = model_info.input_price
@@ -4950,7 +5701,7 @@ def calculate_cost(
             + float(cache_read_tokens) * cache_read_price
             + float(cache_write_tokens) * cache_write_price
         ) / 1_000_000.0
-        return total_cost
+        return total_cost * scale
     except Exception as e:
         raise ValueError(f"Error calculating cost: {e}") from e
 
@@ -4983,7 +5734,13 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     return not (definition is not None and definition.wire == "anthropic")
 
 
-def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
+def cost_for_usage(
+    provider: str,
+    model_info: ModelInfo,
+    usage: Any,
+    *,
+    moment: datetime | None = None,
+) -> float:
     """What one turn's ``Usage`` cost on ``model_info``, in dollars.
 
     THE money computation. Everything that renders a cost — the parent's status
@@ -4999,7 +5756,14 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
     and the token arithmetic is skipped entirely. The provider already applied
     per-route pricing, reasoning-token splits, cache discounts and any overrides
     that a single flat table price cannot express, so a reconstruction here can
-    only be wronger than the number the provider printed on the bill.
+    only be wronger than the number the provider printed on the bill — and it is
+    NEVER scaled by a schedule: the receipt is the provider's own final figure,
+    not a published peak rate waiting for a peak/off-peak multiplier.
+
+    ``moment`` is the instant the rates are evaluated at, resolved by
+    :func:`tariff.moment_for`: explicit argument, else the usage's own stamp
+    (``Usage.at_ms``, or ``CallSnapshot.ts_ms`` in the analytics ledger), else the
+    wall clock. It only matters for a row that carries a schedule.
 
     The caller is responsible for deciding whether ``model_info`` is priced at
     all; this returns 0.0 for a zero-priced model, which is arithmetically true
@@ -5022,6 +5786,7 @@ def cost_for_usage(provider: str, model_info: ModelInfo, usage: Any) -> float:
         _usage_field(usage, "output_tokens"),
         read,
         written,
+        moment=tariff.moment_for(model_info, usage, moment),
     )
 
 

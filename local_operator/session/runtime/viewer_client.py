@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.session.runtime.viewers import (
+    DESKTOP_SURFACE,
     FOCUS_WINDOW_CAPABILITY,
     KNOWN_VIEWER_PROTOCOLS,
     VIEWER_ACK_GRACE_S,
@@ -80,11 +81,12 @@ async def _read_reply(
     """Read frames until the one answering ``req``, or give up.
 
     Frames are read and split HERE rather than with ``readline`` because
-    ``StreamReader.readline`` raises ``LimitOverrunError`` *without consuming
-    the buffer*, so one oversized line wedges every later read — the defect
-    ``session/runtime/control.py`` documents for ``lop send``. This endpoint
-    emits nothing large today, but the failure is silent and permanent if it
-    ever does, and the fix is four lines.
+    ``StreamReader.readline`` raises ``LimitOverrunError`` instead of
+    RETURNING a line past the limit, so such a frame can never be read (it
+    drains the bytes, so a later read would resume at the next line — but the
+    frame is gone, and this endpoint's replies are answers the caller is
+    waiting on). This endpoint emits nothing large today, but the failure is
+    silent and permanent if it ever does, and the fix is four lines.
     """
     buf = bytearray()
 
@@ -196,11 +198,23 @@ def needs_switch(record: ViewerRecord, session_id: str) -> bool:
     OS activation, which is both the cheapest outcome and the least surprising:
     re-resuming a session already on screen would rebuild its view and discard
     the user's scroll position.
+
+    A VIEWER WITH NO WINDOW ALWAYS NEEDS A SWITCH, whatever its
+    ``current_session`` says. On macOS the app survives the last window's
+    closure in the dock, and its record legitimately still names the session it
+    was showing — but nothing is on screen, so a no-op here answers the click
+    with nothing at all. Sending the op instead is what makes the far side
+    recreate the window and then navigate (its own documented reading of
+    ``resume_session`` for a windowless record).
     """
+    if not record.has_window:
+        return True
     return record.current_session != session_id
 
 
-def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord | None:
+def choose_viewer(
+    records: list[ViewerRecord], session_id: str, *, surface: str | None = None
+) -> ViewerRecord | None:
     """Pick the viewer that should take this click, deterministically.
 
     Only viewers speaking a protocol this build knows are considered at all.
@@ -212,15 +226,34 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     anything performed it — the check is here now, because a contract that
     exists only in prose is what shipped this module's original bug.
 
-    Precedence among the remainder, and each rung is a reason rather than a
-    preference:
+    Precedence, and each rung is a reason rather than a preference:
 
-    1. **A viewer already displaying the target.** Switching it is a no-op, so
-       this is the cheapest and least disruptive outcome available.
-    2. **The most recently focused viewer that can switch.** The window the
-       user was last in is the best available proxy for where they expect to
-       land. Ties (two viewers never focused) break on the lowest pid, so
-       repeated clicks are stable rather than alternating.
+    1. **UI FIRST: an eligible DESKTOP viewer takes the click**, whatever a TUI
+       is doing. This is the operator's explicit requirement for the notification
+       feature — a click lands on the exact conversation in the preferred
+       application — and an earlier draft replaced it with recency-first, which
+       meant the same click switched a terminal instead of opening the app
+       depending on nothing but incidental focus history. The recency-first order
+       was never authorized, and the tests that pinned it were changed with it
+       (review round 1, R9).
+    2. **Within the chosen surface, an already-displaying viewer.** Switching is
+       a no-op, so this is the cheapest and least disruptive outcome available. A
+       record that reports NO WINDOW is excluded from this rung even if its
+       ``current_session`` names the target: the app's id is stale by a beat, and
+       treating it as "already displaying" would spend the click on a window that
+       does not exist instead of the one that does. It is NOT excluded from
+       rung 1 — a windowless desktop is still the UI, and its recreation path is
+       exactly what the operator asked for.
+    3. **The most recently focused viewer of that surface that can switch.** The
+       window the user was last in is the best available proxy for where they
+       expect to land.
+    4. **Lowest pid**, so repeated clicks are stable rather than alternating.
+
+    WHY THE DESKTOP PREFERENCE SITS AT RUNG 1 AND NOT AS A TIE-BREAK. As a
+    tie-break it only decided between two viewers the user had never focused, so
+    a TUI focused once — ever — outranked it for good. The surface the operator
+    named has to be consulted before focus history, or focus history silently
+    becomes the policy.
 
     THE ORDERING IS APPLIED HERE, not inherited from the caller. ``scan_viewers``
     happens to return records in this order already, and an earlier draft of
@@ -230,28 +263,57 @@ def choose_viewer(records: list[ViewerRecord], session_id: str) -> ViewerRecord 
     deterministically" has to do its own sorting; borrowing the guarantee from a
     collaborator is how it gets lost.
 
+    ``surface`` narrows the candidates to ONE surface, which is how the click
+    ladder asks "is there a desktop?" and "is there a TUI?" as separate
+    questions rather than inferring the answer from which viewer came back.
+
     Returns ``None`` when nothing can take it, which is the caller's signal to
     fall back to spawning a terminal — the behaviour that exists today and must
     keep working.
     """
-    speakable = [rec for rec in records if rec.protocol in KNOWN_VIEWER_PROTOCOLS]
+    speakable = [
+        rec
+        for rec in records
+        if rec.protocol in KNOWN_VIEWER_PROTOCOLS and (surface is None or rec.surface == surface)
+    ]
+    if not speakable:
+        return None
+    # Rung 1, and it is deliberately a SEPARATE pass rather than a sort key.
+    # ``can_switch`` is required — a desktop that cannot be told to display the
+    # session cannot take the click, and pretending otherwise would strand it.
+    # The windowless case is INCLUDED: ``needs_switch`` sends the op, and the far
+    # side's documented reading of ``resume_session`` for a windowless record is
+    # to recreate the window and then navigate.
+    desktops = [rec for rec in speakable if rec.surface == DESKTOP_SURFACE and rec.can_switch]
+    if desktops:
+        speakable = desktops
     for record in speakable:
-        if record.current_session == session_id:
+        if record.current_session == session_id and record.has_window:
             return record
     switchable = sorted(
         (rec for rec in speakable if rec.can_switch),
-        key=lambda rec: (-rec.focused_at, rec.pid),
+        # The desktop term stays as the first tie-break WITHIN this pass, which
+        # matters only when ``surface`` was not narrowed and no desktop exists:
+        # it is then inert, exactly as it should be.
+        key=lambda rec: (-rec.focused_at, rec.surface != DESKTOP_SURFACE, rec.pid),
     )
     return switchable[0] if switchable else None
 
 
-def route_click(session_id: str, root: Path | None = None) -> ViewerOutcome:
+def route_click(
+    session_id: str, root: Path | None = None, *, surface: str | None = None
+) -> ViewerOutcome:
     """Resolve and deliver, synchronously, for the detached click process.
 
     Runs its own event loop because the click handler has none — it is a
     short-lived process macOS handed an activation. Returns an outcome whose
     ``switched`` flag is the caller's whole decision: True means a live window
     is now showing the session and nothing should be spawned.
+
+    ``surface`` is the click ladder's way of asking about ONE surface at a time
+    (review round 1, R9): it tries the desktop, then the installed app, then
+    whatever is left, and it must be able to tell those apart rather than
+    guessing from the outcome.
     """
     from local_operator.session.runtime.viewers import scan_viewers
 
@@ -261,7 +323,7 @@ def route_click(session_id: str, root: Path | None = None) -> ViewerOutcome:
         # No viewer directory, or an unreadable one. An ordinary answer on a
         # machine where no TUI has ever run.
         return ViewerOutcome(detail="no viewer records")
-    target = choose_viewer(records, session_id)
+    target = choose_viewer(records, session_id, surface=surface)
     if target is None:
         return ViewerOutcome(detail="no viewer available")
     try:

@@ -14,6 +14,7 @@ from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
+from local_operator.model.configure import info_from_discovered_model
 from local_operator.model.discovery import available_models
 from local_operator.model.registry import (
     ProviderDetail,
@@ -234,14 +235,18 @@ async def list_models(
                         )
                     )
             elif provider_detail.id == "deepseek":
-                for model_name, model_info in deepseek_models.items():
+                # Share native discovery's authenticated inventory/cache with
+                # the picker. Never resurrect retired static ids on this older
+                # HTTP surface or resolve metadata under a second credential.
+                api_key = await provider_auth_store.get_api_key("deepseek")
+                rows, _ = await asyncio.to_thread(available_models, "deepseek", api_key=api_key)
+                for row in rows:
+                    fallback = deepseek_models.get(row.id) or ModelInfo(
+                        id=row.id, name=row.name or row.id, description="Unknown model"
+                    )
+                    info = info_from_discovered_model("deepseek", row.id, row, fallback)
                     models.append(
-                        ModelEntry(
-                            id=model_name,
-                            name=model_info.name,
-                            provider=provider_detail.id,
-                            info=model_info,
-                        )
+                        ModelEntry(id=row.id, name=info.name, provider="deepseek", info=info)
                     )
             elif provider_detail.id == "google":
                 for model_name, model_info in google_models.items():

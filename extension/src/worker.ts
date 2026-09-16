@@ -6,11 +6,11 @@ import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
-import { BridgeCommandError } from "./cdp";
+import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
-import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
+import { DEFAULT_PORT, getLocal, isRedactedToken, touchSurface } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
 import { withOwnership } from "./ownership";
@@ -21,7 +21,13 @@ import {
   shouldArmFastPath,
   shouldDialOnAlarm,
 } from "./reconnect";
-import { ErrorCode, type DaemonMessage, type ExtensionEvent, type Response } from "./protocol.gen";
+import {
+  ErrorCode,
+  PROTO_VERSION,
+  type DaemonMessage,
+  type ExtensionEvent,
+  type Response,
+} from "./protocol.gen";
 
 const HANDLERS: Record<
   string,
@@ -65,6 +71,15 @@ const DIAL_TIMEOUT_MS = 10_000;
 
 let socket: WebSocket | undefined;
 let paired = false;
+//: The daemon's statement about THIS link's role: "driver" (commands come here)
+//: or "standby" (a paired peer that is deliberately sent none, because another
+//: authorised install is driving).
+//:
+//: An absent `role` on the wire means DRIVER. The released daemon never sent the
+//: field, and reading "absent" as standby would make a new extension hand its
+//: tabs to nobody on every already-installed daemon — the half of the compat
+//: matrix that has to keep working without a PROTO_VERSION bump.
+let standby = false;
 let attempt = 0;
 let connected = false;
 let connecting = false;
@@ -74,8 +89,76 @@ let alive = false;
 // over — nothing may depend on it firing.
 let fastPathTimer: ReturnType<typeof setTimeout> | undefined;
 
-function send(frame: object): void {
+//: Monotonic id of the CURRENT wire, bumped by every dial.
+//
+// The socket alone cannot fence anything here, because `dispatch` is fired
+// fire-and-forget: a handler that finishes after a reconnect would otherwise
+// write its response — and its `tab_update` — to `socket`, which by then is the
+// REPLACEMENT connection. That is not a cosmetic misdelivery: the daemon
+// matches a response to the request IT sent on the OLD socket, so the new socket
+// receives a frame it never asked for and the daemon's own
+// "nothing is replayed on a new socket" contract (see `respond`) is broken from
+// the other side. Reproduced by the concurrency audit by bundling this file,
+// gating one handler, replacing the wire through the reconnect alarm and then
+// releasing the handler — the NEW wire received
+// `oldResponseOnNewWire=[tab_update bridge:1:old, {id: old-request, ok:true}]`.
+//
+// So every send that belongs to a REQUEST carries the generation of the wire the
+// request arrived on, and anything that would land on a different wire is
+// dropped with a log instead of being delivered.
+let wireGeneration = 0;
+
+function send(frame: object, generation: number = wireGeneration): void {
+  if (generation !== wireGeneration) {
+    // An event produced by a superseded request. Dropping it is the point: the
+    // daemon that asked has already failed that request's future, and the live
+    // connection has its own records to keep.
+    console.warn("dropped an event from a superseded connection", frame);
+    return;
+  }
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
+}
+
+/**
+ * Fire-and-forget chrome API call whose rejection nobody can act on.
+ *
+ * A floating promise that rejects surfaces in an MV3 worker as
+ * `Uncaught (in promise) Error: …`, captured from the operator's own console
+ * as "Could not establish connection. Receiving end does not exist." from
+ * `chrome.runtime.sendMessage` when no popup was open to receive the frame.
+ * None of these call sites has a caller who could act on a failure, so the only
+ * correct handling is to record it and move on — but a fire-and-forget that can
+ * surface as an uncaught error is a defect whether or not the rejection is
+ * expected, and an uncaught error in the worker is indistinguishable from a
+ * crash when someone is reading the console to diagnose a bridge fault.
+ */
+function fireAndForget(op: Promise<unknown> | undefined | void, what: string): void {
+  void Promise.resolve(op).catch((error) => console.warn(`${what} failed`, error));
+}
+
+/**
+ * Fire-and-forget an async function whose SYNCHRONOUS throw is as fatal as its
+ * rejection.
+ *
+ * `fireAndForget` above takes a promise, so the call that produces it has
+ * already run by the time containment is applied: an `async function` that
+ * throws before its first `await` still rejects (safe), but a plain function
+ * that throws synchronously escapes into the caller. That caller here is always
+ * a Chrome event handler — an alarm tick, a runtime lifecycle event, the socket
+ * `onmessage` — and an exception thrown out of one of those is an uncaught
+ * error in the worker, which is the state this PR exists to eliminate: Chrome's
+ * MV3 worker is poisoned by exactly that, and the operator's dead toolbar
+ * clicks (2026-09-11 20:23) coincided with a worker that never dialled again.
+ *
+ * Taking a THUNK rather than a promise is what closes that window — the call
+ * itself happens inside the try.
+ */
+function guarded(op: () => Promise<unknown> | unknown, what: string): void {
+  try {
+    fireAndForget(Promise.resolve(op()), what);
+  } catch (error) {
+    console.warn(`${what} failed`, error);
+  }
 }
 
 // Raise a system notification when a site decision is pending (finding U2).
@@ -173,14 +256,91 @@ async function daemonPort(): Promise<number> {
   return port ?? DEFAULT_PORT;
 }
 
-async function respond(response: Response): Promise<void> {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(response));
+/**
+ * Refresh the driven surface's `lastUsedAt` for the `tabs` listing, AFTER the
+ * command has answered.
+ *
+ * Deliberately here rather than inside `requireSurface` (where it used to run):
+ * it is presentation-only bookkeeping, and on the critical path it cost every
+ * command two session-storage round trips on the single serialized store lane
+ * — see `state.touchSurface` for the measurement that made that the fleet's
+ * dominant cost. Two properties keep the move honest:
+ *
+ *   * It runs in the dispatch TAIL, so no reply waits on it, and the throttled
+ *     write continues after the response frame is on the socket.
+ *   * It is scoped to `request.params.tab`, the handle THIS command drove. A
+ *     handle-less or redacted one is passed through untouched and simply misses
+ *     the map lookup (the redacted form is not a key), so it can neither stamp
+ *     nor resurrect a surface it does not own.
+ */
+function noteSurfaceUse(tab: unknown): void {
+  if (typeof tab !== "string" || !tab) return;
+  fireAndForget(touchSurface(tab, Date.now()), "surface recency write");
 }
 
-async function dispatch(request: { id: string; method: string; params: Record<string, unknown> }): Promise<void> {
+async function respond(response: Response, generation: number): Promise<void> {
+  if (generation !== wireGeneration) {
+    // The request this answers arrived on a connection that has since been
+    // replaced. `worker.ts`'s own contract (see the note below) is that a stale
+    // result must never be replayed onto a new socket — and the daemon has
+    // already failed this request's future when it accepted the replacement, so
+    // there is nothing left to answer. Say so rather than misdelivering it.
+    console.warn(
+      `dropped response for ${response.id}: it belongs to a superseded connection`,
+    );
+    return;
+  }
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(response));
+    return;
+  }
+  // A completed command whose socket is no longer OPEN: the daemon evicted it
+  // ("later connection wins") mid-command, and this is the extension's side of
+  // the resulting `RuntimeError('extension disconnected')` the daemon logs.
+  // There is no correct place to DELIVER the frame — the socket is gone, the
+  // daemon has already failed every pending future, and a response queue would
+  // replay a stale result onto a NEW socket that never asked for it. So do not
+  // pretend it was sent: say so, which is what makes those daemon-side
+  // disconnects attributable to a dropped answer rather than a mystery timeout.
+  console.warn(`dropped response for ${response.id}: the extension socket is not open`);
+}
+
+function applyRole(role: "driver" | "standby", pairedNow: boolean): void {
+  const demoted = role === "standby" && !standby;
+  standby = role === "standby";
+  if (demoted) {
+    // ON THE TRANSITION only: the demotion is the event that has to hand the
+    // tabs back, and re-running the sweep on every repeated `hello_ack` (the
+    // popup opens its own socket, so acks are not rare) would rebuild the
+    // surface map's storage on every render for no change in state.
+    fireAndForget(releaseAllSurfaces(), "standby surface release");
+  }
+  fireAndForget(
+    chrome.storage.session.set({
+      // Paired FIRST, role second, and the order matters: an UNPAIRED standby
+      // must land on the pairing form, because pairing is the one thing it can
+      // still do. Reporting "standby" there showed the user a card saying it was
+      // paired and standing by, with no way to enter the code that would make
+      // that true — and a second install is always in exactly that state when it
+      // first dials.
+      connState: !pairedNow ? "pairing" : standby ? "standby" : "connected",
+      // A successful pairing clears the revoke notice (see the 4003 branch
+      // above): from here on the popup's own state is the truth, and a stale
+      // "this browser was unpaired" line on a working install would be a new
+      // lie in place of the old silence.
+      ...(pairedNow ? { revoked: false } : {}),
+    }),
+    "connState write",
+  );
+}
+
+async function dispatch(
+  request: { id: string; method: string; params: Record<string, unknown> },
+  generation: number,
+): Promise<void> {
   const handler = HANDLERS[request.method];
   if (!handler) {
-    await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } });
+    await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } }, generation);
     return;
   }
   try {
@@ -211,7 +371,7 @@ async function dispatch(request: { id: string; method: string; params: Record<st
       // of forking one.
       const raw = typeof result.tab === "string" ? result.tab : String(request.params.tab ?? "");
       const handle = isRedactedToken(raw) ? "" : raw;
-      send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") });
+      send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") }, generation);
     }
     // An explicit `close` retires the surface, so tell the daemon now rather
     // than relying on the onRemoved listener: chrome.tabs.remove fires
@@ -225,15 +385,22 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     // so it says so and the daemon drops precisely that one.
     if (request.method === "close") {
       const closed = typeof result.closed === "string" ? result.closed : String(request.params.tab ?? "");
-      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed });
+      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed }, generation);
     }
-    await respond({ id: request.id, ok: true, result });
+    await respond({ id: request.id, ok: true, result }, generation);
   } catch (error) {
     if (error instanceof BridgeCommandError) {
-      await respond({ id: request.id, ok: false, error: { code: codeFor(error.code), message: error.message, data: error.data } });
+      await respond({ id: request.id, ok: false, error: { code: codeFor(error.code), message: error.message, data: error.data } }, generation);
     } else {
-      await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: String(error), data: {} } });
+      await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: String(error), data: {} } }, generation);
     }
+  } finally {
+    // A FAILED command still drove the surface, so recency is refreshed on both
+    // arms: the listing's job is to say which tab this session last touched, and
+    // a timeout is a touch. Throttled and fire-and-forget, so this cannot delay
+    // the answer above or the OLD `requireSurface` cost of a write per command
+    // comes back through the tail.
+    noteSurfaceUse(request.params.tab);
   }
 }
 
@@ -269,8 +436,27 @@ async function connect(): Promise<void> {
     return;
   }
 
-  const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+  // `new WebSocket()` THROWS synchronously on a malformed or blocked URL — and
+  // `port` comes from chrome.storage, so a corrupted value reaches this line as
+  // a constructor argument. Every caller of connect() is `void connect()` from
+  // an event handler, so an escape here is an uncaught worker error rather than
+  // a failed dial. Contain it and let the ordinary backoff retry: a bad stored
+  // port is fixed by re-pairing, not by crashing the worker in between.
+  let wire: WebSocket;
+  try {
+    wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+  } catch (error) {
+    console.warn("extension dial failed to open a socket", error);
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   socket = wire;
+  // This dial's identity. Everything asynchronous that belongs to it — the
+  // handshake writes, the frames it carries, and every response a handler it
+  // dispatched eventually produces — is scoped to this number, so a later dial
+  // cannot be written to by an earlier one (see `wireGeneration`).
+  const generation = ++wireGeneration;
 
   // Explicit dial deadline: if a dead loopback handshake neither opens nor
   // fires onerror/onclose, `connecting` would otherwise stay true forever and
@@ -299,32 +485,106 @@ async function connect(): Promise<void> {
 
   wire.onopen = () => {
     clearDialTimer();
+    if (socket !== wire) {
+      // A later dial already owns the worker; this one must not claim
+      // `connected`, must not send its own `hello` (two handshakes race for the
+      // daemon's single authority), and must not be left dangling.
+      try {
+        wire.close();
+      } catch {
+        // Already closing.
+      }
+      return;
+    }
     connected = true;
     connecting = false;
     attempt = 0;
-    const hello: ExtensionEvent = { event: "hello", proto: 1, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
+    const hello: ExtensionEvent = { event: "hello", proto: PROTO_VERSION, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
     wire.send(JSON.stringify(hello));
   };
   wire.onmessage = (message) => {
-    const frame = JSON.parse(String(message.data)) as DaemonMessage;
-    if ("method" in frame) void dispatch(frame);
-    else if (frame.event === "ping") wire.send(JSON.stringify({ event: "pong" }));
+    if (socket !== wire) return; // a superseded socket's frames are not ours
+    // A frame that does not parse is a DAEMON-side defect (a truncated write, a
+    // future protocol version, a proxy injecting something), and it used to
+    // throw straight out of this handler — an uncaught error in the worker for
+    // one bad byte on the wire, with every later frame on a healthy socket
+    // still pending. Drop the frame, keep the socket: the daemon retries or the
+    // dial deadline reaps it, and the console says which one it was.
+    let frame: DaemonMessage;
+    try {
+      const parsed: unknown = JSON.parse(String(message.data));
+      // PARSING IS ONLY HALF THE GUARD. `null`, `2`, `"x"`, `true` and `[]` are
+      // all VALID JSON, so they clear `JSON.parse` and then reach the `"method"
+      // in frame` test below — and `in` throws `TypeError` on any non-object.
+      // That is the same uncaught-throw-in-an-event-handler this whole block
+      // exists to remove, reached by the same class of input (a truncated or
+      // garbled daemon write) that motivated the parse guard, so the shape
+      // check has to live inside the same guard rather than trusting the cast.
+      // Arrays are rejected too: `"method" in []` is legal but an array is not
+      // a frame, and letting one through would hand `dispatch` a bad request.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        console.warn("dropped an unparseable frame from the daemon", parsed);
+        return;
+      }
+      frame = parsed as DaemonMessage;
+    } catch (error) {
+      console.warn("dropped an unparseable frame from the daemon", error);
+      return;
+    }
+    // `dispatch` already answers its own failures through `respond`, but the
+    // guard covers the path where dispatch itself cannot start (a throw before
+    // its first await), which would otherwise land as an uncaught rejection.
+    if ("method" in frame) guarded(() => dispatch(frame as { id: string; method: string; params: Record<string, unknown> }, generation), `dispatch ${String((frame as { method: string }).method)}`);
+    // `send` on a socket that raced into CLOSING throws InvalidStateError. The
+    // pong is the daemon's liveness probe, so losing one costs a link teardown
+    // — but throwing here costs the whole worker.
+    else if (frame.event === "ping") guarded(() => wire.send(JSON.stringify({ event: "pong" })), "pong");
     else if (frame.event === "hello_ack") {
       paired = frame.paired;
-      void chrome.storage.session.set({ connState: frame.paired ? "connected" : "pairing" });
-    } else if (frame.event === "pair_result" && frame.ok) chrome.storage.local.set({ token: frame.token });
+      // `role`/`authorized_count` are additive: an absent role means this link
+      // is the driver, which is what the released daemon always implicitly said.
+      applyRole(frame.role ?? "driver", frame.paired);
+    } else if (frame.event === "role") {
+      // A live change while this socket stayed connected: a failover promoted
+      // us, or `lop browser drive` handed the wheel to the other install.
+      // Handled here rather than by reconnecting, so the promoted install
+      // starts serving immediately instead of after a dial.
+      applyRole(frame.role ?? "driver", paired);
+    } else if (frame.event === "pair_result" && frame.ok) {
+      fireAndForget(chrome.storage.local.set({ token: frame.token }), "token write");
+    }
   };
   const teardown = (event?: CloseEvent) => {
     clearDialTimer();
+    if (socket !== wire) {
+      // A superseded socket finishing its close, long after a replacement dial
+      // took over. Resetting the live connection's flags here — or publishing a
+      // `connState` from it — would tear down the socket that is actually up:
+      // the delayed-onclose half of the same defect class as a stale response.
+      return;
+    }
     connected = false;
     connecting = false;
     paired = false;
     socket = undefined;
+    // The role belief is NOT reset here. A standby keeps holding nothing (its
+    // surfaces were released on the demotion), and a re-dial re-learns the role
+    // from its own ack — whereas clearing it would make the next demotion
+    // "not a transition" and skip the release the daemon is asking for.
     // Preserve the close code so the popup can distinguish a protocol mismatch
     // (4001 — "update needed", which pairing cannot fix) from an ordinary
     // disconnect (finding D2). 4003 is an unpair/revoke.
-    if (event?.code === 4001) void chrome.storage.session.set({ connState: "incompatible" });
-    else if (event?.code === 4003) void chrome.storage.session.set({ connState: "pairing" });
+    if (event?.code === 4001) fireAndForget(chrome.storage.session.set({ connState: "incompatible" }), "connState write");
+    // 4003 is an unpair/revoke, and it is recorded as TWO facts, not one. The
+    // connState says "this install is not paired" (as before), and the sticky
+    // `revoked` flag says WHY — which the form cannot otherwise distinguish from
+    // a fresh install (UX round 3, U5: the destructive-feeling transition was
+    // the only one with no signal in the surface showing it). Sticky rather than
+    // momentary because `connState` is rewritten "pairing" by every re-dial's
+    // ack, so a flag derived from it would vanish within a second; it is cleared
+    // when this install is genuinely paired again (see the ack path above).
+    else if (event?.code === 4003)
+      fireAndForget(chrome.storage.session.set({ connState: "pairing", revoked: true }), "connState write");
     // 4000 is the daemon's later-connection-wins eviction (daemon.py), which the
     // POPUP's own pairing socket triggers on every pair attempt. It is not a
     // loss of connectivity, so publishing "disconnected" here drove the popup's
@@ -338,7 +598,7 @@ async function connect(): Promise<void> {
     // Drive authority is enforced daemon-side by link.paired (a second socket
     // arrives paired:false and its RPCs are refused not_paired), never by this
     // storage key, so suppressing the write grants nothing.
-    else if (event?.code !== 4000) void chrome.storage.session.set({ connState: "disconnected" });
+    else if (event?.code !== 4000) fireAndForget(chrome.storage.session.set({ connState: "disconnected" }), "connState write");
     scheduleReconnect();
   };
   wire.onclose = (event) => teardown(event);
@@ -364,7 +624,7 @@ function scheduleReconnect(): void {
   attempt += 1;
   fastPathTimer = setTimeout(() => {
     fastPathTimer = undefined;
-    void connect();
+    guarded(connect, "fast-path dial");
   }, delay);
 }
 
@@ -379,22 +639,28 @@ function ensureReconnectAlarm(): void {
   chrome.alarms.create(RECONNECT_ALARM_NAME, { periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES });
 }
 ensureReconnectAlarm();
+// Every dial below is `guarded` rather than `void`d. These are the RECOVERY
+// paths — the alarm floor is the only thing that rewakes a suspended worker —
+// so a rejection escaping one of them is both an uncaught worker error and the
+// loss of the tick that was meant to heal the connection.
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) void connect();
+  if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) {
+    guarded(connect, "alarm dial");
+  }
   // The sweep persists receipts, resolves in-command waiters through the queue
   // observer, and centrally re-arms the earliest remaining queue/result/grant
   // deadline. No caller owns this alarm independently.
-  if (alarm.name === ACCESS_EXPIRY_ALARM) void expireAccessRequest();
+  if (alarm.name === ACCESS_EXPIRY_ALARM) guarded(expireAccessRequest, "access expiry sweep");
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
   ensureReconnectAlarm();
-  void connect();
+  guarded(connect, "startup dial");
 });
 chrome.runtime.onInstalled.addListener(() => {
   alive = true;
   ensureReconnectAlarm();
-  void connect();
+  guarded(connect, "install dial");
 });
 // Cold-start convergence: on every worker start (including a rewake from
 // suspension, when the globals have reset to their false initializers) the
@@ -408,7 +674,7 @@ alive = true;
 // contain failure so MV3 never reports an unhandled top-level rejection.
 void restoreAccessQueue()
   .catch((error) => console.warn("approval queue restore failed", error))
-  .finally(() => void connect());
+  .finally(() => guarded(connect, "cold-start dial"));
 
 // TOP-LEVEL REGISTRATION IS LOAD-BEARING (MV3): a service worker is torn down
 // when idle and re-instantiated by an event, and only listeners registered
@@ -446,7 +712,15 @@ chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.accessQueue) {
-    void chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue });
+    // With no popup open there is no receiver for this message, and MV3 rejects
+    // the send with "Could not establish connection. Receiving end does not
+    // exist." — an EXPECTED outcome for a background-only delivery attempt, not
+    // an error, so it must not surface as an uncaught rejection in the worker
+    // console (captured live from the operator's own hands).
+    fireAndForget(
+      chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue }),
+      "origin_prompt broadcast",
+    );
   }
   // The all-sites switch is written by the options page directly (never by
   // a message to this worker or a daemon RPC: there is deliberately no such

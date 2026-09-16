@@ -14,8 +14,14 @@ from collections.abc import Awaitable, Callable, Sequence
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
-from local_operator.harness.comms import HUB_MESSAGE_TYPE
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    SESSION_CREDENTIAL_MESSAGE_TYPE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    TODO_REMINDER_MESSAGE_TYPE,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -48,16 +54,12 @@ from local_operator.session.session import (
     _PRE_ABORT_DROP_NOTICE_AT,
     IMAGE_DROPPED_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
-    SESSION_CREDENTIAL_MESSAGE_TYPE,
-    SESSION_INCIDENT_MESSAGE_TYPE,
-    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     Session,
     _callable_accepts_one_positional,
     _is_persistable_message,
     _paired_prefix,
 )
 from local_operator.session.transcript import Transcript
-from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 TEXT_ONLY_MODEL = ModelSpec(

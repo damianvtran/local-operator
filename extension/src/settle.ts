@@ -1,4 +1,28 @@
-import { BridgeCommandError } from "./cdp";
+/* The host-coupled half of the old `settle.ts`.
+ *
+ * `settle.ts` held two unrelated things: the `deadline()` helper with its
+ * ceiling table — pure, because the numbers are BUDGETS rather than calls, and
+ * the one piece a second host wants verbatim — and `settle()` here, which waits
+ * on `chrome.webNavigation` events and so cannot leave the extension. The pure
+ * half moved to `driver/deadline.ts` (the module the UI vendors); this file
+ * keeps `settle()` and re-exports the deadline helpers, which is what keeps the
+ * existing `from "./settle"` import sites valid unchanged — the same re-export
+ * pattern `cdp.ts` already uses to keep `BridgeCommandError` reachable from
+ * `./cdp`.
+ *
+ * The re-export is a shim, so it must not become the place a host-bound helper
+ * is added back: anything that touches `chrome.*` belongs on THIS side of the
+ * boundary (outside `driver/`), where tests/driver-host-free.test.mjs cannot
+ * see it, not behind the same path the vendored copy is generated from. */
+import { BridgeCommandError } from "./driver/errors";
+
+export {
+  CDP_DEADLINE_MS,
+  CDP_ATTACH_DEADLINE_MS,
+  CHROME_API_DEADLINE_MS,
+  SCRIPTING_DEADLINE_MS,
+  deadline,
+} from "./driver/deadline";
 
 /**
  * Resolve when the tab's main frame finishes its next navigation.

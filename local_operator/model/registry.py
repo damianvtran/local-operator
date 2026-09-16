@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from local_operator.model.tariff import DEEPSEEK_TOU
 from local_operator.providers.local import LOCAL_PRESETS, LOCAL_PROVIDER_IDS
 
 
@@ -223,6 +224,10 @@ class ModelInfo(BaseModel):
             Responses API.
         cache_writes_price (Optional[float]): Cost per million tokens for cache writes.
         cache_reads_price (Optional[float]): Cost per million tokens for cache reads.
+        time_of_use (Optional[str]): Name of the time-of-use tariff schedule whose
+            peak/off-peak ratio this row's prices are quoted at; the price fields
+            hold the PEAK rates and the schedule supplies the off-peak scale. None
+            means the row does not vary by time of day.
         description (Optional[str]): Description of the model.
         limits_from_listing (bool): The window and max_tokens on this row were
         transcribed from the provider's own live listing on a date, so a live
@@ -236,10 +241,24 @@ class ModelInfo(BaseModel):
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Unknown differs from a provider's explicit denial; the spec builder must
+    # not manufacture tool/reasoning support after a live listing denies it.
+    supports_tools: Optional[bool] = None
+    reasoning: Optional[bool] = None
+    reasoning_default_effort: Optional[str] = None
     supports_prompt_cache: bool = False
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
     cache_reads_price: Optional[float] = None
+    time_of_use: str | None = Field(
+        default=None,
+        description=(
+            "Name of the time-of-use tariff schedule (see model/tariff.py) whose "
+            "peak/off-peak ratio this row's prices are quoted at. None means the "
+            "row's prices do not vary by time of day. Peak rates are stored in the "
+            "price fields; the schedule supplies the off-peak scale."
+        ),
+    )
     description: str = Field(..., description="Description of the model")
     id: str = Field(..., description="Unique identifier for the model")
     name: str = Field(..., description="Display name for the model")
@@ -271,6 +290,51 @@ class ModelInfo(BaseModel):
         return value
 
 
+def _hosting_qualified_bare_id(hosting: str, model: str) -> Optional[str]:
+    """``model`` with a single leading ``<hosting>/`` removed, or ``None``.
+
+    ONLY the hosting the caller NAMED is stripped, and that is the whole safety
+    argument. Under ``hosting="openrouter"`` an id like
+    ``deepseek/deepseek-v4.1-flash`` IS the API's own model id — an aggregator
+    namespaces what it routes — so its prefix does not match the hosting and
+    nothing is rewritten. A rule that stripped any ``vendor/`` prefix would
+    answer for a DIFFERENT provider's model, silently enough to look like a
+    working resolve: ``deepseek/deepseek-flash`` under ``openrouter`` would come
+    back wearing DeepSeek's direct-route window and prices.
+
+    Local runtimes are excluded outright. Their ids are the SERVER'S own names
+    rather than a namespace — Ollama and LM Studio both serve owner-prefixed
+    HuggingFace names — so a leading segment there is part of the model and
+    stripping it would send a different model name to the endpoint.
+
+    Aggregators are excluded for the same reason, and they are the case that
+    proves the prefix rule cannot be trusted on its own: OpenRouter PUBLISHES
+    real ids that begin with its own name — ``openrouter/auto``,
+    ``openrouter/auto-beta``, ``openrouter/fusion``, ``openrouter/pareto-code``,
+    ``openrouter/free``, ``openrouter/bodybuilder`` (its public catalogue; there
+    is no bare ``auto``/``free``) — so for an aggregator the leading segment is a
+    namespace the ROUTE owns, not a provider prefix. Stripping it rewrote
+    ``openrouter/auto`` to ``auto`` and put a name no provider serves into the
+    request body, turning a working model into a first-turn failure.
+
+    The trailing id must be non-empty: a bare ``"deepseek/"`` is a malformed id,
+    not a qualified one, and it must fall through to the unknown sentinel rather
+    than resolving to something by accident.
+    """
+    # Function-local, like every other `providers.registry` import in this layer:
+    # that module reaches back into this one for `SupportedHostingProviders`, and
+    # a module-level import here would become a cycle the moment it stops being
+    # lazy.
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if hosting in LOCAL_PROVIDER_IDS or hosting in AGGREGATOR_PROVIDERS:
+        return None
+    prefix = f"{hosting}/"
+    if model.startswith(prefix) and len(model) > len(prefix):
+        return model[len(prefix) :]
+    return None
+
+
 def get_model_info(hosting: str, model: str) -> ModelInfo:
     """
     Retrieves the model information based on the hosting provider and model name.
@@ -280,6 +344,33 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     pricing, context window, and image support. If the hosting provider is not
     supported, a ValueError is raised. If the model is not found for a supported
     hosting provider, a default `unknown_model_info` is returned.
+
+    A provider-QUALIFIED id (``deepseek/deepseek-flash`` under
+    ``hosting="deepseek"``) resolves to the SAME row as its bare id, because one
+    string is the ``provider/model`` spelling of a model NAME and the routes that
+    carry it — a user-supplied ``model_name``, ``--model``, a fallback-chain hop,
+    a session's own saved selection — hand it straight to this lookup. Before the
+    retry below it missed exactly, fell to :data:`unknown_model_info`, and was
+    normalised by ``configure.build_model_spec`` into the 128k unknown default: a
+    1M-context model resuming as 128k, which is not a cosmetic mis-report but a
+    compaction threshold eight times too small (and ``max_output_tokens`` dropping
+    393216 to 8192). See :func:`_hosting_qualified_bare_id` for why the retry is
+    keyed on the caller's OWN hosting, which is what keeps an aggregator's real
+    vendor-namespaced ids untouched.
+
+    Order: the exact spelling first, then ONE retry with a leading ``<hosting>/``
+    removed, then the exact spelling's own answer. The retry is gated on the
+    DISPATCH CHAIN'S OWN ANSWER — it runs only where the exact spelling returned
+    the unknown sentinel (or, on the ``openai`` branch, raised its ``KeyError``)
+    — deliberately rather than on a second table of hostings. A table is a second
+    source of truth that can omit a spelling the chain answers for: it already
+    did, for ``alibaba-token-plan-oauth``, whose rows live under the canonical
+    ``alibaba-token-plan`` id and which both the chain and ``static_models``
+    answer for under either spelling. Gating on the answer keeps the two in step
+    by construction, and it preserves every resolution that succeeds today for
+    free: the aggregators and local runtimes never return the sentinel (they
+    answer every id with a placeholder by design), so their answers are returned
+    unchanged.
 
     Args:
         hosting (str): The hosting provider name (e.g., "openai", "google").
@@ -292,6 +383,50 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
 
     Raises:
         ValueError: If the hosting provider is unsupported.
+    """
+    bare_id = _hosting_qualified_bare_id(hosting, model)
+    info = _dispatch_or_none(hosting, model)
+    if info is None or info is unknown_model_info:
+        # No row for this spelling — the two shapes a miss arrives in. Retry
+        # ONCE with the leading `<hosting>/` removed when there is one, and only
+        # a RETRY THAT ANSWERS replaces the result: a retry that also comes back
+        # unknown leaves the exact spelling's own answer standing, so the honest
+        # sentinel is never traded for a different unknown.
+        if bare_id is not None:
+            retried = _dispatch_or_none(hosting, bare_id)
+            if retried is not None:
+                return retried
+    if info is not None:
+        return info
+    # The `openai` branch indexes its map directly, so an unshipped id arrives as
+    # a KeyError; `configure._registry_fallback` catches it today. Re-raised
+    # rather than converted into an answer, so a bare unshipped openai id keeps
+    # failing exactly as it did.
+    raise KeyError(model)
+
+
+def _dispatch_or_none(hosting: str, model: str) -> Optional[ModelInfo]:
+    """The dispatch chain's answer, with the ``openai`` branch's miss as ``None``.
+
+    One place that knows a miss can arrive in two shapes, so the retry above and
+    the re-raise below cannot disagree about which one they are looking at.
+    """
+    try:
+        return _dispatch_model_info(hosting, model)
+    except KeyError:
+        return None
+
+
+def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
+    """The per-provider lookup chain behind :func:`get_model_info`.
+
+    Split out so the qualified-id retry can ask the same question twice without
+    a second copy of the chain; it answers for one exact spelling only, and every
+    branch behaves exactly as it did when it was :func:`get_model_info`'s whole
+    body. ``openai`` is the one branch that indexes its map directly, so an
+    unshipped id still arrives as a ``KeyError`` — ``configure._registry_fallback``
+    catches that today, and :func:`get_model_info` re-raises it rather than
+    turning it into an answer.
     """
     model_info = unknown_model_info
 
@@ -1339,22 +1474,34 @@ google_models: Dict[str, ModelInfo] = {
 }
 
 deepseek_models: Dict[str, ModelInfo] = {
-    # V4 family (2026): 1M context, implicit prompt caching, an order of
-    # magnitude cheaper than the V3 line. `-latest` floats to the newest
-    # snapshot; the dated ids pin a snapshot so a rollout cannot silently
-    # change behaviour under a long-running agent.
-    "deepseek-v4-flash": ModelInfo(
-        id="deepseek-v4-flash",
-        name="DeepSeek V4 Flash",
-        max_tokens=32_768,
-        context_window=1_048_576,
-        supports_images=False,
+    # /models is authoritative for inventory but currently returns ONLY ids,
+    # object and owner. These omitted-field fallbacks come from DeepSeek's
+    # pricing and create-chat-completion docs (2026-09-12), not an aggregator:
+    # https://api-docs.deepseek.com/quick_start/pricing
+    # https://api-docs.deepseek.com/api/create-chat-completion
+    # 384K is 393216 OUTPUT tokens, not a default request budget. The prices below
+    # are DeepSeek's PEAK list rates; `time_of_use` names the schedule
+    # (model/tariff.py) that supplies the off-peak half, and only the ids the live
+    # pricing page still prices carry it. The legacy ids below deliberately do not.
+    "deepseek-flash": ModelInfo(
+        id="deepseek-flash",
+        name="DeepSeek Flash",
+        max_tokens=393_216,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
         supports_prompt_cache=True,
-        input_price=0.14,
-        output_price=0.28,
-        cache_writes_price=0.14,
-        cache_reads_price=0.014,
-        description="Fast, cheap agentic workhorse with a 1M context window",
+        input_price=0.30,
+        output_price=1.20,
+        cache_writes_price=0.30,
+        cache_reads_price=0.006,
+        # Peak list price plus the published off-peak half. Every surface that
+        # prices this row -- the status band, subagent rows, the analytics ledger
+        # -- reads it through `calculate_cost`, which applies the schedule at the
+        # call's own moment.
+        time_of_use=DEEPSEEK_TOU,
+        description="DeepSeek V4.1 Flash with vision; peak price estimate (off-peak half)",
         recommended=True,
     ),
     "deepseek-v4-flash-0731": ModelInfo(
@@ -1369,6 +1516,14 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.09,
         cache_reads_price=0.009,
         description="Pinned July 2026 V4 Flash snapshot",
+        # No `time_of_use`: the current pricing page no longer lists this id, so
+        # neither its price nor a window ratio for it is published, and the stored
+        # price stays a conservative PEAK estimate. Attaching today's uniform
+        # half-off schedule to a row from an earlier pricing era would pair today's
+        # windows with an era whose discount (and window) we cannot verify, i.e.
+        # invent a number -- see the registry guard in
+        # tests/unit/model/test_pricing.py, which forces this decision to be
+        # explicit for every priced deepseek row.
         # The ROW stays so a user who already pinned this model keeps correct
         # pricing and a 1M context window (dropping it would resolve them to the
         # 128k unknown default and silently mis-set compaction). Only the
@@ -1379,15 +1534,18 @@ deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-v4-pro": ModelInfo(
         id="deepseek-v4-pro",
         name="DeepSeek V4 Pro",
-        max_tokens=65_536,
-        context_window=1_048_576,
+        max_tokens=393_216,
+        context_window=1_000_000,
         supports_images=False,
+        supports_tools=True,
+        reasoning=True,
         supports_prompt_cache=True,
-        input_price=0.435,
-        output_price=0.87,
-        cache_writes_price=0.435,
-        cache_reads_price=0.0435,
-        description="Stronger V4 tier for harder reasoning and long refactors",
+        input_price=1.32,
+        output_price=3.96,
+        cache_writes_price=1.32,
+        cache_reads_price=0.044,
+        time_of_use=DEEPSEEK_TOU,
+        description="DeepSeek V4 Pro (0813); peak price estimate (off-peak half)",
         recommended=False,
     ),
     "deepseek-chat": ModelInfo(
@@ -1402,6 +1560,12 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.14,
         cache_reads_price=0.014,
         description="General purpose chat model",
+        # No `time_of_use`: not on the current pricing page, so no window ratio is
+        # published for it. Third-party write-ups of its era describe a DIFFERENT
+        # window (16:30-00:30 UTC) and a non-uniform discount, which is exactly why
+        # today's schedule must not be attached to it. Stored price stays a
+        # conservative PEAK estimate. See the registry guard in
+        # tests/unit/model/test_pricing.py.
         recommended=True,
     ),
     "deepseek-reasoner": ModelInfo(
@@ -1416,9 +1580,24 @@ deepseek_models: Dict[str, ModelInfo] = {
         cache_writes_price=0.55,
         cache_reads_price=0.14,
         description="Specialized for complex reasoning tasks",
+        # No `time_of_use`, for the same reason as `deepseek-chat` above and
+        # `deepseek-v4-flash-0731`: unpublished on the current page, and its era's
+        # advertised discount was neither uniform nor aligned to today's window.
+        # See the registry guard in tests/unit/model/test_pricing.py.
         recommended=False,
     ),
 }
+
+# Officially documented floating aliases now serve V4.1 Flash. Keep manual
+# selectors working offline, but a successful /models listing hides aliases.
+# Do NOT copy current vision/pricing onto the old pinned 0731 snapshot.
+for _deepseek_alias, _deepseek_label in (
+    ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+    ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (legacy alias)"),
+):
+    deepseek_models[_deepseek_alias] = deepseek_models["deepseek-flash"].model_copy(
+        update={"id": _deepseek_alias, "name": _deepseek_label, "recommended": False}
+    )
 
 qwen_models: Dict[str, ModelInfo] = {
     # No row here carries a cache price, and their absence is a correction rather

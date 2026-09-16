@@ -185,6 +185,30 @@ class SessionInteraction:
     command_frame_pending: bool = False
     connection_task: asyncio.Task[None] | None = field(default=None, repr=False)
     connection_error: str = ""
+    #: True when no owner is coming back for this source, so the affordance the
+    #: ordinary latch offers ("Select again to retry") would be a promise the app
+    #: cannot keep, and the band says what is actually true instead: the
+    #: stopped-session sentence, whose own next step (`/resume <id>`) is runnable
+    #: from the state it names.
+    #:
+    #: THREE WRITERS, and they prove that same thing two ways (review MINOR-2,
+    #: round 2 — the first sentence here used to name only the predicate, which
+    #: stopped being exhaustive when the other two landed):
+    #:   * the connect's cold-and-un-bindable arm, where the viewer answered
+    #:     `can_ever_bind` False — un-diallable by construction;
+    #:   * a failed round whose `session_was_stopped()` answered from the durable
+    #:     stop record, an arm reached BECAUSE the predicate answered True;
+    #:   * `_publish_stopped_session_verdict`, for a click on the current stopped
+    #:     row, with no connect at all.
+    #: So the verdict means "no owner is coming back — proven by the predicate, or
+    #: by the stop record".
+    #:
+    #: A VERDICT, not a probe: it is set by the arm that decided it, because the
+    #: sentence a user reads must not be re-derived from a facade that may have
+    #: healed between the verdict and the paint (that is the stale-verdict flash
+    #: UX round 1's U3 found one surface over). Written wherever
+    #: `connection_error` is written and cleared wherever it is cleared.
+    can_never_bind: bool = False
     #: Consecutive failed connect attempts for this source, counted so
     #: `_connect_sidebar_source` can retry a transient owner loss instead of
     #: latching it, and still surrender to the user once the budget is spent.
@@ -211,6 +235,15 @@ class SessionInteraction:
     gate_draft: tuple[tuple[Any, ...], Any] | None = field(default=None, repr=False)
     gate_view_generation: int = 0
     unsubscribe_frontend: Any = field(default=None, repr=False)
+    #: True while a COALESCED change callback for this source is already queued on
+    #: the event loop, so a burst of owner deltas costs one callback instead of
+    #: one per delta (see `app._on_source_frontend_updated`).
+    #:
+    #: Lives on the source rather than in an app-level set because the app has
+    #: one CURRENT session, while every leased sidebar source carries its own
+    #: pending callback; it is a plain bool rather than a set membership because
+    #: `SessionInteraction` is a mutable dataclass and therefore unhashable.
+    frontend_change_scheduled: bool = False
     #: `time.monotonic()` when this source stopped being the displayed session,
     #: or ``None`` while it is current (or has never been shown).
     #:
@@ -257,19 +290,38 @@ class SessionInteraction:
         but the viewer is a read-only projection (``no_takeover``), so dropping
         it cannot stop or corrupt the owner's turn. Unbounded is the problem:
         prewarming any busy background agent mints one, and each retained
-        viewer costs a deep state copy on EVERY owner delta, so closing the
+        viewer costs a per-delta decision on EVERY owner delta, so closing the
         sidebar must be allowed to drop these (see ``_release_sidebar_source``).
+
+        The roster half of the answer is read through the session's copy-free
+        ``has_running_job`` where the host has one (both real session classes
+        do). It used to be read through ``frontend_state`` — a full deep copy of
+        canonical state, on the loop, for one boolean — and this predicate runs
+        for every delta of every leased source AND for the session being viewed.
+        The read stays UNCONDITIONAL, ahead of ``approve_all``, exactly as it
+        was: it is also what raises for a source whose store has not
+        synchronized, and hoisting the cheap clause above it would silently turn
+        that raise into ``False``. The fallback keeps hosts that expose only
+        ``frontend_state`` (reduced facades, test doubles) on the old read.
         """
-        state = getattr(self.session, "frontend_state", None)
+        running = self._owner_has_running_job()
         return bool(
-            self.draft.approve_all
-            and (
-                getattr(self.session, "is_streaming", False)
-                or any(
-                    getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ())
-                )
-            )
+            self.draft.approve_all and (getattr(self.session, "is_streaming", False) or running)
         )
+
+    def _owner_has_running_job(self) -> bool:
+        """Whether the owner's roster has a running child, clone-free if possible.
+
+        ``getattr``-probed rather than typed, in the established style of
+        ``_sidebar_gate_identity``: a host without the narrow accessor must keep
+        working through the old path rather than lose the clause.
+        """
+        session = self.session
+        accessor = getattr(session, "has_running_job", None)
+        if accessor is not None:
+            return bool(accessor)
+        state = getattr(session, "frontend_state", None)
+        return any(getattr(job, "status", "") == "running" for job in getattr(state, "jobs", ()))
 
     @property
     def must_retain(self) -> bool:

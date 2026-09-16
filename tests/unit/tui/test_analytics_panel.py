@@ -93,6 +93,69 @@ def test_format_percent():
     assert format_percent(None) == "—"
 
 
+def test_the_composed_figure_keeps_its_marks_and_never_reads_as_free():
+    """The two money models COMPOSE: upstream decides WHICH money, one ladder
+    decides the DIGITS.
+
+    This is the test the reconciliation exists to make possible, and it asserts
+    the three things a single money vocabulary has to get right at once:
+
+    * a genuine lower bound still wears its mark — `SpendSummary.is_floor` (set
+      by `combined_spend` when the model half is partial, or any search half is)
+      reaches `format_cost` through `MoneyFigure.of`, so a figure that is a bound
+      cannot lose the `+` on its way through the combiner;
+    * a complete figure does NOT — a mark on a whole figure is the same lie in
+      the other direction;
+    * no nonzero cost can render as free, which is the spelling that started
+      this work: `$0.0000` for money that was spent.
+    """
+    from local_operator.tui.costs import MoneyFigure, combined_spend, format_usd
+
+    partial = combined_spend(1.20, None, model_is_partial=True)
+    assert format_cost(MoneyFigure.of(partial)) == "$1.20+"
+    complete = combined_spend(1.20, None)
+    assert format_cost(MoneyFigure.of(complete)) == "$1.20"
+    # An unpriceable model beside real search money is a bound too, and the mark
+    # must survive the combination rather than only the input.
+    # ($0.420: the ladder's 3dp rung below a dollar, plus the bound's mark.)
+    assert format_cost(MoneyFigure.of(combined_spend(None, _search(0.42)))) == "$0.420+"
+
+    # No nonzero figure is spelled as free, whatever it came through.
+    for micro in (1, 49, 50, 4_200, 213_000, 1_897_843):
+        figure = MoneyFigure(cost_usd=micro / 1_000_000.0)
+        assert format_cost(figure) != "$0.0000", micro
+    assert format_usd(1) == "<$0.0001"
+
+
+def _search(usd: float):
+    """A search snapshot carrying ``usd``, all of it priced."""
+    from local_operator.tui.costs import SearchSpendSnapshot
+
+    return SearchSpendSnapshot(searches=1, usd=usd, paid_operations=1, paid_usd=usd)
+
+
+def test_a_non_finite_cost_renders_instead_of_raising():
+    """R1-7: a figure the ladder cannot take must not take the frame down.
+
+    ``format_cost`` reads the exact integer when the aggregate carries one, and
+    falls back to the float. That fallback used to be ``int(round(cost * 1e6))``,
+    which raises on a NaN/inf — against ``tui/costs.py``'s own contract that
+    nothing there raises. The panel prints what the accounting holds instead.
+    """
+
+    class _Stub:
+        cost_is_known = True
+        cost_is_partial = False
+        cost_micro = None
+
+        def __init__(self, usd: float) -> None:
+            self.cost_usd = usd
+
+    assert format_cost(_Stub(float("nan"))) == "$nan"
+    assert format_cost(_Stub(float("inf"))) == "$inf"
+    assert format_cost(_Stub(2.5)) == "$2.50"
+
+
 def test_format_cost_states():
     def agg(cost_micro, known, calls):
         return UsageAggregate(calls=calls, cost_micro=cost_micro, cost_known_calls=known)
@@ -105,8 +168,14 @@ def test_format_cost_states():
     assert format_cost(agg(0, 0, 5)) == "$—"
     # Sub-cent keeps precision so a real spend is not rounded to zero.
     assert format_cost(agg(4_200, 3, 3)) == "$0.0042"
-    # Large sum abbreviates.
-    assert format_cost(agg(1_200_000_000, 5, 5)) == "$1.2k"
+    # Large sums NO LONGER abbreviate here: the same money reads ``$1200.00`` on
+    # this screen and on the band, because one ladder (``tui.costs.format_usd``)
+    # owns every money cell. The panel has no chart axis, so there is nowhere a
+    # ``$1.2k`` magnitude could live without disagreeing with the band.
+    assert format_cost(agg(1_200_000_000, 5, 5)) == "$1200.00"
+    # A nonzero amount below the ladder's resolution says so, rather than
+    # rounding to the ``$0.0000`` that reads as free.
+    assert format_cost(agg(1, 5, 5)) == "<$0.0001"
 
 
 def test_report_shows_cost():

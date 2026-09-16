@@ -104,3 +104,40 @@ async def test_fetch_cache_cannot_survive_changed_private_policy(tmp_path, monke
     )
     assert second[2]
     assert "private/loopback/reserved" in second[0]
+
+
+@pytest.mark.asyncio
+async def test_blocked_preview_does_not_spend_context_on_challenge_markup(tmp_path, monkeypatch):
+    """The context-cost guard for §5.2.
+
+    Measured before this change: medium.com's Cloudflare interstitial put ~5,507
+    bytes of challenge markup into the model-facing preview to say nothing. The
+    replacement is a statement, a reference id and a next step, so the ceiling
+    here is deliberately tight — a regression that re-inlines the body cannot
+    fit under it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    settings = WebFetchSettings(enrich=False)
+    monkeypatch.setattr(tool, "load_fetch_settings", lambda manager: settings)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+
+    challenge = (
+        "<!DOCTYPE html><html><head><title>Just a moment...</title>"
+        + ("<script>/* challenge platform payload */</script>" * 120)
+        + "</head><body></body></html>"
+    )
+    assert len(challenge) > 5000, "the fixture must be the size the guard is about"
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            403, text=challenge, headers={"content-type": "text/html", "cf-mitigated": "challenge"}
+        )
+    )
+    preview, _details, is_error = await tool.run_fetch(
+        "https://walled.example/x", tool_name="web_fetch", transport=transport
+    )
+    assert is_error is True
+    assert len(preview) < 700
+    assert "Just a moment" not in preview
+    assert "<script" not in preview
+    assert "browser" in preview

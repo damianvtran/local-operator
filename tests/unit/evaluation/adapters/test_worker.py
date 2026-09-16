@@ -585,3 +585,47 @@ def test_error_phase_is_declared_by_the_adapter_and_only_for_execute() -> None:
         )
         assert wrong_method is not None
         assert wrong_method.phase == "unknown", method
+
+
+def test_an_adapter_supplied_observation_cause_is_canary_checked() -> None:
+    """The newly surfaced variable text is bounded AND canary-checked.
+
+    ``RpcErrorDetail.causes`` is where an adapter's account of a failed
+    observation now travels (``ObservationCauseError``), so the worker's
+    redaction discipline has to cover it per entry -- including the ENCODED
+    forms a library, a URL or a log line could carry, which is why the check is
+    ``RedactionSet.assert_clear`` rather than a search for the literal. The
+    alternative reading -- "the adapter bounded it, so it is safe" -- is exactly
+    backwards: bounding is what SEVERS a canary so the substring check stops
+    matching, which is why the worker scans the unbounded value before it cuts
+    (``_redacted``), and why the scan must see the whole cause string.
+    """
+
+    from urllib.parse import quote
+
+    from local_operator.evaluation.adapters.api import ObservationPhaseError
+    from local_operator.evaluation.adapters.rpc import WITHHELD
+    from local_operator.evaluation.adapters.worker import _error_detail
+    from local_operator.evaluation.receipts import RedactionSet
+
+    secret = "AKIA-CAUSE-CANARY-0123456789"
+    for carried in (secret, quote(secret, safe=""), secret.encode("utf-8").hex()):
+        reason = ValueError("environment returned no screenshot frame")
+        reason.__cause__ = RuntimeError(f"screenshot unavailable: {carried}")
+        error = ObservationPhaseError("environment returned no screenshot frame")
+        error.__cause__ = reason
+
+        detail = _error_detail(
+            error, "execute", "exec-0", RedactionSet.from_resolved_values((secret,))
+        )
+
+        assert detail is not None and detail.phase == "observation"
+        # The fixed message survives, so the failure is still bucketable...
+        assert detail.message == "environment returned no screenshot frame"
+        assert detail.causes[0].message == "environment returned no screenshot frame"
+        # ...while the variable half is withheld WHOLE, in every encoding.
+        assert detail.causes[1].message == WITHHELD
+        rendered = detail.render()
+        assert secret not in rendered
+        assert quote(secret, safe="") not in rendered
+        assert secret.encode("utf-8").hex() not in rendered

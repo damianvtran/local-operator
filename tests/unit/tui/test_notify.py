@@ -22,6 +22,7 @@ a frame Textual paints, so the properties are pinned here:
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -613,6 +614,31 @@ def test_an_old_notify_send_without_action_support_gets_the_plain_toast(monkeypa
     assert notify_mod._ACTION_SUPPORT["/usr/bin/old2"] is False
 
 
+def _no_desktop_app(monkeypatch) -> list[str]:
+    """Take the click ladder's NEW desktop rung out of the way, and record it.
+
+    These tests are about the TERMINAL rung, which is now the second of two
+    fallbacks: rung 2 launches the desktop app when one is installed, and on a
+    developer's machine `shutil.which("local-operator-ui")` finds the real npm
+    bin — so without this the click starts the operator's actual app and the
+    terminal assertion never runs. Measured, not hypothetical: the run of this
+    file that added the rung left a real `local-operator-ui --open-session
+    <fixture id>` in the process list.
+
+    Returning False is the "no app installed" answer, which is exactly the
+    state the terminal rung exists for, and it is doubled at ``_launch_desktop``
+    rather than at the process boundary so the ladder's own ordering is still
+    exercised.
+    """
+    from local_operator.tui import resume_click
+
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        resume_click, "_launch_desktop", lambda session_id: attempts.append(session_id) or False
+    )
+    return attempts
+
+
 def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> None:
     """A notification is only sent when nothing is watching, so the click has
     to OPEN a terminal — there is no emulator around the sender to inherit.
@@ -623,6 +649,7 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
     """
     from local_operator.tui import resume_click
 
+    _no_desktop_app(monkeypatch)
     seen: dict[str, Any] = {}
 
     class _Backend:
@@ -640,19 +667,55 @@ def test_the_click_opens_a_terminal_through_the_spawn_registry(monkeypatch) -> N
     assert not any(part in ("--exec", "-e") for part in argv)
 
 
-def test_a_click_with_no_terminal_backend_still_launches(monkeypatch) -> None:
-    """An unrecognised emulator must not silently swallow the user's click."""
+def test_a_click_with_no_terminal_backend_still_lands_or_says_so(monkeypatch) -> None:
+    """An unrecognised emulator must not silently swallow the user's click.
+
+    THE DEFECT THIS REPLACES (UX round 1, U5): the rung answered True after a
+    detached ``lop --resume`` with no terminal attached, so nothing appeared
+    AND nothing was reported — a click that cannot be told apart from a slow
+    one. It now opens a window it can really open — on darwin the AppleScript
+    Terminal backend LAUNCHES Terminal.app and needs no terminal around this
+    process — or answers False, which is what makes the caller print
+    ``lop --resume <id>``. Both branches and the argv are driven in full in
+    ``tests/unit/tui/test_resume_click.py``; this pins the ladder-level outcome
+    on the notification's own path.
+    """
     from local_operator.tui import resume_click
 
-    launched: list[list[str]] = []
+    _no_desktop_app(monkeypatch)
     monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda env: None)
-    monkeypatch.setattr(
-        "local_operator.proc.spawn_detached",
-        lambda argv, *a, **k: bool(launched.append(list(argv))) or True,
-    )
+    spawned: list[list[str]] = []
 
-    assert resume_click.open_session("abc123def456") is True
-    assert launched and launched[0][-2:] == ["--resume", "abc123def456"]
+    class _Stdin:
+        def write(self, data: bytes) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _Process:
+        stdin = _Stdin()
+
+        def wait(self, timeout=None) -> int:
+            # ``apple.spawn`` reports the child's EXIT STATUS, bounded (U11), so
+            # the double has to answer one: this is an osascript that opened the
+            # window and exited 0.
+            return 0
+
+    def fake_popen(argv, **_kwargs):
+        spawned.append(list(argv))
+        return _Process()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    result = resume_click.open_session("abc123def456")
+    if sys.platform == "darwin":
+        assert result is True
+        assert spawned and spawned[0][0] == "osascript", spawned
+        assert "abc123def456" in spawned[0][2]
+    else:
+        assert result is False
+        assert spawned == []
 
 
 def test_the_built_click_command_actually_runs(tmp_path, monkeypatch) -> None:
@@ -704,10 +767,11 @@ def test_the_privacy_flag_governs_the_attached_session_toast_too(
     Review round 1, M2: the flag governed only the observer path, while the
     attached session's own toasts title themselves from ``set_label`` and
     ignored it — and those are the majority of a user's toasts. The settings
-    copy ("A session's name appears on banners, including the lock screen.") is
-    unqualified, so a flag that covered one leg made its own promise false. A
-    privacy control that half works is worse than one that is clearly scoped,
-    because the copy reads as a guarantee.
+    copy ("A session's name, last line and error causes appear on banners,
+    including the lock screen.") is unqualified, so a flag that covered one
+    leg made its own promise false. A privacy control that half works is
+    worse than one that is clearly scoped, because the copy reads as a
+    guarantee.
     """
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: False)
     notifier, sink = unfocused()

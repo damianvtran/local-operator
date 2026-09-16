@@ -9,6 +9,11 @@ provider counts rather than off the estimate.
 
 from __future__ import annotations
 
+import dataclasses
+from datetime import datetime, timezone
+
+import pytest
+
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     SESSION_LABEL_CHARS,
@@ -645,3 +650,70 @@ def test_forest_ignores_a_self_parent_edge():
     forest = build_session_forest({"s": _cost(7)}, {"s": "s"})
     assert [n.session_id for n in forest] == ["s"]
     assert forest[0].total.cost_micro == 7
+
+
+# --- The durable ledger's clock independence ----------------------------------
+#
+# The defect these cover: the ledger's row is FINAL (priced once on the writer
+# thread and never recomputed), so a time-of-use window applied at READ time
+# would move a stored figure under the reader's feet. The window that belongs on
+# a row is the one its own call ran in, which is exactly what `CallSnapshot.ts_ms`
+# records — and what `tariff.moment_for` reads off it.
+
+#: 2026-09-14 (a Monday) 07:00 UTC is peak; 12:00 UTC is off-peak.
+_PEAK_MS = int(datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc).timestamp() * 1000)
+_OFF_PEAK_MS = int(datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _peak_priced_snapshot(ts_ms: int) -> CallSnapshot:
+    """One DeepSeek call of 1M input tokens, stamped at ``ts_ms``."""
+    return CallSnapshot(
+        ts_ms=ts_ms,
+        session_id="s1",
+        provider="deepseek",
+        model_id="deepseek-flash",
+        input_tokens=1_000_000,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=1_000_000,
+    )
+
+
+@pytest.mark.parametrize(
+    ("call_ms", "stored_micro"),
+    [
+        (_PEAK_MS, 300_000),  # 1M tokens × $0.30/MTok at full price
+        (_OFF_PEAK_MS, 150_000),  # the same call at the published half
+    ],
+)
+def test_the_ledger_prices_at_the_calls_own_moment_not_the_readers(
+    call_ms: int, stored_micro: int, monkeypatch
+) -> None:
+    """The ledger's stored figure follows ``ts_ms``, whatever the clock says.
+
+    Both directions are exercised against a clock deliberately parked in the
+    OTHER window: a row priced at "now" would come out 2x wrong here, and the
+    error would be invisible on read because the row is never repriced.
+    """
+    from local_operator.model import tariff
+
+    for clock_ms in (_PEAK_MS, _OFF_PEAK_MS):
+        monkeypatch.setattr(
+            tariff, "now_utc", lambda ms=clock_ms: datetime.fromtimestamp(ms / 1000, timezone.utc)
+        )
+        cost_micro, known = price_snapshot(_peak_priced_snapshot(call_ms))
+        assert known, "the DeepSeek row must resolve for this test to mean anything"
+        assert cost_micro == stored_micro, f"clock={clock_ms}"
+
+
+def test_a_provider_reported_dollar_is_stored_unscaled_by_any_schedule(monkeypatch) -> None:
+    """A receipt reaches the ledger verbatim: no 0.5 and no 2.0 anywhere."""
+    from local_operator.model import tariff
+
+    monkeypatch.setattr(
+        tariff, "now_utc", lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
+    snapshot = dataclasses.replace(_peak_priced_snapshot(_PEAK_MS), usd_cost=0.0075)
+    assert price_snapshot(snapshot) == (7500, True)

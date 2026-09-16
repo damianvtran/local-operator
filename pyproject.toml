@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.54.15"
+version = "0.56.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
-authors = [{ name = "Damian Tran", email = "damian@gominerva.com" }]
+authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -319,7 +319,17 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # runtime surface the gate exists to protect. Excluding `docs/` keeps the
 # type-check gate focused on `local_operator/` and `tests/` without weakening it
 # for real code or littering a throwaway generator with per-line ignores.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples"]
+# `build` is the setuptools scratch directory `uv build` / `python -m build`
+# leaves behind (gitignored, `.gitignore:31`), and leaving it out here is a
+# trap every agent that builds a wheel for evidence walks into: `build/lib/`
+# holds a second copy of `local_operator/`, so the same nominal types exist
+# twice as unrelated classes and the analyzer reports 9 structural errors of the
+# form `"build.lib.local_operator.tui.theme.ThemeSpec" is not assignable to
+# "local_operator.tui.theme.ThemeSpec"`. None of them names a defect in shipped
+# code, and CI cannot catch the omission — it never builds a wheel before
+# type-checking — so the cost lands entirely on local runs of the gate command,
+# where `rm -rf build/` is folklore the next person re-derives from scratch.
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.
@@ -353,6 +363,47 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 # (5.3-5.9s vs 7.8-11.3s) under that contention. See conftest.py for the full
 # measurements and the fallback behaviour. CI is exempt from the CPU share (a
 # dedicated runner has no contention to protect against) and keeps every core.
+#
+# THE CAP WAS TITRATED ON 2026-09-13/14 and it had been too TIGHT: at this host's
+# chronic 4,500-5,500 MB of available memory the reserved floor was binding on
+# every run and resolved 3 workers at 4,964-5,313 MB (2 at 4,500-4,848 MB, 4
+# above ~5,472 MB) on 14 cores that sat 0-2.5% busy. Interleaved
+# A/B waves of 3 concurrent instances of tests/unit/tui/test_slash_echo.py (a
+# boot-bound slice) at real fleet depth measured per-instance wall time 313.3 /
+# 225.2 s at cap 3 against 188.9 / 161.6 / 188.7 s at cap 6 and 171.3 s at cap 8:
+# 6 beat 3 in that run and 8 beat 6 by 9%. An independent A/B (review round 1,
+# 2026-09-14) reproduced the ORDERING but not the magnitude - 15-16% against a
+# different baseline - so the direction is what this file claims for the
+# cap-6-over-cap-3 comparison: that speedup percentage is withdrawn as a claim,
+# while the 9% for cap 8 over cap 6 and the CPU deltas above stand as measured.
+#
+# Hence the reserve CAP moved (`min(3072, total/8)` -> `min(2048, total/8)`; the
+# 1/8 fraction is unchanged, so every small-host floor is exactly what it was)
+# while the CPU share and the 2..8 clamp did not, and the four documented CI
+# runner shapes resolve exactly as before. The per-worker CHARGE did NOT move: an
+# earlier revision halved it to 400 MB, which the per-worker RSS measurement then
+# refused - the heavy corner of this suite peaked at a 441.5 MB worker process
+# tree at cap 6, so 400 would have sat below the draw it has to cover. The
+# release therefore raises this host's chronic-resolution count from the reserve
+# cap alone: from the released constants' 2 / 2 / 3 / 3 / 3 / 4 to 3 / 4 / 4 /
+# 4 / 4 / 4 at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB available - one
+# worker at 4,964-5,313 MB, TWO at 4,848 MB, and none at 5,555 MB, where both
+# constant sets resolve 4. conftest.py carries the full table and the measurement.
+#
+# The hook prints ONE stderr line naming the terms that produced the count, and
+# the size of the live suite fleet alongside them. That line is what turns "3
+# workers on a 14-core machine" into a diagnosis in one reading; an operator
+# override (`PYTEST_XDIST_AUTO_NUM_WORKERS`) gets its own one-line report naming
+# the override as the term that bound, because that is the path where the count
+# is least explicable otherwise. Silence both with `PYTEST_QUIET_WORKER_CAP=1`
+# (`=0`/`false`/`no`/`off` leave them on). Neither ever writes to stdout, which
+# `-q` output is parsed from, and the fleet size reported is NOT used to compute
+# the cap: a divisor over both arms was implemented and measured on 2026-09-13
+# and rejected (it floors every suite at 2 workers here and cost 45% wall time at
+# identical CPU) - conftest.py's module docstring carries the numbers so it is
+# not re-tried without them. The count itself is unchanged by the reporting; the
+# only behavioural change here is the rewritten reserve cap above (the per-worker
+# charge and the 1/8 fraction did not move).
 #
 # `auto` must stay literal here: an explicit `-n N` in addopts would make both
 # the hook and the env var inert.

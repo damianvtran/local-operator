@@ -26,6 +26,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * than one that fails when an id is renamed. */
 const IDS = [
   "connected", "paired", "pairing", "disconnected", "incompatible", "origin", "origin-ack",
+  // The wedge card and its retry: popup.ts paints the section and wires the
+  // button, and the D3-1 pin row asserts on the section's visibility, so a
+  // missing stub node would make that assertion vacuous.
+  "unresponsive", "retry-unresponsive",
   "pending", "origin-host", "origin-again", "origin-scope", "origin-scope-detail",
   "origin-position", "origin-waiting", "origin-allow", "origin-deny", "origin-previous",
   "origin-next", "origin-ack-title", "origin-ack-sub", "origin-ack-check", "card", "retry",
@@ -243,7 +247,7 @@ async function loadPopup() {
 /** A reachable daemon whose /health answer and LATENCY are both controllable.
  * Latency is what puts two renders in flight at once, which is the whole of
  * the ordering defect. */
-function installFetchStub(paired, delayMs = () => 0) {
+function installFetchStub(paired, delayMs = () => 0, extra = {}) {
   globalThis.fetch = async () => {
     const wait = delayMs();
     // The answer is snapshotted when the request STARTS, exactly as a real
@@ -260,6 +264,7 @@ function installFetchStub(paired, delayMs = () => 0) {
         extension_connected: true,
         protocol_version: 1,
         pending_origin: undefined,
+        ...extra,
       }),
     };
   };
@@ -458,16 +463,139 @@ test("the error sits above the button that produced it (D2)", async () => {
   );
 });
 
-test("the first paint is pinned to the state this browser will actually reach (D1)", async () => {
+/* ------------------------------------------------------------------ J9 ---- */
+
+/** Every spelling of a viewport-relative unit this popup must not size anything
+ * with, and the scan that enforces it — shared by the guard below and by its
+ * coverage test, so the coverage cannot drift from the rule it covers.
+ *
+ * FOUR prefix families (bare, `d`, `s`, `l`) times six suffixes, and it is one
+ * character class per family rather than a hand-written list because the rule is
+ * "no viewport length", not "the ten spellings somebody thought of": `vb` is the
+ * viewport height in a horizontal writing mode, `dmin`/`dmax` are the dynamic
+ * viewport, and CSS units are case-insensitive so `100VH` is `100vh`. The first
+ * revision of this matcher listed ten units with no `i` flag, which left
+ * `dmax/dmin/vi/vb/dvi/svi/lvi/...` and every uppercase form GREEN — measured by
+ * mutating `.card`'s `max-height` in a copy of the tree (review round 1, MAJOR 1:
+ * 10 of 24 spellings caught).
+ *
+ * `cq*` is included on the same argument, not as a bonus: this stylesheet
+ * declares no `container-type`, and per CSS Containment a container unit with no
+ * eligible container queries the SMALL VIEWPORT — so `cqh` here IS `svh`. If a
+ * container is ever declared in this popup, revisit that family (they stop being
+ * the viewport's size at that point) rather than deleting the guard.
+ *
+ * `\d[\d.]*` rather than `[\d.]+`: a bare dot before a unit-ish token flags a
+ * legitimate selector (`.vmin-x{…}` -> `['.vmin']`, `.vh{}` -> `['.vh']`), and a
+ * guard that cries wolf on selectors is a guard that gets deleted.
+ */
+const VIEWPORT_UNITS = /\d[\d.]*(?:[dsl]?v|cq)(?:h|w|i|b|min|max)\b/gi;
+
+/** Strip comments, then list every viewport-unit token in `text`.
+ *
+ * Comments are stripped because these sources discuss the removed `100vh` at
+ * length and a guard that fails on its own explanation is a guard somebody
+ * deletes. The strip cannot rot silently either: that prose IS in the scanned
+ * files, so a strip that stopped working turns the guard red on its own. */
+function viewportUnits(text) {
+  return [...text.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(VIEWPORT_UNITS)].map((match) => match[0]);
+}
+
+test("nothing the popup ships sizes itself against the popup's own viewport (J9)", async () => {
+  // A Chrome action popup sizes its WINDOW to this document's content, so a
+  // viewport-relative length here is a length derived from the thing it decides.
+  // `.card` carried `max-height: calc(100vh - 20px)` (design D2's bounded card)
+  // and the feedback loop settled at the collapsed end, measured through the real
+  // toolbar path (chrome.action.openPopup(), no emulated viewport, Chrome 153):
+  // Chrome creates the window at an undersized height, the clamp then reads that
+  // height, the card is clamped to 5px, the document is 25px, and the window
+  // stays there — EVERY state painted as a 300x25 bar with its header band
+  // clipped to a sliver (card 5px, body scrollHeight 386).
+  //
+  // No other assertion in this repo can see that. scripts/popup-states-shot.mjs
+  // opens popup.html as a PAGE at 300x600, where `100vh` is the number the
+  // harness chose, and every stylesheet assertion in this file (the J1/J7 group
+  // above) compares popup.css against itself — a clamp that agrees with its own
+  // constant still collapses the window. So the rule is stated as a rule: the
+  // capped case is handled with `position: sticky` on .head/.foot, which cannot
+  // feed back into the window height, and Chrome's own popup clamp does the
+  // bounding.
+  //
+  // SCOPE: every source the popup's own document loads and executes — the
+  // stylesheet, the markup (which carries inline styles) and the classic
+  // pre-paint script, where a viewport unit would be EQUALLY circular: it writes
+  // the `#pending` pin that decides the window's first-paint size. This is how
+  // the defect shipped, so the guard reads all three rather than the one file it
+  // happened to arrive in.
+  const offenders = [];
+  for (const file of ["popup.css", "popup.html", "first-paint.js"]) {
+    const source = await readFile(join(HERE, "..", "src", "popup", file), "utf8");
+    for (const unit of viewportUnits(source)) offenders.push(`${file}: ${unit}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "the popup must not size anything against its own viewport: the popup window is sized FROM this " +
+      "document, so a viewport unit is circular and collapses the popup. Pin .head/.foot with position: " +
+      "sticky and let Chrome clamp the window instead.",
+  );
+});
+
+test("the J9 matcher catches every spelling of a viewport unit, and only those (J9)", () => {
+  // The guard is worth exactly its matcher's coverage, and review round 1 found
+  // the matcher narrower than the rule it stated: ten of the twenty-four
+  // spellings, no uppercase. Each of the missed ones re-creates the identical
+  // circular clamp, so every spelling is asserted HERE rather than trusted to a
+  // character class nobody re-derives.
+  for (const prefix of ["", "d", "s", "l"]) {
+    for (const suffix of ["h", "w", "i", "b", "min", "max"]) {
+      const unit = `${prefix}v${suffix}`;
+      assert.deepEqual(
+        viewportUnits(`.a { max-height: calc(100${unit} - 20px); }`),
+        [`100${unit}`],
+        `${unit} must be caught`,
+      );
+      const upper = unit.toUpperCase();
+      assert.deepEqual(
+        viewportUnits(`.a { max-height: calc(100${upper} - 20px); }`),
+        [`100${upper}`],
+        `${upper} is the same unit (CSS units are case-insensitive) and must be caught`,
+      );
+    }
+  }
+  // Container units, which query the small viewport here because no container is
+  // declared — see VIEWPORT_UNITS.
+  for (const suffix of ["h", "w", "i", "b", "min", "max"]) {
+    const unit = `cq${suffix}`;
+    assert.deepEqual(viewportUnits(`.a { height: 50${unit}; }`), [`50${unit}`], `${unit} must be caught`);
+  }
+  // The false positives, including the two the first revision's `[\d.]+` had:
+  // a bare dot is a class selector, not a number, and `px`/`ms`/`ch`/`rem` are
+  // not viewport-relative.
+  for (const clean of [
+    ".vmin-x { color: red; }",
+    ".vh { color: red; }",
+    ".a { width: 100px; height: 1.5rem; transition: 100ms; font-size: 2ch; }\n",
+    ".a { margin: 0; padding: 0 11.5px; }\n",
+    "/* 100vh is banned here */\n",
+  ]) {
+    assert.deepEqual(viewportUnits(clean), [], `must not be flagged: ${clean.trim()}`);
+  }
+});
+
+test("the first paint is pinned to the state this browser will actually reach (D1/D3-1)", async () => {
   // #pending paints on EVERY open, before render()'s awaits resolve, so its
-  // pinned height decides how far the card travels. One pin cannot serve both
-  // populations: the pairing form is 360.5px and the connected card 239.9px.
+  // pinned height decides how far the card travels. THREE pins now, not a
+  // boolean: the unresponsive card was unreachable from a paired/unpaired
+  // choice, so the wedge state opened 167.8px short of the card it settled on
+  // (design D3-1, measured in Chrome). The pin recorded is the one for the card
+  // show() last rendered.
   const nodes = installDomStub();
   const { areas } = installChromeStub();
 
   // An already-paired browser. The hint is synchronous (localStorage), because
   // chrome.storage cannot inform a first paint.
-  globalThis.localStorage.setItem("lop:paired-hint", "1");
+  globalThis.localStorage.setItem("lop:pin-hint", "148px");
   installFetchStub(() => true);
   let bundle = await loadPopup();
   try {
@@ -476,7 +604,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
     await tick(30);
     assert.equal(
       nodes.get("pending").style.minHeight,
-      "86px",
+      "148px",
       "a paired browser's first paint must be pinned to the connected card's height",
     );
     assert.equal(
@@ -491,7 +619,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
   // A browser that has never paired.
   const fresh = installDomStub();
   const second = installChromeStub();
-  globalThis.localStorage.removeItem("lop:paired-hint");
+  globalThis.localStorage.removeItem("lop:pin-hint");
   installFetchStub(() => false);
   bundle = await loadPopup();
   try {
@@ -556,24 +684,51 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   // duplicated because nothing can be shared with code that runs this early,
   // and a silent divergence is a resize for one of the two populations.
   const popup = await readFile(join(HERE, "..", "src", "popup", "popup.ts"), "utf8");
-  const owned = /readPairedHint\(\) \? "(\d+)px" : "(\d+)px"/.exec(popup);
-  assert.ok(owned, "popup.ts must still own the measured pins");
-  const early = /paired \? PAIRED_PIN : UNPAIRED_PIN/.test(source) && {
-    paired: /PAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
-    unpaired: /UNPAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
-  };
-  assert.ok(early, "first-paint.js must choose between a paired and an unpaired pin");
-  assert.equal(early.paired, owned[1], "the paired pin must match popup.ts");
-  assert.equal(early.unpaired, owned[2], "the unpaired pin must match popup.ts");
+  const owned = Object.fromEntries(
+    [...popup.matchAll(/const PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
+  );
+  // Only the DURABLE states carry a pin. A pin is a bet that the next open
+  // repeats this state, and the wedged card is transient by construction — its
+  // own copy asks the user to act and reopen — so pinning it optimised a reopen
+  // nobody makes and cost the recovery open everybody makes a measured 315.84px
+  // collapse (design D1). Asserting the exact SET, not a subset: adding a pin
+  // for a transient state is the regression this encodes.
+  assert.deepEqual(
+    Object.keys(owned).sort(),
+    ["CONNECTED", "PAIRING", "STANDBY"],
+    "popup.ts must pin the durable states and only those (design D1) — pinning a transient card taxes the next open, and the standby card is durable: two installed builds keep their roles across every open",  );
+  const early = Object.fromEntries(
+    [...source.matchAll(/var PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
+  );
+  for (const [name, px] of Object.entries(owned)) {
+    assert.equal(
+      early[name],
+      px,
+      `first-paint.js must carry popup.ts's PIN_${name} (${px}px); a divergence is a resize for whoever holds that hint`,
+    );
+  }
+  // And the script must actually CONSULT the stored pin rather than pick one of
+  // the three by a rule of its own: that is what D3-1 was.
+  assert.match(
+    source,
+    /PINS\.indexOf\(stored\)/,
+    "first-paint.js must accept only a recorded pin, so a stale value falls back rather than pinning something unmeasured",
+  );
 
-  const key = /PAIRED_HINT_KEY = "([^"]+)"/.exec(popup)?.[1];
+  const key = /PIN_HINT_KEY = "([^"]+)"/.exec(popup)?.[1];
+  assert.ok(key, "popup.ts must own the hint's storage key");
   assert.ok(source.includes(`"${key}"`), `first-paint.js must read the same key (${key}) popup.ts writes`);
+  // The boolean key the previous revision wrote: read once so the rename does
+  // not cost an existing paired browser a resize. Both files, or the pre-paint
+  // and the module disagree for exactly one open.
+  assert.match(popup, /LEGACY_PAIRED_HINT_KEY = "lop:paired-hint"/, "popup.ts must keep the legacy-key fallback");
+  assert.match(source, /LEGACY_KEY = "lop:paired-hint"/, "first-paint.js must keep the legacy-key fallback");
 
-  // And the CSS fallback must be the unpaired pin: it is what a browser whose
+  // And the CSS fallback must be the pairing pin: it is what a browser whose
   // hint cannot be read at all gets.
   const css = await readFile(join(HERE, "..", "src", "popup", "popup.css"), "utf8");
   const fallback = /#pending\s*\{[^}]*min-height:\s*(\d+)px/.exec(css);
-  assert.equal(fallback?.[1], owned[2], "the CSS fallback must be the unpaired pin");
+  assert.equal(fallback?.[1], owned.PAIRING, "the CSS fallback must be the pairing pin");
 
   // The store package is an explicit allowlist; an unlisted file ships a popup
   // whose <head> references a 404 and whose pin is never applied.
@@ -584,29 +739,61 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   );
 });
 
-test("the paired hint follows /health in both directions (D1)", async () => {
-  // The hint is a layout guess and must never drift from reality: an unpair has
-  // to shrink the next first paint back, or the returning user gets the resize
-  // the pin exists to remove.
+test("the pin follows the card that was rendered, in both directions (D1/D3-1)", async () => {
+  // The hint is a layout guess and must never drift from what the popup paints:
+  // an unpair has to shrink the next first paint back, and the wedge state —
+  // which is neither paired nor unpaired — has to reopen at ITS OWN height, or
+  // the reopen lands 167.8px short (design D3-1).
   const nodes = installDomStub();
   const { areas } = installChromeStub();
+  globalThis.localStorage.removeItem("lop:pin-hint");
   globalThis.localStorage.removeItem("lop:paired-hint");
-  let paired = true;
-  installFetchStub(() => paired);
+  let health = { paired: true, extension_unresponsive: false };
+  installFetchStub(() => health.paired, () => 0, { extension_unresponsive: false });
   const bundle = await loadPopup();
   try {
     areas.local.set("port", 4099);
     await bundle.import();
     await tick(30);
-    assert.equal(globalThis.localStorage.getItem("lop:paired-hint"), "1", "pairing must record the hint");
+    assert.equal(
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "148px",
+      "the connected card must record its own pin",
+    );
 
-    paired = false;
+    // An unpair: the next open must be pinned to the form, not to a card this
+    // browser will not reach.
+    health = { paired: false, extension_unresponsive: false };
+    globalThis.fetch = async () => ({ ok: true, json: async () => health });
     await chrome.storage.session.set({ connState: "pairing" });
     await tick(30);
     assert.equal(
-      globalThis.localStorage.getItem("lop:paired-hint"),
-      "0",
-      "an unpair must clear the hint, or the next first paint is pinned to the wrong state",
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "219px",
+      "an unpair must record the form's pin, or the next first paint is the wrong height",
+    );
+
+    // The wedge: neither paired nor unpaired. THIS is the case a boolean hint
+    // could not express, and the one the recovery copy sends the user back into
+    // ("Check again").
+    health = { paired: false, extension_unresponsive: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(30);
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      false,
+      "precondition: the wedge state really does render the unresponsive card",
+    );
+    // The wedge card must NOT overwrite the hint. It is transient by
+    // construction, so recording it would pin the next open — which its own
+    // copy asks the user to make — to a height that open will not have: with
+    // this card pinned, the recovery open collapsed a measured 315.84px against
+    // base's 167.84px (design D1). Leaving the durable pin in place means the
+    // wedged open grows into the tall card once and the recovery open is exact.
+    assert.equal(
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "219px",
+      "the transient wedge card must leave the durable pin alone (design D1)",
     );
   } finally {
     await bundle.close();

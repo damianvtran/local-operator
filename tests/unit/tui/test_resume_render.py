@@ -16,6 +16,7 @@ from rich.cells import cell_len
 from textual.events import Key, MouseScrollUp
 
 import local_operator.tui.app as app_module
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.tui.app import (
     RESUME_OLDER_NOTICE,
     RESUME_PAGE_MESSAGES,
@@ -166,6 +167,33 @@ def test_resume_tail_start_snaps_back_to_the_nearest_user_row() -> None:
     assert _resume_tail_start(history, 4) == 9
     assert _resume_tail_start(history, 80) == 0
     assert _resume_tail_start(history, 15) == 0
+
+
+def test_resume_tail_start_skips_a_row_that_paints_nothing() -> None:
+    """Reviewer m3: an invisible row must not anchor the resumed window.
+
+    The cut snaps BACKWARD to a row the reader can see, and a harness-injected
+    render mounts no user bubble at all — so anchoring on one spends the first
+    slot of a bounded frame on nothing, which is the same short-frame failure
+    the backward snap exists to fix. The row is inserted exactly where the naive
+    cut lands, so the walk has to step over it to reach the turn.
+    """
+    injected = SimpleNamespace(
+        role="user",
+        id="inj-1",
+        text="[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).",
+        tool_calls=None,
+        content=[],
+        custom_type=None,
+        provider_payload={RENDERED_INJECTION_KEY: True},
+    )
+    history = _history(5)
+    history.insert(10, injected)
+
+    assert _resume_tail_start(history, 5) == 9
+    # Without the invisible row the same walk lands one index later, which is
+    # what pins the skip rather than a shifted fixture.
+    assert _resume_tail_start(history[:10] + history[11:], 5) == 9
 
 
 def test_resume_tail_start_never_renders_fewer_than_the_bound() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from local_operator.slash_commands import SLASH_COMMANDS
+from local_operator.slash_commands import SLASH_COMMANDS, command_argument_words
 from local_operator.tui.autocomplete import SlashCommand
 
 # These are execution handlers, not a copy of the catalogue. A new registry row
@@ -31,6 +31,18 @@ OWNER_COMMANDS = frozenset(
 )
 
 
+def argument_words(spec: SlashCommand) -> list[str]:
+    """The vocabulary a shape's first token must come from, for the wire.
+
+    A thin adapter over ``slash_commands.command_argument_words`` — the ONE
+    derivation, so the word the catalogue publishes and the word the endpoint
+    accepts cannot drift (round 2's MINOR-2: the validator's ``WORD`` arm ignored
+    the vocabulary while a consumer honoured it for every shape). Empty for every
+    shape that takes ANY word; ``ArgumentShape`` states which those are.
+    """
+    return list(command_argument_words(spec))
+
+
 def command_catalogue() -> list[dict[str, Any]]:
     return [
         {
@@ -40,6 +52,22 @@ def command_catalogue() -> list[dict[str, Any]]:
             "arguments": spec.arguments.value,
             "echo": spec.echo,
             "consumes_prompt": spec.consumes_prompt,
+            # The desktop's half of the messages-endpoint admission rule: an
+            # ADDITIVE field, so a renderer that predates it ignores the key and
+            # falls back to its own `promptCommands ∪ inlineArgument` derivation,
+            # while a renderer that reads it needs no second vocabulary. See
+            # `SlashCommand.prefixes_text` for what it does and does not mean.
+            "prefixes_text": spec.prefixes_text,
+            # The THIRD source of "text after this word is the command's
+            # argument": a shape the command route validates or forwards, which
+            # neither of the two booleans above expresses. `argument_words` is
+            # the vocabulary its first token must come from (empty = any word).
+            # Both are additive for the same reason `prefixes_text` is: a
+            # renderer that does not read them keeps its own derivation, and one
+            # that does can answer `/mcp logout` (command) and `/mcp logout seems
+            # to cause a crash` (message) the way this endpoint does.
+            "argument_shape": spec.argument_shape.value,
+            "argument_words": argument_words(spec),
             "destination": spec.desktop_destination,
             "execution": "owner" if spec.name in OWNER_COMMANDS else "native",
         }

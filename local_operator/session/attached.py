@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -66,6 +67,7 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     RETIRING_REASON,
     STOPPED_REASON,
@@ -78,33 +80,53 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
-from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.providers.local import LOCAL_PROVIDER_IDS
+from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
+from local_operator.session.cold_model import (
+    resolve_context_metadata,
+    synthesise_cold_state,
+)
+from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+    FrontendModelSpec,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
     FrontendUpdate,
+    FrontendUsage,
     JobState,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
+    WakeState,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
-from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
+from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.types import drain_phrase_for_frame
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
+    ATTACHMENT_KEY,
+    ATTACHMENT_MISSING,
     Transcript,
     read_replay_suffix,
     replay_entries,
+    usages_since_newest_shrink,
+)
+from local_operator.session.usage_seed import (
+    denominator_window,
+    reading_identity,
+    reading_window,
+    seed_reported_usage,
 )
 from local_operator.session_lease import SessionLeaseHeldError
 
@@ -127,6 +149,22 @@ _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a
 #: silently not matching, which is the same defect with no symptom.
 UNIDENTIFIED_STEER_ID = "remote-steer"
 
+#: The action receipts an ``AttachedSession`` client DECLARES in its attach auth
+#: frame — the whole vocabulary, because every viewer on this facade renders the
+#: receipt and submits its ``request`` itself (see the dial site below).
+#:
+#: A NAMED declaration rather than ``list(SLASH_ACTION_RECEIPTS)`` inlined at the
+#: dial site, because the declaration is read in TWO directions and only one of
+#: them is this file. The runtime reads it to decide whether to stand down
+#: (``runtime_must_complete``), and the desktop route reads it to decide whether
+#: the submit is ITS to make (``routes/desktop_sessions.py::
+#: desktop_viewer_must_submit``). Inlining the same expression in one place left
+#: the other reading the VOCABULARY instead, which made "did this client declare
+#: it" a question with no possible answer but yes — the inert clause review round
+#: 2 (NIT-1) measured. Read from here, a client kind that ever declares a SUBSET
+#: narrows both sides together instead of double-submitting.
+ATTACHED_SLASH_CONSUMERS: tuple[str, ...] = SLASH_ACTION_RECEIPTS
+
 #: How long a VIEWER chases a vanished runtime before unbinding and going cold.
 #: A runtime exits by design when it has nothing left to do, so owner loss is
 #: usually not a crash at all — but a restart after a `kill -9` publishes a new
@@ -135,51 +173,38 @@ UNIDENTIFIED_STEER_ID = "remote-steer"
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
 
-#: The SECOND, longer bound on recovery — the one that applies when the viewer
-#: cannot go cold at ``COLD_FALLBACK_S`` (``_can_go_cold`` is False, i.e. every
-#: terminal ``connect()`` viewer, which is what the TUI builds).
+#: The SECOND bound on recovery used to live here: ``RECOVERY_GIVE_UP_S = 2 *
+#: HEARTBEAT_TIMEOUT_S`` (90 s), for the LIVE-BUT-SILENT owner — a record is
+#: found on every pass, the socket accepts, the canonical sync never lands.
 #:
-#: It exists because that path had NO bounded exit at all. ``COLD_FALLBACK_S``
-#: returns only for a viewer that may go cold; the legacy arm beneath it ends
-#: the in-flight turn and keeps looping, and the takeover that arm is written
-#: to reach lives in the no-record ``else`` branch — so an owner that is LIVE
-#: BUT SILENT (a record is found every pass, the socket accepts, the canonical
-#: sync never lands) kept the loop cycling forever with no verdict to offer.
-#: ``_recovering`` is set for the whole of that loop, so what latches is not a
-#: cosmetic flag: it is the state that REFUSES ``/model``, ``/goal``,
-#: ``/rename``, ``/effort``, ``/compact``, ``/fork`` and ``/credential`` with
-#: ``_RECONNECTING_SLASH_NOTICE``, and that PARKS ``prompt`` silently on
-#: ``_runtime_ready`` with no message and no spinner resolution. Reported from
-#: the field as a session whose model could not be switched by any number of
-#: retries or ``/resume``s.
+#: DELETED, and the reason matters: it was one bound too many, and it bounded
+#: the wrong thing. Whatever the registry would eventually conclude about that
+#: owner, the VIEWER has already concluded it at ``COLD_FALLBACK_S`` — that is
+#: where the in-flight turn is ended locally with a named ``owner-lost``
+#: cut-off. What the 90 s then bought was 82 more seconds of ``_recovering``,
+#: which REFUSES ``/model``, ``/goal``, ``/rename``, ``/effort``, ``/compact``,
+#: ``/fork`` and ``/credential`` with ``_RECONNECTING_SLASH_NOTICE`` and PARKS
+#: ``prompt`` silently on ``_runtime_ready`` with no message, no spinner
+#: resolution and no advice. Measured with a discoverable-but-silent owner: the
+#: verdict landed at t+8.1 s, the user typed at t+8.6 s, and the message was
+#: served at t+50.4 s — 41.75 s of ``streaming=True, recovering=True`` and
+#: nothing on screen (UX round 1, U2).
 #:
-#: DERIVED from ``HEARTBEAT_TIMEOUT_S`` rather than written as a literal 90.0,
-#: because the question this bounds is the owner's own liveness contract: the
-#: registry classifies a record ``wedged`` rather than ``live`` after one
-#: heartbeat timeout, and a viewer must not conclude an owner is unreachable
-#: FASTER than the registry concludes it is wedged — a turn-boundary stall
-#: inside that window is normal (see ``FRONTEND_SYNC_BACKSTOP_S`` on the
-#: 15-vs-45 s window). Two of them also buys ~6 genuine attempts at the
-#: measured silent-owner cadence of one redial per ``FRONTEND_SYNC_BLOCKED_S``.
-#: A bare literal would silently stop tracking that contract if the heartbeat
-#: moved.
+#: What it did NOT buy was the chase. The exit is COLD AND REBINDABLE rather
+#: than failed (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``:
+#: the transcript stays, ``_runtime_ready`` is set, and the next action
+#: re-engages through ``_ensure_bound`` against that very same record), so a
+#: released caller re-dials what the loop was dialing, and a released prompt is
+#: served or reports its failure instead of parking. Nor can the early release
+#: double-bind or double-spawn: ``engage_runtime`` short-circuits on a
+#: discoverable record and otherwise waits rather than spawning while a live pid
+#: holds the lease.
 #:
-#: SCOPED TO A RECORD HAVING BEEN SEEN. This bound answers "an owner is there
-#: and will not answer", never "no owner is there": the latter is the DEAD
-#: shape, whose contract is to keep chasing a successor through the takeover
-#: arm, and it keeps that contract unchanged. ``_recover_runtime`` tracks the
-#: sighting across passes (``record_seen``) because the deadline is necessarily
-#: evaluated before the pass reads a record.
-#:
-#: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
-#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_runtime``), so the
-#: transcript stays on screen, ``_runtime_ready`` is set, and the next prompt
-#: re-engages through ``_ensure_bound`` against this very same live record.
-#: That rebind is the whole repair, and it is why no user-facing copy was added
-#: for this state: a typed ``/model p/id`` on the resulting facade is diverted
-#: by ``OperatorApp._needs_runtime_first`` into ``_bind_then_dispatch``, which
-#: performs exactly that retry and reports its outcome.
-RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
+#: So the rule is now ONE rule for every arm that has not produced a usable
+#: runtime — no-record and record-seen alike — and it is the cold window that a
+#: runtime restarting after ``kill -9`` has to republish in anyway. A successor
+#: that IS coming is still caught: the loop reattaches the moment a record it
+#: can use appears, and the give-up's own rebind catches a slower one.
 
 #: Backoff ceiling for ``_recover_runtime``'s DIAL-FAILURE arm specifically.
 #:
@@ -476,6 +501,84 @@ _MESSAGE_PHASE: dict[type, int] = {
 }
 
 
+def _inline_attachment_references(value: Any, store: AttachmentStore) -> tuple[Any, int]:
+    """Copy ``value`` with every attachment reference inlined, or ``value`` itself.
+
+    Same copy-on-write contract as the wire encoder's mirror on the runtime side
+    (``server._reference_image_payloads``): an untouched frame is returned
+    unchanged, so the common path — a frame with no reference in it, which is
+    every frame from an owner running an older build — costs the traversal and
+    no allocation.
+    """
+    if isinstance(value, dict):
+        digest = value.get(ATTACHMENT_KEY)
+        # The discriminant is checked for the same reason the writer checks it
+        # (see ``server._reference_image_payloads``): the walk covers the whole
+        # frame, and a tool's free-form payload admits a key by that name that
+        # is not an image. Every reference either pass writes carries
+        # ``mime_type``, so this refuses nothing a writer produced.
+        if isinstance(digest, str) and (
+            value.get("type") == "image" or isinstance(value.get("mime_type"), str)
+        ):
+            resolved = store.get(digest)
+            block = {key: item for key, item in value.items() if key != ATTACHMENT_KEY}
+            # ``type`` is set rather than carried: the reference replaces an
+            # image block, and the block may have been encoded with
+            # ``exclude_defaults``, which drops ``type`` because it IS the
+            # model's default. Without it the union in ``Message.content``
+            # cannot pick ``ImageContent``. Setting it is lossless — this only
+            # ever rewrites a block that stands in for an image.
+            block["type"] = "image"
+            if resolved is None:
+                # An unresolvable digest is ORDINARY (interrupted write, a
+                # hand-pruned store) and must not raise: the block degrades to
+                # an empty payload, which pydantic parses as an image with no
+                # bytes and the TUI paints as its "no longer in the transcript"
+                # receipt. Raising here would cost the whole attach over one
+                # image.
+                logger.warning("live frame references missing attachment %s", digest)
+                block["data"] = ATTACHMENT_MISSING
+                return block, 1
+            block["data"], block["mime_type"] = resolved
+            return block, 1
+        moved = 0
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            fresh, count = _inline_attachment_references(item, store)
+            moved += count
+            copied[key] = fresh
+        return (copied, moved) if moved else (value, 0)
+    if isinstance(value, list):
+        moved = 0
+        items: list[Any] = []
+        for item in value:
+            fresh, count = _inline_attachment_references(item, store)
+            moved += count
+            items.append(fresh)
+        return (items, moved) if moved else (value, 0)
+    return value, 0
+
+
+def resolve_frame_attachments(data: dict[str, Any], store: AttachmentStore) -> dict[str, Any]:
+    """Inline the media a wire frame references, BEFORE it is parsed.
+
+    WHY THIS IS A SEPARATE PASS AND NOT A PARSER HOOK. ``ATTACHMENT_KEY`` is
+    deliberately not a pydantic field of ``ImageContent``, so a model built
+    straight from an unresolved frame parses as an image with an EMPTY payload:
+    pydantic drops the unknown key, nothing raises, and the bytes are gone with
+    no error anywhere. Resolution therefore has to happen on the raw dict, ahead
+    of validation — and doing it here, inside the wire callback, is also what
+    keeps the desktop bridge's ``model_dump`` downstream of it on the exact
+    inline-base64 shape an out-of-repo renderer already consumes.
+
+    An owner that never externalizes (any build before the live fit pass) sends
+    no ``attachment`` key at all, and this returns ``data`` itself — identity,
+    not a copy — so the older-owner path pays one traversal and nothing else.
+    """
+    resolved, moved = _inline_attachment_references(data, store)
+    return resolved if moved else data
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -485,45 +588,6 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
     return cls.model_validate(data)
-
-
-def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
-    """Roster rows as they must appear with NO runtime alive.
-
-    The persisted roster records what each job's state WAS when it was
-    written. With no runtime there is by definition nothing running, so a row
-    restored verbatim paints a spinner for a child that cannot be working and
-    the band counts it as live activity (UX review round 1, U1). That is worse
-    than the empty panel this change replaces: an empty panel is obviously
-    incomplete, while phantom activity is confidently wrong, and it invites a
-    cancel that finds nothing. Non-terminal rows are common on disk — a
-    session whose terminal was closed mid-run persists them by design.
-
-    The rule is the one ``AsyncJobManager.restore`` already applies on the
-    owner path, reproduced here because the cold viewer never builds a
-    manager:
-
-    * a ``running`` row that was PARKED (``queued``) never started, so it has
-      no transcript to show or resume and is DROPPED — an ``interrupted`` row
-      would invite a resume that finds nothing;
-    * any other non-terminal row becomes ``interrupted``, the restore-only
-      status that means "was cut off mid-run"; live readers already treat it
-      as terminal, and it is what lets the panel offer to resume the child.
-
-    Anything already terminal is untouched: ``completed``/``failed``/
-    ``cancelled`` are facts the last runtime settled and this process must not
-    relitigate.
-    """
-    rows: list[Any] = []
-    for job in jobs:
-        status = str(getattr(job, "status", "") or "")
-        if status == "running":
-            if bool(getattr(job, "queued", False)):
-                continue
-            rows.append(job.model_copy(update={"status": "interrupted", "restored": True}))
-            continue
-        rows.append(job.model_copy(update={"restored": True}))
-    return rows
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -651,6 +715,125 @@ def _validated_ask_question(pending: PendingRequest) -> AskQuestion:
     )
 
 
+#: The oldest attach protocol that carries the whole frontend state: below it
+#: there is no canonical full-TUI attach, and the degraded projection view was
+#: deliberately deleted, so the refusal below is the whole story rather than a
+#: fallback.
+FRONTEND_ATTACH_MIN_PROTOCOL = 5
+
+
+def frontend_attach_refusal(record: SessionRecord) -> str | None:
+    """Why ``connect`` would refuse this record, or ``None`` if it would dial.
+
+    ONE RULE, TWO CALLERS. ``connect`` refuses on it; a caller that has to
+    decide whether a failed connect is worth RETRYING must ask the same
+    question of the same record. The question matters because the two failure
+    classes want opposite handling: a capability or protocol gap is a STATIC
+    property of the owner, so every redial raises the identical refusal and a
+    budget spent on it is a longer way to the same sentence, while the
+    transient failures (a socket that is not there yet, an owner that is not
+    answering) are exactly what a budget is for.
+
+    Extracted rather than restated at the far side, because a copy of this
+    version test is one protocol bump away from disagreeing with the guard it
+    mirrors — and the disagreement would be silent, since both spellings would
+    keep compiling.
+    """
+    if (
+        record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL
+        or FRONTEND_CAPABILITY not in record.capabilities
+    ):
+        return (
+            f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs "
+            f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
+        )
+    return None
+
+
+def _naming_resolved_no_name(spec: FrontendModelSpec) -> bool:
+    """Whether the RENDER of this spec's model is its own selector.
+
+    ASK NAMING, DO NOT RE-STATE IT. ``model_label``'s ``full`` form is the
+    selector exactly when it refused every candidate it had: a name that merely
+    echoes the id, a RESELLER's listing name (which cannot say which route is
+    answering), and a name two models answer to. A caller that re-derives one of
+    those refusals — the id-echo case was the one an earlier revision copied —
+    disagrees with the band about any model whose listing name is refused for
+    one of the other reasons, and the disagreement is silent: that model keeps
+    painting its bare id while ``naming`` would have accepted the name the
+    conversation's own checkpoint recorded.
+
+    Used by ``AttachedSession._restored_model_specs``, which adopts a
+    checkpoint's display name only when the fresh resolution produced none.
+    """
+    from local_operator.model.naming import resolved_a_name
+
+    return not resolved_a_name(spec.provider, spec.model_id, str(spec.display_name or ""))
+
+
+def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
+    """Whether THIS process resolved a real budget for the pair, or only a fill.
+
+    THE QUESTION IS THE VALUE RULE the band itself applies
+    (``usage_seed.denominator_window``): does this spec carry a window the band can
+    DIVIDE BY, i.e. one that is not ``UNKNOWN_CONTEXT_WINDOW`` (128k)? That is the
+    same question, asked of the same spec, so the window the first frame
+    restores and the window the band refuses cannot disagree.
+
+    WHY NOT ``default_context_window``/``max_context_window``, which is what this
+    predicate used to read: those two fields are PROVIDER PROVENANCE, not the
+    answer. The shipped catalogue states a window through ``context_window``
+    alone — 0 of its 120 rows set either provenance field — so reading them as
+    "did the model layer answer?" reported "nothing answered" for every pair
+    whose resolution carries no provenance, and the checkpoint's window was
+    restored under a fresher one. Measured on the population that needs no
+    history at all, a Codex/OAuth-served conversation resumed on an OpenAI API
+    key (the fresh spec's only budget is the row's 1,050,000, which
+    ``denominator_window`` VOUCHES, so it is a budget and not the placeholder):
+    cold ``110.3%/272k`` where the attach frame paints ``28.6%/1.1M`` (review
+    round 3, blocker 1). The narrowed predicate is also why the mirror direction
+    looked safe: an OAuth opt-out DOES resolve provenance fields, so the
+    one-directional hole was easy to miss.
+
+    THE ONE CARVE-OUT IS THE LOCAL ROUTES, and its signal is the PROVIDER KIND:
+    ``LOCAL_PROVIDER_IDS`` is exactly the set ``build_model_spec`` routes to
+    ``local_model_spec``, whose fallback window its own docstring calls "a
+    conservative working budget, not a claim about the model" — a route FILL
+    rather than an answer, so a vouched window there is not evidence that the
+    model layer answered. What that builder does record is the SERVER'S OWN
+    evidence, in ``default_context_window``/``max_context_window``, and nothing
+    else — so on these routes those two fields are the discrimination, and their
+    absence means the window is the client-side fill. An uncovered local tag's
+    4,096 (``DEFAULT_LOCAL_CONTEXT``) must therefore not displace a checkpoint's
+    32,768, or the first frame paints ``488.2%/4k`` for a 20,000-token reading
+    (review round 1, minor 1).
+
+    Keyed on the constant the BUILDER routes on rather than on a spelling of one
+    route or a magic value (``context_window == 4,096``), because a fill and a
+    real answer leave the same fields behind — there is no spec-level provenance
+    flag to ask, which is the model-layer gap design round 2's D2 defers. Keyed
+    on the same constant, the two cannot drift.
+
+    ONE SOURCE PER FRAME. Both readers of the gate ask THIS function — the
+    state-level window (``_consistent_context``) and the spec-level one
+    (``_restored_model_specs``) — so a frame can never divide by the fresh spec's
+    window while its spec still carries the checkpoint's, or the reverse. The
+    numerator is the conversation's own reading on either side of the branch,
+    because that is the pair the attaching runtime publishes
+    (``frontend_state.refresh_from_session``: ``receipt_context or
+    current.context_tokens`` beside the EFFECTIVE spec's own window), and this is
+    the frame that has to agree with it.
+
+    Asked of the CONFIGURED spec — the one this process just resolved — never
+    of the checkpoint's, whose fields are the answer being judged.
+    """
+    if denominator_window(spec) is None:
+        return False
+    if spec.provider in LOCAL_PROVIDER_IDS:
+        return bool(int(spec.default_context_window or 0) or int(spec.max_context_window or 0))
+    return True
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -740,6 +923,22 @@ class AttachedSession:
         #: shows the cold state for a refresh the user did not ask for. See
         #: ``_go_cold(refresh=True)``.
         self._refresh_callback: Callable[[], Any] | None = None
+        #: Told the moment the ``retiring`` frame ARRIVES (not at the close),
+        #: and only when the runtime says it is DRAINING. The refresh callback
+        #: above is the end of the handover and owns the re-engage; this one is
+        #: the start, and it is the only moment at which a viewer can warn the
+        #: operator before their next message is refused — on the drain rung the
+        #: EOF is ~26 s away, and every second of it the composer accepts text
+        #: that will be refused (UX round 3, U1; QA round 3, Q-1). It is called
+        #: with the frame's ``leaving`` phrase — the trigger's own words — so a
+        #: host can paint a sentence about the trigger that produced the drain
+        #: rather than about drains in general (design round 3, D6). ``""`` here
+        #: means THE FRAME NAMED NO TRIGGER AT ALL, not "a runtime older than the
+        #: key": a runtime older than the key that signal-drained hands over
+        #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
+        #: (:func:`types.drain_phrase_for_frame`) and have done since design round
+        #: 4, D9 (agent review round 5, MINOR-2).
+        self._drain_callback: Callable[[str], Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -758,6 +957,13 @@ class AttachedSession:
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
         self._frontend_store: FrontendStateStore | None = None
+        #: Set by the desktop bridge; see :meth:`set_local_cwd_callback`.
+        self._local_cwd_callback: Callable[[str], Any] | None = None
+        #: Store for media that the owner externalized on the live wire, built
+        #: on first use (:meth:`_attachment_store`). ``None`` until a frame
+        #: actually references an attachment, so a viewer that never sees one
+        #: never resolves the path.
+        self._wire_attachments: AttachmentStore | None = None
         self.jobs = SnapshotJobs()
         self.wake_scheduler = SnapshotWakeScheduler()
         self.mcp_manager = SnapshotMcpManager()
@@ -810,6 +1016,34 @@ class AttachedSession:
         #: wanted it (review round 1, C2). Only ``cold()`` asks for it, and it
         #: is cleared the moment that consumes it.
         self._cold_checkpoint: dict[str, Any] | None = None
+        #: The newest usage RECEIPT the journal holds, stashed during that same
+        #: suffix read so a cold open can seed its accounting from the
+        #: conversation's own history when the checkpoint leaves the fields null
+        #: (``_seed_cold_usage``). The checkpoint is written only by a runtime
+        #: with a frontend attached at turn end, and a desktop detaches between
+        #: requests — so on this surface the row is usually ABSENT and the
+        #: transcript is the only place the reading exists. Parsed from the
+        #: entries the suffix read already had; there is no second parse and no
+        #: second read of a file that is 103 MB at the top end.
+        self._cold_seed_usage: Usage | None = None
+        #: The durable per-session spend record, stashed during the SAME suffix
+        #: read (the reader was widened to serve both custom types in one pass).
+        #: This is the cold surface's money: without it the cold path prices one
+        #: receipt as a FLOOR and keeps the 92.3% behaviour the owner path no
+        #: longer has — the classic "fixed one end, left the mirror" defect
+        #: (design R5).
+        self._cold_spend: dict[str, Any] | None = None
+        #: Where the spend record and the turn-end checkpoint sat in the journal,
+        #: from the same suffix read (``ReplaySuffix.checkpoint_order``; LOWER is
+        #: NEWER). The two carry money and can disagree, and only their own order
+        #: in the transcript can settle which one speaks for the session — see
+        #: ``_seed_cold_usage`` (QA round 1, Q2).
+        self._cold_order: dict[str, int] = {}
+        #: The conversation's own journalled model selection, as read while
+        #: synthesising cold state. Held so the seeding can attribute a receipt
+        #: that predates the serving-identity stamp (``usage_seed.reading_
+        #: identity``) without reading the transcript's head a second time.
+        self._cold_selection: StoredModelSelection | None = None
         # Message ids whose row the follower has ALREADY painted live. The sync
         # seed and relayed stream are filtered against this set as well as
         # ``_history_ids``, so a turn that became durable mid-join — or a
@@ -873,6 +1107,12 @@ class AttachedSession:
         self._takeover_target: Any | None = None
         self._streaming = False
         self._generation = 0
+        #: Whether the app-side controller asked this viewer to PARK its delta
+        #: grade event traffic (see :meth:`set_event_mute`). Remembered rather
+        #: than only sent, because the mute is per CONNECTION: a reconnect
+        #: starts unmuted and only this flag can put the mute back.
+        self._event_mute_requested = False
+        self._event_mute_tasks: set[asyncio.Task[None]] = set()
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
         # Double-Esc subagent cancel: the synchronous protocol method issues
@@ -886,6 +1126,14 @@ class AttachedSession:
         # the app can warn instead of leaving the user to press Enter on a
         # composer whose text is still queued (a silent double-send).
         self._recall_resolution: Callable[[str], None] | None = None
+        # The recall seam's sibling, for the OTHER way a queued steer can fail:
+        # the bind itself. `steer_message` is fire-and-forget, so a refused bind
+        # used to surface only as "Task exception was never retrieved" in the
+        # log while the transcript kept a row promising a delivery that never
+        # came (`still queued — sends with that next message`). Called with the
+        # message id so the app can lift the steer back into the composer and
+        # say what happened (QA round 2, Q-1).
+        self._steer_failure: Callable[[str], None] | None = None
         #: Held ONLY to keep a strong reference — asyncio does not, and a
         #: garbage-collected task would drop the refusal the app is waiting
         #: for. Deliberately not awaited or cancelled in `dispose`, matching
@@ -1032,17 +1280,61 @@ class AttachedSession:
         takeover_factory: Callable[[], Any],
         display_window: bool = False,
         surface: str = "terminal",
+        viewer: bool = False,
     ) -> "AttachedSession":
-        if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
-            raise ConnectionError(
-                f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs protocol >= 5"
-            )
+        """Attach to a LIVE owner, under one of two owner-loss contracts.
+
+        ``viewer`` selects which, and it is the ONLY knob for it (there is
+        deliberately no new ``surface`` value: ``surface`` is written on the
+        wire to the runtime, while this is purely local — see ``_dial``).
+        False, the default, is the legacy attach contract: owner loss is
+        recovered by TAKING OVER the conversation, and a facade built this way
+        returns from ``_ensure_bound`` without dialling (``_can_go_cold`` is
+        False on it) unless recovery is releasing it. False does not BY ITSELF
+        imply the flag is unset, though: this keyword adds the capability, and
+        ``__init__`` sets it independently for ``surface="desktop"``. No caller
+        passes both today (no ``connect`` caller passes ``surface`` at all), so
+        the two are disjoint — but they are separate switches, and a future
+        ``connect(..., surface="desktop", viewer=False)`` would still be a
+        viewer, which is the asymmetry to keep in mind rather than a
+        contradiction to resolve here.
+
+        True builds the VIEWER contract instead — the same one ``cold`` and
+        ``saved_preview`` set, and the only one this keyword asks for: owner
+        loss may end with the facade UNBOUND (``_go_cold``), which it reports
+        as ``is_cold`` while keeping the transcript on screen, and the next
+        action rebinds it through ``_ensure_bound``. That is set by
+        ``_can_go_cold`` and it is what makes a cold facade actively
+        REBINDABLE: ``_ensure_bound``'s first guard returns immediately while
+        the flag is False, so a facade that lost its owner WITHOUT the flag can
+        never bind again — the silent no-op that turned a routine drop into a
+        permanent "Reconnect failed".
+
+        WHY THE CALLERS DIFFER, which is the whole point of this parameter.
+        ``/resume`` (and the startup attach, and ``lop --resume``) must keep the
+        legacy contract: those callers exist to put the user in FRONT of the
+        conversation, so recovering it into this process is the correct end. A
+        SIDEBAR lease is the opposite: a parked, delta-muted source nobody is
+        looking at (see ``_lease_sidebar_source``), whose takeover factory
+        raises by construction, so "recover" would mean owning a conversation
+        the user has not chosen — and whose loss is therefore an ordinary event
+        to be healed on the click, not a failure to report.
+        """
+        refusal = frontend_attach_refusal(record)
+        if refusal is not None:
+            raise ConnectionError(refusal)
         self = cls(
             config_dir=config_dir,
             session_id=session_id,
             takeover_factory=takeover_factory,
             surface=surface,
         )
+        if viewer:
+            # The flag, not a second code path: everything downstream already
+            # reads this one capability (``_ensure_bound``, the recovery loop's
+            # cold arm, ``_give_up_recovery``). Setting it here is the same act
+            # ``saved_preview`` performs at construction time.
+            self._can_go_cold = True
         self._display_window_requested = display_window
         pending_sync = await self._dial(record)
         try:
@@ -1173,6 +1465,12 @@ class AttachedSession:
         # row. Absence of that file must not hide independently durable spend.
         state = self._restore_cold_details(state)
         self._cold_checkpoint = None
+        self._cold_seed_usage = None
+        # NOT cleared, unlike its two neighbours: the spend details row is ~200
+        # bytes (not a parsed transcript), and ``/session`` reads it through
+        # ``restored_spend`` for the exact micro-USD figure long after the cold
+        # open. Freeing it would trade nothing for a missing number.
+        self._cold_selection = None
         self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
@@ -1213,7 +1511,7 @@ class AttachedSession:
         """
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
-            return self._restore_cold_subagents(state)
+            return self._seed_cold_usage(self._restore_cold_subagents(state))
         try:
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
@@ -1236,7 +1534,7 @@ class AttachedSession:
                 "the saved session details could not be read, so the subagent and "
                 "todo panels start empty"
             )
-            return self._restore_cold_subagents(state)
+            return self._seed_cold_usage(self._restore_cold_subagents(state))
         # A fork's transcript carries the PARENT's checkpoints verbatim (#573),
         # and the parent's children are not this session's to list — the same
         # reason ``fork.EXCLUDED_SIDECARS`` leaves the roster behind. The
@@ -1289,7 +1587,228 @@ class AttachedSession:
             }
         )
 
-        return self._restore_cold_subagents(restored)
+        return self._seed_cold_usage(self._restore_cold_subagents(restored))
+
+    def _seed_cold_usage(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Fill still-null accounting from the conversation's own receipts.
+
+        The cold path's second source, AFTER the durable checkpoint, and it
+        exists because the checkpoint is usually absent on this surface: the
+        runtime writes one only with a frontend attached at turn end
+        (``FrontendStateStore.checkpoint``), while a desktop detaches between
+        requests. So a conversation reopened cold opened with an empty context
+        and no spend — for a session that might be deep into its window with
+        dollars already on it — until the user spent a whole turn. The transcript
+        holds those readings; ``_cold_seed_usage`` is the one the suffix read
+        stashed (``_read_transcript._replay``).
+
+        For MONEY the order is: WHICHEVER of the checkpoint's accumulator and the
+        durable ``session_spend.v1`` record is NEWER in the journal (their own
+        order, from the same suffix read — see ``_cold_record_is_newer``), then
+        the one-receipt floor. The record exists precisely so a cold surface does
+        not have to reconstruct a total from a point-in-time reading — and it is
+        durable without a UI attached, which is the property the checkpoint lacks
+        (design §2.3, R5) — but it is written per CALL while the checkpoint is
+        written per TURN END, so either can be the newer, and only the journal can
+        say which (QA round 1, Q2).
+
+        FILLS ONLY, field by field, for every field EXCEPT the money, which the
+        ordering above may OVERRIDE: a checkpoint that carried accounting is the
+        conversation's last turn-end state, and a record that outlived it is
+        newer still. When the two disagree and no order can be established, the
+        figure is kept but demoted to a lower bound rather than certified. EVERY write below
+        is therefore gated on its own target field still being unset — including
+        the window, which is the one that must not be imported under a stored
+        numerator (a checkpoint at 500_000/1_050_000 read as 390.6% of a fresh
+        128k denominator, with the checkpoint's tokens).
+
+        * ``last_usage`` — the raw receipt, whenever there is one.
+        * ``context_tokens`` — only when the reading can be attributed to the
+          model that will RUN (``reading_identity`` against the effective spec),
+          which is the same gate ``_consistent_context`` applies to a checkpoint
+          reading. A count measured on another model is not convertible.
+        * ``context_window`` — from ``reading_window`` when the receipt can be
+          attributed to this model, else straight from ``denominator_window(spec)``.
+          Both ask the SAME value question (is this a budget or the placeholder),
+          and they differ only in the question ``reading_window`` adds on top of it:
+          whether the reading is ATTRIBUTABLE (a receipt for another model is not
+          this model's reading). A spec's own window is a fact about the model
+          regardless of who measured anything against it, and it is what the band
+          divides by on every later paint, so it is written either way (review
+          round 2, minor 1). The resolved flag alone is NOT evidence, because
+          ``UNKNOWN_CONTEXT_WINDOW`` (128_000) is written together with that flag
+          whenever account metadata could not be resolved — which is why the value
+          rule, not the flag, is the one both callers share. With no window at all
+          the strip renders its honest ``window unknown`` state — absolute tokens,
+          no arc.
+        * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced on the
+          receipt's own serving identity (a receipt from another model was billed
+          at THAT model's rates), and only when the receipt is attributable at
+          all. Priced from ONE receipt, so it UNDERSTATES lifetime spend on a long
+          conversation: that is what ``floor`` means on the wire and the cost chip
+          already prints the mark. An unpriceable model yields ``None`` and no
+          chip rather than ``$0.0000``.
+
+        Nothing here touches the wire shape: this fills INPUTS the strip already
+        reads, and ``cumulative_cost`` stays a derived property. There is no
+        ``refresh_frontend_usage`` on a viewer — the seed happens at open.
+        """
+        seed = self._cold_seed_usage
+        record = self._cold_spend
+        spend = SessionSpend.from_details(record) if record else None
+        changes: dict[str, Any] = {}
+        # Money first, and independent of the model spec below: the record is a
+        # total, not a reading that has to be attributed to a model.
+        #
+        # WHICH of the two money artifacts speaks for the session is decided by
+        # their own ORDER in the journal, newest first (QA round 1, Q2). The
+        # record is written per call and the checkpoint only at a turn end, so
+        # the record can be the NEWER of the two — any call accrued after the
+        # last turn end, and every crash/repair window — and the cold viewer
+        # used to prefer the checkpoint unconditionally: a session the record
+        # says cost $5.00 painted ``$1.00`` unmarked and EXACT on the band, one
+        # screen away from a ``/session`` row quoting the record. Ordering them
+        # by the read's own meeting index makes the choice a fact about the
+        # journal instead of a preference between two sources.
+        #
+        # When the order cannot be established AND the two disagree, neither is
+        # presented as exact: the cell keeps the checkpoint's figure and wears
+        # the lower-bound mark. A figure whose provenance cannot be ordered is a
+        # figure we cannot certify, so silence and a bare number are both claims
+        # the artifacts do not support.
+        if spend is not None:
+            known = state.cumulative_parent_cost is not None
+            record_is_newer = self._cold_record_is_newer()
+            if not known or record_is_newer is True:
+                # ``published_usd`` is the ONE derivation of what a record may
+                # paint: the figure, or ``None`` for money we cannot state
+                # (nothing priceable). Never a zero total standing in for a
+                # figure, and never hidden because the counts look empty — a
+                # record holding a turn-end remainder has ``calls == 0`` and
+                # real money (QA round 1 Q1, round 2 Q3, policy: the money
+                # decides and the counts only describe provenance).
+                changes["cumulative_parent_cost"] = spend.published_usd()
+                changes["cost_knowledge"] = spend.knowledge()
+            elif record_is_newer is None and self._cold_money_disagrees(spend, state):
+                from local_operator.session.frontend_state import CostKnowledge
+
+                changes["cost_knowledge"] = CostKnowledge.FLOOR
+
+        spec = state.effective_model or state.selected_model
+        if spec is None:
+            return state.model_copy(update=changes) if changes else state
+        # THE SPEC'S OWN DENOMINATOR, read once because more than one path needs
+        # it: the receipt-seeded numerator below (``reading_window`` prefers the
+        # receipt's attested answer and falls back to this), and the checkpoint
+        # numerator whose checkpoint carried no window of its own. It is the same
+        # number ``tui.app._context_window`` divides by on every later paint, and
+        # the same value rule the seed applies — ``denominator_window`` refuses
+        # the 128k placeholder, so an unknown budget stays unknown rather than
+        # becoming confident.
+        spec_window = denominator_window(spec)
+        if seed is None:
+            if state.context_tokens is not None and state.context_window is None and spec_window:
+                changes["context_window"] = spec_window
+            return state.model_copy(update=changes) if changes else state
+        # ONE attribution for both the numerator and the price, so a reading the
+        # receipt cannot be attributed to gets neither.
+        identity = reading_identity(seed, fallback=self._cold_selection)
+        if state.last_usage is None:
+            # Through the wire form and back, as every other writer of this
+            # field does: ``model_copy`` does not validate, so the receipt has
+            # to be constructed as the FrontendUsage the field declares rather
+            # than smuggled in as a bare Usage.
+            changes["last_usage"] = FrontendUsage.model_validate(seed.model_dump(mode="json"))
+        if state.context_tokens is None and seed.context_tokens:
+            if identity == (str(spec.provider or ""), str(spec.model_id or "")):
+                changes["context_tokens"] = int(seed.context_tokens)
+                changes["context_is_estimate"] = False
+        window = reading_window(seed, fallback=self._cold_selection, spec=spec)
+        # Gated like every other field: the checkpoint's own tokens/window pair
+        # is SELF-CONSISTENT, and importing a fresh denominator under a stored
+        # numerator computes a percentage the tokens were never measured on
+        # (a checkpoint at 500_000/1_050_000 read as 390.6% of the new window).
+        # A checkpoint that carried no window still gets one.
+        #
+        # When the RECEIPT cannot vouch a denominator (a spec whose account
+        # metadata was never resolved, or a reading it cannot attribute), the
+        # state still carries the model's own window, because that is the number
+        # every later paint divides by. Leaving it unset did NOT show "unknown":
+        # ``StatusLine.update`` reads ``None`` as leave-alone, so the first paints
+        # kept whatever the PREVIOUS session had painted. Resuming a 1M
+        # conversation from a settled 128k one read
+        # ``287,491/128,000 = 224.6%`` for two paints (QA round 1, Q2), and a
+        # receipt-seeded numerator with no spec-vouched denominator read the
+        # reported ``287.5k/—`` for two paints before the spec's own refresh
+        # landed 18ms later (Q1). Same spec, same number, one source.
+        if window is None:
+            window = spec_window
+        if window is not None and state.context_window is None:
+            changes["context_window"] = window
+        if (
+            state.cumulative_parent_cost is None
+            and "cumulative_parent_cost" not in changes
+            and identity is not None
+        ):
+            # The neutral pricing module, not the TUI package: this runs in
+            # whichever process prices a turn — the runtime child and a daemonless
+            # viewer both do — and the TUI package must not be in their import
+            # graph (review round 2, Q7; the functions are re-exported from
+            # ``tui.costs`` for the panels that legitimately live there).
+            from local_operator.model.costs import turn_cost
+            from local_operator.session.frontend_state import CostKnowledge
+
+            # Priced on the receipt's OWN serving identity, not on the model
+            # that will run next: a reading taken on another model was billed at
+            # THAT model's rates (a cross-model receipt priced on the session
+            # model's table reported 0.008 where the receipt's own stamp gives
+            # 0.0064), and an unattributable receipt is not priced at all rather
+            # than being charged to whoever happens to be selected.
+            cost = turn_cost(f"{identity[0]}/{identity[1]}", seed)
+            if cost is not None:
+                changes["cumulative_parent_cost"] = cost
+                changes["cost_knowledge"] = CostKnowledge.FLOOR
+        if not changes:
+            return state
+        return state.model_copy(update=changes)
+
+    def _cold_record_is_newer(self) -> bool | None:
+        """Did the ledger record land after the newest turn-end checkpoint?
+
+        ``None`` when the order cannot be established — one of the two was never
+        met by the suffix read, so the journal in hand does not say which is
+        newer. The caller must treat that as "do not certify", never as "the
+        checkpoint wins": this method exists because that assumption WAS the
+        Q2 defect.
+        """
+        spend_met = self._cold_order.get(SESSION_SPEND_CUSTOM_TYPE)
+        checkpoint_met = self._cold_order.get(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+        if spend_met is None or checkpoint_met is None or spend_met == checkpoint_met:
+            return None
+        # LOWER is NEWER: the scan walks from EOF.
+        return spend_met < checkpoint_met
+
+    @staticmethod
+    def _cold_money_disagrees(spend: SessionSpend, state: FrontendSessionState) -> bool:
+        """Do the record and the checkpoint tell different money stories?
+
+        Compared as integer micro-USD, the unit both artifacts are exact in, and
+        on the knowledge state as well as the figure: a checkpoint claiming EXACT
+        beside a record that is a partial sum is a disagreement even when the two
+        numbers happen to match, because the next call would move only one of
+        them.
+        """
+        baseline = state.cumulative_parent_cost
+        if baseline is None:
+            return False
+        if int(round(float(baseline) * 1_000_000)) != spend.micro:
+            return True
+        from local_operator.session.frontend_state import CostKnowledge
+
+        return (
+            state.cost_knowledge is CostKnowledge.EXACT
+            and spend.knowledge() is not CostKnowledge.EXACT
+        )
 
     def _restore_cold_subagents(self, state: FrontendSessionState) -> FrontendSessionState:
         """Overlay the independently committed roster and lifetime ledger.
@@ -1298,12 +1817,14 @@ class AttachedSession:
         the frontend checkpoint and may be the ONLY durable state. Read it once
         for both rows and money; summing visible rows loses swept/prior work.
         """
+        from local_operator.model.costs import (
+            cost_summary,  # neutral, not the TUI package (Q7)
+        )
         from local_operator.session.frontend_state import CostKnowledge
         from local_operator.session.session import (
             SUBAGENT_ROSTER_SIDECAR,
             _read_roster_sidecar,
         )
-        from local_operator.tui.costs import cost_summary
 
         payload = (
             _read_roster_sidecar(
@@ -1312,7 +1833,14 @@ class AttachedSession:
             or {}
         )
         changes: dict[str, Any] = {
-            "jobs": _restored_job_rows(self._durable_roster(state, payload=payload))
+            # The RECORDS go in with the rows: a record's ``outcome`` settles a
+            # child the row's persisted status cannot, and its ``session_dir``
+            # is the only route to the child's own transcript when the record
+            # does not settle it. Without them every non-terminal row came back
+            # as a blanket ``interrupted``" (design §4, D3).
+            "jobs": resolve_restored_rows(
+                self._durable_roster(state, payload=payload), records=roster_records(payload)
+            )
         }
         if isinstance(payload.get("accounting"), list):
             try:
@@ -1370,8 +1898,10 @@ class AttachedSession:
             for raw in (payload or {}).get("jobs") or []:
                 job = JobState.model_validate(raw)
                 if job.usage is not None:
+                    from local_operator.model.costs import (
+                        cost_summary,  # neutral module (Q7)
+                    )
                     from local_operator.session.frontend_state import _cost_knowledge
-                    from local_operator.tui.costs import cost_summary
 
                     # The strict AsyncJob sidecar cannot grow frontend-only
                     # fields without breaking older owners. Reconstruct only
@@ -1405,6 +1935,34 @@ class AttachedSession:
         return list(rows.values())
 
     @staticmethod
+    def _restored_pair(
+        state: FrontendSessionState, durable: FrontendSessionState
+    ) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+        """The two specs a restored reading is only meaningful between, or ``None``.
+
+        ONE RULE, TWO CONSUMERS. ``_consistent_context`` asks it whether the
+        checkpoint's NUMERATOR is this model's, and ``_restored_model_specs``
+        asks it whether the checkpoint's DENOMINATOR is. They cannot be answered
+        separately: the checkpoint's ``context_tokens`` were measured against the
+        checkpoint's own window, so a numerator taken from one side under a
+        denominator taken from the other is a percentage the tokens were never
+        measured against — the wrong-reading class both methods exist to refuse.
+        A third consumer must call this rather than restating the comparison.
+
+        ``None`` when either side carries no spec, or when the two name
+        different models: the user switched models since the checkpoint was
+        written, so the stored reading describes a model that is not about to
+        run and is not convertible into one that is.
+        """
+        configured = state.selected_model
+        stored = durable.selected_model
+        if configured is None or stored is None:
+            return None
+        if configured.provider != stored.provider or configured.model_id != stored.model_id:
+            return None
+        return configured, stored
+
+    @staticmethod
     def _consistent_context(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
@@ -1420,205 +1978,272 @@ class AttachedSession:
         than converted: the band renders ``—`` for an unknown context, which is
         the same honest degradation it already shows for a model it cannot
         price. The first real turn replaces it with a live reading anyway.
+
+        WHICH MODEL the reading belongs to is ``_restored_pair``, shared with the
+        WINDOW's half of the restore (``_restored_model_specs``) rather than
+        restated here. The DENOMINATOR is not a second question with the same
+        answer: the checkpoint's window is restored only where this process
+        resolved none of its own (``_fresh_spec_states_a_budget``). Where it did,
+        the window is left unset and ``_seed_cold_usage`` fills it from the fresh
+        spec — the number every later paint divides by, and the one the runtime's
+        own attach frame publishes — while the numerator stays, because it is a
+        fact about the conversation either way.
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        same_model = bool(
-            configured is not None
-            and stored is not None
-            and configured.provider == stored.provider
-            and configured.model_id == stored.model_id
-        )
-        if not same_model:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        return {
+        configured, _stored = pair
+        update: dict[str, Any] = {
             "context_tokens": durable.context_tokens,
             "context_is_estimate": durable.context_is_estimate,
-            "context_window": durable.context_window,
         }
+        if not _fresh_spec_states_a_budget(configured):
+            update["context_window"] = durable.context_window
+        return update
 
     @staticmethod
     def _restored_model_specs(
         state: FrontendSessionState, durable: FrontendSessionState
     ) -> dict[str, Any]:
-        """Model specs for the restored state, keeping the window and the
-        measured context consistent with each other.
+        """Model specs for the restored state, keeping the window, the
+        measured context and the resolved name consistent with each other.
 
-        The synthesised cold spec is built from ``config.yml``, which names the
-        provider and model but carries no metadata — so ``ModelSpec`` supplies
-        its **128k default** for ``context_window``. The restored
-        ``context_tokens`` were measured against the window the runtime
-        actually had (1M on the reference session), and the band divides the
-        restored tokens by the SPEC's window (``_context_window`` in
-        ``tui/app.py`` reads the effective spec, deliberately, because the
-        percentage predicts when the next request overflows). Dividing 322,546
-        by a defaulted 128,000 is how a resumed session painted **268.2%**
-        (design review round 1, D1) — a number that cannot be true, on the one
-        surface that exists to tell the user how much room is left.
+        The synthesised cold spec is built from ``config.yml`` and the journal,
+        which name the provider and model — and, since this process resolves the
+        pair through the catalogue (``cold_model.resolve_saved_model``), whatever
+        metadata this machine can read OFFLINE. Where that is not enough, the
+        restored state is: the session's last runtime wrote a full spec into its
+        checkpoint, and the values the conversation's own history was actually
+        measured and named against are there.
 
-        The checkpoint's own spec is the one those tokens were measured
-        against, so it is the honest denominator. Taken ONLY when the config
-        names the same model: if the user switched models since, the
-        configured spec is right and the stale window would be the wrong
-        answer in the other direction. In that case the numerator is dropped
-        instead (see ``_consistent_context``) rather than divided by a window
-        it was never measured against.
+        The WINDOW is the case this rule was written for. The restored
+        ``context_tokens`` were measured against the window the runtime actually
+        had (1M on the reference session), so dividing 322,546 by a placeholder
+        window is how a resumed session painted **268.2%** (design review round
+        1, D1) — a number that cannot be true, on the one surface that exists to
+        tell the user how much room is left. The checkpoint's own spec is the one
+        those tokens were measured against, so it is the honest denominator.
+
+        Taken on the SAME-MODEL gate the numerator is taken on
+        (``_restored_pair``), which decides WHICH MODEL the reading belongs to —
+        not, as an earlier revision of this docstring had it, that the pair then
+        always travels together. WHICH WINDOW the restored numerator meets is a
+        separate question (``_fresh_spec_states_a_budget``), and the answer is
+        not the checkpoint's wherever this process resolved a budget of its own.
+        That asymmetry is deliberate and it is the one the runtime's own attach
+        frame already follows — ``frontend_state.refresh_from_session`` pairs
+        ``receipt_context or current.context_tokens`` with the EFFECTIVE spec's
+        window — because the band's percentage predicts when the NEXT request
+        overflows, so a restored numerator under a stale denominator misstates
+        the one number this surface exists to report.
+
+        The checkpoint's window is the wrong answer wherever the fresh spec has
+        one. Measured on this branch while the gate was absent: a conversation
+        whose account GREW from 272k to 872k first-painted ``110.3%/272k``
+        against the live frame's ``34.4%/872k`` (usage overstated threefold), and
+        one whose account opted OUT of the maximum first-painted ``45.9%/872k``
+        against the live ``147.1%/272k`` — a calm reading that HIDES an
+        over-budget conversation on the one surface that exists to warn about it
+        (review round 2, blocker 1; design round 2, D1).
+
+        The populations it must KEEP adopting for, because the fresh spec states
+        no answer there and the checkpoint's window is the only real number in
+        the process: an unresolved account (the 128k placeholder, neither
+        ``default`` nor ``max`` set) and an uncovered local tag (the 4,096 route
+        default, the same two fields absent). Those are the reported
+        ``224.6%/128k`` and review round 1's ``488.2%/4k``.
+
+        The NAME rides the same-model gate for its own reason — it is a fact
+        about THIS model that only a runtime which ran it could resolve — and it
+        is taken on naming's own rule (``naming.resolved_a_name``,
+        ``_naming_resolved_no_name``) rather than a copy of one of that rule's
+        three refusals (review round 1, minor 2; review round 2, nit 1).
         """
-        configured = state.selected_model
-        stored = durable.selected_model
-        if configured is None or stored is None:
+        pair = AttachedSession._restored_pair(state, durable)
+        if pair is None:
             return {}
-        same_model = (
-            configured.provider == stored.provider and configured.model_id == stored.model_id
-        )
-        if not same_model:
+        configured, stored = pair
+        update: dict[str, Any] = {}
+        # The WINDOW half, on the same rule the state-level half follows
+        # (``_consistent_context``): the checkpoint's window is the answer only
+        # while this process resolved no budget of its own.
+        if not _fresh_spec_states_a_budget(configured):
+            window = int(stored.context_window or 0)
+            if window > 0:
+                update.update(
+                    {
+                        "context_window": window,
+                        "default_context_window": stored.default_context_window,
+                        "max_context_window": stored.max_context_window,
+                    }
+                )
+        # The resolved NAME, and why it needs a gate at all: this process resolves
+        # a name only as far as the catalogue it can read OFFLINE reaches, so a
+        # listing row that answers with the id it was asked about gives it nothing
+        # and the band paints the BARE ID on the first frame, healing to the
+        # conversation's own recorded name only when its runtime attaches. The row
+        # is this model's own record of its own identity (``_restored_pair`` is the
+        # same-model gate), so adopting it can never assert a name onto a different
+        # model.
+        if _naming_resolved_no_name(configured):
+            durable_name = str(stored.display_name or "")
+            if durable_name:
+                update["display_name"] = durable_name
+        if not update:
             return {}
-        # Fresh route metadata outranks an old owner's active window (which
-        # may predate maximum-context support or a changed opt-out setting).
-        if (
-            configured.context_metadata_resolved
-            or configured.default_context_window
-            or configured.max_context_window
-        ):
-            return {}
-        # Only the window is adopted. Everything else on the configured spec
-        # reflects THIS process's config, which is current by definition.
-        window = int(getattr(stored, "context_window", 0) or 0)
-        if window <= 0:
-            return {}
-        update = {
-            "context_window": window,
-            "default_context_window": stored.default_context_window,
-            "max_context_window": stored.max_context_window,
-        }
         return {
             "selected_model": configured.model_copy(update=update),
+            # The EFFECTIVE spec is patched only when it names the pair the update
+            # was derived from. ``stored`` is the checkpoint's SELECTED model, while
+            # an effective spec can name a pinned fallback route instead
+            # (``Session._restore_active_route``), and copying a selected model's
+            # name and window onto a spec that names another model would caption
+            # the fallback with the selection's identity. The cold state sets both
+            # fields from ONE object, so this is an invariant rather than a path
+            # (review round 1, minor 5).
             "effective_model": (
                 state.effective_model.model_copy(update=update)
                 if state.effective_model is not None
-                else None
+                and state.effective_model.provider == stored.provider
+                and state.effective_model.model_id == stored.model_id
+                else state.effective_model
             ),
         }
+
+    def _cold_wakes(self) -> list[WakeState]:
+        """The session's scheduled wakes, from the live wake index.
+
+        An INPUT to state synthesis rather than something it reads, because the
+        index is a derived file a supervisor rewrites without opening the
+        session. A session created cold has no index and no rows; an unreadable
+        one is the same absence.
+        """
+        from local_operator.wakes.store import read_entry
+
+        wakes: list[WakeState] = []
+        try:
+            entry = read_entry(self._config_dir, self._session_id)
+            for schedule in (entry or {}).get("schedules", []) or []:
+                if isinstance(schedule, dict):
+                    try:
+                        wakes.append(WakeState.model_validate(schedule))
+                    except Exception:  # noqa: BLE001 — skip an unreadable row
+                        continue
+        except Exception:  # noqa: BLE001 — no index is the common case
+            logger.debug("cold state could not read the wake index", exc_info=True)
+        return wakes
 
     async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
 
-        Off the loop: it reads the config file and the wake index.
+        A thin caller of :mod:`local_operator.session.cold_model`, which the
+        desktop's draft preview calls too — one resolution, two callers, so the
+        preview's readings and the just-created session's first cold frame
+        cannot disagree (the UI swaps one for the other at ``finishDraft``).
+
+        ``selection_sink`` is the one thing this caller adds: the synthesis reads
+        the conversation's saved selection anyway, and ``_seed_cold_usage`` needs
+        it to attribute a receipt that predates the serving-identity stamp,
+        without a second scan of a transcript that reaches 103 MB.
         """
-
-        def _build() -> FrontendSessionState:
-            from local_operator.session.frontend_state import (
-                FrontendModelSpec,
-                WakeState,
-            )
-
-            model: FrontendModelSpec | None = None
-            try:
-                from local_operator.config import ConfigManager
-
-                config = ConfigManager(config_dir=self._config_dir)
-                provider = str(config.get_config_value("hosting", "") or "")
-                model_id = str(config.get_config_value("model_name", "") or "")
-                from local_operator.session.model_selection import read_model_selection
-
-                saved = read_model_selection(self._config_dir / "sessions" / self._session_id)
-                if self._birth_model is not None and (
-                    saved is None or self._model_selection_override
-                ):
-                    model = FrontendModelSpec(**self._birth_model.model_dump())
-                elif saved is not None:
-                    model = FrontendModelSpec(
-                        provider=saved.provider,
-                        model_id=saved.model_id,
-                        reasoning_effort=saved.effort,
-                    )
-                else:
-                    if provider and not model_id:
-                        from local_operator.model.defaults import default_model_for
-
-                        model_id = default_model_for(provider) or ""
-                    model = FrontendModelSpec(provider=provider, model_id=model_id)
-            except Exception:  # noqa: BLE001 — an unreadable config is not fatal
-                logger.debug("cold state could not read the configured model", exc_info=True)
-            if model is None:
-                # NEVER None. ``AttachedSession.model`` raises without a spec, and
-                # a cold viewer is exactly the state where config may be empty
-                # (a first run, before `/login`) — so the band would crash on
-                # the very screen that exists to help the user fix it. An empty
-                # spec renders as "no model" and is replaced by the runtime's
-                # own on first engage.
-                model = FrontendModelSpec(provider="", model_id="")
-
-            wakes: list[WakeState] = []
-            try:
-                from local_operator.wakes.store import read_entry
-
-                entry = read_entry(self._config_dir, self._session_id)
-                for schedule in (entry or {}).get("schedules", []) or []:
-                    if isinstance(schedule, dict):
-                        try:
-                            wakes.append(WakeState.model_validate(schedule))
-                        except Exception:  # noqa: BLE001 — skip an unreadable row
-                            continue
-            except Exception:  # noqa: BLE001 — no index is the common case
-                logger.debug("cold state could not read the wake index", exc_info=True)
-
-            return FrontendSessionState(
-                session_id=self._session_id,
-                epoch=f"cold-{self._session_id}",
-                cwd=cwd,
-                selected_model=model,
-                effective_model=model,
-                wakes=wakes,
-            )
-
-        state = await asyncio.to_thread(_build)
+        state = await synthesise_cold_state(
+            config_dir=self._config_dir,
+            session_id=self._session_id,
+            cwd=cwd,
+            birth_model=self._birth_model,
+            model_selection_override=self._model_selection_override,
+            wakes=self._cold_wakes(),
+            selection_sink=self._note_cold_selection,
+        )
         if state.selected_model is not None and state.selected_model.provider == "openai":
-            from local_operator.config import ConfigManager
-            from local_operator.model.configure import context_spec_for_access
-            from local_operator.providers.auth_store import AuthStore
-            from local_operator.providers.failover import (
-                AuthRetryKeyState,
-                _resolve_access_for_provider,
-            )
-
-            # Resolve the same account as dispatch, not a saved denominator
-            # from before maximum-context support. Never move account stickiness
-            # merely because a viewer opened a cold session.
-            configured_model = state.selected_model
-
-            async def _resolve() -> ModelSpec:
-                # AuthStore's SQLite connection is thread-affine. Creation,
-                # credential resolution and close belong to this ONE worker's
-                # event loop, not separately scheduled default-executor jobs.
-                auth = AuthStore(self._config_dir / "auth.db")
-                try:
-                    access = await _resolve_access_for_provider(
-                        auth,
-                        "openai",
-                        self._session_id,
-                        AuthRetryKeyState(),
-                        None,
-                        read_only=True,
-                        model_id=configured_model.model_id,
-                        scoped_blocks=True,
-                    )
-                    settings = ConfigManager(config_dir=self._config_dir).get_config().values
-                    return context_spec_for_access(configured_model, access, settings)
-                finally:
-                    auth.close()
-
+            # Resolve the account metadata the runtime would, so the band does
+            # not divide a real reading by a stale denominator. Metadata must
+            # never prevent viewing saved work.
             try:
-                model = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+                model = await resolve_context_metadata(
+                    self._config_dir, state.selected_model, stickiness_key=self._session_id
+                )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
                 logger.debug("cold context metadata unavailable", exc_info=True)
         return state
 
+    def _note_cold_selection(self, saved: StoredModelSelection | None) -> None:
+        """Hold the conversation's own selection for ``_seed_cold_usage``."""
+        self._cold_selection = saved
+
     @property
     def is_cold(self) -> bool:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
+
+    @property
+    def owner_reachable(self) -> bool:
+        """Whether there is a LIVE OWNER to ask — reachability only, no sync state.
+
+        The honest term for "can this facade dial the owner", and deliberately NOT
+        ``is_cold``. That predicate is three disjuncts and its third is
+        ``not _ready_for_events``, which is a RESYNC state: ``_refresh_display_history``
+        and the degraded-delta resync clear it while the client stays connected and
+        the runtime keeps serving for the whole of a frontend sync plus a history
+        page load. A caller that folded that into "no owner" would treat a live,
+        mid-resync session as absent — exactly the conflation ``/move``'s seam
+        already grades MAJOR in this file (see ``set_working_directory``: "Liveness
+        of the socket is the honest term"), and the reason the desktop interrupt
+        route read a streaming session as ``idle`` and stopped nothing.
+
+        A True answer promises only that a client object exists and its socket is
+        up. It says NOTHING about whether work is running — that is the caller's
+        question, and on the desktop route it is answered from the follower's
+        published roster, which stays readable throughout a resync because the
+        store is installed from the attach snapshot and updated by deltas.
+        """
+        return self._client is not None and self._client.connected
+
+    @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this facade could EVER succeed.
+
+        NOT simply "does ``_ensure_bound``'s first guard return": it demands an
+        owner that is actually unreachable, and two of the three reasons
+        ``is_cold`` can be true are excluded by the terms below.
+
+        ``_recovering`` is the first exclusion: a facade with a recovery loop
+        RUNNING is on its way back, so it answers True even on the legacy
+        contract where the flag that guard reads is still unset. Every exit of
+        that loop either attaches this facade or releases it rebindable
+        (``_give_up_recovery`` sets ``_can_go_cold`` before it goes cold), so no
+        arm of it ends more closed than it started.
+
+        The second exclusion is a CONNECTED CLIENT, and it is not the same
+        fact: ``is_cold`` is also true while ``_refresh_display_history``
+        rebuilds the window with the socket UP and the runtime still serving
+        (``_ready_for_events`` is its third disjunct, and ``/move``'s seam in
+        this file grades the same conflation MAJOR). Such a facade is cold,
+        un-diallable — and perfectly alive, on its way to a sync that completes on
+        its own, so a caller that read the guard's two flags alone would report
+        a live session as gone and skip the round that waits the refresh out.
+
+        THE REACHABLE False IS A DELIBERATE STOP ON THE LEGACY CONTRACT, and it
+        is worth stating here because nothing else in this file says it plainly:
+        ``connect`` without ``viewer=True`` builds ``_can_go_cold = False``, and
+        ``_on_disconnected``'s deliberate-stop branch returns BEFORE setting
+        ``_recovering`` or starting ``_recover_runtime`` — so there is no loop,
+        nothing sets the flag, no client is left connected, and the facade is
+        cold and closed to dialling for the rest of the process's life. Two
+        routes reach it, both with the honest sentence already painted on that
+        screen: this viewer's own ``/stop``, and a stop someone ELSE issued
+        (``lop stop``, another terminal's ``/stop all``) that
+        ``_recover_runtime`` discovers from the wake marker. ``lop --resume``
+        leaves exactly that facade behind, and the TUI registers it as a sidebar
+        source. The disposed arm is latent by comparison: every ``dispose()``
+        reachable from a sidebar source retires the source first or is app
+        shutdown.
+        """
+        client = self._client
+        return not self._disposed and (
+            self._can_go_cold or self._recovering or (client is not None and client.connected)
+        )
 
     async def attach_existing(self) -> bool:
         """Attach if an owner exists, without turning a history read into work.
@@ -1671,7 +2296,16 @@ class AttachedSession:
         await self._ensure_bound()
 
     async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
-        """Update the existing attach lease; a proxy socket alone is not a human."""
+        """Update the existing attach lease; a proxy socket alone is not a human.
+
+        The ``{visible, can_notify}`` pair is also the DESIRED presence for the
+        NEXT dial, which is why ``_dial`` re-asserts it from the last recorded
+        values (TTL-bounded, so a stale lease is never resurrected). Recording
+        it while cold is therefore meaningful rather than a no-op with a
+        comment: ``DesktopSessionBridge.refresh_watch`` records a live VISIBLE
+        lease before it warms, so the runtime it is about to start counts the
+        viewer from its first tick instead of idling out under it.
+        """
         if self._surface != "desktop":
             raise ValueError("only a desktop viewer can renew a desktop lease")
         self._desktop_visible = visible
@@ -1742,17 +2376,80 @@ class AttachedSession:
             return True
         return self._engage_in_flight()
 
-    def _engage_in_flight(self) -> bool:
-        """Whether an engage is running that a move would have to join.
+    @property
+    def cwd(self) -> str:
+        """Where this session works — and where its next runtime will start.
 
-        ONE definition, read by both the decision to join and the decision to
-        narrate it. Two copies would let the frontend promise a wait the move
-        does not take, or stay silent through one it does — which is the
-        divergence this whole feature exists to prevent, in miniature.
+        The SAME value :meth:`set_working_directory` moves, exposed because a
+        reader that must resolve a relative path or decide a no-op has to read
+        it, and a second resolution rule beside ``_cwd`` is how the two answers
+        drift. The desktop move route is that reader: ``/move ../sibling``
+        resolves against THIS value, and "you are already here" compares against
+        it, so both questions have one source.
+
+        A VIEWER'S value, and deliberately NOT ``DesktopSessionBridge.cwd``: the
+        bridge field is set once at construction and read once at ``acquire``,
+        so after a move it holds the directory the session LEFT until the move
+        route tells it otherwise — a reader that resolved against that copy
+        would answer relative paths from the wrong base.
+        """
+        return self._cwd
+
+    @property
+    def engage_in_flight(self) -> bool:
+        """Whether an engage is running that another caller would have to join.
+
+        ONE definition, read by every consumer of the question. Two copies would
+        let the frontend promise a wait the move does not take, or stay silent
+        through one it does — which is the divergence this whole feature exists
+        to prevent, in miniature.
+
+        PUBLIC because the desktop bridge is a third consumer: ``warm()`` reads
+        it to decide whether a speculative engage is already under way and it
+        can therefore start nothing. That read is the same question the move
+        asks, so it must resolve to the same expression rather than to a copy
+        in ``server/`` that drifts from this one.
+
+        A HINT, never a guarantee, for every caller: it samples the lock at one
+        instant, so a bind taken in the window after the sample is missed by
+        construction. What makes a missed sample safe is the lock itself —
+        ``_ensure_bound`` serialises binds and the loser returns at its
+        ``is_cold`` check — not the accuracy of this predicate. See
+        ``set_working_directory``'s own account of sampling this and then
+        acquiring anyway.
         """
         return self._can_go_cold and self._bind_lock.locked() and not self._recovering
 
-    async def set_working_directory(self, cwd: str) -> str:
+    @property
+    def recovering(self) -> bool:
+        """Whether owner recovery owns this facade's dial right now.
+
+        PUBLIC for the same reason :attr:`engage_in_flight` is — the desktop
+        bridge is the other consumer — and it answers the one question that
+        predicate cannot, which is what a caller retrying a COLD viewer needs:
+        telling a REFUSED engage from a FAILED one. Every attempt made while
+        recovery owns the dial does no work at all (``_ensure_bound`` returns at
+        its own ``_recovering`` guard, before the lock, with no task to report
+        and no process to account for), so a retry loop must not charge it
+        against the pace it keeps for failures that really did spawn.
+        ``engage_in_flight`` is False during recovery BY DESIGN, so it reads as
+        "nothing happened" exactly when this is True.
+
+        A STATE READ, not a lock sample, so unlike ``engage_in_flight`` there is
+        no window between asking and acting to be missed.
+        """
+        return self._recovering
+
+    def _engage_in_flight(self) -> bool:
+        """Deprecated spelling of :attr:`engage_in_flight`, kept for callers here.
+
+        A thin alias rather than a second expression: the predicate was private
+        until the desktop bridge needed it, and rewriting every internal call
+        site in the same change would have mixed a rename into a feature diff.
+        """
+        return self.engage_in_flight
+
+    async def set_working_directory(self, cwd: str, *, exclusive: bool = False) -> str:
         """Point this session at ``cwd``; returns what happened, for the receipt.
 
         TRUSTS ITS CALLER on the target. ``cwd`` is not checked for existence
@@ -1881,7 +2578,18 @@ class AttachedSession:
             # (120.03 s, review round 2 MAJOR-2). Publishing here closes the
             # race by construction rather than narrowing the window.
             async with self._bind_lock_for(foreground=True):
-                return await self._apply_working_directory(cwd, previous=previous)
+                outcome = await self._apply_working_directory(
+                    cwd, previous=previous, exclusive=exclusive
+                )
+        except MoveIndeterminate:
+            # THE CLAUSE ORDER IS LOAD-BEARING: this must precede
+            # ``except BaseException`` below, which would otherwise swallow it
+            # and roll the field back. See the raise site — an unknown owner
+            # outcome may already be an ACCEPTED move, so restoring the old
+            # directory would hand the next engage a path the owner has left.
+            # The field stays at the new value and the caller reconciles before
+            # trusting either one.
+            raise
         except BaseException:
             # ONE rollback for every non-return exit, here rather than at each
             # raise: the optimistic assignment above must not outlive a move
@@ -1900,8 +2608,69 @@ class AttachedSession:
             # the two windows, not the narrower one.
             self._cwd = previous
             raise
+        self._publish_working_directory(cwd)
+        return outcome
 
-    async def _apply_working_directory(self, cwd: str, *, previous: str) -> str:
+    def _publish_working_directory(self, cwd: str) -> None:
+        """Publish the accepted directory while the successor is not yet bound.
+
+        Cold viewers have no owner to announce a move; bound viewers keep their
+        outgoing owner's snapshot until replacement. Both must show the accepted
+        directory immediately. Preserve the owner's sequence: a retiring runtime
+        can still send a final delta, so a viewer-local ``mutate`` would consume
+        its next sequence number and break synchronization. The successor restores
+        its own cwd rather than the previous runtime's checkpoint value.
+
+        A DESKTOP HOST's own frame is the exception to that budget: with a local
+        cwd callback installed the caller publishes ONE authoritative
+        replacement through it, and a failure to do so is raised rather than
+        swallowed — a completed move whose mounted viewer was never repainted is
+        the defect the pre-mutation refusal exists to prevent (review round 2,
+        N4). The in-process notify on the TUI path stays best-effort, because
+        there the facade is the view: a subscriber that cannot be told costs no
+        second authority.
+        """
+        store = self._frontend_store
+        if store is None:
+            return
+        callback = self._local_cwd_callback
+        if callback is None:
+            store.replace_and_notify(store.state.model_copy(update={"cwd": cwd}))
+            return
+        # SILENT locally, then one explicit publication through the caller's own
+        # frame. See :meth:`set_local_cwd_callback` for why a notify here would
+        # be dropped by the renderer rather than rendered.
+        store.replace(store.state.model_copy(update={"cwd": cwd}))
+        try:
+            callback(cwd)
+        except Exception as error:  # noqa: BLE001 — re-raised as the move's own outcome
+            # NOT SWALLOWED (review round 2, N4). The whole reason a move refuses
+            # while a mounted viewer cannot render the replacement is that no
+            # mounted viewer may be left painting the old directory; answering
+            # 200 after the repaint silently failed would say the opposite. The
+            # move itself is already durable here, so the honest class is the
+            # indeterminate one: the session moved, the VIEW could not be
+            # updated, and the client reconciles rather than being told the move
+            # is complete. Raised through the caller, so the receipt stays
+            # pending and a retry is answered by the journal rather than
+            # re-executing.
+            logger.error(
+                "the replacement publication failed for %s (%s)",
+                cwd,
+                error,
+                exc_info=True,
+            )
+            raise MoveIndeterminate(
+                f"replacement publication failed for {cwd}: {error}",
+                message=(
+                    "The session moved, but this window could not be repainted. "
+                    "Reconnect, then reconcile its working directory."
+                ),
+            ) from error
+
+    async def _apply_working_directory(
+        self, cwd: str, *, previous: str, exclusive: bool = False
+    ) -> str:
         """The move itself, with ``_bind_lock`` already held by the caller.
 
         ``previous`` is the directory to restore on a refusal. It is passed in
@@ -1937,10 +2706,21 @@ class AttachedSession:
         ask = getattr(client, "retire_now", None)
         if not callable(ask):
             raise RuntimeError("this session's runtime is too old to be moved; /reload first")
+        if exclusive and not getattr(client, "supports_exclusive_move", False):
+            # FAIL CLOSED, before anything is retired or published. An owner
+            # that does not advertise the fence would ignore the ``exclusive``
+            # field and retire unguarded, so the sibling-viewer guarantee the
+            # desktop move promises would be silently absent. The refusal names
+            # the action rather than the routing id behind it.
+            raise RuntimeError("this session's runtime is too old to be moved; /reload first")
         self._cwd = cwd
+        # ``exclusive`` is a keyword the owner honours only when it advertised
+        # the capability checked above; the legacy call shape is byte-identical
+        # when it was not asked for.
+        retire = cast(Callable[..., Awaitable[str]], ask)
         try:
-            detail = str(await cast(Callable[[], Awaitable[str]], ask)())
-        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            detail = str(await (retire(exclusive=True) if exclusive else retire()))
+        except RuntimeError as error:
             self._cwd = previous
             # A runtime older than this build answers the wire's own
             # ``unknown op`` error. The vetted sentence above cannot fire for
@@ -1952,6 +2732,36 @@ class AttachedSession:
                 raise RuntimeError(
                     "this session's runtime is too old to be moved; /reload first"
                 ) from error
+            raise RuntimeError(f"could not move: {error}") from error
+        except (ConnectionError, TimeoutError) as error:
+            # UNKNOWN OUTCOME, and deliberately NOT a rollback (contract §A):
+            # the request left this process and no answer came back, so the
+            # owner may ALREADY have retired and accepted the new directory.
+            # Restoring ``previous`` would overwrite a committed move with a
+            # stale one, and the successor could then spawn in the old path
+            # while the receipt said otherwise. ``OwnerAckTimeout`` derives from
+            # both bases, so an ack timeout and a dropped socket land here
+            # together — rightly: neither can tell us what the owner did.
+            # ``_cwd`` is LEFT at the new value so the next engage cannot spawn
+            # at a directory the owner may already have left; the caller
+            # reconciles instead of claiming either answer.
+            #
+            # LOGGED HERE because this is the ONE place the cause is still a live
+            # exception, and this raise is the most common indeterminate case:
+            # ``MoveIndeterminate.detail`` is deliberately kept off the wire (it
+            # names sockets and control ports), so without this the operator the
+            # 503 sends off to "reconnect and reconcile" has no trace of WHY
+            # (review round 3, MINOR-2). The exception is chained, so the
+            # transport's own frames stay reachable too.
+            logger.error(
+                "move of %s left an unknown owner outcome: %s",
+                self._session_id,
+                error,
+                exc_info=True,
+            )
+            raise MoveIndeterminate(str(error)) from error
+        except Exception as error:  # noqa: BLE001 — the refusal IS the receipt
+            self._cwd = previous
             raise RuntimeError(f"could not move: {error}") from error
         if detail != "retiring":
             # The runtime kept itself — work arrived between this viewer's idle
@@ -2005,6 +2815,50 @@ class AttachedSession:
             )
         except Exception:  # noqa: BLE001 — a completed move must not fail on its index
             logger.debug("could not repoint armed wakes after a move", exc_info=True)
+
+    async def warm_runtime(self) -> None:
+        """Engage a runtime for a viewer nobody is waiting on. Never raises.
+
+        The HTTP twin of the TUI's ``_start_runtime_engage`` worker
+        (``tui/app.py``): same ``foreground=False`` envelope, same silence on
+        failure, same reason — a speculative warm-up the user did not ask for
+        must never become an error they have to read, and the real send that
+        follows engages again through this same lock and reports properly.
+
+        WHY THIS EXISTS AT ALL. The desktop/HTTP surface had no way to engage a
+        runtime without also submitting work, so the first message POST for a
+        session paid the whole cold engage inline — spawn, dial, welcome ack,
+        frontend sync — measured at a 1146 ms median against 12-42 ms for the
+        second send. Every other surface already warms off the critical path;
+        this is that capability, reached over HTTP.
+
+        ``foreground=False`` IS MANDATORY AND IS NOT A STYLE CHOICE. Two
+        distinct regressions follow from ``True``:
+
+        * It claims the 15 s foreground bind budget for a bind nobody is
+          waiting on, where the background envelope is what a speculative warm
+          is entitled to; and
+        * far worse, ``_bind_lock_for(foreground=True)`` publishes on
+          ``_foreground_waiting``/``_foreground_arrived``, so the warm would
+          announce itself as a user-visible caller and **preempt itself** out
+          of that generous envelope.
+
+        The related hazard — a warm holding ``_bind_lock`` on the background
+        budget while a real send queues behind it — is already solved and must
+        stay solved by the EXISTING mechanism: the send announces itself
+        foreground before acquiring, the in-flight warm samples
+        ``_foreground_arrived`` before its engage, and the cut is
+        ``_BACKGROUND_YIELD_BUDGET_S``. The precedent for opting out is
+        measured: a foreground caller waiting 134.5 s against 29.5 s once a
+        bind took the lock raw. So this method must never grow its own
+        ``wait_for``, its own timeout, or a raw ``async with self._bind_lock``
+        — the entire safety argument is that it is the ordinary background
+        engage and nothing else.
+        """
+        try:
+            await self._ensure_bound(foreground=False)
+        except Exception:  # noqa: BLE001 — the real prompt reports the failure
+            logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
     async def _ensure_bound(self, *, foreground: bool = True) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
@@ -2063,6 +2917,42 @@ class AttachedSession:
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
             await self._consume_model_override()
+
+    async def _await_owner_ready(self) -> None:
+        """Bind, wait out any recovery, and BIND AGAIN if recovery released us.
+
+        The one seam every writer path opens with (``prompt``,
+        ``prompt_and_wait``, ``steer_message``), because the second bind is what
+        makes the give-up repair real rather than described.
+
+        The first ``_ensure_bound`` is a no-op for the whole of a recovery
+        (``_recovering`` refuses it), so a caller that arrives mid-recovery
+        parks on ``_runtime_ready`` — and the wait has two possible endings, not
+        one. The common ending is that recovery ATTACHED this facade to a
+        successor, and the flags are consistent on its own. The other is
+        ``_give_up_recovery``, which deliberately RELEASES the facade into a
+        cold state that can bind again; without the second call the released
+        caller finds no client and reports a transport error for a session it
+        could have started a runtime for — the operator's reported symptom,
+        where a message typed after a cut-off was accepted and never served
+        (UX round 2, U7).
+
+        Nothing is sent twice: every caller of this seam sends only AFTER it
+        returns, so a prompt that never reached the wire is exactly the case
+        this repairs.
+        """
+        await self._ensure_bound()
+        await self._runtime_ready.wait()
+        # NO YIELD IS NEEDED BETWEEN THE WAIT AND THE SECOND BIND, and an earlier
+        # revision's ``await asyncio.sleep(0)`` here was removed rather than
+        # kept as a belt: the give-up exit ``return``s immediately after
+        # ``_give_up_recovery`` with no ``await`` between, so this loop's
+        # ``finally`` clears ``_recovering`` synchronously and the event loop
+        # cannot resume THIS waiter until the facade is already consistent. The
+        # comment that stood here described a scheduling gap that cannot occur
+        # (review round 1, NIT-2), and a comment describing a mechanism nobody
+        # can reproduce is worse than no comment at all.
+        await self._ensure_bound()
 
     @asynccontextmanager
     async def _bind_lock_for(self, *, foreground: bool) -> AsyncIterator[None]:
@@ -2313,7 +3203,20 @@ class AttachedSession:
             return
         if client is None or self._recovering or self.is_cold:
             raise ConnectionError(_MODEL_INTENT_PENDING)
-        await client.set_model(requested.provider, requested.model_id)
+        # The chosen reasoning level rides WITH the pair rather than in a second
+        # RPC, and that is a correctness requirement rather than tidiness: the
+        # owner's ``set_model`` rebuilds the spec from the model's own metadata,
+        # which seeds the model's DEFAULT level, and ``Session.set_model``
+        # assigns that spec before its same-pair early return — so a pair-only
+        # switch would silently replace the level this viewer was born with,
+        # on the very send that consumes the intent. Sent only when a level was
+        # chosen, so every caller who chose none (the CLI's ``--model`` birth,
+        # and every older client) sends exactly the frame it always sent.
+        requested_effort = getattr(requested, "reasoning_effort", None)
+        if requested_effort:
+            await client.set_model(requested.provider, requested.model_id, requested_effort)
+        else:
+            await client.set_model(requested.provider, requested.model_id)
         self._model_selection_override = False
 
     async def _bind_to(
@@ -2473,12 +3376,17 @@ class AttachedSession:
             # runtime NOT to admit the request itself, which would run the
             # command twice. A viewer that omitted this (every build before
             # the field) is exactly the case the runtime completes for.
-            slash_consumers=list(SLASH_ACTION_RECEIPTS),
+            # THE declaration, read from the one constant both sides use — see
+            # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here.
+            slash_consumers=list(ATTACHED_SLASH_CONSUMERS),
             on_frontend_sync=lambda data: (
                 self._on_frontend_sync(data) if self._client is client else None
             ),
             on_frontend_update=lambda data: (
                 self._on_frontend_update(data) if self._client is client else None
+            ),
+            on_retiring=lambda frame: (
+                self._on_retiring_frame(frame) if self._client is client else None
             ),
         )
         try:
@@ -2499,6 +3407,19 @@ class AttachedSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        # Re-assert a parking mute across a reconnect. A fresh connection is
+        # unmuted, so without this a parked source that redialed would resume
+        # paying full delivery for frames its controller discards. Best-effort
+        # like the toggle itself: the app-side drop still applies underneath.
+        if self._event_mute_requested:
+            try:
+                # Bounded, because this runs on the DIAL path: a wedged owner
+                # must not hold the redial open for the full request timeout
+                # over an optimisation. A lost re-assert costs delivery (the
+                # app-side drop still applies), never correctness.
+                await asyncio.wait_for(client.set_event_muted(True), timeout=5.0)
+            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+                logger.debug("event mute re-assert failed", exc_info=True)
         if self._surface == "desktop":
             from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
 
@@ -2818,6 +3739,55 @@ class AttachedSession:
         if not self.is_streaming:
             return set()
         return self._unanswered_tail_call_ids()
+
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        """The instant each in-flight call began, keyed by call id.
+
+        Answered from the folded state this viewer already keeps, which is the
+        same fold the local owner keeps over its own events — one rule, two
+        transports — so a switch between a conversation this process owns and
+        one it merely watches seeds the same anchor.
+
+        The values arrive as ``ToolExecutionStartEvent.started_at_epoch`` on
+        the wire (and in the attach seed's ``live_events``), which is why the
+        producer stamps them rather than this side guessing: an attached
+        viewer has no access to the executor's clock, and a value it invented
+        from its own arrival would be the fabricated age the row's blank
+        column exists to refuse. A start whose event carried no epoch is
+        present with ``None`` — the call DID begin, the instant is just
+        unknown — and a call absent from the map has not started at all;
+        callers that paint a replayed row need the second fact, and callers
+        that date one need the first.
+
+        Empty rather than raising while the store is unsynchronized: a facade
+        before its first sync has no live calls to date, and the reader probes
+        this through ``getattr``. Through ``getattr`` for the store too — the
+        protocol conformance suite builds both session shapes with ``__new__``,
+        which is exactly what makes a member answering off ``self._frontend_store``
+        raise there rather than report "nothing yet".
+        """
+        store = getattr(self, "_frontend_store", None)
+        if store is None:
+            return {}
+        return store.live_tool_start_epochs()
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase, and the instant that phase began.
+
+        Folded from the same events this viewer already receives, so a band
+        drawn here dates its ``thinking``/``responding``/``composing`` arm from
+        the producer's phase edge rather than from the moment the viewer
+        arrived — the half of the operator's report that a per-call stamp
+        cannot answer, since a model call in flight is not a tool call.
+
+        ``("", None)`` before the first sync: no phase matches, and the reader
+        withholds the clock instead of counting from its own attach. Read
+        through ``getattr`` for the reason the sibling accessor above states.
+        """
+        store = getattr(self, "_frontend_store", None)
+        if store is None:
+            return ("", None)
+        return store.activity_phase_clock()
 
     @property
     def display_history_revision(self) -> int:
@@ -3351,10 +4321,15 @@ class AttachedSession:
             suffix = read_replay_suffix(
                 directory,
                 through_id=through_id,
-                checkpoint_type=FRONTEND_CHECKPOINT_CUSTOM_TYPE if want_checkpoint else None,
+                # TWO types out of ONE pass, and the distinction between the two
+                # parameters is load-bearing (review R1-2): the checkpoint is
+                # REQUIRED (the stop condition may wait for it), the spend record
+                # is OPPORTUNISTIC — a pre-ledger journal legitimately has none,
+                # and requiring it made this read the whole file on every cold
+                # open of exactly the sessions that have a checkpoint.
+                checkpoint_types=((FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()),
+                opportunistic_types=((SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()),
             )
-            if want_checkpoint:
-                self._cold_checkpoint = suffix.checkpoint
             cut = through_id
             if cut is not None and not suffix.through_present and not strict_cut:
                 # Older owners used best-effort cursors; preserve that fallback
@@ -3363,6 +4338,32 @@ class AttachedSession:
                 # the file START without meeting the cursor, so this is the
                 # same "id is not in the journal" the whole-file parse saw.
                 cut = None
+            if want_checkpoint:
+                self._cold_checkpoint = suffix.checkpoint
+                self._cold_spend = suffix.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE)
+                self._cold_order = dict(suffix.checkpoint_order)
+                # The accounting fallback rides the SAME read, from the rows
+                # already in hand: the suffix reader stops only once the newest
+                # shrink and its kept window are buffered, so every post-shrink
+                # message row — and therefore every still-valid usage receipt —
+                # is in ``suffix.entries``. One parse, one pass, no extra I/O on
+                # a file that reaches 103 MB. See ``_seed_cold_usage`` for what
+                # the reading is used for and why the checkpoint still wins.
+                #
+                # NOT seeded when a cursor CUTS this read. The cut discards rows
+                # above the cursor from the replay below (the reader even forgets
+                # a compaction met above it), so a receipt from those rows
+                # describes a window this viewer is not showing — and a second
+                # implementation of the cut rule here is exactly the
+                # second-boundary defect the shared scan exists to prevent. Cold
+                # passes no cursor today, so this is the correctness of the
+                # shape: an uncut read seeds, a bounded one prefers "no reading"
+                # to a reading from outside the window.
+                self._cold_seed_usage = (
+                    seed_reported_usage(usages_since_newest_shrink(suffix.entries))
+                    if cut is None
+                    else None
+                )
             # Resolve externalized media against the store that OWNED this
             # journal (``<config>/attachments``), derived from the session
             # directory rather than from this reader's environment — the
@@ -3700,7 +4701,16 @@ class AttachedSession:
             future.set_result(FrontendSync.model_validate(data))
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
-        update = FrontendUpdate.model_validate(data)
+        # The same resolution, for the same reason, on the other frame grade: a
+        # canonical delta carries payload-bearing shapes too (``live_events`` and
+        # a job's trajectory appends both hold tool results), and the runtime's
+        # fit pass is op-agnostic, so a reference can ride here. Without this the
+        # raw ``attachment`` key would flow on into the frontend store AND into
+        # the desktop bridge's published payload, which is the one consumer that
+        # cannot be fixed later.
+        update = FrontendUpdate.model_validate(
+            resolve_frame_attachments(data, self._attachment_store())
+        )
         cut = self._frontend_refresh_cut
         if cut is not None and update.epoch == cut[0] and update.sequence <= cut[1]:
             # The old subscription can deliver this captured prefix after the
@@ -3713,7 +4723,7 @@ class AttachedSession:
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
-        self._apply_frontend_facades(state)
+        self._apply_frontend_facades(state, changed_fields=set(update.changes))
         if update.degraded:
             # The owner shed this delta's body to keep the line under the socket
             # limit. The sequence was consumed on both sides, so the gap check
@@ -3759,8 +4769,15 @@ class AttachedSession:
                 continue
             self._on_frontend_update(update.model_dump(mode="json"))
 
-    def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
-        """Refresh compatibility facades after one canonical install."""
+    def _apply_frontend_facades(
+        self, state: FrontendSessionState, *, changed_fields: set[str] | None = None
+    ) -> None:
+        """Refresh changed facades; a full snapshot replaces every collection.
+
+        Scalar deltas arrive at token cadence. Rebuilding the job/comms facade
+        on each one copied the entire child roster despite no child changing.
+        None means full install, distinct from an empty degraded delta.
+        """
         self._streaming = state.streaming
         self._generation = state.generation
         self._model = state.selected_model
@@ -3779,16 +4796,35 @@ class AttachedSession:
             and not self._model_selection_override
             and (
                 self._birth_model is None
-                or (self._birth_model.provider, self._birth_model.model_id)
-                != (selected.provider, selected.model_id)
+                # Compared as the TRIPLE: the level is part of the sample. A
+                # successor seeded from a pair-only record is constructed with no
+                # ``LOP_MOBILE_CHILD_EFFORT`` and silently drops to its own
+                # resolved level (review round 1, R2) — so a level-only change on
+                # an attached owner refreshes the sample too.
+                or (
+                    self._birth_model.provider,
+                    self._birth_model.model_id,
+                    self._birth_model.reasoning_effort,
+                )
+                != (selected.provider, selected.model_id, selected.reasoning_effort)
             )
             and get_provider_definition(selected.provider) is not None
         ):
-            self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
-        self.jobs.replace(state.jobs)
-        self._subagent_comms.replace(state.jobs)
-        self.wake_scheduler.replace(state.wakes)
-        self.mcp_manager.replace(state.mcp_servers)
+            # Carry the level the owner actually reported: the sample exists so a
+            # successor can be constructed on what this conversation was running,
+            # and "which model" without "at which effort" is half of that.
+            self._birth_model = ModelSpec(
+                provider=selected.provider,
+                model_id=selected.model_id,
+                reasoning_effort=selected.reasoning_effort,
+            )
+        if changed_fields is None or "jobs" in changed_fields:
+            self.jobs.replace(state.jobs)
+            self._subagent_comms.replace(state.jobs)
+        if changed_fields is None or "wakes" in changed_fields:
+            self.wake_scheduler.replace(state.wakes)
+        if changed_fields is None or "mcp_servers" in changed_fields:
+            self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
         if isinstance(startup, Mapping):
             from local_operator.session.mcp_status import McpStartupOutcome
@@ -3800,12 +4836,71 @@ class AttachedSession:
                 tool_count=int(startup.get("tool_count", 0) or 0),
                 settling=bool(startup.get("settling", False)),
             )
+        previous_startup = self.mcp_startup
         self.mcp_startup = startup
+        self._fire_mcp_startup_sink(startup, previous_startup)
         self._name_state.set(state.conversation_title, user_set=state.conversation_title_user_set)
         self._apply_pending_gate(_pending_request(state.pending_gate))
 
+    def _fire_mcp_startup_sink(self, startup: Any, previous: Any) -> None:
+        """Hand a CHANGED ``mcp_startup`` to whatever front end adopted this facade.
+
+        The owner records an MCP round's outcome and pushes it through the
+        frontend state; before this hop, that was where a viewer's copy of the
+        news stopped. The TUI installs its settle/wiring sink on the session it
+        adopts (``OperatorApp._wire_mcp_status``), and on the in-process
+        ``Session`` that sink is how the boot toast and the durable failure
+        notice get raised — but the facade assigned it to an attribute nothing
+        on this class ever read, so on the viewer path a failed server reached
+        ``mcp_startup`` and no screen at all: no toast, no notice, only ``/mcp``.
+        That is the operator's "instead of throwing up the toast that some MCPs
+        failed to load", and it is why the deferred-wiring change (which makes
+        the report land AFTER the bind) had to be paired with this.
+
+        Fired only on a CHANGE, and only for a non-empty outcome. The owner
+        pushes the same snapshot repeatedly (every canonical refresh carries it),
+        and a per-attach re-announce is the noise the TUI's own per-session
+        sentence record exists to suppress. An EMPTY outcome is the machine with
+        no ``.mcp.json``: ``McpStartupOutcome.reportable`` already answers False
+        for it, so passing it on would be harmless, but not passing it keeps the
+        app's painters off the path entirely for the feature-not-used case.
+
+        Guarded like every other UI hop on this class: a host that installed no
+        sink (tests, embedders, a reduced facade) is the normal case, and a sink
+        that raises must never take an incoming frame down with it.
+        """
+        if startup is None or startup == previous:
+            return
+        sink = getattr(self, "_on_mcp_startup_settled", None)
+        if not callable(sink):
+            return
+        try:
+            sink(startup)
+        except Exception:  # noqa: BLE001 — a UI hook must never break the transport
+            logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
+
+    def _attachment_store(self) -> AttachmentStore:
+        """The attachment store that OWNED this session's journal, resolved once.
+
+        ``store_for_transcript_dir`` rather than ``AttachmentStore()``: the
+        reader's own ``config_dir()`` is the same directory in every shipped
+        caller today, and deriving the store from the session path is what makes
+        that a consequence rather than a coincidence — the exact unstated
+        coincidence that let a second, wrong root live beside the write path
+        before (#694, where every reference resolved to ``None``).
+        """
+        store = self._wire_attachments
+        if store is None:
+            store = store_for_transcript_dir(self._config_dir / "sessions" / self._session_id)
+            self._wire_attachments = store
+        return store
+
     def _on_wire_event(self, data: dict[str, Any]) -> None:
-        event = deserialize_event(data)
+        # Resolution runs FIRST, on the raw dict and ahead of validation: an
+        # unresolved reference parses (the key is deliberately not a field) into
+        # an image with an empty payload, silently. See
+        # ``resolve_frame_attachments``.
+        event = deserialize_event(resolve_frame_attachments(data, self._attachment_store()))
         # Command completion is an owner lifecycle fact, not a painting event.
         # A canonical display refresh may buffer/dedupe UI replay, but it must
         # never hide the requested turn's terminal outcome from its scheduler.
@@ -4083,8 +5178,14 @@ class AttachedSession:
         owner: a killed owner factually aborted the turn, a stopped one ended
         the whole session under it, and a viewer going cold has no runtime
         left to hear from. Marked through the normal event path so no
-        card/banner or attach vocabulary appears — the transcript reads as an
-        ordinary aborted turn, which is what it is.
+        card/banner or attach vocabulary appears.
+
+        ``aborted``/``error`` are the CALLER's verdict, and the cut-off work
+        makes that explicit rather than leaving the default to speak for every
+        case: a deliberate stop or a kill keeps ``aborted=True, error=None``
+        (the shape a user's Esc produces), while a confirmed owner death passes
+        ``aborted=False, error=<cut-off notice>`` so the app paints a named
+        failure instead of a cancel it cannot explain.
 
         ``direct`` bypasses the sync buffer and hands the end straight to the
         subscribed handlers (dropping it when there are none). The go-cold
@@ -4115,6 +5216,31 @@ class AttachedSession:
         if not self._streaming and not force:
             return
         end = AgentEndEvent(aborted=aborted, generation=0, error=error)
+        if error:
+            # The cause rides WITH the sentence, so a consumer that only has the
+            # event (the phone's projection, a log line, a test) can classify it
+            # without re-parsing operator-facing prose. ``cause_from_reason``
+            # inverts ``format_cut_off_notice``'s own rendering, which is what
+            # keeps the two from drifting into a vocabulary nobody can read.
+            from local_operator.incidents import cause_from_reason
+
+            # NO ``or "owner-lost"`` FALLBACK. `cause_from_reason` is the
+            # inverse of `format_cut_off_notice`, so an empty answer means the
+            # event's error is NOT a cut-off sentence — and stamping the token
+            # anyway mislabelled every other error as an owner loss. The one
+            # concrete case is `_settle_suspect_turn`'s `"turn failed"`
+            # placeholder for a provider error, which then carried
+            # `cut_off_cause="owner-lost"` on a row that was never cut off
+            # (review round 1, MINOR-3).
+            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error)})
+            # A CUT-OFF VERDICT, and only a cut-off verdict, is also journalled
+            # for every other surface rather than only painted in the frame this
+            # viewer owns (UX round 2, U6). A `turn failed` placeholder carries
+            # no cause — the event's error is not a cut-off sentence — so the
+            # hook stays off it: this facade has no standing to publish an
+            # outcome for an end it cannot name.
+            if end.cut_off_cause:
+                self._journal_witnessed_cut_off(cause=str(end.cut_off_cause))
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -4138,6 +5264,60 @@ class AttachedSession:
             self._streaming = False
             self._suspect_generation = None
 
+    def _journal_witnessed_cut_off(self, *, cause: str) -> None:
+        """Journal the cut-off this viewer just witnessed, off the loop.
+
+        WHY. The durable outcome a sidebar row reads is written by
+        ``bootstrap_transcript`` — the same classifier the next boot runs — and
+        until something ran it, a session whose runtime died mid-turn read
+        ``Working`` and then ``Recent`` in active sessions, never ``errored``:
+        the operator's requirement is literally "so at least we see it in
+        active sessions as errored", and it was unmet for every session nobody
+        had opened yet (UX round 2, U6). A viewer that has just DELIVERED the
+        cut-off verdict is the one place that knows both that it happened and
+        which directory to classify, and it is ONE classification per death —
+        not the per-row orphan scan on the refresh path whose cost is the
+        reason this was deferred.
+
+        The CLASSIFIER's verdict is published, never this facade's own
+        ``owner-lost`` — except where the classifier CANNOT run, which is the
+        one case ``cause`` is for (review round 1, MINOR-2). Opening the same
+        session runs exactly this classifier and gets ``runtime-killed`` (or the
+        no-evidence sentence); two sentences for one death, depending on which
+        surface you looked at, is the divergence the taxonomy exists to prevent.
+        But when a record on disk still points at a live pid, the classifier's
+        in-flight arm publishes NOTHING by design — it cannot tell a dead owner
+        behind a recycled pid from a healthy run — so the give-up arm that ends
+        a live-but-silent chase used to leave the sidebar row un-errored while
+        the terminal carried a named ``owner-lost`` verdict.
+
+        PUBLISHED PROVISIONALLY, WHICH IS WHAT MAKES THAT SAFE. The record this
+        writes is ``provisional_anchor(token)``, so the live owner's real
+        outcome — same token, real anchor — SUPERSEDES it
+        (``AttentionStore._supersedes_provisional``), and a viewer that mistook
+        a stall for a death cannot leave a wrong row behind. Meanwhile the
+        surfaces a live session is showing are exactly where a provisional
+        ``error`` is suppressed while it is still busy, which is why the wrong
+        row cannot outrank work in progress.
+
+        Fire-and-forget on the default executor, fully guarded, and deliberately
+        so: this is a notice for OTHER surfaces, and nothing about painting this
+        viewer's own verdict may wait on a transcript read or fail because the
+        attention store is locked.
+        """
+        try:
+            from local_operator.session.attention import AttentionStore
+            from local_operator.session.transcript import Transcript
+
+            directory = self._config_dir / "sessions" / self._session_id
+            store = AttentionStore(self._config_dir / "attention.db")
+            transcript = Transcript(directory)
+            asyncio.get_running_loop().run_in_executor(
+                None, _journal_witnessed_cut_off, transcript, store, cause
+            )
+        except Exception:  # noqa: BLE001 — a notice must not break the verdict
+            logger.debug("journalling the witnessed cut-off failed", exc_info=True)
+
     def _settle_suspect_turn(self) -> None:
         """Decide what a mid-turn disconnect meant, now that recovery rebound.
 
@@ -4155,12 +5335,14 @@ class AttachedSession:
           from ``last_turn_outcome`` (additive; ``""`` from an old runtime
           keeps today's aborted synthesis).
 
-        The ``error`` case synthesises the placeholder ``"turn failed"``.
-        ``last_turn_outcome`` is a four-value enum that deliberately carries
-        no message — transporting the owner's error text would mean a second,
-        unbounded field on every snapshot — so that string is a CLASS marker,
-        never the owner's actual diagnostic, and nothing downstream should
-        read it as authoritative (review round 1, MINOR-2).
+        The ``error`` case synthesises ``last_turn_cut_off`` when the owner
+        published one — the harness-authored reason sentence for a cut-off — and
+        falls back to the placeholder ``"turn failed"`` otherwise. The
+        placeholder is a CLASS marker, never the owner's actual diagnostic
+        (review round 1, MINOR-2); the cut-off reason is different in kind: it
+        is a short, bounded, harness-authored sentence, so carrying it on the
+        snapshot costs one line and buys the viewer a real cause instead of
+        a shrug.
         """
         suspect = self._suspect_generation
         self._suspect_generation = None
@@ -4172,16 +5354,18 @@ class AttachedSession:
             self._same_live_turn = True
             return
         outcome = ""
+        cut_off = ""
         store = self._frontend_store
         if store is not None:
             outcome = str(getattr(store.state, "last_turn_outcome", "") or "")
+            cut_off = str(getattr(store.state, "last_turn_cut_off", "") or "")
         # ``force`` because ``_apply_frontend_facades`` already cleared
         # ``_streaming`` when the snapshot says the turn ended, and the
         # usual early-return would swallow the synthesised end.
         self._end_turn_locally(
             direct=True,
             aborted=outcome in ("aborted", ""),
-            error="turn failed" if outcome == "error" else None,
+            error=(cut_off or "turn failed") if outcome == "error" else None,
             force=True,
         )
         # A successor turn may already be live (generation moved). The
@@ -4191,7 +5375,7 @@ class AttachedSession:
             self._streaming = True
             self._generation = snapshot_generation
 
-    async def _session_was_stopped(self) -> bool:
+    async def session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
 
         Two shapes, one meaning — the session ended on purpose, so there is
@@ -4206,6 +5390,23 @@ class AttachedSession:
            reconnect), and the owner never rediscovers. Both conditions
            together are the deliberate-stop wire shape: a dead owner leaves
            the marker absent, a stopped one leaves it set.
+
+        DECLARED on :class:`ViewerSessionProtocol` rather than kept private,
+        because a host that missed the disconnect still has to tell the two
+        apart: the sidebar's connect re-dials a clicked row, and an owner that
+        was STOPPED never answers however many rounds are spent on it — which
+        is what made "Select again to retry" an unkeepable promise on that arm
+        (UX U2, round 1). ``_recover_runtime`` reads the same fact for the same
+        reason, so this is one implementation rather than a second marker probe
+        in the TUI.
+
+        ITS LIMIT, stated because a caller may need to act on the absence: the
+        marker is stamped by ``control._mark_wakes_dormant``, which writes
+        nothing at all for a session with no wake schedules (it returns 0 on an
+        absent entry — "absent-file-is-no-wakes is the store's own contract"),
+        and clears on the next open. So False is "not proven stopped", not
+        "proven alive"; a wake-less stop leaves no trace here and the caller
+        has to fall back on what it can establish for itself.
         """
         if self._deliberate_stop:
             return True
@@ -4302,8 +5503,29 @@ class AttachedSession:
             # is the honest repair, and ``_settle_suspect_turn`` decides on
             # rebind exactly as it does after a transient drop.
         else:
+            # OWNER DEATH, and the end must say so. Synthesising the bare
+            # abort (``aborted=True, error=None``) is the exact shape a user's
+            # Esc produces, so a runtime that died mid-turn painted the same
+            # "interrupted" the operator's own cancel does — the bug this
+            # change exists to fix, and the reason this branch names a cause
+            # rather than leaving a class marker.
+            #
+            # Reached for a runtime this viewer can no longer hear. A deliberate
+            # stop returns above and ``refresh=True`` never ends a turn, but the
+            # give-up arm below ALSO arrives here for a live-but-silent owner (a
+            # record is present and its pid is alive, and nothing answers), so
+            # the sentence it paints says what the viewer can verify rather than
+            # asserting a death it cannot establish (review round 1, MINOR-3).
+            # What it must never do is paint an error over a healthy session
+            # that merely dropped a socket: that case rebinds inside
+            # ``COLD_FALLBACK_S`` and never reaches this branch — the autorefresh
+            # design's invariant, kept.
             try:
-                self._end_turn_locally(direct=True)
+                self._end_turn_locally(
+                    direct=True,
+                    aborted=False,
+                    error=format_cut_off_notice("owner-lost"),
+                )
             except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
                 logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
             # Belt for the case ``_end_turn_locally`` early-returns on
@@ -4319,6 +5541,44 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
             logger.debug("%s callback failed", "refresh" if refresh else "went-cold", exc_info=True)
 
+    def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Told when a move installs a locally accepted directory.
+
+        Installed by the DESKTOP bridge, and the reason it exists rather than
+        the facade publishing for itself: a local replacement carries the
+        owner's UNCHANGED epoch/sequence, so emitting it as an ordinary
+        ``frontend.update`` delta is discarded by the renderer's own stale-delta
+        check (review R4 — reproduced against the shipped reducer). The desktop
+        therefore negotiates an explicit ``frontend.replace`` frame and the
+        bridge publishes it through its own outer cursor, while this facade
+        installs the state silently. With no callback set (a TUI viewer, a
+        headless host) the in-process subscribers get the notification they
+        always got.
+        """
+        self._local_cwd_callback = callback
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether the bound owner can retire under the exclusivity fence.
+
+        Asked BEFORE a move mutates anything (``_move_session``), because an
+        owner too old to know the ``exclusive`` field would ignore it and retire
+        unguarded — leaving a sibling facade to engage a successor from its own
+        stale cwd. False means refuse with update guidance; it never means "fall
+        back to a plain retire".
+
+        TRUE WHEN COLD, and that is not a loophole: a cold viewer has no owner to
+        retire, so there is no sibling engage to race and nothing for the fence
+        to protect. Answering False here would refuse the feature's PRIMARY case
+        ("change directory at the start of a session") on every backend; the
+        bound branch of ``_apply_working_directory`` is where the capability is
+        actually required.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            return True
+        return bool(getattr(client, "supports_exclusive_move", False))
+
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime retired itself for a newer build.
 
@@ -4327,6 +5587,64 @@ class AttachedSession:
         ``starting…`` state covers the ~1 s the re-engage takes.
         """
         self._refresh_callback = callback
+
+    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Told when the runtime announces a departure that is REFUSING work.
+
+        Fired from the ``retiring`` frame itself, so the operator hears it
+        ~26 s before the socket closes rather than after — and only when the
+        frame says ``draining``, because the idle handover refuses nothing and
+        announcing it would put a row on every ordinary refresh (the case
+        ``OperatorApp._on_runtime_refreshed``'s docstring used to assert from
+        the viewer's own now-cold state; QA round 3, Q-1 measured that probe
+        reading True for both hands). Fired on the client's reader task, so a
+        widget-touching host marshals as it does for every other callback here.
+
+        ``callback`` receives the frame's ``leaving`` phrase — the trigger's own
+        words, read off the frame's ``reason``/``to`` when a runtime older than
+        the key sends none — because the two triggers are not interchangeable in
+        a sentence a person reads (design round 3, D6: the signal trigger used to
+        be painted with the build's notice; design round 4, D9: the frames that
+        carry no key at all). Only a frame that establishes NEITHER trigger
+        reaches the host as ``""``.
+        """
+        self._drain_callback = callback
+
+    def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
+        """A ``retiring`` frame arrived; act on it while the runtime is alive.
+
+        The frame is additive twice over: a runtime older than the ``draining``
+        field is therefore read as the idle handover, which is the pre-change
+        behaviour and paints nothing, and a runtime older than ``leaving`` has
+        its trigger read off the frame's ``reason``/``to`` by
+        :func:`types.drain_phrase_for_frame`.
+
+        THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
+        ``""`` on the grounds that an absent phrase is "the build handover, the
+        only departure it announces at all" — true of a runtime from ``main`` or
+        a release, where the stale-build path is the sole ``draining=True``
+        caller, and FALSE of this branch's own intermediate builds, which
+        announce both triggers with no phrase and so handed a signalled runtime
+        the build sentence (design round 4, D9; agent review round 4, MAJOR-1).
+        The frame's own words are on the wire in every one of those builds, so
+        they decide; a frame that names neither trigger still yields ``""``, and
+        the host paints the sentence that is true of any drain.
+        """
+        if not frame.get("draining"):
+            return
+        callback = self._drain_callback
+        if callback is None:
+            return
+        try:
+            # The derivation sits INSIDE the guard rather than above it: this
+            # method's stated contract is that a viewer failing to speak cannot
+            # break the pump, and a call outside the ``try`` is one that could
+            # (agent review round 5, NIT-1). The client remembers the same phrase
+            # for the refusals it decodes, from the same helper — see
+            # ``AttachClient._raise_for_reply_error``.
+            callback(drain_phrase_for_frame(frame))
+        except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
+            logger.debug("drain callback failed", exc_info=True)
 
     def runtime_idle(self) -> bool:
         """Whether the bound runtime is doing nothing a refresh would lose.
@@ -4427,10 +5745,6 @@ class AttachedSession:
         # the next message engages a fresh runtime. Without a bound the loop
         # would redial forever against a session nobody is running.
         cold_deadline = time.monotonic() + COLD_FALLBACK_S
-        # The second, longer bound for the surface that cannot take the branch
-        # above. See ``RECOVERY_GIVE_UP_S`` for why it is derived from the
-        # heartbeat contract rather than calibrated here.
-        #
         # READ ONCE HERE, DELIBERATELY, and not re-derived per pass. A deadline
         # recomputed inside the loop is a deadline that resets every pass and
         # therefore never fires — the exact never-terminates shape this bound
@@ -4439,22 +5753,60 @@ class AttachedSession:
         # correct: the constant is static in production, and a live change to a
         # bound already being waited on has no defined meaning (review round 1,
         # R4).
-        give_up_deadline = time.monotonic() + RECOVERY_GIVE_UP_S
-        # Whether ANY pass of this loop has found a discoverable owner record.
+        # ONE BOUND FOR EVERY ARM THAT HAS NOT PRODUCED A USABLE RUNTIME, and it
+        # is the cold one. There used to be a second, longer deadline here
+        # (``RECOVERY_GIVE_UP_S``, 90 s = two heartbeat timeouts) for the
+        # LIVE-BUT-SILENT owner — a record found on every pass, the socket
+        # accepting, the canonical sync never landing — scoped by a
+        # ``record_seen`` sighting so it could not fire for a genuinely dead
+        # owner, and a third condition for the takeover arm that cannot run.
         #
-        # The give-up exit below is scoped to the live-but-silent shape — an
-        # owner that keeps publishing a record and never answers — and must not
-        # fire for an owner that is genuinely DEAD, whose contract is to keep
-        # chasing a successor through the takeover arm. The check has to sit at
-        # the top of the pass (that is where a deadline can be evaluated before
-        # the pass spends its time on a dial that may block), which is BEFORE
-        # ``find_runtime_record`` runs, so the exit cannot consult this pass's
-        # record. It consults the previous passes' instead: one sighting is
-        # enough, because a record seen at all is what distinguishes "an owner
-        # is there and silent" from "nothing is there". Without this the exit
-        # fired for a no-record viewer too, marking a dead runtime as merely
-        # unresponsive (QA round 1 Q849-1, review round 1 R3).
-        record_seen = False
+        # The longer bound was the WRONG twenty seconds to be strict about.
+        # Whatever the registry would eventually conclude about that owner, the
+        # VIEWER has already concluded it here: the cold deadline below is where
+        # the in-flight turn is ended with a named ``owner-lost`` cut-off. The
+        # 90 s then bought 82 more seconds of ``_recovering``, which refuses
+        # every mutation seam and parks ``prompt`` on ``_runtime_ready`` with
+        # nothing on screen — measured with a discoverable-but-silent owner, the
+        # verdict landed at t+8.1 s, the user typed at t+8.6 s and the message
+        # was served at t+50.4 s (UX round 1, U2).
+        #
+        # It bought no chase either: the exit is COLD AND REBINDABLE
+        # (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``), so
+        # the released caller re-dials the very same record through
+        # ``_ensure_bound`` and a released prompt is served or reports its
+        # failure. A successor that IS coming is still caught — by the
+        # give-up's own REBIND, not by this loop, and that distinction is
+        # measured rather than rhetorical (review round 2, MINOR-2). The
+        # deadline is tested at the top of a pass and ``paced()`` parks the
+        # loop AT it, so a successor that publishes inside the final sleep is
+        # never dialled from here: with the bound monkeypatched to 0.5 s and a
+        # record appearing at t+0.49 s, the loop released at 0.506 s having
+        # dialled that record ZERO times. What catches it is the released
+        # caller's next action, which re-enters through ``_ensure_bound``
+        # against the very same record. An earlier draft of this comment
+        # claimed the loop itself reattached "the moment a record it can use
+        # appears", which the boundary case falsifies. The early release
+        # cannot double-bind or double-spawn because ``engage_runtime``
+        # short-circuits on a discoverable record and otherwise waits rather
+        # than spawning while a live pid holds the lease.
+
+        def paced(seconds: float) -> float:
+            """``seconds``, shortened so the loop wakes AT the cold deadline.
+
+            The deadline is checked at the top of a pass, so a pass that slept
+            ``delay`` past it reported the cut-off one sleep late: measured at
+            9.4 s against ``COLD_FALLBACK_S`` of 8.0 on the watched SIGKILL,
+            with this cap in place 8.01 s. (Both figures run from the KILL; the
+            loop's deadline starts when it notices the drop, so the residual
+            hundredth is the notification lag, not the pacing.) The sleep is
+            otherwise untouched: once the deadline is behind us the original
+            pacing returns, because a bound that yielded a zero sleep would turn
+            the chase into a hot loop against the registry.
+            """
+            remaining = cold_deadline - time.monotonic()
+            return min(seconds, remaining) if remaining > 0 else seconds
+
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
@@ -4466,122 +5818,108 @@ class AttachedSession:
                         )
                         self._go_cold()
                         return
-                    # The LEGACY attach surface does not go cold at THIS bound
-                    # (``_can_go_cold`` is desktop-only) because its contract is
-                    # to keep chasing a successor. It does now go cold at a
-                    # second, longer one — see the give-up branch below; this
-                    # comment used to say it had "no cold state to fall into"
-                    # at all, which is how the forever-latch survived review.
-                    # But the turn must still reach a
-                    # verdict: with the abort deferred to recovery, a genuine
-                    # owner death whose takeover keeps failing (lease held by
-                    # another follower, or any raise — both retry forever by
-                    # design) left the working line spinning with nothing able
+                    # The LEGACY attach surface does not go cold at the FIRST
+                    # branch above because the flag is not set for it — it is set
+                    # only where the caller asks for the viewer contract (the
+                    # desktop surface and ``connect(viewer=True)``, which is what
+                    # the sidebar's speculative lease builds) — and the legacy
+                    # contract is to keep chasing a successor. It reaches a cold
+                    # state HERE, through ``_give_up_recovery``, at the same
+                    # bound. That comment used to say this surface had "no cold
+                    # state to fall into" at all, which is how the forever-latch
+                    # survived review.
+                    #
+                    # The turn must still reach a verdict: with the abort
+                    # deferred to recovery, a genuine owner death whose takeover
+                    # keeps failing (lease held by another follower, or any
+                    # raise — both retry forever by design) left the working line
+                    # spinning with nothing able
                     # to clear it. That is strictly worse than the false
                     # "interrupted" this PR removes — review round 1,
                     # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
-                    # after this long with no runtime, an in-flight turn is
-                    # honestly aborted. ``_end_turn_locally`` clears
-                    # ``_suspect_generation``, so this fires at most once and
-                    # the retry loop continues underneath it.
+                    # after this long with no runtime the turn is CUT OFF, and it
+                    # says so with a named cause rather than with the bare abort a
+                    # user's Esc produces. ``_end_turn_locally`` clears
+                    # ``_suspect_generation``, so this fires at most once and the
+                    # retry loop continues underneath it.
+                    #
+                    # THIS IS THE ARM THE OPERATOR'S REPORT LANDS ON, which is why
+                    # it needs the verdict as much as ``_go_cold`` does. The
+                    # owner-death branch there carries it, and it is reachable
+                    # only when the flag holds — set by the desktop surface and by
+                    # ``connect(viewer=True)``, the sidebar's speculative lease,
+                    # while every OTHER ``connect()`` caller (``/resume``, the
+                    # startup attach, ``session_factory``) leaves it unset and
+                    # therefore arrives here instead. Measured on this head: a
+                    # SIGKILLed runtime painted ``interrupted ⊘`` with no notice,
+                    # no reason and durable state still ``kind=None`` at t≈98 s,
+                    # byte-identical to the user's own cancel (QA round 1, Q-1; UX
+                    # U1).
                     if self._suspect_generation is not None:
                         logger.info(
                             "no runtime for %s after %.0fs; ending the in-flight turn",
                             self._session_id,
                             COLD_FALLBACK_S,
                         )
-                        self._end_turn_locally(direct=True)
+                        self._end_turn_locally(
+                            direct=True,
+                            aborted=False,
+                            error=format_cut_off_notice("owner-lost"),
+                        )
                     # ...and AFTER that verdict, the loop itself must reach one.
-                    # Ending the turn left ``_recovering`` set, and the only
-                    # other exits are the cold branch above (unreachable here)
-                    # and the takeover in the no-record ``else`` — which a
-                    # LIVE BUT SILENT owner never reaches, because a record is
-                    # found on every pass. So the chase had no terminal state:
-                    # ``/model`` and every other mutation seam refused forever
-                    # and ``prompt`` parked silently on ``_runtime_ready``.
+                    # Ending the turn left ``_recovering`` set, and the other
+                    # exits are the cold branch above (unreachable here) and the
+                    # takeover in the ``else`` below — which a LIVE BUT SILENT
+                    # owner never reaches, because a record is found on every
+                    # pass, and which `lop`'s own TUI cannot reach either, since
+                    # ``cli.py`` wires a takeover factory whose body raises BY
+                    # CONSTRUCTION (a terminal must never win the transcript
+                    # lease). Measured on ``main`` (95fccacda): a watched SIGKILL
+                    # left ``_recovering`` latched and the next message accepted
+                    # and never served, the band spinning with a live clock at
+                    # 242 s and counting, with no error, no timeout and no advice
+                    # (UX round 2, U7).
                     #
-                    # SCOPED TO ``record_seen``, which is what makes the
-                    # paragraph below true rather than merely intended. The
-                    # condition cannot be "this pass found a record" — the
-                    # deadline is evaluated before ``find_runtime_record`` runs —
-                    # so it is "some pass did", which selects the same class:
-                    # an owner that is discoverable at all is the live-but-
-                    # silent shape, and one that never was is the dead shape the
-                    # takeover arm below is written for.
+                    # So the loop stops claiming a chase it cannot finish, on the
+                    # SAME bound for every arm. No record at all, a record this
+                    # viewer cannot use, a record that never answers, and a
+                    # takeover that never runs are ONE class from the user's
+                    # seat: no runtime this viewer can use. Each arm used to
+                    # carry its own deadline and its own scoping rule
+                    # (``record_seen``, ``takeover_attempts`` /
+                    # ``takeover_progress``), which is how the surface the
+                    # operator actually uses ended up with no reachable exit.
+                    #
+                    # An IN-FLIGHT takeover is untouched by this: the deadline is
+                    # checked at the top of a pass, and a factory that is still
+                    # working is inside its own await, so a slow-but-real
+                    # takeover still completes and returns above.
                     #
                     # Going cold here does not weaken the chase contract, which
                     # is written for a DEAD owner and is vacuous for a live one:
                     # ``acquire_session_lease`` raises ``SessionLeaseHeldError``
-                    # unless the holder is proven dead, so a live owner cannot
-                    # be taken over even if this arm did reach the factory. Nor
-                    # does it engage a second runtime for a session that has
-                    # one: ``engage_runtime`` short-circuits on a discoverable
-                    # record and, failing that, waits rather than spawning while
-                    # a live pid holds the lease. ``_takeover_factory`` stays
-                    # armed for a LATER genuine death — a subsequent owner loss
-                    # re-enters this loop and, with the record gone by then,
-                    # takes the else-branch exactly as it always has.
-                    if record_seen and time.monotonic() >= give_up_deadline:
-                        logger.info(
-                            "no usable state from the runtime for %s after %.0fs; "
-                            "unbinding — the conversation stays and the next action "
-                            "reconnects",
-                            self._session_id,
-                            RECOVERY_GIVE_UP_S,
-                        )
-                        # LOAD-BEARING, and it must precede ``_go_cold``.
-                        # ``_ensure_bound`` returns immediately when this flag
-                        # is False, so clearing ``_recovering`` while leaving it
-                        # unset would produce a viewer that reports ``is_cold``
-                        # and can NEVER bind again — a silent no-op in place of
-                        # today's honest refusal, which is the worse bug.
-                        # Mirrors the refresh arm of ``_go_cold``, which flips
-                        # the same flag with the same reasoning: from here on
-                        # this facade is a viewer.
-                        self._can_go_cold = True
-                        # BELT, not a live repair: verified unreachable with a
-                        # stamped pid today, because this check runs at the TOP
-                        # of a pass and every way the previous pass could fail
-                        # (failed dial, refused sync, timeout) routes through
-                        # ``_discard_rejected_client``, which clears it. It is
-                        # kept because the invariant it upholds is not local:
-                        # ``_go_cold`` does NOT clear the identity ``_dial``
-                        # stamps on entry, while ``runtime_pid`` promises None
-                        # while cold, and ``take_unannounced_cleanup`` reads
-                        # that pid to decide notice ownership — a stale match
-                        # claims another runtime's notice and blanks the
-                        # terminal that should have shown it (the F3 hazard the
-                        # dial-failure arm below documents). Any future exit
-                        # added between a successful dial and this check would
-                        # reintroduce it silently. Cleared locally rather than
-                        # inside ``_go_cold`` to keep this off the desktop path.
-                        self._runtime_pid = None
-                        # NO "recovery was exhausted" FLAG IS STAMPED HERE, and
-                        # the absence is deliberate. An earlier revision set one
-                        # so the TUI could pick a different sentence for this
-                        # cold state; the sentence turned out to be unreachable
-                        # (see the note in ``OperatorApp._activate_resolved_
-                        # model``), which left the flag with no consumer — and a
-                        # consumerless flag that LATCHES is not inert. It was
-                        # cleared only on ``_bind_to``'s success tail, while
-                        # this loop's own reattach arm below rebinds inline
-                        # without going through ``_bind_to``, so a viewer that
-                        # gave up once and then recovered still reported the
-                        # give-up verdict against every later, genuinely dead
-                        # owner (review round 1, R2). Deleted rather than fixed
-                        # with two more clear-sites: state whose only defence is
-                        # remembering to clear it everywhere is state that will
-                        # latch again the next time an exit is added.
-                        self._go_cold()
-                        # ``finally`` clears ``_recovering``: the refusals lift
-                        # and the parked prompt is released by ``_runtime_ready``.
-                        return
+                    # unless the holder is proven dead OR UNVERIFIABLE — the
+                    # premise an earlier revision of this comment got wrong — so a
+                    # live owner cannot be taken over even if this arm did reach
+                    # the factory. Nor does it engage a second runtime for a
+                    # session that has one: ``engage_runtime`` short-circuits on a
+                    # discoverable record and, failing that, waits rather than
+                    # spawning while a live pid holds the lease.
+                    # ``_takeover_factory`` stays armed for a LATER genuine
+                    # death — a subsequent owner loss re-enters this loop and,
+                    # with the record gone by then, takes the else-branch exactly
+                    # as it always has.
+                    self._give_up_recovery(
+                        after=COLD_FALLBACK_S,
+                        because="no runtime this viewer could use appeared",
+                    )
+                    return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
                 # small file, threaded) and it is what keeps the takeover
                 # from resurrecting a session a kill switch just ended.
-                if not self._deliberate_stop and await self._session_was_stopped():
+                if not self._deliberate_stop and await self.session_was_stopped():
                     self._deliberate_stop = True
                     self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
@@ -4594,14 +5932,6 @@ class AttachedSession:
                     and record.protocol >= 5
                     and FRONTEND_CAPABILITY in record.capabilities
                 ):
-                    # Stamped on the SAME condition that selects the reattach
-                    # arm, not on ``record is not None``: a record this viewer
-                    # cannot use (an older protocol, no frontend capability)
-                    # falls through to the takeover ``else`` and belongs to the
-                    # dead-owner contract, so counting it as a sighting would
-                    # let the give-up exit fire for a chase that never had a
-                    # reattach to give up ON.
-                    record_seen = True
                     try:
                         pending_sync = await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):
@@ -4623,7 +5953,7 @@ class AttachedSession:
                         # rule — a pass that did not bind leaves no trace of
                         # the runtime it tried.
                         self._discard_rejected_client()
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(paced(delay))
                         # ``_RECOVERY_DIAL_CAP_S``, not the 0.5 this loop shared
                         # with ``_bind_under_lock``: the ``continue`` below
                         # skips the sleep at the bottom of the loop, so this is
@@ -4705,18 +6035,57 @@ class AttachedSession:
                         local = await self._takeover_factory()
                     except SessionLeaseHeldError:
                         # Another follower won the kernel-arbitrated stale
-                        # recovery lock. Back off, then discover its fresh
-                        # registrant record and reattach.
-                        pass
+                        # recovery lock. Back off and re-dial on the next pass:
+                        # its fresh registrant record is what this loop is
+                        # waiting for, and the SAME cold deadline above bounds
+                        # the wait.
+                        #
+                        # WHAT A LEASE HOLDER ACTUALLY PROVES (review round 1,
+                        # MINOR-1 — an earlier comment here, and the PR body,
+                        # asserted "a live process", which is not what the
+                        # exception means). ``SessionLeaseHeldError`` is raised
+                        # for "another live OR UNVERIFIABLE process"
+                        # (``session_lease.py``): ``_pid_state`` returns
+                        # ``"uncertain"`` for any unexpected ``OSError``, the
+                        # legacy ``.session.pid`` mirror raises merely because a
+                        # pid is NOT DEAD, and an unreadable claim raises with
+                        # ``pid=None``. None of those implies a process that will
+                        # ever publish a record — a recycled pid or a candidate
+                        # publishing an unattachable one (protocol < 5, no
+                        # ``FRONTEND_CAPABILITY``) reaches this raise forever.
+                        #
+                        # That shape used to latch the facade indefinitely,
+                        # because this raise was counted as PROGRESS and
+                        # progress disabled the give-up arm. It does not any
+                        # more: the deadline is evaluated at the top of every
+                        # pass and does not consult this flag, so an unprobeable
+                        # holder is bounded exactly like every other arm — and
+                        # the release is rebindable, so if that holder IS alive
+                        # and eventually publishes, the next action re-dials it.
+                        logger.debug(
+                            "remote takeover: another follower holds the lease for %s",
+                            self._session_id,
+                        )
                     except Exception:
                         logger.debug("remote takeover attempt failed", exc_info=True)
                     else:
                         callback = self._takeover_callback
                         if callback is not None:
-                            # Takeover means the owner is gone: the turn did
-                            # abort. Synthesise before the app disposes this
-                            # facade, or the working line never learns.
-                            self._end_turn_locally(direct=True)
+                            # Takeover means the owner is gone and the turn did
+                            # NOT complete, so the synthesised end names that
+                            # rather than carrying the bare abort a user's Esc
+                            # produces. The same shape this loop's cold arm passes,
+                            # so the two ways of losing an owner cannot disagree
+                            # about what losing one looks like; a DELIBERATE stop
+                            # never reaches here, because the stop check returns
+                            # earlier in the pass. Synthesise before the app
+                            # disposes this facade, or the working line never
+                            # learns.
+                            self._end_turn_locally(
+                                direct=True,
+                                aborted=False,
+                                error=format_cut_off_notice("owner-lost"),
+                            )
                             result = callback(local)
                             if inspect.isawaitable(result):
                                 await result
@@ -4727,10 +6096,81 @@ class AttachedSession:
                         # disconnect can happen; if it did not, avoid leaking
                         # the writer lease we just won.
                         await local.dispose()
-                await asyncio.sleep(delay)
+                await asyncio.sleep(paced(delay))
                 delay = min(delay * 1.7, 0.5)
         finally:
             self._recovering = False
+
+    def _give_up_recovery(self, *, after: float, because: str) -> None:
+        """Stop chasing an owner that cannot be reached, and stay REBINDABLE.
+
+        The single exit for every arm that has not produced a usable runtime
+        within the cold window: no record at all, a record this viewer cannot
+        use, a record that never answers, and a takeover arm that cannot run in
+        this viewer (``_takeover_factory`` raising on every pass — UX round 2,
+        U7). One method rather than a copy per branch, because the ordering rule
+        below is load-bearing and a second copy is how it gets forgotten.
+
+        ``after`` is the bound that expired, and it is only logged: the bound
+        differs per arm at most in which constant is named, and the log line is
+        what lets a reader tell which arm released the facade without reading
+        the source.
+
+        LOAD-BEARING, and it must precede ``_go_cold``: ``_ensure_bound``
+        returns immediately when ``_can_go_cold`` is False, so clearing
+        ``_recovering`` while leaving that flag unset would produce a viewer that
+        reports ``is_cold`` and can NEVER bind again — a silent no-op in place of
+        today's honest refusal, which is the worse bug. Mirrors the refresh arm
+        of ``_go_cold``, which flips the same flag with the same reasoning: from
+        here on this facade is a viewer.
+
+        The terminal state is COLD AND REBINDABLE, not failed: the transcript
+        stays on screen, ``_runtime_ready`` is set, and the next action engages
+        through ``_ensure_bound``. No user-facing copy is added for the state
+        itself, because it would have to describe where the user is not: they
+        see either the named cut-off verdict already painted above them (when a
+        turn was live) or, for an idle owner death, the ordinary cold session
+        the next message starts a fresh runtime from.
+        """
+        logger.info(
+            "giving up recovery for %s after %.0fs: %s; unbinding — the "
+            "conversation stays and the next action reconnects",
+            self._session_id,
+            after,
+            because,
+        )
+        self._can_go_cold = True
+        # BELT, not a live repair: verified unreachable with a stamped pid
+        # today, because this check runs at the TOP of a pass and every way the
+        # previous pass could fail (failed dial, refused sync, timeout) routes
+        # through ``_discard_rejected_client``, which clears it. It is kept
+        # because the invariant it upholds is not local: ``_go_cold`` does NOT
+        # clear the identity ``_dial`` stamps on entry, while ``runtime_pid``
+        # promises None while cold, and ``take_unannounced_cleanup`` reads that
+        # pid to decide notice ownership — a stale match claims another
+        # runtime's notice and blanks the terminal that should have shown it
+        # (the F3 hazard the dial-failure arm documents). Any future exit added
+        # between a successful dial and this check would reintroduce it
+        # silently. Cleared locally rather than inside ``_go_cold`` to keep this
+        # off the desktop path.
+        self._runtime_pid = None
+        # NO "recovery was exhausted" FLAG IS STAMPED HERE, and the absence is
+        # deliberate. An earlier revision set one so the TUI could pick a
+        # different sentence for this cold state; the sentence turned out to be
+        # unreachable (see the note in ``OperatorApp._activate_resolved_model``),
+        # which left the flag with no consumer — and a consumerless flag that
+        # LATCHES is not inert. It was cleared only on ``_bind_to``'s success
+        # tail, while this loop's own reattach arm rebinds inline without going
+        # through ``_bind_to``, so a viewer that gave up once and then recovered
+        # still reported the give-up verdict against every later, genuinely dead
+        # owner (review round 1, R2). Deleted rather than fixed with two more
+        # clear-sites: state whose only defence is remembering to clear it
+        # everywhere is state that will latch again the next time an exit is
+        # added.
+        self._go_cold()
+        # The CALLER ``return``s: the loop's ``finally`` then clears
+        # ``_recovering`` (lifting the refusals) and ``_go_cold`` has already
+        # released anything parked on ``_runtime_ready``.
 
     async def load_job_trajectory(self, job_id: str) -> bool:
         """Fetch one child's retained event window from the owner, in pages.
@@ -4962,6 +6402,21 @@ class AttachedSession:
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.pending_gate
+
+    @property
+    def has_running_job(self) -> bool:
+        """Whether the owner's roster still shows a running child, clone-free.
+
+        The retention predicate (``SessionInteraction.retained_for_auto_work``)
+        asks this on every canonical delta of every leased source, and it used to
+        ask it through ``frontend_state`` — a full deep copy of canonical state
+        for one boolean. Raised exactly the way that property raises when the
+        store has not synchronized, because this replaces its read on that path
+        and a caller must not read "no running child" for "no state yet".
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.has_running_job()
 
     @property
     def epoch(self) -> str:
@@ -5197,6 +6652,53 @@ class AttachedSession:
     def supports_completion_ack(self) -> bool:
         return bool(self._client and self._client.supports_completion_ack)
 
+    @property
+    def supports_event_mute(self) -> bool:
+        return bool(self._client and self._client.supports_event_mute)
+
+    def set_event_mute(self, muted: bool) -> None:
+        """Park/unpark the owner's delta-grade event relay (best-effort).
+
+        WHY THIS EXISTS. A parked source keeps its subscription so the
+        conversation stays warm, but every delta it receives is materialised
+        on this process's loop — socket read, JSON decode, event
+        deserialization — and then discarded by the parked controller. The
+        app-side drop is the semantic contract; the DELIVERY underneath it is
+        paid per parked viewer per frame, so the cheapest correct frame is the
+        one the owner never sends. This asks the owner to stop sending
+        delta-grade frames while parked — the same three types the parked
+        controller discards, nothing that carries state — and resumes them on
+        reveal, where the presentation rebuilds from history plus the canonical
+        live seed exactly as it already does after any parked gap.
+
+        SYNCHRONOUS ON PURPOSE (the park toggle's own shape): the send is
+        spawned rather than awaited, and a lost send is only a lost
+        optimisation because the app-side drop still applies. The REQUESTED
+        state is remembered, which is what a reconnect re-asserts — the mute
+        is per connection and a fresh socket starts unmuted. Call from the
+        app's loop, which is where parking happens; a viewer whose owner never
+        advertised the capability is a no-op (the pre-mute behaviour).
+        """
+        self._event_mute_requested = muted
+        client = self._client
+        if client is None or not client.supports_event_mute:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Never in the connect path's loop-less phases; a lost send is
+            # recoverable by the next park toggle or the next reconnect.
+            return
+        task = loop.create_task(self._send_event_mute(client, muted))
+        self._event_mute_tasks.add(task)
+        task.add_done_callback(self._event_mute_tasks.discard)
+
+    async def _send_event_mute(self, client: AttachClient, muted: bool) -> None:
+        try:
+            await client.set_event_muted(muted)
+        except Exception:  # noqa: BLE001 — a lost mute is a cost, never a defect
+            logger.debug("event mute send failed", exc_info=True)
+
     async def refresh_attention(self) -> dict[str, Any]:
         return dict(self.frontend_state.attention)
 
@@ -5205,8 +6707,15 @@ class AttachedSession:
         client = self._client
         if client is None or not client.connected or self._recovering:
             raise ConnectionError("session is reconnecting")
-        await client.acknowledge_attention(token)
-        return dict(self.frontend_state.attention)
+        # The OWNER's answer for this op, not this follower's projection: the
+        # projection arrives on the event queue (a different writer from the ack)
+        # and would read stale by construction, which is how an honest receipt
+        # comes to look lost (agent review round 1, R4). An owner older than the
+        # field sends none, so fall back to the projection -- where the caller
+        # must stay inconclusive rather than report a verdict it cannot support.
+        return await client.acknowledge_attention_state(token) or dict(
+            self.frontend_state.attention
+        )
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """The owner serializes the copy; a viewer never raw-copies a live store."""
@@ -5410,8 +6919,7 @@ class AttachedSession:
         This also works with older owners that implement the existing ID/epoch/
         generation contract, without a new scheduler or longer RPC timeout.
         """
-        await self._ensure_bound()
-        await self._runtime_ready.wait()
+        await self._await_owner_ready()
         if self._takeover_target is not None:
             await self.prompt(text, images=images, message_id=message_id)
             return
@@ -5496,9 +7004,9 @@ class AttachedSession:
         """
         # The cold-to-attached seam: a viewer that has been LOOKING at a
         # session starts working in it here, which is the first moment a
-        # runtime is actually owed. A no-op once attached.
-        await self._ensure_bound()
-        await self._runtime_ready.wait()
+        # runtime is actually owed. A no-op once attached, and run again after
+        # the wait for the reason ``_await_owner_ready`` documents.
+        await self._await_owner_ready()
         target = self._takeover_target
         if target is not None:
             # A takeover means a real in-process Session now owns the
@@ -5538,15 +7046,51 @@ class AttachedSession:
         asyncio.create_task(self._send_steer_when_ready(message))
 
     async def _send_steer_when_ready(self, message: Message) -> None:
-        await self._ensure_bound()
-        """Retain a queued steer across silent reattach/takeover."""
-        await self._runtime_ready.wait()
+        """Retain a queued steer across silent reattach/takeover.
+
+        THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
+        other caller of ``_await_owner_ready`` runs inside a worker whose
+        exception the app catches and turns into a notice and a composer
+        restore; this one is spawned by ``steer_message`` and never awaited, so
+        a refused bind died as an unretrieved task exception while its row went
+        on promising the ride-along. That is the shape QA round 2 (Q-1)
+        measured on the released-cold path: the give-up wakes this waiter into a
+        bind against the same unreachable record, the bind raises, and the
+        user's already-accepted message is silently gone — falsifying both the
+        row and U3's "nothing is lost".
+
+        So the failure is RETRIEVED here and reported through
+        ``_steer_failure``, whose app-side handler lifts the steer's rows and
+        hands the text back (``OperatorApp._on_steer_undeliverable``). The
+        message must never be dropped on the floor: it is text the app already
+        echoed as sent, and a steered message has no other owner to fail it.
+
+        A DISPOSED facade is the one silent return, here and above: the app
+        that would paint the warning is gone with it.
+        """
+        try:
+            await self._await_owner_ready()
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            # `ConnectionError` is the documented failure of `_ensure_bound`
+            # (an unreachable owner, an engage that produced no runtime, the
+            # stopped-session refusal), and it is the only class the path is
+            # known to raise. Caught broadly anyway, for the reason
+            # `_resolve_recall` gives about the same seam: an unknown raise
+            # would otherwise become the very unretrieved-exception bug this
+            # block exists to remove.
+            self._report_steer_failure(message, str(error))
+            return
         target = self._takeover_target
         if target is not None:
             target.steer_message(message)
             return
         client = self._client
         if client is None or not client.connected:
+            # Same fact as the raise above, reached through the other door: the
+            # bind returned but left nothing that can carry the message. The
+            # row must stop promising for it too, or this is the silent drop
+            # again with a different stack.
+            self._report_steer_failure(message, "the bind returned with no connected client")
             return
         command = ContinuationCommand(
             command_id=message.id,
@@ -5558,7 +7102,56 @@ class AttachedSession:
                 if isinstance(block, ImageContent)
             ],
         )
-        await client.send_command(command, streaming=True)
+        # THE THIRD DOOR, and the one the two checks above cannot close:
+        # `client.connected` is a SNAPSHOT taken one line earlier and the send
+        # is a socket round trip, so an owner that dies in between raises HERE
+        # (review round 3, MINOR-3 — read, not raced: three kill offsets from a
+        # live driver failed to land in the window, which is why the unit cells
+        # below force the raise instead). Left unguarded this is the shape QA
+        # round 2 (Q-1) filed, one line lower: nothing awaits this task, so the
+        # raise is an unretrieved task exception while the row still promises
+        # `sends with that next message`.
+        #
+        # ITS AMBIGUITY, stated rather than hidden: the raise can come FROM
+        # `_request_frame` before the frame is written ("not attached", an
+        # oversized request) or AFTER it (`OwnerAckTimeout`, a lost connection),
+        # and the second shape cannot prove the owner did not receive the
+        # message. Handing the text back is still the right gesture — the
+        # alternative is the silent drop this method exists to remove — and a
+        # user who resends a message the owner already had is the cheaper error.
+        try:
+            await client.send_command(command, streaming=True)
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            self._report_steer_failure(message, str(error))
+            return
+
+    def _report_steer_failure(self, message: Message, detail: str) -> None:
+        """Report a steer nothing can carry, through the app's failure seam.
+
+        ONE ACTION FOR ALL THREE DOORS of ``_send_steer_when_ready`` — the bind
+        that raised, the bind that returned with no client, and the send itself
+        — because they leave the app in one state: a message that was echoed as
+        sent and is not going anywhere. The seam is what hands the text back
+        and lifts the rows that claimed otherwise.
+
+        Logged BEFORE the report, and the report is skipped when the resolver is
+        unarmed: the log line is then the only trace of the failure, which is
+        strictly better than the unretrieved exception every door here used to
+        produce. A DISPOSED facade reports nothing at all: the app that would
+        paint the warning is gone with it (`_send_steer_when_ready`'s one silent
+        return).
+        """
+        if self._disposed:
+            return
+        logger.info(
+            "steer %s could not be delivered for %s: %s",
+            message.id,
+            self._session_id,
+            detail,
+        )
+        resolver = self._steer_failure
+        if resolver is not None:
+            resolver(str(message.id))
 
     def queued_steering(self) -> list[Any]:
         return [
@@ -5621,6 +7214,16 @@ class AttachedSession:
             if resolver is not None:
                 resolver(command_id)
 
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Install the app's handler for a steer whose bind was refused.
+
+        Called with the undelivered message's id. The steer twin of
+        :meth:`set_recall_resolution` and armed the same way, on adoption,
+        because the failure arrives asynchronously on a task the app never
+        awaits — there is no synchronous press to install a resolver in.
+        """
+        self._steer_failure = resolver
+
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """Install the app's handler for a recall the owner did NOT honour.
 
@@ -5636,6 +7239,39 @@ class AttachedSession:
             return  # nothing to abort on; the local end is what the app shows
         task = asyncio.create_task(client.abort())
         task.add_done_callback(_log_abort_failure)
+
+    async def interrupt(self) -> str:
+        """Stop this session's CURRENT WORK and return the owner's receipt.
+
+        THE AWAITING TWIN OF :meth:`abort`, and the reason it exists is the
+        receipt. The control frame is the same one — the runtime's ``abort`` op
+        (``ServingSessionHandle.abort``), which stops this turn, cancels the
+        children it started and spares backgrounded ``bash`` jobs. What
+        :meth:`abort` throws away is the runtime's own sentence describing what
+        actually settled; a caller that has a user waiting on the press (the
+        desktop's Stop button and Esc) must be able to show it instead of
+        guessing. ``abort`` keeps its fire-and-forget shape for its existing
+        callers, which have no request left to answer into.
+
+        NOT the kill switch. ``request_stop`` ends the session and its process;
+        this ends one turn and leaves both running, which is what a button
+        labelled "stop this session's current work" promises. There is no
+        escalation ladder here and deliberately so: a ladder only works where
+        the second rung is offered on screen, and this surface has none — a
+        second press is simply a second interrupt, a no-op because nothing is
+        left.
+
+        RAISES when there is no attached client rather than resolving a
+        no-op, so the caller can tell "nothing to interrupt" from "the owner
+        went away". The desktop route maps a cold session to an ``idle`` answer
+        before it reaches here, so this raise is the genuine transport failure
+        (``ConnectionError``/``RuntimeError``/``TimeoutError``), which its error
+        ladder already answers as a 503.
+        """
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("not attached")
+        return await client.abort()
 
     async def request_stop(self) -> str:
         """Stop the session this follower is watching — deliberately.
@@ -5686,6 +7322,47 @@ class AttachedSession:
             logger.debug("credential op failed", exc_info=True)
             return {"ok": False, "reason": "disconnected"}
         return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
+
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise RuntimeError("The MCP credential owner is disconnected")
+        return await client.mcp_credentials(body)
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb on the OWNER's eval kernel.
+
+        The namespace this reads is the eval kernel's, and the kernel runs beside
+        the owner's turn loop — so a viewer that answered from anything local
+        would report a namespace no cell in this conversation ever mutates. The
+        verbs themselves are the owner's (``ServingSessionHandle.variables_op``
+        → the shared table), so both session shapes execute one implementation.
+
+        A disconnected viewer RAISES. Deliberately not the
+        ``{"ok": False, "reason": "disconnected"}`` shape ``credential_op``
+        answers: a lost owner is transient and retryable, and the route's
+        ``errors()`` ladder already words it for every neighbouring route, while
+        the one state this surface has for "cannot read" (
+        ``unsupported``) is a claim about the owner's BUILD — a user told that
+        would go and update a backend that is not the problem.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError("the session runtime is not attached")
+        try:
+            answer = await client.variables(action, key, value, value_type)
+        except RuntimeError as error:
+            # An owner too old to know the op answers ``unknown op``: that IS a
+            # fact about its build, and the panel's sentence for it is exactly
+            # "update the backend".
+            if "unknown op" in str(error):
+                return {"state": "unsupported"}
+            raise
+        if not isinstance(answer, dict):
+            return {"state": "unsupported"}
+        return answer
 
     async def register_secret_redaction(self, value: str) -> None:
         """Hand one §6 value to the owner so IT registers it for redaction.
@@ -5756,6 +7433,42 @@ class AttachedSession:
         # Copying path: `Usage` is accumulated in place elsewhere in the
         # harness, so a shared instance is one `+=` from corrupting state.
         return self.frontend_state.last_usage
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable spend record this viewer read out of the journal.
+
+        Scope, stated because the absence is a deliberate one: a COLD open
+        reads the record from the suffix it already fetched, which is this
+        surface's only access to the owner's money (there is no runtime to ask
+        and no `Transcript` to index). A WARM attach adopts the owner's
+        canonical state instead, whose ``cumulative_parent_cost`` and
+        ``cost_knowledge`` are the same number one wire hop away — so
+        ``None`` here means "ask the owner's state", never "this session has
+        no spend".
+        """
+        details = getattr(self, "_cold_spend", None)
+        if not details:
+            return None
+        return SessionSpend.from_details(details)
+
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """No rows recovered on a VIEWER: the transcript is the runtime's.
+
+        Declared and implemented rather than left to a duck-probe, because the
+        TUI reads it on the resume path and an absent member there degrades the
+        band to a silently-short figure -- the shape of the /team and /agent
+        regressions.
+
+        An empty tuple is a SCOPE decision, not a capability limit: the search
+        spend a viewer would show comes from a process-wide ledger keyed by
+        session id (``web_search.cost.SEARCH_SPEND``), and the viewer's own
+        process holds no rows for the owner's searches, so recovering rows from
+        the journal here would not reach the screen this member feeds. Routing a
+        viewer's search spend from the runtime is its own change; until then an
+        empty tuple leaves the ledger untouched, which renders as absence rather
+        than as a confident ``$0.0000``.
+        """
+        return ()
 
     def running_subagents(self) -> int:
         return sum(
@@ -5878,6 +7591,33 @@ async def _await_handler(result: Any) -> None:
     sync-or-async handler contract without weakening types at the call site.
     """
     await result
+
+
+def _journal_witnessed_cut_off(transcript: Any, store: Any, cause: str) -> None:
+    """Publish a witnessed cut-off's durable outcome, on a worker thread.
+
+    The executor body of :meth:`AttachedSession._journal_witnessed_cut_off`,
+    kept module-level so the read-heavy work (a registry scan plus a transcript
+    parse) cannot reach back into the facade and so the whole thing is one
+    testable call. Never raises: a sidebar notice is not worth a task
+    exception in the operator's log.
+
+    ``cause`` is the viewer's own verdict token, and it is only used when the
+    classifier refuses to classify — see the caller's docstring for why that is
+    safe (the record it writes is provisional and the live owner's real outcome
+    supersedes it).
+    """
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import bootstrap_transcript
+
+    try:
+        bootstrap_transcript(
+            transcript,
+            store,
+            witnessed_cut_off=(cause, render_cut_off_reason(cause)),
+        )
+    except Exception:  # noqa: BLE001 — the verdict it describes is already painted
+        logger.debug("journalling the witnessed cut-off failed", exc_info=True)
 
 
 def _pending_request(state: Any) -> PendingRequest | None:

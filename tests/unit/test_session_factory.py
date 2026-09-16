@@ -25,9 +25,14 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
+    _latest_user_query,
     _transcript_dir_and_agent_id,
     attach_mcp_dispose,
     build_initial_blocks,
@@ -482,6 +487,57 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
 
 @pytest.mark.asyncio
+async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Path) -> None:
+    """The chosen level is CONSTRUCTED into the spec, not applied afterwards.
+
+    This is the seam the desktop plane's spawn environment reaches:
+    ``spawn_owned_session(birth_effort=...)`` → ``args.birth_effort`` →
+    ``configure_model(reasoning_effort=...)``. It is a construction input rather
+    than a later switch because the owner's FIRST frontend snapshot and its
+    first provider call are then already right, with no window in which the spec
+    disagrees with the chip the user just used.
+
+    Both halves matter. The configured ``model_effort`` must still govern a
+    caller that chose no level (every launch before this feature, and the TUI),
+    so the second session below is constructed with the birth argument ABSENT
+    and must come back on the configured rung.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: anthropic\n"
+        "  model_name: claude-sonnet-5\n"
+        "  model_effort: low\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_effort="max"),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.reasoning_effort == "max"
+        assert "max" in chosen.model.reasoning_efforts, "the level must be one the model offers"
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.reasoning_effort == "low", "configured model_effort must still govern"
+    finally:
+        await default.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:
@@ -902,6 +958,7 @@ class FakeMcpManager:
         connected: list[str] | None = None,
         settling: bool = False,
         startup_failures: dict[str, str] | None = None,
+        network_failures: list[str] | None = None,
     ):
         self.disconnected = 0
         self.callback: Callable[[list[Any]], Any] | None = None
@@ -911,6 +968,10 @@ class FakeMcpManager:
         self.meta: dict[str, dict[str, Any]] = {}
         self._settling = settling
         self._startup_failures = dict(startup_failures or {})
+        # The transport-failure subset, mirroring the real manager's accumulator:
+        # the wiring reads it into ``McpStartupOutcome.network_failures`` so the
+        # toast and the durable notice group on the same fact.
+        self._network_failures: set[str] = set(network_failures or [])
         self.on_startup_settled: Callable[[], None] | None = None
         # Declared like the real manager's, so ``attach_mcp_dispose`` installing
         # the incident/recovery sinks is type-checked here rather than silently
@@ -932,6 +993,9 @@ class FakeMcpManager:
 
     def startup_failures(self) -> dict[str, str]:
         return dict(self._startup_failures)
+
+    def startup_network_failures(self) -> set[str]:
+        return set(self._network_failures)
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -1043,7 +1107,7 @@ async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
         configured=["notion", "linear"],
         connected=["linear"],
         settling=True,
-        startup_failures={"notion": "run /mcp login notion to authorize"},
+        startup_failures={"notion": "/mcp login notion to authorize"},
     )
 
     async def fake_discover(cwd, auth_store=None):
@@ -1077,6 +1141,121 @@ async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
     assert settled.failures == {}
     # The session's settle sink was handed the final outcome.
     assert settled_outcomes == [settled]
+
+
+@pytest.mark.asyncio
+async def test_the_boot_snapshot_carries_which_failures_were_the_network(monkeypatch) -> None:
+    """The front end groups on a FACT, so the session has to carry it.
+
+    The manager records the transport-failure subset BESIDE the messages; the
+    session snapshot is what the toast and the durable notice read. A manager
+    that knew and a session that did not would render a fleet-wide outage as
+    unrelated server faults, which is the defect this field exists to close.
+    """
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(
+        configured=["linear", "slack"],
+        connected=[],
+        startup_failures={
+            "linear": "network: cannot resolve linear.example.com",
+            "slack": "network: cannot reach slack.example.com",
+        },
+        network_failures=["linear", "slack"],
+    )
+
+    async def fake_discover(cwd, auth_store=None):
+        return (
+            manager,
+            [],
+            [
+                {"path": "mcp:linear", "error": "network: cannot resolve linear.example.com"},
+                {"path": "mcp:slack", "error": "network: cannot reach slack.example.com"},
+            ],
+        )
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+
+    boot = session.mcp_startup
+    assert boot is not None
+    assert boot.network_failures == frozenset({"linear", "slack"})
+    assert boot.all_failures_are_network is True
+
+
+@pytest.mark.asyncio
+async def test_the_grouping_survives_a_manager_that_does_not_report_network_failures(
+    monkeypatch,
+) -> None:
+    """A reduced manager double must lose the GROUPING, not the wiring.
+
+    ``startup_network_failures`` is read behind the same guard as
+    ``startup_settling``: this wiring is exercised with fakes that implement only
+    part of the manager's surface, and an AttributeError here would take down the
+    whole MCP startup record — including the failures the user needs — over a
+    piece of presentation.
+    """
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(
+        configured=["slack"],
+        connected=[],
+        startup_failures={"slack": "network: cannot reach slack.example.com"},
+    )
+
+    async def fake_discover(cwd, auth_store=None):
+        return (
+            manager,
+            [],
+            [{"path": "mcp:slack", "error": "network: cannot reach slack.example.com"}],
+        )
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    monkeypatch.delattr(FakeMcpManager, "startup_network_failures")
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+
+    boot = session.mcp_startup
+    assert boot is not None
+    assert boot.failures == {"slack": "network: cannot reach slack.example.com"}
+    assert boot.network_failures == frozenset()
+    # Degraded to the plain list: the failure is still reported, just not grouped.
+    assert boot.all_failures_are_network is False
+
+
+@pytest.mark.asyncio
+async def test_the_settled_re_report_carries_the_network_subset_of_that_round(
+    monkeypatch,
+) -> None:
+    """The settle re-report is the ONLY surface a missed-gate failure reaches,
+    so it has to carry the grouping too — and it must not inherit a name the
+    settled failure map no longer holds (a collapsed SDK-missing round folds to
+    one key, and a stale server name beside it is not a network story)."""
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(configured=["linear"], connected=[], settling=True)
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+    assert manager.on_startup_settled is not None
+
+    # The round settles with one network failure, plus a name the settle map does
+    # not hold: the phantom must be dropped, not carried into the outcome.
+    manager._settling = False
+    manager._startup_failures = {"linear": "network: cannot resolve linear.example.com"}
+    manager._network_failures = {"linear", "gone"}
+    manager.on_startup_settled()
+
+    settled = session.mcp_startup
+    assert settled is not None
+    assert settled.settling is False
+    assert settled.network_failures == frozenset({"linear"})
+    assert settled.all_failures_are_network is True
 
 
 @pytest.mark.asyncio
@@ -1950,6 +2129,39 @@ class TestWarmSessionImports:
             factory, "_WARM_IMPORTS", ("local_operator.no_such_module_at_all", "json")
         )
         factory.warm_session_imports()  # must not raise
+
+    def test_it_also_warms_what_is_not_an_import(self, monkeypatch) -> None:
+        """Two costs ride the boot warm beside the module list, and both are
+        easy to drop because neither is a module.
+
+        * The tokenizer. tiktoken's ``cl100k_base`` table is built on first
+          use, inside the first turn's critical path (122 ms to build, 0.004 ms
+          once built), and nothing on the import path touches it — so a warm
+          that only imported modules would leave it exactly where it was.
+        * The bytecode cache. It repairs the NEXT process, not this one, which
+          is why it is asked for here rather than awaited.
+
+        Pinned as a call-order-free assertion on the two seams, because the
+        failure mode is silent: ``warm_session_imports`` still returns happily
+        with both gone, and the only symptom is a first turn that is 100 ms
+        slower than the benchmark said.
+        """
+        import local_operator.bytecode as bytecode
+        import local_operator.session_factory as factory
+        from local_operator.compaction import tokens as tokens_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(factory, "_WARM_IMPORTS", ())
+        monkeypatch.setattr(tokens_mod, "warm_tokenizer", lambda: calls.append("tokenizer"))
+        monkeypatch.setattr(
+            bytecode,
+            "warm_bytecode_cache_in_background",
+            lambda: calls.append("bytecode"),
+        )
+
+        factory.warm_session_imports()
+
+        assert sorted(calls) == ["bytecode", "tokenizer"]
 
 
 @pytest.mark.asyncio
@@ -3723,6 +3935,40 @@ async def test_attach_mcp_dispose_installs_the_recovery_sink() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attach_mcp_dispose_survives_a_raising_store_refresh() -> None:
+    """A store push must not be able to disarm the manager's sinks.
+
+    ``attach_mcp_dispose`` is reached from the deferred wiring task, whose caller
+    swallows exceptions with one warning ("background MCP wiring failed"), and
+    the store refresh it performs sits BETWEEN the disconnect hook and the two
+    sink installs. So an unguarded raise there does not merely lose a repaint: it
+    skips ``on_incident`` and ``on_recovery`` entirely, and the model never
+    learns a server's tools are gone — the exact consequence the sibling guard in
+    ``_fire_mcp_sink`` names (review round 1, MINOR-1; QA round 1, Q1, which
+    measured the escape 5/5 on the base).
+
+    Asserted on the CONSEQUENCE rather than on the absence of an exception: the
+    test fails if the sinks are not installed, however the call got there.
+    """
+    session = FakeSessionShell()
+    # What the ``hasattr`` gate above reads, so the guarded call is reached.
+    session._frontend_state_store = object()  # type: ignore[attr-defined]
+
+    def exploding() -> None:
+        raise RuntimeError("frontend store refresh exploded")
+
+    session.refresh_frontend_state = exploding  # type: ignore[method-assign]
+
+    manager = FakeMcpManager()
+    attach_mcp_dispose(session, cast("McpManager", manager))
+
+    assert manager.on_incident == session._on_mcp_incident
+    assert manager.on_recovery == session._on_mcp_recovery
+    assert manager.disconnect_all in session._dispose_hooks
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_mcp_auth_revalidation_runs_from_the_composition_root(monkeypatch) -> None:
     """Every host polls the shared credential store, and stops on dispose.
 
@@ -3785,3 +4031,107 @@ async def test_a_raising_revalidation_never_kills_the_poller(monkeypatch) -> Non
             break
     assert calls["n"] >= 3, "the poller stopped after a raising tick"
     await session.dispose()
+
+
+# --- The configured birth-default effort (model_effort) -----------------------
+
+
+async def _prepare_effort_plan(config_manager, tmp_config_dir: Path, **arg_overrides):
+    """Drive the real ``_prepare`` for a model whose ladder is the shipped one.
+
+    ``_prepare`` is the ONE funnel every launch path shares — TUI boot, /new,
+    /reload, /resume, ``lop exec``, the server and the scheduler — so the
+    configured effort is read there rather than mutated post-hoc by each
+    caller. Anthropic's `claude-opus-5` is used because its ladder is a real
+    one (low/medium/high/xhigh/max) and resolves offline from the registry.
+    """
+    from local_operator.session_factory import _prepare
+
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+    args = _args(**{"hosting": "anthropic", "model": "claude-opus-5", **arg_overrides})
+    return await _prepare(
+        args,
+        cast("ConfigManager", config_manager),
+        credential_manager,
+        cast("AgentRegistry", registry),
+        has_ui=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_picked_by_the_flag(
+    tmp_config_dir: Path,
+) -> None:
+    """Carried unconditionally on ``model_source``: a ``--model`` flag chooses a
+    MODEL, not an effort, so the standing configured level rides across it — and
+    the clamp in ``configure_model`` is what makes that safe for a weaker ladder."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "low"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    assert plan.session_kwargs["model"].reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_taken_from_config(
+    tmp_config_dir: Path,
+) -> None:
+    """The same read serves the no-flag path, so a plain launch gets the level
+    without the operator re-running `/effort` every time."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "medium"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir, hosting=None, model=None)
+    assert plan.session_kwargs["model"].reasoning_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_no_configured_effort_leaves_the_builders_seed(tmp_config_dir: Path) -> None:
+    """``""`` is "no opinion", so the spec builder's own seeding must survive —
+    for a direct Anthropic route that is the documented ``high``. A regression
+    that read the empty string as a level would blank or move it."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": ""}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    spec = plan.session_kwargs["model"]
+    assert spec.reasoning_effort == "high"
+    assert spec.reasoning_default_effort == "high"
+
+
+def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
+    """Reviewer m2: a harness notice must not become the selection query.
+
+    ``_latest_user_query`` reads the newest ``role="user"`` row, and a notice is
+    stored as one — so selection searched the skills index for "[model switch]
+    You are now running as …" and froze the block's ``task_id`` against it. Both
+    shapes are refused: the stamped render, and the legacy notice a compaction
+    block carried forward with no stamp at all.
+    """
+    notice = (
+        "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+        "Reason: provider failure"
+    )
+
+    def entry(entry_id: str, text: str, payload: dict[str, Any] | None = None) -> SimpleNamespace:
+        body: dict[str, Any] = {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+        if payload:
+            body["provider_payload"] = payload
+        return SimpleNamespace(id=entry_id, type="message", payload=body)
+
+    transcript = SimpleNamespace(
+        latest_entry=lambda _type: None,
+        latest_user_entry=lambda: entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        entries=lambda: [
+            entry("mine", "fix the login redirect loop"),
+            entry("stamped", notice, {RENDERED_INJECTION_KEY: True}),
+            entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        ],
+    )
+
+    assert _latest_user_query(transcript) == "fix the login redirect loop"

@@ -1,5 +1,3 @@
-import os
-
 from fastapi import Depends, Request, WebSocket
 
 from local_operator.agents import AgentRegistry
@@ -64,12 +62,16 @@ async def get_provider_auth_store(
     # declares, and this dependency sits between the models routes and
     # `get_desktop_auth`, so an override supplied by a caller that mounts one
     # router in isolation was silently skipped on the way through.
-    from local_operator.server.desktop import require_desktop
+    from local_operator.server.desktop import desktop_posture, require_desktop
     from local_operator.server.routes.auth import get_desktop_auth
 
     # A central login must not become usable through an unprotected legacy
     # endpoint merely because that endpoint historically accepted local keys.
-    if os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"):
+    # ``desktop_posture`` and not the environment: a daemon that accepted a
+    # claim governs its plane exactly as one the app started does, and a test
+    # of the environment here is how this dependency would quietly stay shut
+    # on a claimed daemon.
+    if desktop_posture().enabled:
         require_desktop(request)
     # Passed explicitly: `get_desktop_auth` is invoked as a plain function here,
     # so its own `Depends(...)` defaults would arrive as `Depends` objects

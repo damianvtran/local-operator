@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, cast
+import statistics
+import threading
+import time
+from typing import Any, Coroutine, cast
 
 import pytest
 
@@ -134,6 +137,9 @@ class FakeHandle:
     async def set_model(self, provider, model_id):  # noqa: ANN001, ANN202
         return await self._record("set_model", provider, model_id)
 
+    async def set_model_effort(self, provider, model_id, effort):  # noqa: ANN001, ANN202
+        return await self._record("set_model_effort", provider, model_id, effort)
+
     async def set_effort(self, effort):  # noqa: ANN001, ANN202
         return await self._record("set_effort", effort)
 
@@ -251,6 +257,26 @@ async def _wait_record() -> registry.SessionRecord:
             return found[0][0]
         await asyncio.sleep(0.05)
     raise AssertionError("runtime never published a live record")
+
+
+async def _on_runtime_loop(runtime: RuntimeServer, coro: Coroutine[Any, Any, Any]) -> Any:
+    """Drive a runtime-owned coroutine from the runtime's OWN event loop.
+
+    ``RuntimeServer.start()`` hosts the runtime on a dedicated thread with its own
+    loop, and the send path owns objects that belong to that loop (``conn.send_lock``
+    and the connection's ``StreamWriter``). Awaiting such a coroutine from the test's
+    loop is the cross-loop misuse ``_send_to`` now refuses, and its failure mode was
+    not an error: with the lock contended, the test loop parks a waiter future of its
+    OWN, the owner's ``Lock.release()`` completes it with ``set_result`` from the wrong
+    thread, and that callback is scheduled with plain ``call_soon`` — no self-pipe
+    write — so a loop already in ``select()`` is never woken and the await never
+    returns. Ten CI shard jobs were cancelled on exactly that park. Every production
+    caller of a control op or a repaint is already on the owner's loop; this is how a
+    test gets there. ``start_in_process`` hosts are unaffected and need no hop.
+    """
+    loop = runtime._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
 
 async def _dial(
@@ -435,7 +461,7 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         )
         update = await _until(attach_reader, "frontend_update")
         assert update["data"]["changes"]["pending_gate"]["request_id"] == "approval-1"
-        await runtime._push()
+        await _on_runtime_loop(runtime, runtime._push())
         daemon = json.loads(await daemon_reader.readline())
         assert daemon["data"]["pending"] is None
     finally:
@@ -545,6 +571,101 @@ async def test_peer_message_dispatches_with_parsed_args() -> None:
         runtime.close()
 
 
+class NoEffortHandle(FakeHandle):
+    """An owner runtime that predates a chosen reasoning level.
+
+    The dispatch probes ``set_model_effort`` with getattr, so a handle that
+    simply lacks the method must still answer the two-argument switch it does
+    implement — the same optional-capability contract ``NoPeerHandle`` and
+    ``recall_steer`` document. The consequence, stated rather than discovered:
+    against such an owner the chosen level is not applied, and the turn runs at
+    the model's own default level.
+    """
+
+    set_model_effort = None  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_effort_dispatches_to_the_optional_capability() -> None:
+    """The level rides the SAME frame as the pair, and only when one was chosen.
+
+    Two frames, one op: with a level it must reach the effort-carrying method,
+    and without one it must stay byte-for-byte the call every owner has always
+    received (the frame carries no ``effort`` key at all in that case, which is
+    what an older viewer sends).
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        for req, frame in (
+            (
+                21,
+                {
+                    "op": "set_model",
+                    "req": 21,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "effort": "max",
+                },
+            ),
+            (
+                22,
+                {
+                    "op": "set_model",
+                    "req": 22,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                },
+            ),
+        ):
+            writer.write(json.dumps(frame).encode() + b"\n")
+            await writer.drain()
+            await _until(reader, "ack", req)
+        assert handle.calls[0][0:2] == (
+            "set_model_effort",
+            ("deepseek", "deepseek-flash", "max"),
+        )
+        assert handle.calls[1][0:2] == ("set_model", ("deepseek", "deepseek-flash"))
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -> None:
+    handle = NoEffortHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "set_model",
+                    "req": 23,
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "effort": "max",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert (await _until(reader, "ack", 23))["detail"] == "set_model ok"
+        assert handle.calls[-1][0:2] == ("set_model", ("deepseek", "deepseek-flash"))
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 class NoPeerHandle(FakeHandle):
     """An owner runtime that predates peer messaging: no receive_peer_message.
 
@@ -625,6 +746,104 @@ async def test_in_process_close_joins_delayed_projection_push() -> None:
     # A second awaited close must join the completed shutdown rather than
     # returning early based only on the cross-thread close latch.
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll() -> None:
+    """A thread-mode close must not inherit the loop's wait interval.
+
+    This is the same defect the viewer endpoint had: ``close()`` joins the serve
+    thread, and that thread decided it had been asked to stop by re-checking the
+    latch on a 200 ms ``sleep``. Measured on the poll (n=15, isolated, the close
+    landing at an arbitrary phase): median 206 ms, min 192 ms, max 215 ms — of
+    which ~150 ms remains when the close is aimed 50 ms into the wait, which is
+    the shape below.
+
+    WALL time, deliberately, and not ``time.thread_time()``: the old cost was
+    blocked in a sleep, which consumes no CPU, so a CPU-time instrument would
+    report ~0 ms for exactly the code this test exists to reject.
+
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. Identical in shape to the viewer
+    endpoint's test: same 50 ms phase GUESS, same five fresh servers, same
+    MEDIAN aggregate and the same reason for it — a single starved round on the
+    polled code returns in ~1 ms and must not carry the verdict, while a single
+    slow round on the fixed code must not false-fail it. The reasoning and its
+    load measurements are stated ONCE, in
+    ``test_viewer_routing.test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll``;
+    this loop's own numbers only: on a loaded dev host a single round reached
+    ~101 ms, ABOVE the 100 ms ceiling, so there is no per-round margin here
+    either — the aggregate is what carries the test (measured medians 1-7 ms).
+
+    Thread mode specifically, because the in-process path never parks in
+    ``_closed_wait``: it schedules its teardown on the owning loop and has no
+    poll to remove.
+    """
+    samples: list[float] = []
+    for _ in range(5):
+        runtime = RuntimeServer(FakeHandle(), kind="tui")
+        try:
+            # start() inside the try: a runtime that fails to start must still
+            # be closed by this round's ``finally``.
+            runtime.start()
+            # Tight-poll the record rather than using ``_wait_record()``, which
+            # waits in 50 ms steps. The overshoot matters HERE and nowhere else:
+            # the polled code's cost is the REMAINDER of the loop's wait
+            # interval, so every 50 ms of overshoot before the settle below
+            # moves the close toward the end of that interval and shrinks the
+            # floor the base arm owes — measured with the 50 ms cadence, the old
+            # code came in at 101-103 ms against the 100 ms ceiling, one
+            # scheduling nudge away from the false pass this test exists to
+            # prevent. Polling at 5 ms keeps the base arm at ~140-190 ms.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while True:
+                found = registry.scan()
+                if found and found[0][1] == "live":
+                    break
+                if asyncio.get_running_loop().time() > deadline:
+                    raise AssertionError("runtime never published a live record")
+                await asyncio.sleep(0.005)
+
+            # The live record proves a listener was PUBLISHED, not that it
+            # ANSWERS: dial the port it advertises, so a round whose listener
+            # died after publishing cannot pass while measuring nothing.
+            # CONNECTED is what the record exists for; closing without a frame
+            # registers no client (the daemon path only runs after a successful
+            # auth).
+            probe_reader, probe_writer = await asyncio.open_connection(
+                "127.0.0.1", found[0][0].control_port, limit=1 << 20
+            )
+            probe_writer.close()
+            await probe_writer.wait_closed()
+
+            # The record proves the listener is PUBLISHED, not that the loop has
+            # parked in ``_closed_wait()`` — ``_serve`` publishes first and parks
+            # after — so the loop's phase must still be settled before timing or
+            # the close can land before it parks: the latch is then already set
+            # when the loop gets there, it never waits, and the POLLED code
+            # returns in ~1 ms too (the false negative the median above exists
+            # to absorb). Parked, the poll owes the rest of a 200 ms
+            # interval and cannot meet the ceiling. Awaited, not ``sleep``: the
+            # runtime owns its own thread and loop, and the test has no reason to
+            # block its own.
+            await asyncio.sleep(0.05)
+
+            started = time.monotonic()
+            runtime.close()
+            samples.append(time.monotonic() - started)
+        finally:
+            runtime.close()
+
+    aggregate = statistics.median(samples)
+    assert aggregate < 0.1, (
+        f"the median of {len(samples)} parked closes took {aggregate * 1000:.0f} ms "
+        "— close() is waiting out the serve loop's wait instead of waking it. "
+        "Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, the "
+        "pre-fix poll measured through this test's own 50 ms settle lands in "
+        "139.5-191.2 ms (median ~151 ms, n=50), so a median under the ceiling "
+        "needs three of these five rounds woken early — the loop is not waiting "
+        "(server.close -> _request_close -> _wake_close_wait -> _closed_wait)."
+    )
 
 
 @pytest.mark.asyncio
@@ -1759,8 +1978,9 @@ async def test_a_watch_frame_buffered_behind_a_parked_op_cannot_move_the_count()
 
         # Now the dead connection's buffered frame is finally processed. This
         # is the delivery the reader loop performs; it must not be able to
-        # reach the live count.
-        await runtime._on_request({"op": "unwatch", "req": "late"}, conn)
+        # reach the live count. (On the owner's loop, as the reader loop's own call
+        # is — the guard in ``_send_to`` refuses it anywhere else.)
+        await _on_runtime_loop(runtime, runtime._on_request({"op": "unwatch", "req": "late"}, conn))
 
         assert runtime.watching_surfaces() == frozenset({"viewer"}), (
             "a frame buffered behind a parked op moved the counter after its "
@@ -2353,7 +2573,7 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
         seed = json.loads(await tui_reader.readline())
         assert seed["op"] == "frontend_sync"
 
-        await runtime._push()
+        await _on_runtime_loop(runtime, runtime._push())
         daemon_repaint = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=2))
         assert daemon_repaint["op"] == "projection"
         events_repaint = json.loads(await asyncio.wait_for(events_reader.readline(), timeout=2))
@@ -2368,8 +2588,19 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
 
 
 @pytest.mark.asyncio
-async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixture) -> None:
-    """Test 21: one INFO line per actual removal, naming the reason."""
+async def test_every_drop_logs_its_reason_once_at_one_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test 21: one line per actual removal, naming the reason.
+
+    At the level the reason EARNS: a close the runtime asked for, or one a peer
+    asked for by closing first, is part of a client's ordinary life and stays
+    INFO. Every other reason means a client was removed without asking to
+    leave, and those are WARNING — see `_GRACEFUL_DROP_REASONS` and
+    `test_an_unrequested_drop_is_logged_at_warning`. Both used to be INFO
+    beside every routine close, which is how "the sidebar went cold" ended up
+    with no findable cause in the runtime log.
+    """
     import logging
 
     handle = FakeHandle()
@@ -2382,7 +2613,7 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
         conns = list(runtime._clients.values())
         assert len(conns) == 1
         caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
-        runtime._drop_client(conns[0], reason="test")
+        runtime._drop_client(conns[0], reason="reader eof")
         infos = [
             rec
             for rec in caplog.records
@@ -2391,8 +2622,9 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
         assert len(infos) == 1, [rec.getMessage() for rec in infos]
         assert "dropped attach client" in infos[0].getMessage()
         assert "events=" in infos[0].getMessage()
-        assert infos[0].getMessage().endswith(": test")
-        # Second call (reader-loop finally) must not INFO again.
+        assert infos[0].getMessage().endswith(": reader eof")
+        assert not [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+        # Second call (reader-loop finally) must not log again.
         runtime._drop_client(conns[0], reason="reader eof")
         infos_after = [
             rec
@@ -2400,6 +2632,52 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
             if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
         ]
         assert len(infos_after) == 1
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unrequested_drop_is_logged_at_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Why the client went is the one thing that must not be buried.
+
+    A viewer dropped for a reason IT did not choose — the attach cap evicting
+    it, an event queue overflowing, a send timing out — learns what happened
+    only as a cold facade. The runtime's own record of the reason is therefore
+    the only place the cause exists at all, and at INFO beside every routine
+    close it was invisible in practice: the operator's report of "Reconnect
+    failed — select again to retry" had nothing to read.
+    """
+    import logging
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record, client="attach")
+        conns = list(runtime._clients.values())
+        assert len(conns) == 1
+        caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
+        runtime._drop_client(conns[0], reason="attach cap")
+        warnings = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING and "dropped" in rec.getMessage()
+        ]
+        assert len(warnings) == 1, [rec.getMessage() for rec in warnings]
+        assert "dropped attach client" in warnings[0].getMessage()
+        assert warnings[0].getMessage().endswith(": attach cap")
+        # The reason is still ONE line, not a warning plus an info.
+        assert not [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+        ]
     finally:
         if writer is not None:
             writer.close()
@@ -2424,7 +2702,7 @@ async def test_attach_cap_drop_reason_is_logged(caplog: pytest.LogCaptureFixture
         messages = [
             rec.getMessage()
             for rec in caplog.records
-            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+            if rec.levelno == logging.WARNING and "dropped" in rec.getMessage()
         ]
         assert any(msg.endswith(": attach cap") for msg in messages), messages
     finally:
@@ -2475,9 +2753,74 @@ async def test_tui_send_timeout_is_five_seconds(monkeypatch: pytest.MonkeyPatch)
         assert conns, "full-TUI client never registered"
         seen.clear()
         monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
-        await runtime._send_to(conns[0], {"op": "ping"})
+        # ON THE RUNTIME'S OWN LOOP. ``_send_to`` owns ``conn.send_lock`` and the
+        # connection's writer, and both belong to the loop ``start()`` hosts — so it
+        # is driven from there, the way its only production callers are. Awaiting it
+        # from this loop is the cross-loop misuse ``_send_to`` now refuses (see
+        # ``test_send_to_refuses_a_foreign_loop_instead_of_parking``); it looked like
+        # it worked here only because an UNCONTESTED lock takes the fast path.
+        runtime_loop = runtime._loop
+        assert runtime_loop is not None, "start() publishes the runtime's loop"
+        await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(
+                runtime._send_to(conns[0], {"op": "ping"}), runtime_loop
+            )
+        )
         assert 5.0 in seen, f"TUI send bound was not 5.0 s; saw {seen}"
         assert 1.0 not in seen, f"full-TUI client still used the 1 s bound; saw {seen}"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_send_to_refuses_a_foreign_loop_instead_of_parking() -> None:
+    """A loop-owned send is REFUSED off its loop, not waited on until forever.
+
+    ``_send_to`` is the single write path for every frame the runtime emits, and
+    both things it touches are owned by the runtime's loop: ``conn.writer`` (a
+    StreamWriter whose transport and drain waiter were built on that loop) and
+    ``conn.send_lock`` (an ``asyncio.Lock``, which binds itself to the first loop
+    that CONTENDS it and is then unusable from any other).
+
+    WHY THE GUARD, AND WHY THIS IS NOT A TIMING ASSERTION: the pre-fix failure mode
+    was not an exception at all. Awaiting that path from a foreign loop leaves a
+    waiter future on the FOREIGN loop, and the owner's ``Lock.release()`` completes
+    it from the wrong thread with ``set_result`` — whose callback is scheduled with
+    plain ``call_soon``, an append to the other loop's ready deque with no self-pipe
+    write. A loop parked in ``select()`` is never woken, so the await never returns
+    and the xdist worker running it is wedged until CI's cap cancels the shard job:
+    ten such cancels, several on ``main``, are what this guard exists to make
+    impossible to reintroduce silently. An uncontended lock is enough to show it —
+    the fast path makes the cross-loop call LOOK fine while binding the lock to the
+    wrong loop for every later contention — so this needs no timing, no contention
+    and no sleeping: it fails on the pre-fix tree as "DID NOT RAISE".
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "attach"}).encode() + b"\n")
+        await writer.drain()
+        deadline = asyncio.get_running_loop().time() + 5
+        conns: list[Any] = []
+        while asyncio.get_running_loop().time() < deadline and not conns:
+            conns = list(runtime._clients.values())
+            if not conns:
+                await asyncio.sleep(0.02)
+        assert conns, "the client never registered"
+        assert (
+            runtime._loop is not asyncio.get_running_loop()
+        ), "this test only means anything while the runtime is thread-hosted"
+
+        with pytest.raises(RuntimeError, match="owning event loop"):
+            await runtime._send_to(conns[0], {"op": "ping"})
     finally:
         if writer is not None:
             writer.close()
@@ -2870,3 +3213,181 @@ async def test_the_compose_fold_never_emits_an_unreadable_frame() -> None:
     for frame in conn.event_queue._queue:
         size = len(json.dumps(frame).encode()) + 1
         assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
+
+
+# ---------------------------------------------------------------------------
+# The wire fit pass: a live frame carrying images is REFERENCED, not degraded.
+#
+# Measured on the operator's own session bytes (a 317,726-byte page render,
+# base64 through the real attachment store): one ``tool_execution_end`` with two
+# of them is an 847,600-byte frame, and two such rows in one frame is 1,695,113
+# bytes — 1.62x the 1 MiB line the attach reader enforces. The guard answered
+# that with a ``notice``: the event was dropped, the live tool card could never
+# settle, and the viewer fell back to a full re-sync.
+# ---------------------------------------------------------------------------
+
+
+def _image_b64(size: int = 400_000) -> str:
+    """A deterministic inline payload shaped like a page render's base64."""
+    import base64
+
+    return base64.b64encode(bytes(range(256)) * (size // 256)).decode("ascii")
+
+
+def _wire_bytes(frame: dict[str, Any]) -> int:
+    """The size the socket will write, re-derived here on purpose.
+
+    The production rule is ONE function (``server._frame_line_bytes``); this is a
+    test asserting against it, so it computes the number itself rather than
+    calling the code under test — a measurement taken through the same helper
+    cannot catch that helper being wrong.
+    """
+    return len(json.dumps(frame).encode()) + 1
+
+
+def _image_tool_end(*, images: int, call_id: str = "call_image") -> dict[str, Any]:
+    """One ``tool_execution_end`` whose result carries ``images`` page renders."""
+    data = _image_b64()
+    content: list[dict[str, Any]] = [{"type": "text", "text": "PAGE"}]
+    content += [{"type": "image", "data": data, "mime_type": "image/png"} for _ in range(images)]
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "screenshot",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "screenshot",
+            "content": content,
+            "is_error": False,
+        },
+    }
+
+
+def _text_tool_end(*, size: int, call_id: str = "call_text") -> dict[str, Any]:
+    """One ``tool_execution_end`` whose result is a single oversized TEXT block.
+
+    The shape no reference can help: the payload IS the text, so the only way to
+    keep the event (and with it the card that settles) is to bound the text in
+    place. That makes it the frame the SHEDDING stage exists for.
+    """
+    long_text = "x" * size
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "text", "text": long_text}],
+            "is_error": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_three_image_tool_end_frame_is_referenced_not_degraded() -> None:
+    """The chokepoint must fit an image-bearing event, not shed it.
+
+    Degrading this frame loses the ``tool_execution_end``, and the end is the
+    only thing that settles the live tool card — the ``⊘ interrupted`` fallback
+    exists for exactly the stranded card that follows. A reference resolves to
+    the same bytes on every in-repo frontend, and the metrics are the frame
+    size, the surviving identity fields and the round-trip of each digest.
+    """
+    import re
+
+    from local_operator.session.attachments import AttachmentStore
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+    frame = {"op": "event", "data": _image_tool_end(images=3)}
+    original = _image_b64()
+    assert _wire_bytes(frame) > _MAX_LINE_BYTES
+
+    server._enqueue_client_frame(conn, frame)
+
+    assert server.dropped == []
+    enqueued = conn.event_queue.get_nowait()
+    assert _wire_bytes(enqueued) <= _MAX_LINE_BYTES
+    assert enqueued["data"]["type"] == "tool_execution_end"
+    assert enqueued["data"]["tool_call_id"] == "call_image"
+    assert enqueued["data"]["tool_name"] == "screenshot"
+    images = [block for block in enqueued["data"]["result"]["content"] if block["type"] == "image"]
+    assert len(images) == 3
+    for block in images:
+        assert "data" not in block
+        assert re.fullmatch(r"[0-9a-f]{32}", block["attachment"]), block
+        assert block["mime_type"] == "image/png"
+        resolved = AttachmentStore().get(block["attachment"])
+        assert resolved is not None, "the reference does not resolve to stored bytes"
+        assert resolved[0] == original
+
+
+@pytest.mark.asyncio
+async def test_the_reference_pass_does_not_mutate_the_shared_frame() -> None:
+    """One producer frame reaches every recipient; none of them owns it.
+
+    ``_relay_on_loop`` hands the SAME dict to each connection's enqueue, so a
+    pass that rewrote in place would let the first connection decide what the
+    second sends — and would leave the producer holding a frame it never built.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    server._closed = threading.Event()
+    first, second = _stalled_conn(), _stalled_conn()
+    server._clients[id(first.writer)] = first
+    server._clients[id(second.writer)] = second
+    data = _image_tool_end(images=3)
+    before = json.dumps(data, sort_keys=True)
+
+    server._relay_on_loop(data)
+
+    assert json.dumps(data, sort_keys=True) == before, "the producer frame was mutated"
+    frames = [conn.event_queue.get_nowait() for conn in (first, second)]
+    for frame in frames:
+        assert _wire_bytes(frame) <= _MAX_LINE_BYTES
+        assert "data" not in frame["data"]["result"]["content"][1]
+    assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_the_shedding_pass_does_not_mutate_the_shared_frame() -> None:
+    """The shed stage edits its argument, and its argument is the producer's.
+
+    ``_bound_live_result_in_place`` clips the result dict and its blocks IN
+    PLACE, and the result it is handed comes straight out of the frame the relay
+    fans out — so without the copy the first recipient's clip would rewrite the
+    payload every later recipient measures, and the producer would be left
+    holding a frame it never built. This test is what pins the copy: with it
+    removed, all 205 tests in the three touched files still passed while the
+    producer's own result was already clipped.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    server._closed = threading.Event()
+    first, second = _stalled_conn(), _stalled_conn()
+    server._clients[id(first.writer)] = first
+    server._clients[id(second.writer)] = second
+    data = _text_tool_end(size=2 * _MAX_LINE_BYTES)
+    before = json.dumps(data, sort_keys=True)
+
+    server._relay_on_loop(data)
+
+    assert json.dumps(data, sort_keys=True) == before, "the producer frame was mutated"
+    frames = [conn.event_queue.get_nowait() for conn in (first, second)]
+    for frame in frames:
+        assert _wire_bytes(frame) <= _MAX_LINE_BYTES
+        # The EVENT survived, which is the whole point of shedding instead of
+        # degrading: the card it settles.
+        assert frame["data"]["type"] == "tool_execution_end"
+        assert frame["data"]["tool_call_id"] == "call_text"
+    clipped = frames[0]["data"]["result"]["content"][0]["text"]
+    assert clipped != "x" * (2 * _MAX_LINE_BYTES), "the shed stage did not run"
+    assert clipped.endswith("…")
+    assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)

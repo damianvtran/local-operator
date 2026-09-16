@@ -14,7 +14,10 @@ import sqlite3
 import uuid
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
+from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
 
@@ -73,26 +76,79 @@ async def test_only_a_real_user_session_in_this_root_can_be_acknowledged(tmp_pat
 async def test_a_delayed_receipt_for_an_older_completion_never_clears_a_newer_one(tmp_path):
     """A slow client acknowledging A must not mark B read.
 
-    The renderer captures the token with the anchor it actually saw, so a
-    receipt that arrives after the next turn finished is addressed to the OLD
-    outcome. Advancing to "now" (or to the latest sequence) would silently
-    swallow an unread result -- the exact failure the mobile bodyless `/seen`
-    had before this contract existed.
+    The renderer captures the token with the anchor it actually saw, so a receipt
+    that arrives after the next turn finished is addressed to the OLD outcome.
+    Two wrong answers are available and both are refused here: advancing to "now"
+    (which would silently swallow an unread result -- the exact failure the
+    mobile bodyless `/seen` had before this contract existed) and answering 200
+    for a receipt that cannot make the conversation read, which is what stranded
+    the operator's checkmark (both shipped clients latch on a resolved call).
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     first = _publish(tmp_path, sid, "result-1")
     second = _publish(tmp_path, sid, "result-2")
 
-    late = await pool.acknowledge_attention(sid, first)
-    assert late["unseen"] is True
-    assert late["completion_token"] == second and late["revision"] == [2, 1]
+    # The refusal TYPE is read by name rather than imported: the name is what
+    # the surfaces key on (`detail.code` / the mobile `code`), and a name check
+    # keeps this module importable against a pre-fix tree, so the assertion that
+    # fails there is about BEHAVIOUR (no refusal, or a moved receipt) rather
+    # than about a symbol having been added.
+    with pytest.raises(ValueError) as refused:
+        await pool.acknowledge_attention(sid, first)
+    assert type(refused.value).__name__ == "SupersededCompletionToken", refused.value
+    untouched = AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")
+    assert untouched["unseen"] is True and untouched["revision"] == [2, 0]
 
     caught_up = await pool.acknowledge_attention(sid, second)
     assert caught_up["unseen"] is False and caught_up["revision"] == [2, 2]
 
     # Reordered duplicate delivery of the old receipt converges, never regresses.
     assert (await pool.acknowledge_attention(sid, first))["unseen"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_route_refuses_a_superseded_token_with_a_machine_code(tmp_path, monkeypatch):
+    """The wire answer a client has to be able to act on, over the REAL route.
+
+    A 200 whose body said `unseen: true` was the defect the operator reported:
+    both shipped clients treat a resolved `sessions.seen` as "read" and stop
+    retrying, so the one completion they were looking at stayed unseen forever.
+    The refusal is therefore a 409 carrying the machine code they need to take
+    the re-arm path instead of backing off as if the store had failed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "synthetic-desktop-token")
+    app = FastAPI()
+    app.include_router(desktop_sessions.router)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    sid = await pool.create(str(tmp_path))
+    stale = _publish(tmp_path, sid, "result-1")
+    current = _publish(tmp_path, sid, "result-2")
+    store = AttentionStore(tmp_path / "attention.db")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer synthetic-desktop-token"},
+    ) as client:
+        route = f"/v1/desktop/sessions/{sid}/seen"
+        refused = await client.post(route, json={"completion_token": stale})
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["code"] == "superseded_completion_token"
+        assert "current token" in refused.json()["detail"]["message"]
+        assert store.state(f"session/{sid}")["unseen"] is True
+
+        read = await client.post(route, json={"completion_token": current})
+        assert read.status_code == 200
+        assert read.json()["result"]["unseen"] is False
+        assert store.state(f"session/{sid}")["unseen"] is False
+
+        # And the two refusals stay distinguishable by TYPE on the class a
+        # caller catches, not only by the code on the wire.
+        unknown = await client.post(route, json={"completion_token": str(uuid.uuid4())})
+        assert unknown.status_code == 409
+        assert unknown.json()["detail"] == "unknown completion token"
 
 
 @pytest.mark.asyncio
@@ -150,9 +206,11 @@ async def test_concurrent_receipts_and_publications_converge(tmp_path):
     """Independent processes write this store; the API must not serialize it.
 
     Interleaving a burst of acknowledgements with a new publication has exactly
-    two correct outcomes -- read through the latest, or unread BECAUSE the new
-    completion landed after the last receipt. Neither may lose the newer
-    completion or report a receipt ahead of what was acknowledged.
+    two correct outcomes per acknowledgement -- read through the token it named,
+    or refused because a newer completion is already current -- and one outcome
+    that is never correct: accepted while the conversation reads as unread.
+    Neither may lose the newer completion or report a receipt ahead of what was
+    acknowledged.
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
@@ -162,16 +220,33 @@ async def test_concurrent_receipts_and_publications_converge(tmp_path):
         await asyncio.sleep(0.01)
         return await asyncio.to_thread(_publish, tmp_path, sid, "result-2")
 
-    receipts, _ = await asyncio.gather(
-        asyncio.gather(*[pool.acknowledge_attention(sid, token) for _ in range(8)]),
-        publish_later(),
+    async def acknowledge_once():
+        try:
+            return await pool.acknowledge_attention(sid, token)
+        except ValueError as refused:
+            assert type(refused).__name__ == "SupersededCompletionToken", refused
+            return None
+
+    receipts, second = await asyncio.gather(
+        asyncio.gather(*[acknowledge_once() for _ in range(8)]), publish_later()
     )
-    final = AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")
+    store = AttentionStore(tmp_path / "attention.db")
+    final = store.state(f"session/{sid}")
     published, acknowledged = final["revision"]
     assert published == 2 and acknowledged == 1
     assert final["unseen"] is True and final["anchor_id"] == "result-2"
-    for state in receipts:
-        assert state["revision"][1] == 1
+    accepted = [state for state in receipts if state is not None]
+    assert accepted, "every acknowledgement was refused; the race did not run"
+    for state in accepted:
+        # An accepted receipt belongs to the token it named: the watermark reads
+        # 1, and the state names `result-1` as the completion it is about. An
+        # acknowledgement that ran before the publication was therefore HONEST
+        # when it answered -- the newer completion simply landed after it, which
+        # is the whole reason the clients must read the returned state rather
+        # than the fact that the call resolved.
+        assert state["revision"][1] == 1 and state["completion_token"] == token
+    # The newer completion's own receipt is the one that closes it.
+    assert store.acknowledge(f"session/{sid}", second)["unseen"] is False
 
 
 def _break_store(root) -> None:

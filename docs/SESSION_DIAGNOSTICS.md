@@ -75,6 +75,18 @@ mirrored session identity/runtime scalars. The command is frontend-local, like
 help and the daemon's mirrored command registry discover it from the standard
 command table.
 
+That last clause now holds for the TERMINAL half only, and saying so here is
+cheaper than letting it be discovered as a contradiction. The desktop app's
+`/session` panel reads this same report over HTTP —
+`GET /v1/desktop/sessions/{id}/report`, gated on `features.diagnostics` in
+`/v1/capabilities`, with the three group-bys (`by_model`, `by_purpose`,
+`by_purpose_outcome`) encoded as arrays of objects because a JSON object cannot
+carry the tuple keys the store uses — and with `recent_limit` clamped by the
+store's own 0..50 bound. It is the same `AnalyticsStore.session_report` call over
+one added transport, so the two surfaces cannot report different numbers for one
+session; what changed is that the report is no longer reachable only from the
+process that owns the session.
+
 The report does not render prompts, tool schemas/payloads/results, credentials,
 provider URLs or raw exception text. Its only tool-related data is the existing
 aggregate estimated token count.

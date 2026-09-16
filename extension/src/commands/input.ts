@@ -1,6 +1,6 @@
 import { BridgeCommandError, cdp, requireSurface } from "../cdp";
 import { withOriginGate } from "../origins";
-import { settle } from "../settle";
+import { CHROME_API_DEADLINE_MS, deadline, settle } from "../settle";
 import { getRefs, surfaceToken, type StoredSurface } from "../state";
 
 interface QueryResult { nodeId?: number }
@@ -68,7 +68,13 @@ export async function click(
   requestId: string,
 ): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
-  const before = (await chrome.tabs.get(surface.tabId)).url ?? "";
+  const before = (
+    await deadline(
+      chrome.tabs.get(surface.tabId),
+      CHROME_API_DEADLINE_MS,
+      `chrome.tabs.get(${surface.tabId})`,
+    )
+  ).url ?? "";
   const nodeId = await nodeIdFor(surface, params.selector ?? params.ref);
   await cdp(surface.tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
   const objectId = await objectIdFor(surface.tabId, nodeId);
@@ -120,7 +126,11 @@ export async function click(
     chrome.webNavigation.onBeforeNavigate.removeListener(onBefore);
     chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistory);
   }
-  const tab = await chrome.tabs.get(surface.tabId);
+  const tab = await deadline(
+    chrome.tabs.get(surface.tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${surface.tabId})`,
+  );
   const navigated = navigationSeen || (tab.url ?? "") !== before;
   return { navigated, url: tab.url ?? "", title: tab.title ?? "" };
 }
@@ -159,6 +169,10 @@ export async function typeText(params: Record<string, unknown>): Promise<Record<
     }`,
     [String(params.text ?? "")],
   );
-  const tab = await chrome.tabs.get(surface.tabId);
+  const tab = await deadline(
+    chrome.tabs.get(surface.tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${surface.tabId})`,
+  );
   return { value: value ?? "", url: tab.url ?? "", title: tab.title ?? "" };
 }

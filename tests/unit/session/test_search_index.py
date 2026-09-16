@@ -497,3 +497,34 @@ def test_the_lowered_memo_re_derives_for_a_new_equal_length_corpus():
     second = {"s0": "unrelated", "s1": "RETENTION sweep"}
     assert search_digests(second, "retention") == {"s1"}
     assert search_digests(first, "retention") == {"s0"}
+
+
+def test_the_index_still_invalidates_after_an_mtime_restore(tmp_path: Path):
+    """A bookkeeping append restores the transcript's mtime; the index must
+    still see the new bytes.
+
+    ``Transcript._write_entries`` puts the pre-append mtime back after
+    journalling a ``session_incident``, so that row cannot restamp the
+    ``/resume`` activity clock. The signature here is ``[st_size, st_mtime,
+    title_mtime]``, and the restore leaves only ONE of those three terms able
+    to carry invalidation: the SIZE, which still moves on every append. The
+    digest assertions below are therefore the teeth — a signature that stopped
+    reading size would serve the stale digest and fail them.
+    """
+    import os
+
+    session = tmp_path / "sessions" / "mtimer01"
+    _write(session, ("user", "the opening subject"))
+    first = build_index(tmp_path, ["mtimer01"])
+    assert search_digests(first, "opening subject") == {"mtimer01"}
+
+    transcript = session / "transcript.jsonl"
+    preserved = transcript.stat().st_mtime
+    _write(session, ("user", "the opening subject"), ("assistant", "a bookkeeping era"))
+    # The writer's restore, simulated at the syscall it makes. Deliberately not
+    # asserted on: reading back the stamp this line just set would restate the
+    # fixture rather than the product.
+    os.utime(transcript, (preserved, preserved))
+
+    second = build_index(tmp_path, ["mtimer01"])
+    assert search_digests(second, "bookkeeping era") == {"mtimer01"}
