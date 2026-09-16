@@ -6280,6 +6280,10 @@ COMMAND_DRAFTS = [
     "/analytics view",
     "/move ~/x",
     "/move ~/my folder",
+    # `/fast maybe` is in here as well as in the predicate table: the shape is WORD
+    # with an empty vocabulary, so ONE token is the command whatever the token says
+    # and the picker's on/off list is presentation the route does not enforce.
+    "/fast maybe",
     "/stop now",
     "/fast on",
 ]
