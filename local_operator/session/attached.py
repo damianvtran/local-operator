@@ -80,6 +80,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.providers.local import LOCAL_PROVIDER_IDS
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.cold_model import (
     resolve_context_metadata,
@@ -756,35 +757,64 @@ def _naming_resolved_no_name(spec: FrontendModelSpec) -> bool:
 def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
     """Whether THIS process resolved a real budget for the pair, or only a fill.
 
-    THE SIGNAL meaning "this process has a real budget", and the whole of the
-    discrimination between the two populations a restored reading can land in.
-    It is the presence of ``default_context_window`` or ``max_context_window``:
-    the two fields ``context_spec_for_access`` and ``build_model_spec`` write
-    only when a catalogue row or an account actually ANSWERED for this pair.
-    Neither survives a fill, which is what makes it the right question:
+    THE QUESTION IS THE VALUE RULE the band itself applies
+    (``usage_seed.denominator_window``): does this spec carry a window the band can
+    DIVIDE BY, i.e. one that is not ``UNKNOWN_CONTEXT_WINDOW`` (128k)? That is the
+    same question, asked of the same spec, so the window the first frame
+    restores and the window the band refuses cannot disagree.
 
-    * an UNRESOLVED ACCOUNT takes ``UNKNOWN_CONTEXT_WINDOW`` (128k) with BOTH
-      fields explicitly cleared and ``context_metadata_resolved`` set — which is
-      why the flag is the WRONG signal, and why the gate keyed on it (PR #631)
-      refused exactly this population and painted ``224.6%/128k`` for a
-      conversation holding 287,491 tokens against a 1M budget;
-    * an UNCOVERED LOCAL TAG takes the route default (``DEFAULT_LOCAL_CONTEXT``,
-      4,096) with both fields absent, so a 20,000-token reading from a 32,768
-      checkpoint painted ``488.2%/4k`` while the default was allowed to
-      replace it.
+    WHY NOT ``default_context_window``/``max_context_window``, which is what this
+    predicate used to read: those two fields are PROVIDER PROVENANCE, not the
+    answer. The shipped catalogue states a window through ``context_window``
+    alone — 0 of its 120 rows set either provenance field — so reading them as
+    "did the model layer answer?" reported "nothing answered" for every pair
+    whose resolution carries no provenance, and the checkpoint's window was
+    restored under a fresher one. Measured on the population that needs no
+    history at all, a Codex/OAuth-served conversation resumed on an OpenAI API
+    key (the fresh spec's only budget is the row's 1,050,000, which
+    ``denominator_window`` VOUCHES, so it is a budget and not the placeholder):
+    cold ``110.3%/272k`` where the attach frame paints ``28.6%/1.1M`` (review
+    round 3, blocker 1). The narrowed predicate is also why the mirror direction
+    looked safe: an OAuth opt-out DOES resolve provenance fields, so the
+    one-directional hole was easy to miss.
 
-    Both are populations where the fresh spec states NO answer and the
-    checkpoint's window is the only real number in the process, so it is
-    adopted. Where either field IS set, the fresh spec carries the account's or
-    the route's own budget, and the checkpoint's window is the stale one that
-    rule exists to refuse: it can predate an opt-out, a plan change or
-    maximum-context support, and in the opt-out direction it hides an
-    over-budget conversation behind a calm percentage.
+    THE ONE CARVE-OUT IS THE LOCAL ROUTES, and its signal is the PROVIDER KIND:
+    ``LOCAL_PROVIDER_IDS`` is exactly the set ``build_model_spec`` routes to
+    ``local_model_spec``, whose fallback window its own docstring calls "a
+    conservative working budget, not a claim about the model" — a route FILL
+    rather than an answer, so a vouched window there is not evidence that the
+    model layer answered. What that builder does record is the SERVER'S OWN
+    evidence, in ``default_context_window``/``max_context_window``, and nothing
+    else — so on these routes those two fields are the discrimination, and their
+    absence means the window is the client-side fill. An uncovered local tag's
+    4,096 (``DEFAULT_LOCAL_CONTEXT``) must therefore not displace a checkpoint's
+    32,768, or the first frame paints ``488.2%/4k`` for a 20,000-token reading
+    (review round 1, minor 1).
+
+    Keyed on the constant the BUILDER routes on rather than on a spelling of one
+    route or a magic value (``context_window == 4,096``), because a fill and a
+    real answer leave the same fields behind — there is no spec-level provenance
+    flag to ask, which is the model-layer gap design round 2's D2 defers. Keyed
+    on the same constant, the two cannot drift.
+
+    ONE SOURCE PER FRAME. Both readers of the gate ask THIS function — the
+    state-level window (``_consistent_context``) and the spec-level one
+    (``_restored_model_specs``) — so a frame can never divide by the fresh spec's
+    window while its spec still carries the checkpoint's, or the reverse. The
+    numerator is the conversation's own reading on either side of the branch,
+    because that is the pair the attaching runtime publishes
+    (``frontend_state.refresh_from_session``: ``receipt_context or
+    current.context_tokens`` beside the EFFECTIVE spec's own window), and this is
+    the frame that has to agree with it.
 
     Asked of the CONFIGURED spec — the one this process just resolved — never
     of the checkpoint's, whose fields are the answer being judged.
     """
-    return bool(int(spec.default_context_window or 0) or int(spec.max_context_window or 0))
+    if denominator_window(spec) is None:
+        return False
+    if spec.provider in LOCAL_PROVIDER_IDS:
+        return bool(int(spec.default_context_window or 0) or int(spec.max_context_window or 0))
+    return True
 
 
 class AttachedSession:

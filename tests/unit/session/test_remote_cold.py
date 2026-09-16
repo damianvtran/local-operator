@@ -988,10 +988,15 @@ def test_the_restore_adopts_a_local_window_with_the_tokens_measured_against_it()
     ``DEFAULT_LOCAL_CONTEXT``, the route default for a tag no listing row
     describes, so the fresh spec states no budget of its own and the checkpoint's
     window is the only real number in the process
-    (``_fresh_spec_states_a_budget``). The account-scoped population is the one
-    that refuses — see
-    ``test_the_restore_refuses_a_stale_window_the_account_has_answered_for`` — and
-    the assertions below check both readers rather than only the spec, which is
+    (``_fresh_spec_states_a_budget``, whose local carve-out is keyed on the
+    provider KIND — ``LOCAL_PROVIDER_IDS``, the set ``build_model_spec`` routes to
+    ``local_model_spec`` — because a route FILL and an answer leave the same
+    fields behind and only the server's own evidence lands in
+    ``default_context_window``/``max_context_window``). The account-scoped
+    population is the one that refuses — see
+    ``test_the_restore_refuses_a_stale_window_the_account_has_answered_for`` and
+    ``test_the_restore_refuses_a_stale_window_on_an_api_key_after_an_oauth_run`` —
+    and the assertions below check both readers rather than only the spec, which is
     the part that makes a paint order unable to mix them.
 
     NOT distinguished here, and not distinguishable from a cold frame: whether a
@@ -1056,6 +1061,12 @@ def test_the_restore_adopts_a_local_window_with_the_tokens_measured_against_it()
         "refuses, and "
         "test_the_restore_refuses_a_stale_window_the_account_has_answered_for pins it "
         "(review round 2, blocker 1)."
+    )
+    from local_operator.tui.widgets.status_line import context_spelling
+
+    assert context_spelling(20_000, window) == "61.0%/32.8k", (
+        "the local cell's own reading, unchanged by the round-3 widening: the carve-out "
+        "exists so this frame does not become the 488.2%/4k a route fill would paint"
     )
 
 
@@ -1825,6 +1836,16 @@ async def test_a_checkpoint_window_is_not_replaced_under_its_own_tokens(
     measured on (a checkpoint at 500_000/1_050_000 printed as 390.6% of the fresh
     window), which is the same class of wrong reading as B1 reached from the other
     direction.
+
+    The fresh spec here is the UNRESOLVED-ACCOUNT shape —
+    ``context_spec_for_access``'s own output for an account it could not resolve
+    (the 128k placeholder, both provenance fields absent) — because that is a
+    population where this process resolved no budget and the checkpoint's window IS
+    the frame's denominator. The synthetic ``400_000`` spec this test used to stub
+    is no longer that population: a resolved NON-placeholder window on a non-local
+    route is now read as an answer of its own
+    (``_fresh_spec_states_a_budget``, review round 3 blocker 1), so it belongs to
+    the refusal cells above, not to the fill-only one.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     directory = _seed_transcript(tmp_path, SESSION_ID)
@@ -1834,20 +1855,29 @@ async def test_a_checkpoint_window_is_not_replaced_under_its_own_tokens(
         {"hosting": "openai", "model_name": "gpt-5.6-sol"}
     )
 
-    # A spec the seed WOULD otherwise take a window from: resolved True and a real,
-    # non-placeholder value (so the B1 guard is not what keeps it out).
-    async def _resolved(config_dir, model, *, stickiness_key):
-        return model.model_copy(
-            update={"context_window": 400_000, "context_metadata_resolved": True}
-        )
+    # A spec that states NO budget of its own, without a value written out here:
+    # the real resolver's answer for an account it cannot reach.
+    from local_operator.model.configure import context_spec_for_access
+    from local_operator.session.frontend_state import FrontendModelSpec
+    from local_operator.session.usage_seed import denominator_window
 
-    monkeypatch.setattr("local_operator.session.attached.resolve_context_metadata", _resolved)
+    unresolved = context_spec_for_access(
+        FrontendModelSpec(provider="openai", model_id="gpt-5.6-sol"), None, {}
+    )
+    assert denominator_window(unresolved) is None, (
+        "precondition: the placeholder is not a denominator, so nothing here can be mistaken "
+        "for an answer of this process's own"
+    )
+
+    async def _unresolved(config_dir, model, *, stickiness_key):
+        return FrontendModelSpec(**unresolved.model_dump(mode="python"))
+
+    monkeypatch.setattr("local_operator.session.attached.resolve_context_metadata", _unresolved)
 
     from local_operator.harness.types import Message
     from local_operator.session.frontend_state import (
         FRONTEND_CHECKPOINT_CUSTOM_TYPE,
         CostKnowledge,
-        FrontendModelSpec,
         FrontendSessionState,
     )
     from local_operator.session.transcript import Transcript
@@ -1890,8 +1920,31 @@ async def test_a_checkpoint_window_is_not_replaced_under_its_own_tokens(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "checkpoint_tokens",
+        "checkpoint_window",
+        "account_window",
+        "account_default",
+        "account_max",
+        "expected_band",
+    ),
+    [
+        pytest.param(250_000, 272_000, 872_000, 272_000, 872_000, "28.7%/872k", id="account-grew"),
+        pytest.param(
+            400_000, 872_000, 272_000, 272_000, 272_000, "147.1%/272k", id="account-shrank"
+        ),
+    ],
+)
 async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
+    monkeypatch,
+    checkpoint_tokens: int,
+    checkpoint_window: int,
+    account_window: int,
+    account_default: int,
+    account_max: int,
+    expected_band: str,
 ) -> None:
     """Blocker 1 end to end: the account's CURRENT window governs the first frame.
 
@@ -1901,13 +1954,19 @@ async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
     from the frame the runtime paints moments later. Measured through both
     streams' own paths while the gate was absent: ``cold 110.3%/272k`` against
     ``live 34.4%/872k`` when the account grew, and ``cold 45.9%/872k`` against
-    ``live 147.1%/272k`` when it shrank. The shrank direction is what makes it a
-    blocker rather than an imprecision: 45.9% is calm, and it HIDES an over-budget
-    conversation on the one surface that exists to warn about exactly that
-    (review round 2, blocker 1; design round 2, D1).
+    ``live 147.1%/272k`` when it shrank.
 
-    The discrimination is ``_fresh_spec_states_a_budget``: the fresh spec carries
-    ``default_context_window``/``max_context_window``, so the model layer ANSWERED
+    BOTH DIRECTIONS ARE PINNED, on the literal band string, because only one of
+    them looks wrong: the SHRANK cell is the HIDING direction — ``45.9%/872k`` is
+    calm where the conversation is over budget, so a refusal that fired only when
+    the fresh window is LARGER would leave the suite green while the surface that
+    exists to warn stayed quiet (review round 2, blocker 1; design round 2, D1;
+    review round 3, minor 2).
+
+    The discrimination is ``_fresh_spec_states_a_budget``, on the value rule the
+    band itself applies: the fresh spec carries a window
+    ``usage_seed.denominator_window`` VOUCHES (these cells state one on
+    ``context_window`` and both provenance fields), so the model layer answered
     for this pair and the checkpoint's window is the stale one. Only the WINDOW
     moves — the numerator is the conversation's own reading and stays, which is
     the pairing the runtime publishes on attach
@@ -1922,14 +1981,16 @@ async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
         {"hosting": "openai", "model_name": "gpt-5.6-sol"}
     )
 
-    # The account's own answer, on BOTH fields: that is what says the model layer
-    # resolved this pair, and it is the signal the gate reads.
+    # The account's own answer, on BOTH provenance fields: that is one of the two
+    # shapes in which the model layer says it resolved this pair, and it is the one
+    # the round-3 blocker is NOT about (the API-key population below states the
+    # window on ``context_window`` alone).
     async def _account_answered(config_dir, model, *, stickiness_key):
         return model.model_copy(
             update={
-                "context_window": 872_000,
-                "default_context_window": 272_000,
-                "max_context_window": 872_000,
+                "context_window": account_window,
+                "default_context_window": account_default,
+                "max_context_window": account_max,
                 "context_metadata_resolved": True,
             }
         )
@@ -1945,12 +2006,14 @@ async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
         FrontendSessionState,
     )
     from local_operator.session.transcript import Transcript
+    from local_operator.tui.widgets.status_line import context_spelling
 
     transcript = Transcript(directory)
     await transcript.append_message(Message.user("how far along are we?"))
     await transcript.append_message(
         Message.assistant(
-            "deep in it", usage=_stamped(250_000, provider="openai", model_id="gpt-5.6-sol")
+            "deep in it",
+            usage=_stamped(checkpoint_tokens, provider="openai", model_id="gpt-5.6-sol"),
         )
     )
     # A self-consistent pair, as a real turn-end checkpoint writes: the tokens are
@@ -1958,7 +2021,135 @@ async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
     durable = FrontendSessionState(
         session_id=SESSION_ID,
         epoch="previous-owner",
-        context_tokens=250_000,
+        context_tokens=checkpoint_tokens,
+        context_window=checkpoint_window,
+        selected_model=FrontendModelSpec(
+            provider="openai", model_id="gpt-5.6-sol", context_window=checkpoint_window
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        spec = state.effective_model or state.selected_model
+        tokens, window = state.context_tokens, state.context_window
+        assert tokens is not None and window is not None, (
+            "the restored pair is the conversation's own reading: a numerator and the window "
+            "it is divided by"
+        )
+        assert tokens == checkpoint_tokens, "the restored numerator is the conversation's own"
+        assert spec is not None and spec.context_window == account_window, (
+            "the account's current window is what this spec resolved, so the checkpoint's stale "
+            f"{checkpoint_window // 1000}k must not replace it — that replacement is the "
+            "first-frame reading the live frame contradicts"
+        )
+        assert window == account_window, (
+            "and the state-level field follows it, because that is the window the seed's "
+            "denominator rule vouches (``usage_seed.denominator_window``) — one band, one "
+            "denominator, whichever paint lands last"
+        )
+        assert context_spelling(tokens, window) == expected_band, (
+            "the literal first-frame reading: the shrank cell is the one that HIDES an "
+            "over-budget conversation behind a calm percentage"
+        )
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_restore_refuses_a_stale_window_on_an_api_key_after_an_oauth_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Blocker 1's population: a pair whose only budget is ``context_window``.
+
+    The SAME PAIR resumed on a different CREDENTIAL is still the same model, so
+    ``_restored_pair`` matches and the checkpoint's reading is a candidate for
+    restoration. What differs is the budget: a Codex/OAuth-served run held 272,000
+    tokens of room, and an OpenAI API key resolves the public row's 1,050,000.
+
+    This population is what a gate keyed on ``default_context_window``/
+    ``max_context_window`` cannot see, and structurally rather than as an edge of
+    the credential matrix: the shipped catalogue states a window through
+    ``context_window`` alone (0 of its 120 rows set either provenance field), so
+    for a complete first-hand row — ``_listing_can_correct`` is False for
+    ``openai/gpt-5.6-sol``, i.e. no listing can ever correct it — those two fields
+    stay ``None`` on an API key for good. ``denominator_window`` VOUCHES the
+    1,050,000, so it is a budget and not the placeholder: this process resolved an
+    answer of its own, and restoring the checkpoint's 272,000 first-painted
+    ``110.3%/272k`` where the attach frame paints ``28.6%/1.1M`` — verbatim the
+    string round 2 was filed on (review round 3, blocker 1).
+
+    The mirror direction (an API-key checkpoint resumed on an OAuth account whose
+    opt-out resolves 272k WITH both provenance fields) is covered by the
+    parametrised test above, which is why the one-directional hole was easy to
+    miss.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    from local_operator.config import ConfigManager
+    from local_operator.model import discovery
+    from local_operator.model.configure import context_spec_for_access
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.session.frontend_state import FrontendModelSpec
+    from local_operator.session.usage_seed import denominator_window
+
+    # No listing leg is answerable for a complete first-hand row, which is also the
+    # production state for the 93 shipped rows that carry no listing at all.
+    monkeypatch.setattr(discovery, "available_models", lambda *args, **kwargs: ([], "static"))
+    ConfigManager(config_dir=tmp_path).update_config(
+        {"hosting": "openai", "model_name": "gpt-5.6-sol"}
+    )
+
+    # The resolver's own answer for this pair on an API key, computed by the real
+    # function rather than written out here; only the credential lookup (which a
+    # unit test cannot have) is supplied for it.
+    access = OAuthAccess("sk-public", 0, kind="api_key")
+    settings = ConfigManager(config_dir=tmp_path).get_config().values
+    fresh = context_spec_for_access(
+        FrontendModelSpec(provider="openai", model_id="gpt-5.6-sol"), access, settings
+    )
+    assert fresh.context_window == 1_050_000, "precondition: the public row's own window"
+    assert fresh.default_context_window is None and fresh.max_context_window is None, (
+        "precondition: the ONLY budget this resolution states is ``context_window``, which is "
+        "what the narrower gate read as `nothing answered`"
+    )
+    assert denominator_window(fresh) == 1_050_000, (
+        "precondition: the band VOUCHES this window, so it is a budget rather than the 128k "
+        "placeholder — the whole basis for calling it an answer of this process's own"
+    )
+
+    async def _api_key_account(config_dir, model, *, stickiness_key):
+        return FrontendModelSpec(**fresh.model_dump(mode="python"))
+
+    monkeypatch.setattr(
+        "local_operator.session.attached.resolve_context_metadata", _api_key_account
+    )
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.widgets.status_line import context_spelling
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("how far along are we?"))
+    await transcript.append_message(
+        Message.assistant(
+            "deep in it", usage=_stamped(300_000, provider="openai", model_id="gpt-5.6-sol")
+        )
+    )
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=300_000,
         context_window=272_000,
         selected_model=FrontendModelSpec(
             provider="openai", model_id="gpt-5.6-sol", context_window=272_000
@@ -1974,18 +2165,98 @@ async def test_the_restore_refuses_a_stale_window_the_account_has_answered_for(
     )
     try:
         state = viewer.frontend_state
-        spec = state.effective_model or state.selected_model
-        assert state.context_tokens == 250_000, "the restored numerator is the conversation's own"
-        assert spec is not None and spec.context_window == 872_000, (
-            "the account's current maximum is what this spec resolved, so the checkpoint's stale "
-            "272k must not replace it — that replacement is the first-frame reading the live "
-            "frame contradicts"
+        assert state.context_tokens == 300_000, "the numerator stays: it is the conversation's own"
+        assert state.context_window == 1_050_000, (
+            "the API key's own window is the one this frame must divide by; the OAuth run's "
+            "272,000 is stale and only the narrowed gate let it through"
         )
-        assert state.context_window == 872_000, (
-            "and the state-level field follows it, because that is the window the seed's "
-            "denominator rule vouches (``usage_seed.denominator_window``) — one band, one "
-            "denominator, whichever paint lands last"
+        assert context_spelling(state.context_tokens, state.context_window) == "28.6%/1.1M", (
+            "the literal reading the attach frame also paints — the cold frame used to say "
+            "110.3%/272k here"
         )
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_restore_refuses_a_stale_window_for_a_pair_with_no_listing_leg(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Blocker 1's second population: a shipped row no listing can correct.
+
+    ``anthropic/claude-opus-4-20250514`` is one of the 93 shipped rows with no
+    listing leg, so the fresh spec is the registry's own 200,000 with both
+    provenance fields absent — permanent, not an outage. A checkpoint written when
+    that row said 1,000,000 (or written on a route whose answer exceeded the row's)
+    therefore restored a window eight times the process's own, and the frame read
+    ``25.0%/1M`` where the attach frame paints ``125.0%/200k`` — the HIDING
+    direction, on the surface whose whole purpose is to warn before the next
+    request overflows.
+
+    Nothing about the account is involved here: the pair's OWN row answers, and the
+    gate has to read that answer off ``context_window`` to see it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    from local_operator.config import ConfigManager
+    from local_operator.model import discovery
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.frontend_state import FrontendModelSpec
+    from local_operator.session.usage_seed import denominator_window
+
+    monkeypatch.setattr(discovery, "available_models", lambda *args, **kwargs: ([], "static"))
+    ConfigManager(config_dir=tmp_path).update_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-4-20250514"}
+    )
+
+    fresh = build_model_spec("anthropic", "claude-opus-4-20250514")
+    assert fresh.context_window == 200_000, "precondition: the shipped row's own window"
+    assert (
+        denominator_window(fresh) == 200_000
+    ), "precondition: vouched, so the row's window is a budget this process resolved"
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.widgets.status_line import context_spelling
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("how far along are we?"))
+    await transcript.append_message(
+        Message.assistant(
+            "deep in it",
+            usage=_stamped(250_000, provider="anthropic", model_id="claude-opus-4-20250514"),
+        )
+    )
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=250_000,
+        context_window=1_000_000,
+        selected_model=FrontendModelSpec(
+            provider="anthropic", model_id="claude-opus-4-20250514", context_window=1_000_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens == 250_000, "the numerator stays"
+        assert (
+            state.context_window == 200_000
+        ), "the row's own window governs, so the over-budget conversation reads over budget"
+        assert (
+            context_spelling(state.context_tokens, state.context_window) == "125.0%/200k"
+        ), "the literal reading: adopting the checkpoint would paint 25.0%/1M and hide it"
     finally:
         await viewer.dispose()
 

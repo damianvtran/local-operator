@@ -247,10 +247,14 @@ async def test_cold_resume_does_not_restore_pre_maximum_window(tmp_path, monkeyp
     ``45.9%/872k`` on one the live frame calls ``147.1%/272k`` and paints in danger
     red (review round 2, blocker 1; design round 2, D1).
 
-    The discrimination is ``_fresh_spec_states_a_budget``: the fresh spec's
-    ``default_context_window``/``max_context_window`` mean the model layer ANSWERED
-    for this pair, and the checkpoint's window is then the stale one. The
-    populations where it did NOT answer are the ones that still adopt, and
+    The discrimination is ``_fresh_spec_states_a_budget``, on the VALUE rule the band
+    itself applies (``usage_seed.denominator_window``): the fresh spec's window is
+    one the band can divide by, so the model layer answered for this pair and the
+    checkpoint's window is then the stale one. (The two provenance fields this
+    docstring used to name are NOT the signal — 0 of the 120 shipped rows set them,
+    so a pair whose resolution states its window on ``context_window`` alone read as
+    "nothing answered" there; review round 3, blocker 1.) The populations where it
+    did NOT answer are the ones that still adopt, and
     ``test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominator``
     below pins that half.
     """
@@ -353,10 +357,11 @@ async def test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominat
     ``context_spec_for_access`` writes ``UNKNOWN_CONTEXT_WINDOW`` (128k) TOGETHER
     WITH ``context_metadata_resolved: True`` whenever it could not resolve the
     account, so neither the flag nor the value can tell this population from a
-    resolved 128k budget. What distinguishes it is that the fresh spec states no
-    ``default_context_window`` and no ``max_context_window`` — nothing ANSWERED
-    for this pair (``_fresh_spec_states_a_budget``) — so the checkpoint's window
-    is the only real denominator in the process and a restored reading keeps it.
+    resolved 128k budget. What distinguishes it is that the placeholder is not a
+    denominator at all — ``denominator_window`` refuses it, so this process
+    resolved no budget of its own (``_fresh_spec_states_a_budget``) — and the
+    checkpoint's window is then the only real denominator in the process, which a
+    restored reading keeps.
 
     This is the reported defect's own population: without the adoption, the cold
     frame divides a restored reading by the 128k placeholder and paints
@@ -396,7 +401,7 @@ async def test_cold_resume_of_an_unresolved_account_keeps_the_restored_denominat
     assert (
         state.selected_model.default_context_window is None
         and state.selected_model.max_context_window is None
-    ), "precondition: nothing ANSWERED for this pair, which is what makes it adopt"
+    ), "precondition: the placeholder states no window this process could divide by"
     legacy = FrontendSessionState(
         session_id="cold",
         epoch="legacy",
