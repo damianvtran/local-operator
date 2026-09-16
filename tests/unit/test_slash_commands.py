@@ -159,9 +159,23 @@ WHOLE_DRAFT_TABLE = [
     # which is how both composers read it. Pinned because splitting on `" "` here
     # read it as one WORD-shaped token and refused a draft planned as prose.
     ("/usage\rfix it", None),
-    # ...while the tab-separated forms still decide as they always did.
+    # ...while the tab forms a SPACE would also have refused still decide as they
+    # always did: one selector token, or a command whose text is its own.
     ("/goal\tship it", "goal"),
     ("/usage\ton", "usage"),
+    # And the class the same change moves, pinned rather than left to the count.
+    # Round 3 measured it and the invariant is stronger than the tally: a
+    # tab-separated draft now decides exactly as the SAME draft with a space does
+    # (294 of 294 agree), and 48 altered decision — 36 refused→prose, like these
+    # two, and 12 prose→refused, like `/move\tsome prose`. Both directions are the
+    # one boundary matching the tokenizer: the old literal-space split either read
+    # the draft as a single WORD and refused prose both composers send, or it took
+    # the word after the space as the whole argument and admitted chat for a
+    # command both composers run. `Move` is the second case; these rows are the
+    # first.
+    ("/usage\tsome prose", None),
+    ("/mcp logout\tand then", None),
+    ("/move\tsome prose", "move"),
 ]
 
 

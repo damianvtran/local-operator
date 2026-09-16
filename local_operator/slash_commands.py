@@ -976,8 +976,23 @@ def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:
     # `/usage\rfix it` as `(usage, "it")` — one WORD-shaped token, therefore a
     # 422 — while both composers read it as `/usage` plus the two-token argument
     # `fix it` and plan `send`. Planned prose and refused here is the
-    # permanent-refusal class. `split(None, 1)` leaves `/goal\tship it` and
-    # `/usage\ton` deciding exactly as they did (one token either way).
+    # permanent-refusal class.
+    #
+    # THAT FIX MOVES A WHOLE CLASS, not just the `\r` case, and the class is
+    # stated so it is not rediscovered: ANY whitespace separator is now the
+    # boundary, so a tab-separated draft decides exactly as the SAME draft with a
+    # space does. Measured over 294 such drafts (every registry name and alias ×
+    # six argument shapes): all 294 agree with their space form, and 48 of them
+    # CHANGED decision — 36 refused→prose and 12 prose→refused. Both directions
+    # are corrections toward what the other host plans, which is why the count is
+    # not the argument. The twelve are the Owner-dispatched commands
+    # (`/move\tsome prose`): the old split cut at the first LITERAL space, so its
+    # "argument" was the word `prose` alone, the booleans said "not for me", and a
+    # draft both composers run as `/move` with `some prose` was admitted as chat.
+    # The thirty-six are the reverse: it read the whole draft as one WORD with an
+    # argument it could not see, and refused `/usage\tsome prose` and
+    # `/mcp logout\tand then`, which both composers plan `send`. One boundary, two
+    # hosts, one answer.
     parts = stripped.split(None, 1)
     word = parts[0]
     rest = parts[1] if len(parts) == 2 else ""

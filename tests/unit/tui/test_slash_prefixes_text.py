@@ -292,10 +292,10 @@ def test_the_boolean_carried_rows_declare_any_not_none() -> None:
         for command in SLASH_COMMANDS
         if command.consumes_prompt or command.prefixes_text
     }
-    declared = {command.name for command in SLASH_COMMANDS if command.prefixes_text} | {
-        command.name for command in SLASH_COMMANDS if command.consumes_prompt
-    }
-    assert boolean_carried == declared
+    # No ``boolean_carried == declared`` line here: the second set was the first one
+    # written a different way, so the assert could not fail and proved nothing
+    # (round 3's NIT). The set that carries the claim is the one below, checked
+    # against the shapes actually published.
     shapes = {command.name: command.argument_shape for command in SLASH_COMMANDS}
     assert {name for name in boolean_carried if shapes[name] is not ArgumentShape.ANY} == set()
 
