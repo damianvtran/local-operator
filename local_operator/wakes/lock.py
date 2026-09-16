@@ -60,18 +60,43 @@ from pathlib import Path
 WAKE_LOCK_NAME = ".wake-write.lock"
 
 #: How long an external writer waits for a peer before refusing. Generous on
-#: purpose: the write it serialises is a read plus an append, which is
-#: sub-millisecond on an ordinary transcript but MEASURED at ~0.5 s on a 25 MB
-#: one, and five concurrent arms on a large transcript therefore legitimately
-#: queue for seconds. Refusing early would turn contention into a false
-#: failure; refusing at all is what keeps a duplicated row impossible.
+#: purpose: the write it serialises is a read plus an append, and the append
+#: parses the whole journal, so the hold scales with the transcript's ENTRY
+#: COUNT rather than its bytes. MEASURED on the reference host (review round 2):
+#: 0.030 s warm on an ordinary transcript, 1.40 s at 25 MB, 1.43 s at a 103 MB
+#: one with large entries, and **7.45 s at a 103 MB one with 415k small
+#: entries** — the worst shape measured, because that write is ~3 whole-journal
+#: parses (read, verify, and the append's own construction). This bound is the
+#: flat value it is on purpose: it is ~2x the worst measured hold, an ordinary
+#: double-press is answered in ~0.02 s and cannot reach it (reaching it needs a
+#: peer already inside a multi-second write, i.e. a ~500 MB conversation), and a
+#: bound that scaled with the transcript would make a client wait minutes for an
+#: answer that writes nothing anyway. A refusal here is safe and retryable; the
+#: number is stated rather than assumed so a future change can re-measure it.
 LOCK_WAIT_S = 15.0
 _LOCK_RETRY_SLEEP_S = 0.02
 _LOCK_RETRY_SLEEP_MAX_S = 0.1
 
 
 class WakeLockBusy(RuntimeError):
-    """The lock was held by a peer for the whole of :data:`LOCK_WAIT_S`."""
+    """The lock was held by a peer for the whole of :data:`LOCK_WAIT_S`.
+
+    The sentence below travels to the user, so it says both what happened and
+    why it can legitimately take seconds: on a very large conversation one write
+    holds the lock for most of this bound.
+    """
+
+
+class WakeLockUnavailable(RuntimeError):
+    """The lock FILE could not be created or opened at all.
+
+    Distinct from :class:`WakeLockBusy` because the answer differs: a busy lock
+    is a peer's temporary hold and re-running is the fix, whereas a directory
+    that refuses the lock file will refuse it again — the fix is a permission,
+    not a retry. Untranslated, this was the one failure mode of this lock that
+    reached the caller as an untyped 500 where the rest of the surface answers a
+    refusal with a sentence (review round 2, R7; QA Q5).
+    """
 
 
 def _try_lock(fd: int) -> bool:
@@ -154,8 +179,25 @@ class WakeWriteLock:
         self._fd: int | None = None
 
     def acquire(self) -> None:
-        """Take the lock, or raise :class:`WakeLockBusy` at the deadline."""
-        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        """Take the lock, or raise at the deadline / on an unusable lock file.
+
+        Raises :class:`WakeLockBusy` when a peer holds it for the whole wait, and
+        :class:`WakeLockUnavailable` when the lock file cannot be opened at all
+        (a read-only session directory, or one removed between the caller's
+        existence check and this call). Both are refusals the caller renders;
+        neither is allowed to escape as a bare ``OSError``.
+        """
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            # Not a WakeLockBusy: nothing was contended and re-running changes
+            # nothing until the directory's mode does. `strerror` is the only
+            # part of the error worth showing — the path is already the session
+            # the caller asked about.
+            raise WakeLockUnavailable(
+                f"this conversation's directory does not accept a wake write "
+                f"({exc.strerror or exc}); nothing was written"
+            ) from None
         deadline = time.monotonic() + self.timeout_s
         sleep_s = _LOCK_RETRY_SLEEP_S
         try:
@@ -166,7 +208,8 @@ class WakeWriteLock:
                 if time.monotonic() >= deadline:
                     raise WakeLockBusy(
                         "Another writer is applying a change to this conversation's wakes. "
-                        "Retry in a moment."
+                        "Retry in a moment — on a very large conversation a single write "
+                        "holds the lock for several seconds."
                     )
                 time.sleep(sleep_s)
                 sleep_s = min(sleep_s * 1.5, _LOCK_RETRY_SLEEP_MAX_S)

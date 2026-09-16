@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -452,20 +453,21 @@ def test_the_message_cap_is_the_shared_validators(
 
 
 def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The CLI is a second external writer, so it meets the same guard the
     route's cold path does: a runtime owns the schedules, and a row appended
-    behind it would be deleted by its next persist without ever firing."""
-    import local_operator.wakes.supervisor as supervisor
+    behind it would be deleted by its next persist without ever firing.
+
+    The owner is a REAL one — a live ``.session.pid`` and no discovery record,
+    which is the state review round 2 showed the guard used to write behind
+    (R6) — rather than a stubbed predicate, so this cell fails if the predicate
+    narrows again.
+    """
     from local_operator.cli import _wake_create
 
     session = _session(tmp_path, "wakecreate01")
-
-    async def live(config_dir: Path, session_id: str) -> bool:
-        return True
-
-    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+    (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 
     assert _wake_create(_args()) == 1
     assert "Retry in a moment" in capsys.readouterr().err

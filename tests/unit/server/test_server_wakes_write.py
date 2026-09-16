@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
@@ -473,15 +474,24 @@ async def test_an_owner_refusal_keeps_the_runtime_s_own_sentence(tmp_path: Path)
         }
     )
 
-    with pytest.raises(HTTPException) as refused:
+    with pytest.raises(desktop_wakes.WakeRefusal) as refused:
         await desktop_wakes._via_owner(
             root, bridge, "aaaaaaaaaaaa", "create", "", {"message": "x", "in": "5m"}
         )
 
-    assert refused.value.status_code == 422
-    assert refused.value.detail == {
+    # Raised as the route's own refusal type since round 2 (Q4): the boundary that
+    # has a journal records it, the one that has not renders it, and both get this
+    # status and this sentence.
+    assert refused.value.status == 422
+    assert refused.value.code == "wake_invalid"
+    assert str(refused.value) == "at most 16 wake schedules are allowed."
+    assert refused.value.session_id == "aaaaaaaaaaaa"
+    assert desktop_wakes._refusal_detail(
+        refused.value.code, str(refused.value), session_id=refused.value.session_id
+    ) == {
         "code": "wake_invalid",
         "message": "at most 16 wake schedules are allowed.",
+        "session_id": "aaaaaaaaaaaa",
     }
 
 
@@ -678,20 +688,58 @@ async def test_the_created_id_comes_back_when_the_rollback_declines(
 
 
 @pytest.mark.asyncio
-async def test_an_owner_appearing_at_the_append_is_refused_through_the_route(
-    desktop, monkeypatch: pytest.MonkeyPatch
+async def test_a_released_claim_leaves_no_row_and_a_recorded_one_is_never_deleted(
+    tmp_path: Path,
 ) -> None:
-    """R2/Q3 end to end through the route: the owner check that matters is the
-    one the WRITER makes, because the route's is a moment old by then."""
-    import local_operator.wakes.supervisor as supervisor
+    """Q4's journal half, where the difference is actually made.
 
+    A refusal whose sentence says to retry has to leave its id usable, and a
+    recorded outcome — a success, or a refusal the route kept because the request
+    may already have left something behind — has to stay replayable and
+    undeletable. Both are one line of SQL apart, so both are pinned here rather
+    than inferred from a route test.
+    """
+    from local_operator.server.utils.desktop_receipts import DesktopReceipts, Unclaimed
+
+    journal = DesktopReceipts(tmp_path)
+
+    async def refuses() -> dict[str, Any]:
+        raise Unclaimed({"refused": True, "code": "wake_write_busy"})
+
+    outcome = await journal.run("k1", {"a": 1}, refuses)
+    assert outcome == {"refused": True, "code": "wake_write_busy"}
+    assert journal.recorded("k1") is False, "a released claim must leave no row"
+
+    async def applied() -> dict[str, Any]:
+        return {"applied": True}
+
+    assert await journal.run("k1", {"a": 1}, applied) == {"applied": True}
+    # The `result IS NULL` guard, called directly: no caller can withdraw a
+    # finished request's receipt and make it repeatable.
+    journal._release("k1")
+    assert journal.recorded("k1") is True
+    assert await journal.run("k1", {"a": 1}, applied) == {
+        "applied": True,
+        "replayed": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_owner_appearing_at_the_append_is_refused_through_the_route(
+    desktop,
+) -> None:
+    """R2/Q3/R6 end to end through the route: the owner check that matters is the
+    one the WRITER makes, because the route's is a moment old by then.
+
+    The owner planted here is a live ``.session.pid`` with NO discovery record —
+    the review round 2 state that used to answer ``200 index_written: true`` and
+    write the row behind a live process. It also covers the route's own
+    resolution: with no dialable owner the route still takes its cold path, so
+    the refusal below is the writer's guard firing, not the bridge's.
+    """
     client, root = desktop
     session_dir = _session(root, "aaaaaaaaaaaa")
-
-    async def live(config_dir, session_id):
-        return True
-
-    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+    (session_dir / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 
     response = await client.post(
         "/v1/desktop/wakes",
@@ -708,6 +756,119 @@ async def test_an_owner_appearing_at_the_append_is_refused_through_the_route(
     assert detail["code"] == "wake_owner_present"
     assert "Retry in a moment" in detail["message"]
     assert _rows_on_disk(session_dir) == []
+    assert read_entry(root, "aaaaaaaaaaaa") is None
+
+
+@pytest.mark.asyncio
+async def test_a_refused_named_session_request_is_retryable_with_the_same_id(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q4: a refusal whose sentence says to retry must leave the request retryable.
+
+    The named-session shape used to RAISE its refusals, so the receipt row stayed
+    NULL and the retry answered the journal's "outcome is indeterminate" — for a
+    mistyped duration, for the cap, and (new in round 2) for the two 503s whose
+    own copy tells the client to come back. Both halves are pinned here: the
+    refusal is refused again the same way, and it never becomes an indeterminate
+    dead end.
+    """
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+    request_id = _request_id(60)
+    body = {
+        "request_id": request_id,
+        "session_id": "aaaaaaaaaaaa",
+        "message": "boom",
+        "in": "30",
+    }
+
+    first = await client.post("/v1/desktop/wakes", json=body)
+    assert first.status_code == 422, first.text
+    assert first.json()["detail"]["code"] == "wake_invalid"
+
+    # No journal row survives the refusal, so the retry RE-RUNS and answers the
+    # same thing — deterministically, from the same body.
+    second = await client.post("/v1/desktop/wakes", json=body)
+    assert second.status_code == 422, second.text
+    assert second.json()["detail"] == first.json()["detail"]
+    assert "indeterminate" not in second.text
+    assert _rows_on_disk(session_dir) == []
+
+    # The transient half: while a peer holds the write lock the answer is the
+    # retryable 503, and a retry AFTER it is released applies — which is what
+    # "Retry in a moment" promises and what a recorded outcome would refuse.
+    import local_operator.wakes.arm as arm_module
+
+    original = arm_module.WakeWriteLock.acquire
+
+    def busy(self) -> None:
+        from local_operator.wakes.lock import WakeLockBusy
+
+        raise WakeLockBusy("Another writer is applying a change")  # noqa: TRY003
+
+    monkeypatch.setattr(arm_module.WakeWriteLock, "acquire", busy)
+    blocked_id = _request_id(61)
+    blocked = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": blocked_id,
+            "session_id": "aaaaaaaaaaaa",
+            "message": "contended",
+            "in": "30m",
+        },
+    )
+    assert blocked.status_code == 503, blocked.text
+    assert blocked.json()["detail"]["code"] == "wake_write_busy"
+    assert "indeterminate" not in blocked.text
+
+    monkeypatch.setattr(arm_module.WakeWriteLock, "acquire", original)
+    retried = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": blocked_id,
+            "session_id": "aaaaaaaaaaaa",
+            "message": "contended",
+            "in": "30m",
+        },
+    )
+    assert retried.status_code == 200, retried.text
+    assert [row["id"] for row in _rows_on_disk(session_dir)] == ["w1"]
+
+
+@pytest.mark.asyncio
+async def test_a_session_directory_that_takes_no_lock_file_is_a_typed_refusal(
+    desktop,
+) -> None:
+    """Q5 / R7: the lock file is created in the session directory, so a directory
+    that refuses it fails the write before anything else — and it used to answer
+    an untyped 500 where every other failure on this surface has a sentence.
+
+    The base answered 200 here (it never created a file in that directory), so
+    this cell also records that the behaviour is a refusal now, deliberately:
+    a write this server cannot serialise is not one it should attempt.
+    """
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+    session_dir.chmod(0o500)
+
+    try:
+        response = await client.post(
+            "/v1/desktop/wakes",
+            json={
+                "request_id": _request_id(62),
+                "session_id": "aaaaaaaaaaaa",
+                "message": "no lock for me",
+                "in": "30m",
+            },
+        )
+    finally:
+        session_dir.chmod(0o700)
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "wake_write_unavailable"
+    assert "Internal Server Error" not in response.text
+    assert "nothing was written" in detail["message"]
     assert read_entry(root, "aaaaaaaaaaaa") is None
 
 

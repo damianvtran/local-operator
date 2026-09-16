@@ -71,7 +71,7 @@ from local_operator.harness.wake import (
     build_wake_edit,
     build_wake_schedule,
 )
-from local_operator.wakes.lock import WakeLockBusy, WakeWriteLock
+from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +257,21 @@ async def _apply(
         await asyncio.to_thread(lock.acquire)
     except WakeLockBusy as busy:
         raise WakeWriteError(str(busy), status=STATUS_WRITE_BUSY, code="wake_write_busy") from None
+    except WakeLockUnavailable as unusable:
+        # The lock file itself could not be created — a read-only session
+        # directory, or one that vanished between the existence check above and
+        # the open. Nothing was written, and re-running cannot help until the
+        # directory's mode changes, so this is a 409 that names the fix rather
+        # than the 500 an untranslated OSError used to answer with (review
+        # round 2, R7; QA Q5 — the base answered 200 here, so this sentence is
+        # what a user gets instead of a silent success).
+        raise WakeWriteError(
+            f"Cannot schedule a wake for this conversation: {unusable}. "
+            "Restore write permission on its directory, or reopen the conversation "
+            "from a writable location, and retry.",
+            status=STATUS_CONFLICT,
+            code="wake_write_unavailable",
+        ) from None
     try:
         rows, wake_id, due = await _mutate_locked(config_dir, session_dir, session_id, mutate, now)
         # The INDEX write is inside the lock too, and that is not incidental: it
@@ -362,29 +377,53 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     THE WINDOW THIS LEAVES, stated rather than implied: the check is a moment
     before the append, so an owner that starts between the two still wins. The
     window is now the append itself (sub-millisecond on an ordinary transcript;
-    ~0.5 s on a 25 MB one) rather than the route's whole read-merge-write, and it
-    cannot be closed from this side: the runtime is not a party to the lock above
-    (see ``wakes/lock.py`` for why adding it would not save the row — the owner's
-    in-memory list is stale regardless of ordering) and taking the session lease
-    would refuse every attach and paint this server's pid into ``.session.pid``
-    for the duration of a write.
+    seconds on a very large one) rather than the route's whole read-merge-write,
+    and it cannot be closed from this side: the runtime is not a party to the
+    lock above (see ``wakes/lock.py`` for why adding it would not save the row —
+    the owner's in-memory list is stale regardless of ordering) and taking the
+    session lease would refuse every attach and paint this server's pid into
+    ``.session.pid`` for the duration of a write.
 
-    Both owner states are refused, and they are the same answer to the writer:
-    a LIVE record (the supervisor's own no-engage rule, imported so this guard
-    and that process cannot disagree about which sessions are owned) and a
-    WEDGED one — alive, heartbeat stale, lease held so no engage can succeed.
+    OWNED MEANS ANY LIVE PROCESS, NOT ONLY A DIALABLE ONE, and that distinction
+    is the whole of review round 2's R6. Asking ``_has_live_runtime`` asks "does a
+    *dialable discovery record* exist", which is the SUPERVISOR's question (it
+    delivers into a record). An owner that exists as a live process holding the
+    session but publishes no usable record — a mixed-version rollout, a
+    registrant that failed to start, the rebind window where the record still
+    names the previous session — is owned all the same, and the tree already says
+    so twice: ``session_lease.acquire_session_lease`` refuses a new claim while a
+    live legacy pid mirror exists ("It is still authoritative when live or
+    uncertain"), and this route's own ``_rollback_created`` asks the wider
+    question to decide a directory is not its own. Predicating on the narrower
+    one appended the row behind such an owner and answered 200 with
+    ``index_written: true`` — the lost-reminder leak this guard exists to
+    prevent, one layer down. So the test is the owner PID
+    (``find_runtime_record(...)[1]``, which is ``None`` only when nothing holds
+    the session) and the record is not part of it.
+
+    BOTH OWNER STATES ARE REFUSED, and the order below is load-bearing: a WEDGED
+    owner (alive, heartbeat stale, lease held so no engage can succeed) is asked
+    FIRST because it is also a live pid — the owner question first would shadow
+    the wedged answer with the generic one and lose the sentence that names the
+    next step.
     """
-    from local_operator.wakes.supervisor import _has_live_runtime, wedged_runtime
+    from local_operator.mobile.attach_client import find_runtime_record
+    from local_operator.wakes.supervisor import wedged_runtime
 
-    if await _has_live_runtime(Path(config_dir), session_id):
+    wedged = await asyncio.to_thread(wedged_runtime, Path(config_dir), session_id)
+    if wedged is not None:
+        raise WakeWriteError(WEDGED_MESSAGE, status=STATUS_OWNER_BUSY, code="wake_owner_wedged")
+    # Off the loop: this reads ``.session.pid`` and, for the zombie proof, forks a
+    # ``ps`` — the same probe the attach paths use, so this guard and the process
+    # that would take the session agree about who is holding it.
+    _record, owner = await asyncio.to_thread(find_runtime_record, Path(config_dir), session_id)
+    if owner is not None:
         raise WakeWriteError(
             "This conversation is open in a running session, which owns its schedules. "
             "Retry in a moment, or change them from that session.",
             status=STATUS_OWNER_BUSY,
             code="wake_owner_present",
         )
-    if await asyncio.to_thread(wedged_runtime, Path(config_dir), session_id) is not None:
-        raise WakeWriteError(WEDGED_MESSAGE, status=STATUS_OWNER_BUSY, code="wake_owner_wedged")
 
 
 def _refusal(outcome: Mapping[str, Any]) -> WakeWriteError:

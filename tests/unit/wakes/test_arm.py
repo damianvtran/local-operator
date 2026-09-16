@@ -448,6 +448,7 @@ def _rows_from_transcript(directory: Path) -> list[dict[str, Any]]:
 
 import asyncio  # noqa: E402 — grouped with the tests that need it
 import functools  # noqa: E402
+import os  # noqa: E402
 import threading  # noqa: E402
 
 from local_operator.wakes.lock import WakeWriteLock  # noqa: E402
@@ -494,8 +495,14 @@ async def test_concurrent_arms_leave_one_row_each_and_no_conflict(
     The window is WIDENED on purpose so this is a deterministic catch rather
     than a probabilistic one: ``_read_rows`` is the step that makes the race,
     and slowing it is the same magnifier a 103 MB transcript provided when this
-    was found. Without the per-session lock every thread reads the same base and
-    the last append wins, so the assertion below fails at 1 row instead of 5.
+    was found.
+
+    WITHOUT the lock, the assertion that fires is ``failures == []`` — two of the
+    five arms are refused with ``wake_write_conflict`` for writes that a peer had
+    already absorbed, which is round 1's false-refusal half. The rows do not
+    collapse to one; the verify/retry loop turns the lost update into a 409
+    instead. (N4: this docstring used to predict the wrong failure mode. Measured
+    by the reviewer and by QA, with the lock neutralised, 4 runs out of 4.)
     """
     import local_operator.wakes.arm as arm_module
 
@@ -526,20 +533,62 @@ async def test_concurrent_arms_leave_one_row_each_and_no_conflict(
 
 
 @pytest.mark.asyncio
-async def test_a_live_owner_that_appears_at_the_append_is_refused(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("owner", ["cold", "pid-mirror-only", "dialable-record"])
+async def test_an_owner_holding_the_session_is_refused_without_needing_a_record(
+    root: Path, owner: str
 ) -> None:
-    """The route's owner check is a moment old by the time the writer runs. When
-    a runtime has appeared in between, the row would be deleted by that owner's
-    next persist — so the writer refuses instead of answering 200."""
-    import local_operator.wakes.supervisor as supervisor
+    """R6: ask who HOLDS the transcript, not who publishes a dialable record.
+
+    The route's owner check is a moment old by the time the writer runs, and a
+    runtime that appeared in between owns the schedules — its next persist
+    republishes the list it loaded BEFORE this append, which deletes the row from
+    the transcript and the index while the supervisor skips a live session.
+
+    The state that decides this is a live ``.session.pid``, and the three cells
+    below are the reviewer's known-positive / known-negative pair plus the
+    control:
+
+    * ``cold`` — no owner at all, so the guard must NOT over-refuse (control);
+    * ``pid-mirror-only`` — a live owner with NO usable discovery record
+      (mixed-version rollout, a failed registrant, the rebind window). Asking
+      ``_has_live_runtime`` answered "not owned" here and wrote the row behind a
+      live owner with a 200 (review round 2, R6);
+    * ``dialable-record`` — the known-positive: the same owner, publishing a v5
+      record, which the narrow predicate also caught.
+    """
+    import local_operator.session.runtime.registry as registry
+    from local_operator.mobile.attach_client import find_runtime_record
 
     session_dir = _session(root, "owned01", [_row("w1")])
+    if owner != "cold":
+        # This process's own pid: a REAL live owner, so the probe's zombie proof
+        # and its liveness proof are exercised rather than stubbed.
+        (session_dir / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    if owner == "dialable-record":
+        registry.publish(
+            registry.SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id="owned01",
+                conversation_name="",
+                cwd=str(root),
+                model_label="",
+                control_port=1,
+                control_key="k",
+                protocol=5,
+            ),
+            root=root,
+        )
+        # The instrument is alive: this owner IS dialable, which is what makes
+        # the refusal below a positive rather than a silent no-op.
+        record, pid = find_runtime_record(root, "owned01")
+        assert record is not None and pid == os.getpid()
 
-    async def live(config_dir: Path, session_id: str) -> bool:
-        return True
-
-    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+    if owner == "cold":
+        outcome = await arm_wake(root, "owned01", {"message": "lands", "in": "30m"})
+        assert outcome.wake_id == "w2"
+        assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1", "w2"]
+        return
 
     with pytest.raises(WakeWriteError) as refused:
         await arm_wake(root, "owned01", {"message": "must not land", "in": "30m"})

@@ -1422,7 +1422,7 @@ async def test_a_failed_fire_is_held_for_its_backoff_and_retried_when_it_elapses
     due = NOW_MS - 5_000
     write_entry(tmp_path, "heldsession1", cwd=str(tmp_path), schedules=[_schedule(due)])
 
-    fired = await fire_due_wakes(tmp_path)
+    fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
 
     assert fired == 0 and calls == ["heldsession1"]
     record = deliveries.read_delivery(tmp_path, "heldsession1")
@@ -1435,7 +1435,7 @@ async def test_a_failed_fire_is_held_for_its_backoff_and_retried_when_it_elapses
     # The NEXT pass, immediately, must not re-engage: the wait is the record's.
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        assert await fire_due_wakes(tmp_path) == 0
+        assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 0
     assert calls == ["heldsession1"], f"the retry ignored the recorded backoff: {calls}"
     held = [rec for rec in caplog.records if rec.message.startswith("backoff:")]
     assert held, "the hold was silent; an operator reading the log cannot see why nothing is firing"
@@ -1470,7 +1470,7 @@ async def test_an_owed_fire_past_the_staleness_bound_is_still_fired(
     write_entry(tmp_path, "owedstale001", cwd=str(tmp_path), schedules=[_schedule(stale_due)])
 
     # Unchanged for a wake nobody attempted: refused, and left to the session.
-    assert await fire_due_wakes(tmp_path) == 0
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 0
     assert engagements == []
 
     # Owed: the same schedule, with the supervisor having tried and failed.
@@ -1520,7 +1520,7 @@ async def test_a_delivered_fire_clears_its_record(
         tmp_path, "deliverable01", due, error="unreachable", now_ms=NOW_MS - 60_000
     )
 
-    assert await fire_due_wakes(tmp_path) == 1
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
     assert deliveries.read_delivery(tmp_path, "deliverable01") is None
 
 
@@ -1548,7 +1548,7 @@ async def test_a_record_is_dropped_when_its_occurrence_is_no_longer_owed(
         tmp_path, "reapedsess001", due, error="unreachable", now_ms=NOW_MS - 1_000
     )
 
-    assert await fire_due_wakes(tmp_path) == 0
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 0
 
     assert (
         deliveries.read_delivery(tmp_path, "advanced00001") is None
@@ -1651,7 +1651,7 @@ async def test_an_unwritable_ledger_does_not_claim_durability(
     write_entry(tmp_path, "nowritable01", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
 
     with caplog.at_level("WARNING"):
-        assert await fire_due_wakes(tmp_path) == 0  # the count reports STARTS
+        assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 0  # the count reports STARTS
 
     assert calls == ["nowritable01"], "the attempt itself must still be made"
     assert deliveries.read_deliveries(tmp_path) == {}, "the seam was supposed to refuse the write"

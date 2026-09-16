@@ -46,7 +46,7 @@ import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
@@ -71,6 +71,7 @@ from local_operator.server.routes.desktop_sessions import (
     receipts,
     reply,
 )
+from local_operator.server.utils.desktop_receipts import Unclaimed
 from local_operator.server.utils.desktop_sessions import read_desktop_marker
 from local_operator.wakes.arm import (
     WEDGED_MESSAGE,
@@ -81,6 +82,38 @@ from local_operator.wakes.arm import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class WakeRefusal(Exception):
+    """A wake refusal on its way to a response.
+
+    Carries the writer's OWN status and code, because the same refusal has two
+    destinations: a receipted ``POST`` records it as that request's outcome (so a
+    retry gets a real answer instead of the journal's "outcome is indeterminate"),
+    and the un-receipted ``PATCH``/``DELETE`` render it directly. One type is what
+    stops a refusal being rendered two different ways depending on which route hit
+    it — the split that made the create+arm shape answer 500 where the
+    named-session shape answered 422 (review round 1, R1).
+
+    RAISED, not returned, from the writer paths, and caught at the two boundaries
+    that decide the journal: see ``_refused`` for what each boundary then does.
+
+    ``bare`` marks a refusal that is NOT ours to re-shape: the pool's own 503
+    carries a plain-string ``detail``, and this surface has answered it that way
+    since before this feature existed. Recording it makes it retryable; rendering
+    an envelope around someone else's error would make that a silent interface
+    change for the client.
+    """
+
+    def __init__(
+        self, status: int, code: str, message: str, *, session_id: str = "", bare: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.session_id = session_id
+        self.bare = bare
+
 
 router = APIRouter(tags=["Desktop wakes"], dependencies=[Depends(require_desktop)])
 
@@ -114,8 +147,26 @@ _STATUS_FOR_CODE = {
     # the wire, and it is shared by the owner path and the file path.
     "wake_owner_present": 503,
     "wake_owner_wedged": 503,
+    # The owner exists but this server cannot use it: the pool could not reach it,
+    # or it answered nothing. Transient by nature, and raised before any writer
+    # ran, so its claim on the request id is released like the other 503s.
+    "wake_owner_unavailable": 503,
     "wake_write_busy": 503,
+    # 409, NOT 503: the lock FILE could not be created (a read-only session
+    # directory), so nothing was contended and a retry changes nothing until the
+    # directory's mode does — the same "conflict with the state itself" class as
+    # the 409s above. Before this it was the one lock failure that escaped as an
+    # untyped 500 (review round 2, R7; QA Q5).
+    "wake_write_unavailable": 409,
 }
+
+#: The one refusal whose FIRST attempt may already have written a snapshot, and
+#: therefore the one whose claim on its request id is kept rather than released.
+#: The verify loop appends, is overtaken, retries and is overtaken again, so
+#: attempt 1's list — carrying the row — can be in the transcript; re-running
+#: that would apply the row twice. Every other refusal is raised before any
+#: write, which is what makes releasing the claim safe (see ``_refused``).
+_WRITTEN_BEFORE_REFUSAL = frozenset({"wake_write_conflict"})
 
 
 class WakeRequest(Input):
@@ -212,42 +263,57 @@ async def create_wake(body: WakeCreate, request: Request):
     root = request.app.state.config_manager.config_dir
 
     async def create() -> dict[str, Any]:
-        if body.session_id is not None:
-            receipt = await _mutate(
-                request,
-                body.session_id,
-                op="create",
-                wake_request=_wake_request(body),
-            )
-            if body.title:
-                # An EXPLICIT name is the only reason to touch an existing
-                # conversation's title here: a schedule's prompt is not a
-                # rename request, and silently re-titling a session the user
-                # already named would be this route editing their history.
-                await asyncio.to_thread(_birth_title, root, body.session_id, body.title, True)
-            return receipt
+        try:
+            if body.session_id is not None:
+                receipt = await _mutate(
+                    request,
+                    body.session_id,
+                    op="create",
+                    wake_request=_wake_request(body),
+                )
+                if body.title:
+                    # An EXPLICIT name is the only reason to touch an existing
+                    # conversation's title here: a schedule's prompt is not a
+                    # rename request, and silently re-titling a session the user
+                    # already named would be this route editing their history.
+                    await asyncio.to_thread(_birth_title, root, body.session_id, body.title, True)
+                return receipt
+        except WakeRefusal as refusal:
+            # THE NAMED-SESSION SHAPE SETTLES ITS REFUSALS TOO (review round 2,
+            # Q4). It used to raise, so its receipt row stayed NULL and a retry of
+            # the same request_id answered the journal's "outcome is
+            # indeterminate" — for a mistyped duration, for the cap, and for the
+            # two 503s whose own sentences say to retry. Nothing durable is made
+            # on this shape, so its refusals are RELEASED and the retry re-runs;
+            # see ``_refused`` for the one case that is recorded instead.
+            return _refused(refusal, session_id=refusal.session_id or str(body.session_id or ""))
+
         session_id, cwd = await _create_session(request, body)
         try:
             outcome = await arm_wake(root, session_id, _wake_request(body), cwd=cwd)
         except WakeWriteError as error:
             # THIS SHAPE TRANSLATES ITS REFUSALS TOO. It used to call the writer
-            # directly and re-raise, so every refused schedule answered 500
-            # while the identical body with `session_id` answered 422/409 with
-            # the validator's sentence — the "New scheduled task" flow, i.e. the
+            # directly and re-raise, so every refused schedule answered 500 while
+            # the identical body with `session_id` answered 422/409 with the
+            # validator's sentence — on the "New scheduled task" flow, i.e. the
             # shape the whole feature exists for (review round 1, R1; QA Q1,
             # 5 of 5 refusal kinds).
             #
-            # The refusal is ALSO this request's recorded outcome rather than a
-            # raised-and-forgotten exception: `run` stores what the operation
-            # RETURNS, and a raised one leaves the receipt row NULL, so a retry
-            # of the same request_id met the journal's "outcome is
-            # indeterminate" — a dead end for a mistyped duration.
+            # The refusal is also SETTLED with the journal rather than raised: a
+            # raised one leaves the receipt row NULL, so a retry of the same
+            # request_id met "outcome is indeterminate" — a dead end for a
+            # mistyped duration (see ``_refused`` for which refusals a retry then
+            # re-runs and which it replays).
             removed = await asyncio.to_thread(_rollback_created, root, session_id)
             # The created id only when the directory SURVIVED (the rollback
             # declined because something adopted it): that is the case the
-            # design's "retry the arm against it" is about. Offering an id whose
-            # directory was just removed would send the caller to a 404.
-            return _refused(error, session_id="" if removed else session_id)
+            # design's "retry the arm against it" is about, and the case where
+            # the claim must be KEPT — a released claim would let the retry make
+            # a SECOND conversation beside the one that survived. Offering an id
+            # whose directory was just removed would send the caller to a 404.
+            return _refused(
+                _refusal_of(error), session_id="" if removed else session_id, keep=not removed
+            )
         except BaseException:
             # Nothing may be left behind that the user cannot see or reach:
             # a session directory with no wake in it is a phantom conversation
@@ -268,15 +334,19 @@ async def create_wake(body: WakeCreate, request: Request):
             create,
         )
         if result.get("refused"):
-            # Raised AFTER the journal write on purpose: the recorded refusal is
-            # what a retry replays, instead of the journal answering
-            # "indeterminate" for a request whose outcome it now knows.
+            # Raised AFTER the journal settled the claim: a recorded refusal is
+            # what a retry replays, a released one re-runs (see ``_refused``).
+            code = str(result.get("code") or "wake_refused")
             raise HTTPException(
-                _refusal_status(str(result["code"])),
-                _refusal_detail(
-                    str(result["code"]),
-                    str(result["message"]),
-                    session_id=str(result.get("session_id") or ""),
+                _refusal_status(code, _as_int(result.get("status")) or 409),
+                (
+                    str(result.get("message") or "The wake was refused.")
+                    if result.get("bare")
+                    else _refusal_detail(
+                        code,
+                        str(result.get("message") or "The wake was refused."),
+                        session_id=str(result.get("session_id") or ""),
+                    )
                 ),
             )
         if result.get("replayed"):
@@ -295,18 +365,23 @@ async def edit_wake_route(session_id: str, wake_id: WakeId, body: WakeEdit, requ
     is no duplicate side effect for a journal to prevent.
     """
     async with errors():
-        return reply(
-            await _mutate(
-                request,
-                session_id,
-                op="edit",
-                wake_id=wake_id,
-                # Through the same projection as a create: an edit body carries
-                # no route-level fields today, and routing both through one
-                # helper is what keeps that true when one gains them.
-                wake_request=_wake_request(body),
+        try:
+            return reply(
+                await _mutate(
+                    request,
+                    session_id,
+                    op="edit",
+                    wake_id=wake_id,
+                    # Through the same projection as a create: an edit body carries
+                    # no route-level fields today, and routing both through one
+                    # helper is what keeps that true when one gains them.
+                    wake_request=_wake_request(body),
+                )
             )
-        )
+        except WakeRefusal as refusal:
+            # No request id on this shape, so there is no journal claim to
+            # record: the refusal IS the response (see ``WakeRefusal``).
+            _raise_refusal(refusal)
 
 
 @router.delete(
@@ -320,9 +395,14 @@ async def delete_wake_route(session_id: str, wake_id: WakeId, request: Request):
     held while it had something scheduled.
     """
     async with errors():
-        return reply(
-            await _mutate(request, session_id, op="cancel", wake_id=wake_id, wake_request={})
-        )
+        try:
+            return reply(
+                await _mutate(request, session_id, op="cancel", wake_id=wake_id, wake_request={})
+            )
+        except WakeRefusal as refusal:
+            # As for the edit above: un-receipted by design (idempotent), so the
+            # refusal is rendered here rather than journalled.
+            _raise_refusal(refusal)
 
 
 # ---------------------------------------------------------------------------
@@ -522,9 +602,11 @@ async def _mutate(
             # append from its own in-memory list on its next persist anyway.
             # 503, with a sentence naming the next step, because the client's
             # move is to retry or stop that conversation.
-            raise HTTPException(
+            raise WakeRefusal(
                 _refusal_status("wake_owner_wedged"),
-                _refusal_detail("wake_owner_wedged", WEDGED_MESSAGE),
+                "wake_owner_wedged",
+                WEDGED_MESSAGE,
+                session_id=session_id,
             )
         return await _via_files(
             root,
@@ -555,13 +637,25 @@ async def _via_owner(
     payload = json.dumps({"op": op, "wake_id": wake_id, "request": wake_request})
     outcome = await bridge.remote.route_shared_slash("wake", payload)
     if not isinstance(outcome, Mapping):
-        raise HTTPException(503, "The conversation's runtime answered nothing for this wake.")
+        # NOT a wake refusal the runtime decided: the bridge answered nothing at
+        # all (no ack shape from the owner). Typed for the journal all the same —
+        # it is raised before any write and its sentence asks the caller to come
+        # back, which is exactly the pair that must not leave a NULL row.
+        raise WakeRefusal(
+            503,
+            "wake_owner_unavailable",
+            "The conversation's runtime answered nothing for this wake.",
+            session_id=session_id,
+            bare=True,
+        )
     if outcome.get("kind") == "error":
         data = outcome.get("data") or {}
         code = str(data.get("code") or "wake_refused")
-        raise HTTPException(
+        raise WakeRefusal(
             _refusal_status(code),
-            _refusal_detail(code, str(outcome.get("text") or "The wake was refused.")),
+            code,
+            str(outcome.get("text") or "The wake was refused."),
+            session_id=session_id,
         )
     data = outcome.get("data") or {}
     root = Path(config_dir)
@@ -609,10 +703,7 @@ async def _via_files(
     try:
         outcome = await run()
     except WakeWriteError as error:
-        raise HTTPException(
-            _refusal_status(error.code, error.status),
-            _refusal_detail(error.code, str(error), session_id=session_id),
-        ) from None
+        raise _refusal_of(error, session_id=session_id) from None
     return _receipt(
         root,
         session_id,
@@ -671,25 +762,76 @@ def _refusal_detail(code: str, message: str, *, session_id: str = "") -> dict[st
     return detail
 
 
-def _refused(error: WakeWriteError, *, session_id: str = "") -> dict[str, Any]:
-    """A refusal as THIS REQUEST'S RECORDED OUTCOME, for the receipt journal.
+def _refused(refusal: WakeRefusal, *, session_id: str = "", keep: bool = False) -> dict[str, Any]:
+    """Settle a refusal against this request's id: RECORD it, or RELEASE it.
 
-    ``receipts().run`` stores whatever the operation RETURNS, so a refusal that
-    is raised instead leaves the row NULL — and a NULL row makes the retry of
-    the same ``request_id`` answer "outcome is indeterminate" for what was a
-    user typo (review round 1, R1). Returning it is what makes a retry
-    actionable: the journal replays the same sentence.
+    Returns the outcome the receipt journal should store, or raises
+    :class:`Unclaimed` to withdraw the claim instead — one or the other, decided
+    by ``keep`` and ``_WRITTEN_BEFORE_REFUSAL``.
 
-    A refusal is honest to record, which is why this needs no journal change:
-    nothing was created (``_rollback_created`` proves it), so replaying the
-    answer is exactly right.
+    WHY NEITHER HALF CAN BE SKIPPED. ``receipts().run`` records whatever the
+    operation returns, so a refusal that is merely RAISED leaves the row NULL —
+    and a NULL row makes the retry answer "outcome is indeterminate" for what was
+    a user typo (review round 1, R1) or, worse, for a 503 whose own sentence tells
+    the caller to retry (review round 2, Q4). So a refusal must be settled one way
+    or the other on every path that has a journal.
+
+    ``keep=True`` ⇒ RECORDED, and the journal replays it. Two cases, both "this
+    request may already have left something behind": a created session whose
+    directory SURVIVED our rollback (the caller is handed that id and retries the
+    arm against it), and ``wake_write_conflict``, whose verify loop may have
+    written a snapshot before the base moved again.
+
+    ``keep=False`` ⇒ RELEASED, so a retry re-runs and can genuinely succeed. That
+    is what a sentence like "retry in a moment" promises, and re-running is safe
+    BY CONSTRUCTION here: the refusal was raised before any write, which is the
+    same reason at-most-once is not needed for it. Failing the other way would be
+    the visible bug: a transient contention answer that a retry can never get
+    past.
     """
-    return {
-        "refused": True,
-        "code": error.code,
-        "message": str(error),
-        "session_id": session_id,
-    }
+    if keep or refusal.code in _WRITTEN_BEFORE_REFUSAL:
+        return {
+            "refused": True,
+            "code": refusal.code,
+            "message": str(refusal),
+            "status": refusal.status,
+            "session_id": session_id,
+            "bare": refusal.bare,
+        }
+    raise Unclaimed(
+        {
+            "refused": True,
+            "code": refusal.code,
+            "message": str(refusal),
+            "status": refusal.status,
+            "session_id": session_id,
+            "bare": refusal.bare,
+        }
+    )
+
+
+def _refusal_of(error: WakeWriteError, *, session_id: str = "") -> WakeRefusal:
+    """The writer's refusal as the route's own type.
+
+    One translation point, so the status the writer chose is preserved (the table
+    only overrides the codes it knows) and the two shapes of ``POST`` cannot
+    answer differently for the same mistake.
+    """
+    return WakeRefusal(
+        _refusal_status(error.code, error.status), error.code, str(error), session_id=session_id
+    )
+
+
+def _raise_refusal(refusal: WakeRefusal) -> NoReturn:
+    """Render a refusal on a route that has no receipt journal to record it in."""
+    raise HTTPException(
+        refusal.status,
+        (
+            str(refusal)
+            if refusal.bare
+            else _refusal_detail(refusal.code, str(refusal), session_id=refusal.session_id)
+        ),
+    )
 
 
 def _wedged(config_dir: Path, session_id: str) -> Any:

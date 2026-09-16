@@ -99,10 +99,77 @@ def test_release_allows_the_next_holder_immediately(tmp_path: Path) -> None:
 
 def test_the_wait_is_generous_enough_for_the_write_it_serialises() -> None:
     """Documented, not incidental: the write under the lock is a read plus an
-    append, measured at ~0.5 s on a 25 MB transcript, so five concurrent arms
-    legitimately queue for seconds. A short bound would turn contention into a
-    false 503."""
+    append, and the append parses the whole journal, so a 103 MB transcript with
+    415k small entries was MEASURED at a 7.45 s hold (review round 2). Five
+    concurrent arms legitimately queue; a short bound would turn contention into
+    a false 503."""
     assert LOCK_WAIT_S >= 5.0
+
+
+def test_a_lock_file_left_by_a_killed_holder_blocks_nobody(tmp_path: Path) -> None:
+    """The stale lock, DRIVEN rather than reasoned about (review round 2, N5).
+
+    A SIGKILLed holder leaves the FILE behind — nothing deletes it, and nothing
+    should: the file is never written to, so there is nothing to clean. The whole
+    design rests on the kernel dropping the flock at process death, which makes
+    "a stale lock left by a crashed writer" a state this module does not have.
+    Pinned because a future "tidy up the stale lock file" change would break it
+    silently, and because the alternative (a lock file containing a pid to reap)
+    is the design this deliberately is not.
+    """
+    root = str(Path(__file__).resolve().parents[3])
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER.format(root=root, session=str(tmp_path), hold=30.0)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        assert (tmp_path / WAKE_LOCK_NAME).exists()
+        holder.kill()
+        holder.wait(timeout=30)
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+
+    # The file is still there; the lock is not. Taken immediately, not after the
+    # holder's 30 s hold.
+    assert (tmp_path / WAKE_LOCK_NAME).exists(), "the file is not supposed to be cleaned up"
+    started = time.monotonic()
+    with WakeWriteLock(tmp_path, timeout_s=1.0):
+        pass
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_directory_that_refuses_the_lock_file_is_a_refusal_not_a_crash(
+    tmp_path: Path,
+) -> None:
+    """The lock's one non-contention failure mode (review round 2, R7; QA Q5).
+
+    The lock file lives in the session directory, so a directory whose mode does
+    not allow creating one used to raise ``PermissionError`` straight out of
+    ``acquire()`` — past the caller's ``except WakeLockBusy`` and into an untyped
+    500 where every other failure on this surface answers a sentence. Both halves
+    of the mode change are covered: a directory that cannot be written, and one
+    that is not there at all (the caller's existence check and this call are not
+    atomic).
+    """
+    from local_operator.wakes.lock import WakeLockUnavailable
+
+    refused = tmp_path / "readonly"
+    refused.mkdir()
+    refused.chmod(0o500)
+    try:
+        with pytest.raises(WakeLockUnavailable) as error:
+            WakeWriteLock(refused, timeout_s=0.1).acquire()
+        assert "does not accept a wake write" in str(error.value)
+        assert "nothing was written" in str(error.value)
+    finally:
+        refused.chmod(0o700)
+
+    with pytest.raises(WakeLockUnavailable):
+        WakeWriteLock(tmp_path / "gone", timeout_s=0.1).acquire()
 
 
 def test_two_threads_alternate_rather_than_overlap(tmp_path: Path) -> None:
