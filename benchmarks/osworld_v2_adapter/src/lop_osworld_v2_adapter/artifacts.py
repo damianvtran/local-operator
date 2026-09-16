@@ -5,9 +5,12 @@ THEIR CONTENTS. The parent reopens ``<root>/<sha256>`` with ``O_NOFOLLOW``,
 re-hashes the bytes and compares them against the size and digest the event
 declared (``evaluation.adapters.supervisor.verify_artifact``), so the name and
 the bytes are meant to be ONE fact. The adapter has only three publishes and
-both of the byte-bearing ones (``observation``'s frame, ``scoring``'s detail)
-go through here, because that "name implies bytes" contract is a property of
-the write and not of its caller.
+both of the CONTENT-ADDRESSED ones (``observation``'s frame, ``scoring``'s
+detail) go through here, because that "name implies bytes" contract is a
+property of the write and not of its caller. The third (``providers/aws.py``,
+the guest-preparation report) writes bytes too, but to a fixed name that is
+never reopened by digest -- a partial one costs a forensic file, not a
+permanently refused address -- so it is deliberately left alone.
 
 A create-then-write cannot honour it: the name exists from the instant of the
 create, while the bytes are still on their way. The interrupting failure is
@@ -136,6 +139,18 @@ def _already_published(path: Path, size: int) -> bool:
     parent refuses to follow one anyway (``O_NOFOLLOW``). Any ``OSError``
     (absent, dangling, unreadable) reports "not published" so the write is
     attempted and the real error surfaces from the write itself.
+
+    A directory at the address is the one non-regular shape that cannot be
+    repaired this way, and it is DELIBERATELY NOT treated as published: it is
+    not a regular file, so the write is attempted and the ``os.replace`` onto
+    it fails with ``EISDIR``. That failure is the point. The pre-fix dedup
+    asked only whether the name EXISTED, a directory answered yes, and the
+    producer then declared the frame's true ``byte_count`` against bytes that
+    were never written -- corruption the parent refuses later and far less
+    legibly, as an unsafe artifact path, with the producer's own call already
+    returned. Reporting it where it happened costs the caller one real errno,
+    and ``test_a_directory_at_the_address_is_refused_rather_than_skipped``
+    pins that as the contract rather than an accident.
     """
 
     try:

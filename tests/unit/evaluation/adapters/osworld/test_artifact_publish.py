@@ -26,6 +26,7 @@ parent's HostVerifier makes.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import signal
 from pathlib import Path
@@ -101,9 +102,12 @@ def test_a_publish_that_fails_mid_write_leaves_nothing_at_the_address(tmp_path: 
     the same syscall path). ``SIGXFSZ`` is ignored because its default action is
     to kill the process outright instead of returning the error.
 
-    On the pre-fix tree this test fails at the first assertion: the create has
-    already landed a 0-byte file under the digest name, and the retry then skips
-    its own write.
+    On the pre-fix tree this test fails at the first assertion: the create had
+    already landed the NAME under the digest, and the write that followed it
+    stopped at the limit rather than at zero. What the retry then finds is a
+    partial file -- ``byte_count // 4`` bytes here, 25% of the frame, while a
+    limit of 0 leaves the 0-byte shape the live run left. The poisoning is the
+    name landing without its bytes, so no particular length is part of it.
     """
 
     resource = pytest.importorskip("resource", reason="RLIMIT_FSIZE is POSIX-only")
@@ -186,6 +190,36 @@ def test_a_link_at_the_address_is_replaced_rather_than_written_through(tmp_path:
     assert not path.is_symlink()
     assert elsewhere.read_bytes() == b"not the frame"
     assert verify_artifact(tmp_path, retry.frames[0].artifact) == payload
+
+
+def test_a_directory_at_the_address_is_refused_rather_than_skipped(tmp_path: Path) -> None:
+    """A broken address that cannot be repaired is REPORTED, not hidden.
+
+    A symlink or a FIFO is repaired in place (above); a DIRECTORY is the shape
+    that cannot be, because ``os.replace`` will not overwrite one. It is
+    deliberately not treated as published: the name existing is not the same
+    fact as the bytes being there, and the pre-fix dedup -- which asked only
+    whether the name existed -- declared the frame's true ``byte_count``
+    against a directory that the parent then refused as an unsafe artifact
+    path, long after the publish that should have reported it had returned.
+
+    So the publish raises the kernel's own error, the address is left exactly
+    as it was found, and no temp file survives the attempt. This pins that as
+    the contract rather than an accident of ``os.replace``.
+    """
+
+    first = _build(tmp_path, shade=23)
+    artifact = first.frames[0].artifact
+    path = tmp_path / artifact.sha256
+    path.unlink()
+    path.mkdir()
+
+    with pytest.raises(OSError) as raised:
+        _build(tmp_path, shade=23)
+    assert raised.value.errno == errno.EISDIR
+
+    assert path.is_dir(), "the refusal consumed the directory it refused"
+    assert _entries(tmp_path) == {artifact.sha256}, "the failed publish left a temp file"
 
 
 def test_a_leftover_score_detail_is_healed_too(tmp_path: Path) -> None:
