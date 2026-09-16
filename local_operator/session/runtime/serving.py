@@ -4202,9 +4202,30 @@ class ServingSessionHandle(SessionHandle):
         # reaches here — the viewer pulls it back to local because its own
         # facade holds the identical rows — so this answers the explicit
         # `list` and the empty case from the session's own manager.
+        #
+        # The emptiness test asks the MANAGER for its configured server NAMES
+        # (``get_all_server_names``), which is the question the status band's
+        # ``tui.app._mcp_status`` asks it — with the same ``manager is None``
+        # guard this now uses. It used to read ``manager.servers``, an attribute
+        # no manager has ever had, so the test answered falsy forever and an
+        # explicit ``/mcp list`` said "no MCP servers configured." on EVERY
+        # session whose slash command routes here — every fresh viewer, and the
+        # phone projection, which shares this handler — while the very same
+        # session's transcript listed those servers failing to start by name.
+        #
+        # A manager that cannot answer must never take a slash command down with
+        # it, so the accessor is guarded: a session whose MCP discovery failed
+        # carries no manager at all (``mcp_manager is None``), which is the
+        # genuinely-empty case this notice is for. A facade too old to expose
+        # the accessor degrades to the same answer rather than raising.
+        names: list[str] = []
         manager = getattr(session, "mcp_manager", None)
-        servers = getattr(manager, "servers", None) if manager is not None else None
-        if not servers:
+        if manager is not None:
+            try:
+                names = list(manager.get_all_server_names())
+            except Exception:  # noqa: BLE001 — a listing must never raise
+                logger.debug("MCP listing: the manager could not name its servers", exc_info=True)
+        if not names:
             return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
         return SlashResult(kind="block", data={"type": "mcp"})
 

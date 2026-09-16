@@ -37894,7 +37894,8 @@ class OperatorApp(App[None]):
         if verb == "logout":
             # Only what can actually be removed — the /logout rule. Rows are
             # keyed by server NAME but the store is keyed by URL, so the
-            # config (via the manager) supplies the mapping.
+            # config — the same layer the names above came from — supplies the
+            # mapping.
             stored = mcp_logged_out_servers()
             if stored is None:
                 # An unreadable store is NOT the same answer as "no
@@ -37902,7 +37903,7 @@ class OperatorApp(App[None]):
                 # been rather than rendering a bare empty one.
                 editor.picker.set_notice("credential store unreadable — cannot list logouts")
                 return []
-            names = [name for name in names if self._mcp_server_url(name, manager) in stored]
+            names = [name for name in names if self._mcp_server_url(name) in stored]
         # The verb→server swap is otherwise only inferable from the row
         # shapes; a one-line notice names what this list is FOR while the
         # server slot is open (it clears on the next slot change — the
@@ -37999,11 +38000,32 @@ class OperatorApp(App[None]):
             for name, source in sources.items()
         ]
 
-    def _mcp_server_url(self, name: str, manager: Any) -> str | None:
-        """The configured URL for one server, or ``None`` when unknown."""
-        if manager is None:
+    def _mcp_server_url(self, name: str) -> str | None:
+        """The configured URL for one server, or ``None`` when unknown.
+
+        Read from the CONFIG layer, not from the session's manager. This maps
+        the picker's rows (keyed by server NAME) onto the credential store
+        (keyed by URL), and on a FOLLOWER the session carries the read-only
+        ``SnapshotMcpManager`` facade, which has no ``get_server_config``: the
+        unconditional call raised ``AttributeError`` on every refresh of the
+        ``/mcp logout `` argument list and took the app down. Names alone
+        cannot answer this, so the mapping needs a source that works on both
+        sides.
+
+        The config layer is that source, and it is also the source the names
+        in the same list already come from (:func:`oauth_server_names`), so
+        mapping them through anything else was a latent disagreement between
+        two halves of one list. ``_mcp_remove_choices`` next door reads it for
+        the same reason: the config is the thing the command acts on, and it
+        answers even when there is no manager at all.
+        """
+        from local_operator.mcp.config import load_all_mcp_configs
+
+        try:
+            configs, _sources = load_all_mcp_configs(os.getcwd())
+        except Exception:  # noqa: BLE001 — an unreadable config offers no rows
             return None
-        cfg = manager.get_server_config(name)
+        cfg = configs.get(name)
         return getattr(cfg, "url", None) if cfg is not None else None
 
     async def _mcp_login_worker(
