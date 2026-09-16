@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -713,8 +714,11 @@ class TestInstallIntoGeneration:
         # the arm that pins the words for it — the one this test builds.
         text = str(refused.value)
         assert "the pointer removed" in text, text
-        assert "the daemon shim removed" in text, text
-        assert "the copy" in text and "removed" in text, text
+        # R1-2: ``remove_shim`` is "there was none before this run", and the only
+        # plant happens AFTER the step that failed — so on this machine there was
+        # nothing to remove, and the clause said otherwise until review round 1.
+        assert "no daemon shim to remove" in text, text
+        assert re.search(r"the copy \S+ removed", text), text
         assert (
             "so this machine is as it was" in text
         ), "every step landed, so the claim is earned here"
@@ -777,60 +781,141 @@ class TestInstallIntoGeneration:
         text = str(refused.value)
         assert f"the pointer put back to {adopted.name}" in text, text
         assert "the daemon shim that was already there kept" in text, text
-        assert "the copy" in text and "removed" in text, text
+        # R1-4: the NAME is pinched too — a widened clause that drops it ("the copy
+        # removed") is a different sentence, and the weaker "the copy" + "removed"
+        # pair passed with it.
+        assert re.search(r"the copy \S+ removed", text), text
         assert "are gone" not in text, text
         assert "so this machine is as it was" in text, text
 
-    def test_a_prune_between_the_flip_and_the_undo_leaves_no_pointer_behind(
+    def test_a_prune_between_the_flip_and_the_undo_leaves_a_working_launcher(
         self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R7-1: the generation the undo wants to put BACK can be gone by then.
+        """R7-1 and Q1 together: the race, driven through the REAL launcher write.
 
-        ``flip_pointer`` answers a target that no longer exists with
-        ``UpdateError``, not ``OSError``, and the undo caught only the latter — so
-        the refusal escaped a function documented never to raise, from its FIRST
-        step, and the two steps after it never ran. What was left is the half-layout
-        the migration exists to prevent: the pointer on the refused copy, and that
-        copy still on disk (measured by review round 7).
+        ``flip_pointer`` answers a target that no longer exists with ``UpdateError``,
+        not ``OSError``, and the undo caught only the latter — so the refusal escaped
+        a function documented never to raise, from its FIRST step, and the two steps
+        after it never ran. What was left is the half-layout the migration exists to
+        prevent: the pointer on the refused copy, and that copy still on disk
+        (measured by review round 7).
 
         The race is this layout's own: nothing holds a generation a migration has
         only captured as ``previous`` — the running process publishes no record —
         while ``lop install prune`` is the operation the layout invites beside it.
         ``write_stable_launchers`` is the seam because it sits between the flip and
-        the undo in the real sequence.
+        the undo in the real sequence, and it runs FOR REAL here: the launcher set it
+        returns is exactly what the undo has to keep working.
+
+        AND THE LAUNCHER IS THE POINT (review round 1, Q1). ``~/.local/bin/lop``
+        names ``<stable>/current/bin/lop``, so a pointer with nothing under it leaves
+        the operator's own command with no code to run — measured: ``lop --version``
+        answered *No such file or directory* behind a refusal that read as a clean
+        rollback. So this test EXECUTES the launcher afterwards instead of reading
+        the symlink, and the migration's source is the tree it must land back on.
         """
         _skip_as_root()
         adopted = _install("0.52.0")
         legacy = tmp_path / "legacy-venv"
         _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        # One entry point the adopted generation does not have, so the launcher write
+        # has something to fail on while the two that already name the pointer stay
+        # written: the split QA measured as ``written=2 failed=['lop-doctor']``.
+        dist_info = next(legacy.glob("lib/python*/site-packages/local_operator-*.dist-info"))
+        entry_points = dist_info / "entry_points.txt"
+        entry_points.write_text(
+            entry_points.read_text(encoding="utf-8") + "lop-doctor = local_operator.cli:main\n",
+            encoding="utf-8",
+        )
+        extra = legacy / "bin" / "lop-doctor"
+        extra.write_text(f"#!{legacy}/bin/python3\n", encoding="utf-8")
+        extra.chmod(0o755)
+        bin_dir = Path.home() / ".local" / "bin"
+        os.chmod(bin_dir, 0o500)
+
+        real_write = update_mod.write_stable_launchers
 
         def _race(generation: Path) -> tuple[list[Path], list[Path]]:
-            # A concurrent prune takes the captured generation, and the launcher
-            # write then refuses for its own unrelated reason (an entry point this
-            # adopted machine does not have).
+            # A concurrent prune takes the generation captured as ``previous``, and
+            # then the launcher write runs unchanged.
             assert update_mod._remove_tree(adopted) is True
-            return [], [Path.home() / ".local" / "bin" / "lop-doctor"]
+            return real_write(generation)
 
         monkeypatch.setattr(update_mod, "write_stable_launchers", _race)
-        with pytest.raises(UpdateError) as refused:
-            update_mod.clone_into_generation(legacy)
-        # NO POINTER LEFT FLIPPED, asserted first because it is the end state review
-        # round 7 measured: the pointer named a tree the same undo then deletes, and a
-        # pointer left there is the DANGLING ``current`` R6-1 exists to prevent. An
-        # un-restorable pointer is REMOVED rather than left, which is the whole of
-        # the fix's end state.
-        assert not update_mod.pointer_path().is_symlink(), "the pointer was left flipped"
-        assert update_mod.current_generation() is None
+        try:
+            with pytest.raises(UpdateError) as refused:
+                update_mod.clone_into_generation(legacy)
+        finally:
+            os.chmod(bin_dir, 0o700)
+
+        # 1. `lop` ON PATH STILL RUNS. Executed, not inspected: the fixture's console
+        #    script prints the ``sys.prefix`` that answered, so this asserts which
+        #    INTERPRETER the operator's own command reaches now — the legacy tree this
+        #    run migrated from, which is where that launcher pointed before the run.
+        ran = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [str(bin_dir / "lop")], capture_output=True, text=True, timeout=60
+        )
+        assert ran.returncode == 0, ran.stdout + ran.stderr
+        assert Path(ran.stdout.split()[-1]).resolve() == legacy.resolve(), ran.stdout
+
+        # 2. NOTHING IS LEFT ON THE REFUSED COPY: the pointer names the migration's
+        #    source rather than that copy, and the copy is gone.
         assert not list(update_mod.generations_dir().glob("*")), "the copy must be gone"
-        # The refusal the CALLER is reporting, not the one the cleanup tripped over:
-        # an ``UpdateError`` escaping from inside the undo replaced the real error and
-        # stopped the cleanup at its first step.
-        assert "could not write" in str(refused.value), refused.value
-        assert "refusing to point current at a missing generation" not in str(refused.value)
-        # And the sentence must not claim the restore it could not perform: the
-        # closing clause is earned only when every step landed (Q1).
-        assert "the pointer removed" in str(refused.value), refused.value
-        assert "as it was" not in str(refused.value), refused.value
+        current = update_mod.current_generation()
+        assert current is not None, "the pointer must keep resolving something"
+        assert _real(current) == _real(legacy)
+
+        # 3. The refusal the CALLER is reporting, not the one the cleanup tripped over:
+        #    an ``UpdateError`` escaping from inside the undo replaced the real error
+        #    and stopped the cleanup at its first step.
+        text = str(refused.value)
+        assert "could not write" in text, text
+        assert "refusing to point current at a missing generation" not in text, text
+        # 4. And the sentence states what happened, without claiming a restore it did
+        #    not perform: the machine's own generation is gone, so it is not "as it
+        #    was" — the pointer was moved instead.
+        assert "the pointer moved to the install this run came from" in text, text
+        assert re.search(r"the copy \S+ removed", text), text
+        assert "as it was" not in text, text
+
+    def test_a_pointer_whose_target_was_pruned_is_moved_not_left_dead(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """R1-1: a prune that took the tree the pointer names leaves a DEAD link.
+
+        ``current_generation()`` then answers ``None`` while the pointer is still a
+        symlink, and every reader of the layout reads a symlink as a machine that has
+        a current generation — including ``lop install status``, which is the one
+        surface meant to make that legible. With a launcher resolving through it, the
+        pointer is moved to the install the run came from; unlinking it instead would
+        leave that launcher resolving nothing, and leaving it says a sentence that is
+        not true ("it named a generation").
+        """
+        pointer = update_mod.pointer_path()
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        vanished = update_mod.generations_dir() / "20260101T000000Z-vanished"
+        os.symlink(vanished, pointer)
+        copy = update_mod.generations_dir() / "20260101T000000Z-migrate-legacy"
+        copy.mkdir(parents=True)
+        legacy = tmp_path / "legacy-venv"
+        legacy.mkdir()
+
+        outcome = update_mod._undo_migration(
+            copy,
+            remove_shim=False,
+            previous=None,
+            source=legacy,
+            relinked=[Path.home() / ".local" / "bin" / "lop"],
+        )
+
+        text = ", ".join(outcome.parts)
+        assert "the pointer moved to the install this run came from" in text, text
+        assert "naming another generation" not in text, text
+        moved = update_mod.current_generation()
+        assert moved is not None, "a dead pointer is what this arm must not leave"
+        assert _real(moved) == _real(legacy)
+        assert not list(update_mod.generations_dir().glob("*")), text
+        assert outcome.complete is False, "a moved pointer is not the machine it was"
 
     def test_a_symlinked_install_path_still_re_points_the_copy(
         self, home: Path, tmp_path: Path
@@ -1450,7 +1535,7 @@ class TestInstallStatus:
         assert f"  {damaged.name}  <- current" in text, text
         assert (
             update_mod._field(
-                "next lop would load:", f"(unknown — {damaged.name} holds no install)"
+                "next lop would load:", f"(unknown — no install root under {damaged.name})"
             )
             in text
         ), text

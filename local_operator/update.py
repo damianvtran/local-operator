@@ -2149,14 +2149,27 @@ def clone_into_generation(
     # whether or not this run created it (review round 6, R6-1).
     previous = current_generation()
     flip_pointer(generation)
-    _written, not_written = write_stable_launchers(generation)
+    written, not_written = write_stable_launchers(generation)
     if not_written:
         # THE MIGRATION REFUSES AND ROLLS BACK, because a migration that cannot
         # write ``~/.local/bin/lop`` has adopted nothing: `lop` on PATH still runs
         # the legacy tree while the shim planted a moment later would have the
         # supervised units on the new layout. Half a layout is harder to reason
         # about than none (design review round 1, D1).
-        undone = _undo_migration(generation, remove_shim=shim_was_absent, previous=previous)
+        #
+        # ``written`` and ``origin`` go to the undo because BOTH are what decides
+        # whether the pointer may be removed: a launcher in ``written`` names
+        # ``<stable>/current/bin/<name>``, so while one exists the pointer is the
+        # only thing keeping `lop` runnable, and ``origin`` (the tree this run
+        # copied from) is where such a launcher pointed before this run (review
+        # round 1, Q1).
+        undone = _undo_migration(
+            generation,
+            remove_shim=shim_was_absent,
+            previous=previous,
+            source=origin,
+            relinked=written,
+        )
         raise UpdateError(
             "could not write "
             + ", ".join(str(path) for path in not_written)
@@ -2317,7 +2330,12 @@ class UndoOutcome:
 
 
 def _undo_migration(
-    generation: Path, *, remove_shim: bool, previous: Path | None = None
+    generation: Path,
+    *,
+    remove_shim: bool,
+    previous: Path | None = None,
+    source: Path | None = None,
+    relinked: Sequence[Path] = (),
 ) -> UndoOutcome:
     """Put the machine back when a migration fails after the flip (D1, R6-1).
 
@@ -2325,90 +2343,152 @@ def _undo_migration(
     caller is about to report the real error, and cleanup that raises would
     replace it. Each step is narrow on purpose:
 
-    * the pointer is put back to whatever it named BEFORE this run (``previous``),
-      and unlinked only when this run created it. "It names our generation" cannot
-      tell those two apart — after ``flip_pointer`` it is true either way — and
-      unlinking an already-adopted machine's pointer leaves ``lop`` on PATH
-      DANGLING while the refusal claims the machine is as it was (review round 6,
-      R6-1: measured, `lop` on PATH stopped resolving and the generation that had
-      been current became unreferenced);
-    * the shim is removed only when this run planted it (``remove_shim``);
+    * the pointer is put back to whatever it named BEFORE this run (``previous``);
+      "it names our generation" cannot tell whether this run created it — after
+      ``flip_pointer`` that is true either way — and unlinking an already-adopted
+      machine's pointer leaves ``lop`` on PATH DANGLING while the refusal claims
+      the machine is as it was (review round 6, R6-1: measured, `lop` on PATH
+      stopped resolving and the generation that had been current became
+      unreferenced);
+    * the shim is unlinked when this run found none (``remove_shim``), which is the
+      only case in which it can have planted one — and the plant happens AFTER the
+      step that fails, so on a fresh machine there is usually nothing there at all.
+      The clause reports which of the two it was (review round 1, R1-2);
     * the copy goes through ``_remove_tree``, which reports what it could not
       remove instead of claiming it.
 
-    ``previous`` CAN BE GONE BY THE TIME THIS RUNS, which is why the handler
-    below catches ``UpdateError`` as well as ``OSError`` (review round 7, R7-1).
-    Pruning is exactly the operation this layout invites while an install runs,
-    and ``flip_pointer`` answers a target that has been removed with
-    ``UpdateError``, not ``OSError``: catching only the latter let that escape a
-    function whose contract is that it does not raise — past the shim and past the
-    copy — so the pointer stayed on the refused generation WITH that generation's
-    tree still on disk. That is the half-layout state D1 exists to prevent,
-    reached by the race this layout makes reachable, and it was measured rather
-    than argued.
+    ``previous`` CAN BE GONE BY THE TIME THIS RUNS, which is why the handler below
+    catches ``UpdateError`` as well as ``OSError`` (review round 7, R7-1). Pruning
+    is exactly the operation this layout invites while an install runs, and
+    ``flip_pointer`` answers a target that has been removed with ``UpdateError``,
+    not ``OSError``: catching only the latter let that escape a function whose
+    contract is that it does not raise — past the shim and past the copy — so the
+    pointer stayed on the refused generation WITH that generation's tree still on
+    disk. That is the half-layout state D1 exists to prevent, reached by the race
+    this layout makes reachable, and it was measured rather than argued.
 
-    A POINTER THAT CANNOT BE PUT BACK IS REMOVED, not left where it is: once the
-    tree this run copied is deleted underneath it (the step below), leaving the
-    pointer in place means a DANGLING ``current`` — the very harm R6-1 fixed — and
-    keeping the copy instead would contradict D1's "half a layout is worse than
-    none" by adopting a tree whose launchers never got written. Removing it leaves
-    a state that is readable and true instead: ``current_generation`` answers
-    ``None``,
-    ``prune_generations`` refuses to delete anything while the live tree is
-    unknown, and ``lop install status`` says ``(absent)``.
+    THE POINTER MUST KEEP RESOLVING SOMETHING. ``~/.local/bin/<name>`` names
+    ``<stable>/current/bin/<name>``, and ``relinked`` is the list
+    :func:`write_stable_launchers` reports it (re)pointed there: while that list is
+    non-empty the pointer is load-bearing for the operator's own command, so an
+    un-restorable pointer is MOVED to ``source`` — the install this run copied FROM,
+    which is where those launchers pointed before the migration — rather than
+    removed. Removing it is what review round 1 measured (Q1): ``lop`` on PATH had
+    no code left to run (*No such file or directory*), the supervised shim died with
+    *no current install generation*, and the refusal read as a clean rollback while
+    mentioning neither. With nothing resolving through the pointer, unlinking it is
+    the pre-migration state itself, which is what a machine that had not adopted the
+    layout wants back (design review round 1, D1; review round 1, R1-1).
+
+    The copy is removed whenever the pointer no longer names it. When the pointer
+    cannot be moved AND still names the copy, the copy STAYS: deleting it is exactly
+    what would leave the launcher with nothing to resolve through.
     """
     parts: list[str] = []
     complete = True
+    keep_copy = False
     target = current_generation()
-    if target is not None and _real(target) == _real(generation):
-        # The path the pointer was actually put back to, or ``None``. Held
-        # separately from ``previous`` so the clause below can say what HAPPENED
-        # rather than what was intended — and so the claim is inside the same
-        # condition as the narrowing it depends on.
-        restored_to: Path | None = None
-        if previous is not None:
-            try:
-                flip_pointer(previous)
-                restored_to = previous
-            except (OSError, UpdateError):
-                # NOT "as it was": the generation this run found is gone (or
-                # unreadable), so the state it found cannot be restored — the
-                # closing clause of the refusal is left off rather than claimed.
-                complete = False
-                logger.warning("could not put %s back", pointer_path(), exc_info=True)
-        if restored_to is not None:
-            parts.append(f"the pointer put back to {restored_to.name}")
-        else:
-            try:
-                pointer_path().unlink(missing_ok=True)
-                parts.append(
-                    "the pointer removed — the generation it named is gone"
-                    if previous is not None
-                    else "the pointer removed"
-                )
-            except OSError:  # pragma: no cover — nothing further to do about it
-                logger.warning("could not undo %s", pointer_path(), exc_info=True)
-                parts.append(f"the pointer still at {pointer_path()}")
-                complete = False
-    else:
+    names_our_copy = target is not None and _real(target) == _real(generation)
+
+    # The path the pointer was actually put back to, or ``None``. Held separately
+    # from ``previous`` so the clauses below can say what HAPPENED rather than what
+    # was intended — and so the claim sits inside the same condition as the
+    # narrowing it depends on.
+    restored_to: Path | None = None
+    if names_our_copy and previous is not None:
+        try:
+            flip_pointer(previous)
+            restored_to = previous
+        except (OSError, UpdateError) as exc:
+            # NOT "as it was": the generation this run found is gone (or unreadable),
+            # so the state it found cannot be restored — the closing clause of the
+            # refusal is left off rather than claimed.
+            #
+            # ONE LINE, with no stack (QA round 1, Q2): this now fires for
+            # ``UpdateError`` too, and the operator's next line is the refusal
+            # itself. An eight-line traceback above it buried the two sentences that
+            # matter — 1165 of 1165 stderr bytes were the warning and its stack.
+            complete = False
+            logger.warning("could not put %s back: %s", pointer_path(), exc)
+
+    # ``None`` means the pointer is left alone; a string is the reason it is removed.
+    # ONE removal site for both dead-pointer shapes, so the deletion guard that
+    # counts the unlinks this function holds stays honest.
+    unlink_reason: str | None = None
+    if restored_to is not None:
+        parts.append(f"the pointer put back to {restored_to.name}")
+    elif target is not None and not names_our_copy:
         # Somebody else's flip landed while this migration was failing. Their
-        # generation is not ours to touch, so it is left alone and said so: the
-        # sentence is built from these clauses, and a step that reports nothing
-        # reads as a step that did nothing. Not "as it was" either — the pointer
-        # names neither this run's copy nor what it named before this run.
+        # generation is live, so the pointer resolves through it and is not ours to
+        # move — and it is not "as it was" either, because it names neither this
+        # run's copy nor what it named before this run.
         parts.append("the pointer left naming another generation")
         complete = False
-    if remove_shim:
+    elif relinked:
+        moved_to: Path | None = None
+        if source is not None:
+            try:
+                flip_pointer(source)
+                moved_to = source
+            except (OSError, UpdateError) as exc:
+                logger.warning("could not point %s at %s: %s", pointer_path(), source, exc)
+        if moved_to is not None:
+            parts.append(f"the pointer moved to the install this run came from ({moved_to})")
+            complete = False
+        elif names_our_copy:
+            # Last resort: the pointer cannot be moved and the copy is the only tree
+            # it can resolve to, so the copy stays and the launcher keeps working.
+            parts.append(
+                f"the copy kept at {generation}, because {pointer_path()} still resolves through it"
+            )
+            keep_copy = True
+            complete = False
+        else:
+            # A pointer whose target a prune already took (review round 1, R1-1): it
+            # resolves nothing, and the same prune is what makes it unmovable. A dead
+            # link is worse than none — every reader of the layout reads it as a
+            # machine that has a current generation.
+            unlink_reason = "it named a generation that was pruned"
+    else:
+        # Nothing on PATH resolves through the pointer, so unlinking it IS the
+        # pre-migration state: it is what this run created, and removing it puts the
+        # machine back exactly as D1 asked. With a ``previous`` that could not be
+        # restored, the machine is not as it was either way, and the clause says
+        # which of the two happened.
+        unlink_reason = "the generation it named is gone" if previous is not None else ""
+        if previous is not None:
+            complete = False
+    if unlink_reason is not None:
         try:
-            daemon_image_path().unlink(missing_ok=True)
-            parts.append("the daemon shim removed")
-        except OSError:  # pragma: no cover — same
-            logger.warning("could not undo %s", daemon_image_path(), exc_info=True)
-            parts.append(f"the daemon shim still at {daemon_image_path()}")
+            pointer_path().unlink(missing_ok=True)
+            parts.append(
+                f"the pointer removed — {unlink_reason}" if unlink_reason else "the pointer removed"
+            )
+        except OSError as exc:  # pragma: no cover — nothing further to do about it
+            logger.warning("could not undo %s: %s", pointer_path(), exc)
+            parts.append(f"the pointer still at {pointer_path()}")
+            complete = False
+    shim = daemon_image_path()
+    if remove_shim:
+        # ``remove_shim`` MEANS "it was absent before this run", NOT "this run planted
+        # one": the only plant happens after the step that failed, so on a fresh
+        # machine there is nothing here to unlink, and the clause claimed a removal
+        # that never happened (review round 1, R1-2).
+        try:
+            if shim.exists():
+                shim.unlink(missing_ok=True)
+                parts.append("the daemon shim removed")
+            else:
+                parts.append("no daemon shim to remove")
+        except (OSError, RuntimeError) as exc:  # pragma: no cover — unreadable or gone
+            logger.warning("could not undo %s: %s", shim, exc)
+            parts.append(f"the daemon shim still at {shim}")
             complete = False
     else:
         parts.append("the daemon shim that was already there kept")
-    if _remove_tree(generation):
+    if keep_copy:
+        pass
+    elif _remove_tree(generation):
         parts.append(f"the copy {generation.name} removed")
     else:
         logger.warning("the refused migration's copy is still at %s", generation)
@@ -2647,10 +2727,17 @@ def prune_lines(plan: PrunePlan) -> list[str]:
         # AND A FAILED REMOVAL IS NOT "NOTHING TO REMOVE" (Q2). Both reach
         # ``plan.removed == ()``, and the header claimed the benign one: it printed
         # ``nothing to remove`` while every row beneath it said the candidate could
-        # not be removed and was still there — the summary contradicting the rows,
-        # on the one command whose whole job is to report a retention decision. With
-        # no removals, EVERY candidate attempted failed, so the two arms are exact
-        # rather than an estimate: nothing was eligible, or nothing could be done.
+        # not be removed and was still there — the summary contradicting the rows, on
+        # the one command whose whole job is to report a retention decision.
+        #
+        # ``failed`` is the whole of the difference, and it is exact rather than
+        # indicative: a candidate is either removed or reported as failed, so an
+        # empty ``removed`` with no failure means nothing was ever attempted. Review
+        # round 1 (R1-3) measured the third shape this must not over-claim: removals
+        # attempted, decided, and a kept row beside them carrying its own unrelated
+        # reason. The number is the row count, as it has always been — every row
+        # states its own fate, and the header is not asked to summarise a
+        # per-generation decision it cannot see.
         failed = any(decision.reason == _REMOVAL_FAILED_REASON for decision in plan.decisions)
         summary = f"{len(plan.decisions)}, " + (
             "none could be removed" if failed else "nothing to remove"
@@ -2976,16 +3063,20 @@ def install_status_command() -> int:
     fresh = _stamp_at(root) if root is not None else None
     if fresh is None:
         # WHICH KIND OF UNKNOWN (D18). With no pointer to resolve, the old sentence
-        # is the fact. With the pointer resolving to a generation that holds no
-        # install in it (a tree damaged after the flip), it is false: the rows a few
-        # lines below mark that same generation ``<- current``, so the reader is
-        # told both that the pointer names nothing and that it names that generation,
-        # with no way to tell which line is lying. Naming the generation makes the
-        # two lines agree.
+        # is the fact. With the pointer resolving to a tree the LAYOUT cannot read an
+        # install out of, it is false: the rows a few lines below mark that same tree
+        # ``<- current``, so the reader is told both that the pointer names nothing and
+        # that it names that tree, with no way to tell which line is lying.
+        #
+        # AND IT IS ABOUT THE INSTALL ROOT, not about the tree: the pointer is moved
+        # to the install a refused migration came from (review round 1 remediation),
+        # which is a uv-tool tree holding an install at its OWN root — "holds no
+        # install" would be false about it while at the same time ``lop`` on PATH
+        # demonstrably ran it.
         detail = (
             "nothing resolves behind the pointer"
             if generation is None
-            else f"{generation.name} holds no install"
+            else f"no install root under {generation.name}"
         )
         print(_field("next lop would load:", f"(unknown — {detail})"))
     else:
