@@ -25,8 +25,10 @@ from local_operator.providers.qwencloud_console import (
     QWENCLOUD_CONSOLE_PROJECT_ID,
     QWENCLOUD_CONSOLE_PROVIDER,
     QWENCLOUD_TICKET_MAX_LENGTH,
+    QWENCLOUD_TICKET_SECRET_NAME,
     QWENCLOUD_TICKET_STALE_MS,
     TicketStoreError,
+    TicketStoreLocked,
     TicketStoreUnreadable,
     delete_ticket,
     read_ticket_record,
@@ -50,29 +52,71 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AuthStore
         opened.close()
 
 
+@pytest.fixture()
+def secret_base(tmp_path: Path) -> Path:
+    """A throwaway secret-store base. Never the user's real config dir."""
+    base = tmp_path / "secretbase"
+    base.mkdir()
+    return base
+
+
 def _persisted_data(store: AuthStore) -> dict[str, Any]:
     rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
     assert len(rows) == 1
     return rows[0].data
 
 
-def test_set_then_reset_upserts_in_place(store: AuthStore) -> None:
-    """Re-entry UPDATES one row. Two rows here means the identity key broke."""
-    store_ticket(store, FAKE_TICKET)
-    store_ticket(store, FAKE_TICKET_2)
+def _audit_events(base: Path) -> dict[str, int]:
+    """Audit rows by event name, read straight from the store's SQLite file.
+
+    Read at this level on purpose: the property under test is what the STORE
+    recorded, so asserting it through the same API that might be skipping the
+    record would prove nothing.
+    """
+    from local_operator.secrets.keys import store_path
+
+    path = store_path(base)
+    if not path.exists():
+        return {}
+    connection = sqlite3.connect(path)
+    try:
+        rows = connection.execute("select event, count(*) from audit group by event").fetchall()
+    finally:
+        connection.close()
+    return dict(rows)
+
+
+def _secret_value(base: Path) -> bytes:
+    """The stored VALUE, for round-trip assertions only. Never printed."""
+    from local_operator.secrets import access
+
+    return access.open_store(base).get(QWENCLOUD_TICKET_SECRET_NAME)
+
+
+def test_set_then_reset_upserts_in_place(store: AuthStore, secret_base: Path) -> None:
+    """Re-entry UPDATES one row. Two rows here means the identity key broke.
+
+    Now also the SECRET side: the value is replaced rather than duplicated or
+    left stale, which is what the `SecretExists` -> `update` fallback buys.
+    """
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    store_ticket(store, FAKE_TICKET_2, base=secret_base)
 
     rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
     assert len(rows) == 1, f"expected one row, got identity keys {[r.identity_key for r in rows]}"
     assert rows[0].identity_key == QWENCLOUD_CONSOLE_PROJECT_ID
-    assert rows[0].data["ticket"] == FAKE_TICKET_2
+    assert "ticket" not in rows[0].data
+    assert rows[0].data["length"] == len(FAKE_TICKET_2)
+    assert _secret_value(secret_base) == FAKE_TICKET_2.encode()
 
 
-def test_the_row_carries_no_type_or_key_field(store: AuthStore) -> None:
+def test_the_row_carries_no_type_or_key_field(store: AuthStore, secret_base: Path) -> None:
     """`key` would route a browser cookie into the API-key cascade as a bearer."""
-    store_ticket(store, FAKE_TICKET)
+    store_ticket(store, FAKE_TICKET, base=secret_base)
     data = _persisted_data(store)
 
-    assert data["ticket"] == FAKE_TICKET
+    assert data["secret_name"] == QWENCLOUD_TICKET_SECRET_NAME
+    assert data["length"] == len(FAKE_TICKET)
     assert data["project_id"] == QWENCLOUD_CONSOLE_PROJECT_ID
     assert isinstance(data["captured_at"], int)
     # The store stamps `type` on the way in; that is expected and coerced to
@@ -562,7 +606,10 @@ def test_set_refuses_a_tty(
 
 
 def test_set_reads_stdin_and_strips_one_trailing_newline(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    store: AuthStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     class PipedStdin:
         def isatty(self) -> bool:
@@ -573,7 +620,13 @@ def test_set_reads_stdin_and_strips_one_trailing_newline(
 
     monkeypatch.setattr("sys.stdin", PipedStdin())
     assert _run(monkeypatch, store, "set") == 0
-    assert _persisted_data(store)["ticket"] == FAKE_TICKET
+    # End to end through the CLI, whose `base` is None: it resolves to the
+    # `store` fixture's LOCAL_OPERATOR_CONFIG_DIR, so exactly one newline is
+    # stripped and the value reaching the ENCRYPTED store is the exact input.
+    data = _persisted_data(store)
+    assert "ticket" not in data
+    assert data["length"] == len(FAKE_TICKET)
+    assert _secret_value(tmp_path / "config") == FAKE_TICKET.encode()
     out = capsys.readouterr().out
     assert f"({len(FAKE_TICKET)} characters)" in out
     assert FAKE_TICKET not in out
@@ -697,3 +750,346 @@ def test_no_subcommand_prints_usage_and_exits_two(
 ) -> None:
     assert _run(monkeypatch, store, None) == 2
     assert "usage: lop qwencloud-ticket {set,status,rm}" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# PR 2: the VALUE lives in the encrypted secret store, `auth.db` keeps only
+# metadata. The four outcomes below must stay DISTINGUISHABLE -- collapsing
+# any of them into a silent None is the "bug dressed as a plausible degraded
+# state" this module's own comments name.
+# ---------------------------------------------------------------------------
+
+
+def test_the_value_never_lands_in_auth_db(
+    store: AuthStore, secret_base: Path, tmp_path: Path
+) -> None:
+    """The whole point of PR 2: no ticket value in the plaintext SQLite file.
+
+    Asserted at the BYTE level as well as on the row dict, because a value
+    could reach the file through a path the row shape does not show.
+    """
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    data = _persisted_data(store)
+
+    assert "ticket" not in data
+    assert data["secret_name"] == QWENCLOUD_TICKET_SECRET_NAME
+    assert data["length"] == len(FAKE_TICKET)
+    store.close()
+    assert FAKE_TICKET.encode() not in (tmp_path / "auth.db").read_bytes()
+
+
+def test_the_value_round_trips_through_the_secret_store(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """Byte-identical, under the name both halves of the code agree on."""
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+
+    assert _secret_value(secret_base) == FAKE_TICKET.encode()
+
+
+def test_reset_upserts_one_row_and_one_secret(store: AuthStore, secret_base: Path) -> None:
+    """A second `set` must REPLACE the value, not fail and leave the old one.
+
+    Without the `SecretExists` -> `update` fallback this raises, and the user
+    is left with a stale cookie while believing they replaced it.
+    """
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    store_ticket(store, FAKE_TICKET_2, base=secret_base)
+
+    assert len(store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)) == 1
+    assert _secret_value(secret_base) == FAKE_TICKET_2.encode()
+
+
+def test_read_record_never_appends_a_get_event(store: AuthStore, secret_base: Path) -> None:
+    """`status` reports presence, length and age having NEVER read the value.
+
+    The assertion is deliberately "no `get` event, and last_used_at stays
+    None" rather than "no audit row at all": `open_store()` legitimately
+    appends a broker `key`/`deny:key` row per call, so a total-delta assertion
+    would fail against a correct implementation while pinning nothing.
+    """
+    from local_operator.secrets import access
+
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    before = _audit_events(secret_base)
+    assert before.get("get", 0) == 0
+
+    for _ in range(5):
+        record = read_ticket_record(store, base=secret_base)
+        assert record is not None
+        assert record["secret_present"] is True
+
+    after = _audit_events(secret_base)
+    assert after.get("get", 0) == 0, f"a retrieval happened: {after}"
+    secret_record = access.open_store(secret_base).describe(QWENCLOUD_TICKET_SECRET_NAME)
+    assert secret_record.last_used_at is None
+
+
+def test_metadata_orphan_reports_secret_absent(store: AuthStore, secret_base: Path) -> None:
+    """Row present, value gone: something IS stored and the user must be told.
+
+    `None` here would report "nothing stored" over a broken credential -- the
+    same false success `TicketStoreUnreadable` exists to prevent.
+    """
+    from local_operator.secrets import access
+
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    access.open_store(secret_base).delete(QWENCLOUD_TICKET_SECRET_NAME)
+
+    record = read_ticket_record(store, base=secret_base)
+    assert record is not None, "a metadata orphan must not collapse into 'nothing stored'"
+    assert record["secret_present"] is False
+    assert record["length"] == len(FAKE_TICKET)
+
+
+def test_secret_orphan_is_invisible_to_this_feature(store: AuthStore, secret_base: Path) -> None:
+    """The reverse orphan, and why `store_ticket` writes the secret FIRST.
+
+    A crash between the two writes leaves this state: a value nothing points
+    at. It is inert -- unreadable by the feature, overwritten by the next
+    `set` -- which is why it is the failure this ordering prefers.
+    """
+    from local_operator.secrets import access
+
+    secret_store = access.open_store(secret_base, create=True)
+    secret_store.initialize()
+    secret_store.set(QWENCLOUD_TICKET_SECRET_NAME, FAKE_TICKET.encode())
+
+    assert read_ticket_record(store, base=secret_base) is None
+
+
+def test_no_store_means_no_daemon(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host that has never run `lop secret set` must not gain a broker daemon.
+
+    Measured: without the `store_path(base).exists()` guard this call SPAWNS a
+    brokerd and leaves `broker.lock` + `broker.sock` behind. Checking only the
+    return value passes WITHOUT the guard, so both detectors are required --
+    the artifacts on disk and a spy on the spawn itself.
+    """
+    from local_operator.secrets import client
+
+    def boom(base: Path | None) -> None:  # pragma: no cover - must never run
+        raise AssertionError("a broker daemon was spawned")
+
+    monkeypatch.setattr(client, "_spawn_broker", boom)
+
+    # No metadata row either: the store-less path must be reached, not short
+    # circuited by an earlier return.
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    import shutil
+
+    shutil.rmtree(secret_base / "secrets")
+
+    record = read_ticket_record(store, base=secret_base)
+    assert record is not None
+    assert record["secret_present"] is False
+    assert not (secret_base / "secrets").exists(), "the secrets dir was created by a read"
+
+
+class _DeniedStore:
+    """A store whose every operation is refused the way a LOCKED one is.
+
+    The raw text is the broker's real wire message, quoted verbatim from a
+    probe against a genuinely hardened, locked store: it is about ANCESTRY and
+    tells the user nothing they can act on, which is why our code must not let
+    it through.
+    """
+
+    RAW = "no lop session is registered with the broker"
+
+    def describe(self, name: str) -> Any:
+        from local_operator.secrets.client import BrokerDenied
+
+        raise BrokerDenied(self.RAW)
+
+    def initialize(self) -> None:
+        from local_operator.secrets.client import BrokerDenied
+
+        raise BrokerDenied(self.RAW)
+
+    def set(self, name: str, value: bytes) -> None:
+        from local_operator.secrets.client import BrokerDenied
+
+        raise BrokerDenied(self.RAW)
+
+    def delete(self, name: str) -> Any:
+        from local_operator.secrets.client import BrokerDenied
+
+        raise BrokerDenied(self.RAW)
+
+
+def _lock_the_secret_store(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:
+    """Make every secret-store operation raise BrokerDenied, as a locked store does."""
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "open_store", lambda *a, **k: _DeniedStore())
+
+
+def test_locked_store_raises_ticket_store_locked_with_the_remedy(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user gets the remedy, not the broker's ancestry wording.
+
+    `retrieve_secret` re-raises the raw wire text; the re-wording that names
+    `lop secret unlock` lives in `master_key_for` and does not fire on this
+    path. So the message must be OURS.
+    """
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    _lock_the_secret_store(monkeypatch, secret_base)
+
+    with pytest.raises(TicketStoreLocked) as excinfo:
+        read_ticket_record(store, base=secret_base)
+
+    message = str(excinfo.value)
+    assert "lop secret unlock" in message
+    assert _DeniedStore.RAW not in message
+    assert FAKE_TICKET not in message
+
+
+def test_locked_store_is_not_confused_with_no_ticket(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked store is UNKNOWN, never "nothing stored".
+
+    `TicketStoreLocked` subclasses `TicketStoreUnreadable`, so every existing
+    caller that already distinguishes "cannot read" from "absent" is correct
+    for this state by construction.
+    """
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    _lock_the_secret_store(monkeypatch, secret_base)
+
+    with pytest.raises(TicketStoreUnreadable):
+        read_ticket_record(store, base=secret_base)
+
+
+def test_delete_removes_both_and_confirms_both(store: AuthStore, secret_base: Path) -> None:
+    """`rm` must clear the value as well as the row, and prove each is gone."""
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+
+    assert delete_ticket(store, base=secret_base) is True
+    assert read_ticket_record(store, base=secret_base) is None
+    with pytest.raises(SecretNotFound):
+        access.open_store(secret_base).describe(QWENCLOUD_TICKET_SECRET_NAME)
+
+
+def test_delete_of_a_metadata_orphan_still_removes_the_row(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """A missing value must not strand the row that points at it."""
+    from local_operator.secrets import access
+
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    access.open_store(secret_base).delete(QWENCLOUD_TICKET_SECRET_NAME)
+
+    assert delete_ticket(store, base=secret_base) is True
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True) == []
+
+
+def test_delete_says_may_still_be_stored_when_the_secret_survives(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silent failed revoke, on the secret side this time.
+
+    `delete` accepting the call is not evidence the value is gone, exactly as
+    `delete_credential` returning None is not evidence the row is. Both are
+    confirmed by re-reading.
+    """
+    from local_operator.secrets import access
+
+    store_ticket(store, FAKE_TICKET, base=secret_base)
+    real = access.open_store(secret_base)
+
+    class PretendingSecretStore:
+        def delete(self, name: str) -> None:
+            return None  # accepted, deleted nothing
+
+        def describe(self, name: str) -> Any:
+            return real.describe(name)
+
+    monkeypatch.setattr(access, "open_store", lambda *a, **k: PretendingSecretStore())
+
+    with pytest.raises(TicketStoreError, match="may still be stored"):
+        delete_ticket(store, base=secret_base)
+
+
+def test_a_pre_migration_row_still_reports_length_and_age(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """`status` on an un-migrated install keeps working, without a retrieval.
+
+    The row written by PR 1 carries the plaintext `ticket` and no
+    `secret_name`. Length and age come from it; the VALUE is still never
+    returned.
+    """
+    store.upsert_credential(
+        QWENCLOUD_CONSOLE_PROVIDER,
+        {
+            "ticket": FAKE_TICKET,
+            "project_id": QWENCLOUD_CONSOLE_PROJECT_ID,
+            "captured_at": 1700000000000,
+        },
+    )
+
+    record = read_ticket_record(store, base=secret_base)
+    assert record is not None
+    assert record["length"] == len(FAKE_TICKET)
+    assert record["secret_present"] is True
+    assert record["captured_at"] == 1700000000000
+    assert FAKE_TICKET not in json.dumps(record)
+
+
+def test_mode_refusal_message_names_metadata_not_a_cookie(
+    tmp_path: Path, secret_base: Path
+) -> None:
+    """The refusal must describe what it actually guards now: the METADATA.
+
+    Leaving the old wording would make the code claim to be protecting a
+    full-account cookie that no longer lives in this file.
+    """
+    db_path = tmp_path / "auth.db"
+    opened = AuthStore(db_path=db_path)
+    try:
+        os.chmod(tmp_path, 0o777)
+        with pytest.raises(TicketStoreError) as excinfo:
+            store_ticket(opened, FAKE_TICKET, base=secret_base)
+        message = str(excinfo.value)
+        assert "metadata" in message
+        assert "full-account session cookie" not in message
+        assert FAKE_TICKET not in message
+    finally:
+        os.chmod(tmp_path, 0o700)
+        opened.close()
+
+
+def test_the_value_never_appears_in_any_error_message(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every failure branch this slice adds, checked for the value."""
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretStoreError
+
+    # Locked, on the write path.
+    monkeypatch.setattr(access, "open_store", lambda *a, **k: _DeniedStore())
+    with pytest.raises(TicketStoreLocked) as locked:
+        store_ticket(store, FAKE_TICKET, base=secret_base)
+    assert FAKE_TICKET not in str(locked.value)
+    assert "lop secret unlock" in str(locked.value)
+
+    # Genuinely unreadable, on the write path.
+    class BrokenStore:
+        def initialize(self) -> None:
+            raise SecretStoreError("store is corrupt")
+
+        def set(self, name: str, value: bytes) -> None:  # pragma: no cover
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr(access, "open_store", lambda *a, **k: BrokenStore())
+    with pytest.raises(TicketStoreError) as broken:
+        store_ticket(store, FAKE_TICKET, base=secret_base)
+    assert FAKE_TICKET not in str(broken.value)
+    assert "nothing was written" in str(broken.value)
