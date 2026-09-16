@@ -58,6 +58,92 @@ class ArgumentMode(Enum):
     REQUIRED = "required"
 
 
+class ArgumentShape(Enum):
+    """What the TEXT AFTER a command's word IS, for the desktop.
+
+    The registry's declaration for the third source of "this trailing text is
+    the command's argument" — the two the composer derives from ``consumes_prompt``
+    (free text) and ``prefixes_text`` (a value chosen from a list) are narrower
+    than the field they approximate. What is left over is text the desktop
+    VALIDATES or FORWARDS: the MCP subcommand and server name, a provider id, a
+    selection, a filter, a path, a title.
+
+    PRECEDENCE, and it is published so a consumer may OR the three facts rather
+    than nest them: ``consumes_prompt`` and ``prefixes_text`` are read FIRST and
+    are the whole answer when either is true. The shape is asked only after them,
+    and a row that one of the booleans already carries declares ``ANY`` anyway —
+    the command owns its trailing text, whatever it says — so a reader who takes
+    the shape first, or who ORs the three, still reaches the same answer. ``NONE``
+    is therefore reserved for rows where the booleans are false AND no shape
+    applies; it is emitted explicitly rather than omitted, so no consumer has to
+    infer a default.
+
+    Read on the desktop's ADMISSION rule (``slash_commands.
+    command_argument_is_used``) and by the command route's own validator, so
+    "is this trailing text this command's argument" has exactly one answer per
+    shape rather than one per call site. That is the second-decision defect
+    class this repo has already paid for: a host planning a draft as prose while
+    the other refuses it as a command leaves a message that no resend can clear.
+
+    NOT :class:`ArgumentMode`, and the difference is the whole reason both exist.
+    ``ArgumentMode`` answers "does a space open a VALUE LIST in THIS TERMINAL, and
+    does Enter on the bare word also send it" — a TUI completion question. This
+    answers "would the DESKTOP use text typed here", which is true for commands
+    whose trailing text never opens a TUI list at all (``/mcp logout`` is a
+    subcommand, ``/move ~/x`` is a path). Widening one into the other was probed
+    and is wrong in both directions: ``/login`` is ``REQUIRED`` yet its word is a
+    provider id the route validates, while ``/usage`` is no ``ArgumentMode`` list
+    at all yet ``/usage on`` is a control the composer runs.
+
+    THE CRITERION, stated because a shape is a decision per command and a reader
+    has to be able to check one: a shape is published only where the desktop's
+    command PATH uses the trailing text — a handler that reads it (a title, a
+    path, a session selection), a presentation payload that carries it
+    (``selection``, ``filter``, ``selected``, a choice field), or a validator that
+    judges it (the provider id, the MCP subcommand). Where the path DROPS the text
+    the shape is ``NONE`` and the text is prose: ``/compact hello`` and
+    ``/context x`` both run a command that silently discards what followed, which
+    is the operator's own report against ``/compact``.
+
+    TWO DELIBERATE EXCEPTIONS, named here so the criterion is not read as a law
+    the table breaks silently: ``/search <word>`` (the desktop fixes its filter to
+    ``web-search`` and reads no word) and ``/stop <word>`` (the picker owns
+    ``targets=[session_id]``) keep ``WORD``. Both are whole-draft controls the
+    composer RUNS, so a sentence after the word is prose while a single word is
+    not — and refusing the one-token form is the safe direction for a guard whose
+    whole purpose is that a control never becomes paid model chat.
+    """
+
+    #: No argument AT ALL from any source: the two booleans are false for this
+    #: row and no shape applies, so text after the word is prose, whatever it
+    #: says. Read AFTER the booleans — see the precedence note above; a row they
+    #: carry never says this (`/goal` is ``ANY``, not ``NONE``).
+    NONE = "none"
+    #: ONE whitespace-free token — a selector the desktop forwards as a
+    #: ``selection``/``filter``/``selected`` value (a view, a mode, a session id).
+    #: A sentence here is prose, which is what keeps `/usage more prose` a message.
+    #: The vocabulary is ``slash_commands.command_argument_words``, empty for this
+    #: shape's rows and honoured by BOTH arms (the validator and the catalogue),
+    #: so a row needing one has a single place to declare it.
+    WORD = "word"
+    #: One token naming a provider THIS INSTALL knows — the route's own lookup
+    #: (``get_provider_definition``), so ``/login openai`` is the command and
+    #: ``/login zzz`` is prose. A ``WORD`` whose vocabulary is the provider ids.
+    PROVIDER = "provider"
+    #: ``<subcommand> [name]`` — the MCP shape the command route validates
+    #: against ``MCP_SUBCOMMANDS`` and ``SERVER_NAME_RE``. At most two tokens, so
+    #: ``/mcp logout`` is the command while ``/mcp logout seems to cause a crash``
+    #: is prose.
+    SUBCOMMAND = "subcommand"
+    #: The command owns its trailing text, whatever it says — a handler or a form
+    #: field takes it (a session title, a working directory, a path), or one of the
+    #: two booleans above already carries it. Declared explicitly on those boolean
+    #: rows rather than left to the default: ``NONE`` means "no source at all",
+    #: and a consumer that reads this field alone must not plan prose for a control
+    #: the endpoint refuses.
+    ANY = "any"
+
+
 #: Exact / prefix tiers, with registry-order tie-break.
 SCORE_EXACT = 1000
 SCORE_PREFIX = 900
@@ -125,6 +211,55 @@ class SlashCommand:
     #: ``SLASH_COMMANDS`` is pinned entry-by-entry in ``test_slash_echo.py`` so a
     #: new command must state this choice.
     consumes_prompt: bool = field(default=False, kw_only=True)
+    #: Whether text typed AFTER this command's word is an ARGUMENT the command
+    #: owns, on the DESKTOP — so ``/model gpt-5`` is the model command with its
+    #: value rather than a message, while ``/mcp logout seems to be broken`` is a
+    #: message that happens to open with a command word.
+    #:
+    #: Keyword-only and defaulting to FALSE for the same reason ``echo`` and
+    #: ``consumes_prompt`` do. It is the UNION of two things the composer can
+    #: complete: the free-text prompt (``consumes_prompt``) and the value chosen
+    #: from a list (``inline`` in the renderer's ``picker-registry``, whose
+    #: contents are a host presentation fact and deliberately not mirrored here).
+    #:
+    #: NOT the same question as ``arguments is not ArgumentMode.NONE``, and this is
+    #: the trap. ArgumentMode answers "does a space open a VALUE LIST in this
+    #: terminal", which is TRUE for ``/login``, ``/move``, ``/stop``, ``/mcp`` and
+    #: ``/rename`` — all of which the DESKTOP presents as a picker or a form and
+    #: deliberately refuses hand-typed arguments for
+    #: (``desktop_sessions.py:657-678``). The desktop's answer for those is "that
+    #: trailing text is prose", which is what makes ``/mcp logout seems to cause a
+    #: crash`` a message instead of a malformed MCP invocation.
+    #:
+    #: It is the desktop's half of the ONE rule the messages endpoint and the
+    #: composer both read (``slash_commands.command_prefixes_text``). Two
+    #: derivations of "is this trailing text the command's argument" is the
+    #: second-decision defect class this repo has already paid for: the route and
+    #: the planner answering differently turns a prose draft into a permanent
+    #: refusal no resend can clear.
+    prefixes_text: bool = field(default=False, kw_only=True)
+    #: What TEXT AFTER this command's word IS, for the desktop — the third source
+    #: of "this trailing text is the command's argument", beside
+    #: ``consumes_prompt`` (free text) and ``prefixes_text`` (a value chosen from
+    #: a list). See :class:`ArgumentShape` for the values and why neither of the
+    #: other two can stand in for it.
+    #:
+    #: PRECEDENCE: the two booleans are read FIRST and are the whole answer when
+    #: either is true; this field is asked after them. A row the booleans already
+    #: carry declares :attr:`ArgumentShape.ANY` explicitly — "the command owns its
+    #: trailing text, whatever it says" — because the default below means NO
+    #: source at all, and the field is published so a consumer may read it alone
+    #: or OR the three facts and still be right.
+    #:
+    #: Keyword-only and defaulting to :attr:`ArgumentShape.NONE` for the reason
+    #: ``echo`` and ``consumes_prompt`` do: a command that has not stated a shape
+    #: gets the behaviour that changes nothing — text after it is PROSE, which is
+    #: the direction that cannot turn a user's message into a command.
+    #:
+    #: ``SLASH_COMMANDS`` is pinned entry-by-entry in
+    #: ``tests/unit/tui/test_slash_prefixes_text.py`` so a new command cannot be
+    #: added without stating this choice.
+    argument_shape: ArgumentShape = field(default=ArgumentShape.NONE, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:
