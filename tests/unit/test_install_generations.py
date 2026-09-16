@@ -20,8 +20,10 @@ future edit could quietly remove:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -506,8 +508,75 @@ class TestInstallIntoGeneration:
             update_mod.generations_dir().glob("*")
         ), "the refused copy must be gone, not left on disk"
 
+    def test_remove_tree_does_not_chmod_through_a_symlink(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """R4-1: the write-bit retry stays inside the tree it was asked to delete.
+
+        ``shutil.rmtree`` reports a top-level symlink by calling the callback with
+        ``os.path.islink`` and the LINK, and ``stat``/``chmod`` follow links — so
+        an unguarded retry restores owner bits on the link's TARGET, a directory
+        this call was never asked to touch. Asserted the only way that shape can
+        be: the outside directory's mode is read before and after, and its
+        contents are still there.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "file").write_text("x", encoding="utf-8")
+        os.chmod(outside, 0o500)  # r-x: anything that ORs 0o700 in is visible
+        link = tmp_path / "link"
+        os.symlink(outside, link)
+        try:
+            with caplog.at_level(logging.WARNING, logger="local_operator.update"):
+                assert update_mod._remove_tree(link) is False, "a symlink is not removable"
+            assert (
+                stat.S_IMODE(outside.stat().st_mode) == 0o500
+            ), "the retry followed the link and chmod'ed its target"
+            assert (outside / "file").is_file(), "the link's target was emptied"
+            assert "still on disk" in caplog.text
+        finally:
+            os.chmod(outside, 0o755)
+
+    def test_prune_never_hands_a_symlinked_entry_to_the_remover(
+        self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R4-1's other half: a link under ``generations/`` is not a candidate.
+
+        ``Path.is_dir()`` follows symlinks, so the marker-less branch would have
+        handed one straight to the remover. The layout never writes a link there
+        (``_reserve_generation`` uses ``mkdir``), and following one would delete
+        whatever it points at. ``_remove_tree`` is wrapped to record the paths it
+        was offered, so this fails if the entry is merely refused rather than
+        never considered.
+        """
+        real = tmp_path / "not-a-generation"
+        real.mkdir()
+        (real / "keep").write_text("x", encoding="utf-8")
+        generations = update_mod.generations_dir()
+        generations.mkdir(parents=True, exist_ok=True)
+        link = generations / "20200101T000000Z-link"
+        os.symlink(real, link)
+        # AGED, because that is the shape that reaches the remover: a fresh
+        # marker-less entry is treated as in-flight and kept by the age rule
+        # (``path.stat()`` follows the link, so the target's mtime is what
+        # counts). Without the ageing this test passes for that reason instead of
+        # for the filter — the trap this PR has been caught by three times.
+        aged = time.time() - update_mod._PARTIAL_TTL_S - 60
+        os.utime(real, (aged, aged))
+        attempted: list[Path] = []
+        original = update_mod._remove_tree
+
+        def _recording(path: Path) -> bool:
+            attempted.append(path)
+            return original(path)
+
+        monkeypatch.setattr(update_mod, "_remove_tree", _recording)
+        assert update_mod.prune_generations(keep=0) == []
+        assert link not in attempted, "prune handed a symlinked entry to the remover"
+        assert (real / "keep").is_file(), "prune followed a symlink out of generations/"
+
     def test_remove_tree_says_whether_the_tree_is_gone(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """R3-2's second half: a caller that PRINTS a removal must not be lied to.
 
@@ -530,8 +599,13 @@ class TestInstallIntoGeneration:
         stubborn = tmp_path / "stubborn"
         stubborn.mkdir()
         monkeypatch.setattr(update_mod.shutil, "rmtree", _refuse)
-        assert update_mod._remove_tree(stubborn) is False
+        with caplog.at_level(logging.WARNING, logger="local_operator.update"):
+            assert update_mod._remove_tree(stubborn) is False
         assert stubborn.exists()
+        # The other half of "logged rather than swallowed": a tree that survived
+        # is announced, so a reader of the log is not left with the boolean only
+        # (review round 4, R4-3).
+        assert "still on disk" in caplog.text
 
     def test_rebind_reports_the_scripts_it_could_not_rewrite(self, tmp_path: Path) -> None:
         """R2-4: the helper's report, asserted at the call site rather than through a refusal.

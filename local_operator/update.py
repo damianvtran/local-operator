@@ -1420,14 +1420,38 @@ def _remove_tree(path: Path) -> bool:
     empties — so the refusal promising "the copy is removed" left the ~136 MB copy
     behind, and ``lop install prune``, which removes through this same helper,
     reported such a generation as removed while it stayed on disk (review round 3,
-    R3-2). The retry is scoped to the tree being deleted and only ever ADDS write
-    permission, which is what makes it safe in a function that must not raise.
+    R3-2). The retry only ever ADDS write permission, and only to paths that are
+    really INSIDE the tree it was asked to delete — see ``_inside``, because the
+    obvious version of that scoping was wrong (review round 4, R4-1). That
+    combination is what makes it safe in a function that must not raise.
 
     The return value exists for the same reason: a caller that PRINTS a removal
     has to know whether one happened.
     """
     if not path.exists() and not path.is_symlink():
         return True
+
+    root = path.resolve()
+
+    def _inside(candidate: Path) -> bool:
+        """Is ``candidate`` a REAL path inside the tree being deleted?
+
+        BOTH HALVES ARE LOAD-BEARING. ``shutil.rmtree`` reports a top-level
+        SYMLINK by handing the callback ``os.path.islink`` and the link itself,
+        and the unlink of a symlink entry does the same with the entry — while
+        ``stat`` and ``chmod`` FOLLOW links. Restoring owner bits through one
+        would reach the link's target, a directory this call was never asked to
+        touch (review round 4, R4-1, measured: the retry chmod'ed the target of a
+        link handed to ``rmtree``). ``resolve()`` alone is not enough either: it
+        would resolve the link INTO ``root`` and answer "inside" for a path that
+        is not the tree.
+        """
+        try:
+            if candidate.is_symlink():
+                return False
+            return candidate.resolve().is_relative_to(root)
+        except OSError:  # pragma: no cover — vanished under us mid-walk
+            return False
 
     def _with_write_bits(
         function: Callable[[str], object], target: str, error: BaseException
@@ -1436,14 +1460,23 @@ def _remove_tree(path: Path) -> bool:
         # directory that is not writable, the missing bit is the PARENT's, so both
         # it and the target get their owner bits back before the one retry.
         for candidate in {Path(target).parent, Path(target)}:
+            if not _inside(candidate):
+                continue
             try:
                 os.chmod(candidate, os.stat(candidate).st_mode | 0o700)
             except OSError:  # pragma: no cover — gone, or not ours to chmod
-                logger.debug("could not make %s writable", candidate, exc_info=error)
+                # ``exc_info=True``, not the exception that triggered the handler:
+                # that traceback is about a different call (review round 4, R4-2).
+                logger.debug("could not make %s writable", candidate, exc_info=True)
+        if Path(target).is_symlink():
+            # The notification form a top-level symlink produces (see
+            # ``_inside``): there is nothing to remove and nothing to retry, and
+            # ``rmtree`` has already returned.
+            return
         try:
             function(target)
         except OSError:
-            logger.debug("could not remove %s", target, exc_info=error)
+            logger.debug("could not remove %s", target, exc_info=True)
 
     try:
         shutil.rmtree(path, onexc=_with_write_bits)
@@ -2158,7 +2191,12 @@ def prune_generations(
         except OSError:  # pragma: no cover — an unresolvable reference keeps nothing extra
             continue
     entries = sorted(
-        (path for path in generations.iterdir() if path.is_dir()),
+        # ``is_dir()`` follows symlinks, so it admits a link to a directory; the
+        # layout never writes one there (``_reserve_generation`` uses ``mkdir``),
+        # and ``_remove_tree`` refuses a symlink by design — but a link is not one
+        # of our generations, so it is not a pruning candidate at all (review
+        # round 4, R4-1: this is the shape that handed one to the remover).
+        (path for path in generations.iterdir() if path.is_dir() and not path.is_symlink()),
         key=lambda path: (path.stat().st_mtime, path.name),
     )
     survivors = [path for path in entries if _real(path) not in wanted]
