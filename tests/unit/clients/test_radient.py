@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
@@ -812,64 +813,153 @@ def test_list_search_providers_success(
 
 # Transcription: the provider/model passthrough contract.
 #
-# These two tests pin the wire behaviour that the daemon's `POST /v1/transcriptions`
-# relies on: an unset provider/model must be ABSENT from the multipart body so the
-# Radient agent-server's configured default governs, and an explicitly requested
-# pair must travel verbatim. They live here rather than in the server tests because
-# the route-level mocks only see kwargs; only these observe the actual form body.
+# These tests pin what the daemon puts on the wire, so they assert on the
+# SERIALISED multipart body — the bytes handed to the connection — rather than on
+# the kwargs dict given to `requests.post`. The distinction is not pedantic: the
+# dict carries `None`s that `requests` drops during preparation, so asserting on it
+# would also constrain *how* the client builds the body, and a body-equivalent
+# refactor would fail the test.
 
 
-def _transcription_post_response() -> MagicMock:
-    """Build a mocked `requests.post` returning a successful transcription payload."""
-    mock_requests_post = MagicMock()
-    mock_requests_post.return_value.status_code = 200
-    mock_requests_post.return_value.json.return_value = {
-        "result": {"text": "hello", "provider": "elevenlabs", "status": "completed"}
-    }
-    return mock_requests_post
+def _transcription_post() -> tuple[MagicMock, List[bytes]]:
+    """Mock `requests.post`, recording the prepared body of every call.
+
+    The body is prepared inside the call, not afterwards from the recorded kwargs:
+    the client closes the audio handle as soon as `post` returns, and preparing a
+    request reads the file.
+
+    Returns:
+        tuple[MagicMock, List[bytes]]: the patched `requests.post` and one
+        serialised body per call it received.
+    """
+    bodies: List[bytes] = []
+
+    def _post(url: str, **kwargs: Any) -> MagicMock:
+        bodies.append(
+            requests.Request("POST", url, **kwargs).prepare().body  # type: ignore[arg-type]
+        )
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "result": {"text": "hello", "provider": "elevenlabs", "status": "completed"}
+        }
+        return response
+
+    return MagicMock(side_effect=_post), bodies
+
+
+def _multipart_fields(body: bytes) -> Dict[str, str]:
+    """Map each field name in a serialised multipart body to its text value.
+
+    The file part is reported as `<file>`; the point of these tests is which text
+    fields travel, not the audio bytes.
+
+    Args:
+        body (bytes): The prepared request body (its boundary is the first token).
+
+    Returns:
+        Dict[str, str]: field name to value, for every part that has one.
+    """
+    boundary = body.split(b"\r\n", 1)[0]
+    fields: Dict[str, str] = {}
+    for part in body.split(boundary):
+        if b"\r\n\r\n" not in part:
+            continue
+        head, _, content = part.partition(b"\r\n\r\n")
+        name = re.search(rb'name="([^"]*)"', head)
+        if name is None:
+            continue
+        fields[name.group(1).decode()] = (
+            "<file>" if b"filename=" in head else content.rstrip(b"\r\n").decode()
+        )
+    return fields
 
 
 def test_create_transcription_omits_unset_provider_and_model(
-    radient_client: RadientClient, base_url: str, tmp_path: Path
+    radient_client: RadientClient, tmp_path: Path
 ) -> None:
     """Test that an unset provider and model are left out of the request body.
 
     This is the daemon's default path. The fields must be *absent* rather than
-    sent empty: a server defaulted to a non-OpenAI provider rejects an OpenAI
-    model id, so sending one at all would lock the talk feature to OpenAI.
+    sent empty: the server default governs, and a server defaulted to a
+    non-OpenAI provider rejects an OpenAI model id, so sending one at all would
+    lock the talk feature to OpenAI.
     """
     audio_file = tmp_path / "sample.webm"
     audio_file.write_bytes(b"sample audio data")
-    mock_requests_post = _transcription_post_response()
+    mock_requests_post, bodies = _transcription_post()
 
     with patch("requests.post", mock_requests_post):
         response = radient_client.create_transcription(file_path=str(audio_file))
 
     assert isinstance(response, RadientTranscriptionResponseData)
-    call_args, call_kwargs = mock_requests_post.call_args
-    assert call_args[0] == f"{base_url}/tools/transcriptions"
-    assert "model" not in call_kwargs["data"]
-    assert "provider" not in call_kwargs["data"]
-    assert "prompt" not in call_kwargs["data"]
-    assert call_kwargs["data"]["response_format"] == "json"
-    assert call_kwargs["files"]["file"][0] == str(audio_file)
+    assert mock_requests_post.call_args[0][0].endswith("/tools/transcriptions")
+    # The whole field set, so nothing else leaks either: no model, no provider,
+    # no prompt, no language.
+    assert _multipart_fields(bodies[0]) == {
+        "file": "<file>",
+        "response_format": "json",
+        "temperature": "0.0",
+    }
+
+
+def test_create_transcription_drops_empty_provider_and_model(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    """Test that empty-string provider and model are dropped, not sent empty.
+
+    The client's guard is truthiness, and the route comment says so — an empty
+    field (`-F "model="` from a caller) must not reach the wire as `model=`.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post, bodies = _transcription_post()
+
+    with patch("requests.post", mock_requests_post):
+        radient_client.create_transcription(
+            file_path=str(audio_file), model="", provider="", prompt=""
+        )
+
+    assert _multipart_fields(bodies[0]) == {
+        "file": "<file>",
+        "response_format": "json",
+        "temperature": "0.0",
+    }
 
 
 def test_create_transcription_forwards_explicit_provider_and_model(
-    radient_client: RadientClient, base_url: str, tmp_path: Path
+    radient_client: RadientClient, tmp_path: Path
 ) -> None:
     """Test that an explicitly requested provider and model are forwarded verbatim."""
     audio_file = tmp_path / "sample.webm"
     audio_file.write_bytes(b"sample audio data")
-    mock_requests_post = _transcription_post_response()
+    mock_requests_post, bodies = _transcription_post()
 
     with patch("requests.post", mock_requests_post):
-        response = radient_client.create_transcription(
+        radient_client.create_transcription(
             file_path=str(audio_file), model="scribe_v2", provider="elevenlabs"
         )
 
-    assert isinstance(response, RadientTranscriptionResponseData)
-    call_args, call_kwargs = mock_requests_post.call_args
-    assert call_args[0] == f"{base_url}/tools/transcriptions"
-    assert call_kwargs["data"]["model"] == "scribe_v2"
-    assert call_kwargs["data"]["provider"] == "elevenlabs"
+    fields = _multipart_fields(bodies[0])
+    assert fields["model"] == "scribe_v2"
+    assert fields["provider"] == "elevenlabs"
+
+
+def test_create_transcription_forwards_provider_without_a_model(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    """Test that `provider` alone travels, with no model invented alongside it.
+
+    The daemon does not enforce a provider/model pairing rule; whatever the caller
+    passes is forwarded and nothing else is added.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post, bodies = _transcription_post()
+
+    with patch("requests.post", mock_requests_post):
+        radient_client.create_transcription(file_path=str(audio_file), provider="elevenlabs")
+
+    fields = _multipart_fields(bodies[0])
+    assert fields["provider"] == "elevenlabs"
+    assert "model" not in fields

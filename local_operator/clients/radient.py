@@ -1003,8 +1003,10 @@ class RadientClient:
             provider (Optional[str]): Transcription provider. Defaults to None, which
                                       sends no `provider` field and leaves the choice
                                       to the Radient agent-server's configured
-                                      default. It must be sent together with a
-                                      `model` id the provider actually serves.
+                                      default. Most providers require a `model` id
+                                      they actually serve, but nothing here enforces
+                                      the pairing: whatever the caller passes is
+                                      forwarded, and no model is invented for it.
 
         Returns:
             RadientTranscriptionResponseData: The transcription result.

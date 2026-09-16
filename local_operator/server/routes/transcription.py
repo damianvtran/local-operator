@@ -28,12 +28,15 @@ async def create_transcription_endpoint(
     # `model` and `provider` are deliberately unset by default: the daemon must not
     # choose a speech-to-text backend. Radient's agent-server owns that choice (its
     # configured default provider/model), and `RadientClient.create_transcription`
-    # omits each field from the multipart body when it is None, so the server-side
-    # default governs. Pinning them here was not harmless redundancy: an OpenAI
-    # model id sent alongside a server defaulted to a non-OpenAI provider (e.g.
-    # ElevenLabs Scribe v2) fails outright, so the old defaults silently locked the
-    # talk feature to OpenAI and to one model id. Callers that genuinely need a
+    # omits each field from the multipart body when it is None or empty, so the
+    # server-side default governs. Pinning them here was not harmless redundancy: an
+    # OpenAI model id sent alongside a server defaulted to a non-OpenAI provider
+    # (e.g. ElevenLabs Scribe v2) fails outright, so the old defaults silently locked
+    # the talk feature to OpenAI and to one model id. Callers that genuinely need a
     # specific backend still pass both explicitly, and are forwarded unchanged.
+    #
+    # Nothing here enforces that pairing, though: `provider` alone is forwarded as
+    # given, because the daemon cannot know which model ids a provider serves.
     model: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     response_format: Optional[str] = Form("json"),
