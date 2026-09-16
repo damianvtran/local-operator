@@ -47,7 +47,11 @@ start with [`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md): it
 inventories what an install creates and persists (with paths), states how the
 shipped artefacts are signed today, maps the behaviour pattern that matches a
 persistence heuristic, and gives the path-scoped allow-list that resolves it
-without weakening detection generally.
+without weakening detection generally — a **`Suppress Alerts` exclusion on all
+engines**, which is the mode that silences the alert while leaving the agent's
+monitoring in place. (The `Interoperability` and `Performance Focus` modes are
+*not* equivalent: they reduce or disable monitoring of the excluded paths, and on
+macOS agents 4.6+ `Interoperability` is not supported.)
 
 ## Reporting a Vulnerability
 
