@@ -1739,3 +1739,35 @@ def test_the_listing_route_publishes_the_marker_beside_the_rows(tmp_path, monkey
 
     assert {row["session_id"] for row in broken["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
     assert broken["degraded"] == ["sessions"]
+
+
+def test_the_history_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
+    """The phone's other conversation list, and the same rule.
+
+    ``/api/sessions/past`` is a second listing of the operator's conversations
+    (the sheet the client's ``getPastSessions`` is written for), so a store it
+    cannot walk may not reach it as "there are none" either. Its previous shape
+    was worse than the home listing's: ``except Exception: return []`` laundered
+    EVERY failure into an empty history, bugs included.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions/past").json()
+    assert {row["id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+    broken = client.get("/api/sessions/past").json()
+
+    assert broken["sessions"] == []
+    assert broken["degraded"] == ["sessions"]
