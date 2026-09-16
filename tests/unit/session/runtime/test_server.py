@@ -2782,3 +2782,53 @@ async def test_the_compose_fold_never_emits_an_unreadable_frame() -> None:
     for frame in conn.event_queue._queue:
         size = len(json.dumps(frame).encode()) + 1
         assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_attach_socket_carries_tcp_keepalive() -> None:
+    """A viewer that dies without a FIN must become detectable.
+
+    THE BUG THIS PINS. A terminal attach leaves the registry by exactly one
+    route — the reader loop's ``finally`` — which needs EOF. A window closed
+    abruptly (or a dropped link, or a killed emulator) sends no FIN, so the
+    connection lingers, ``_visible_attach_surfaces`` keeps reporting a viewer,
+    and ``_announce_pending`` suppresses the out-of-band toast for a gate
+    nobody can see. Keepalive is what turns that half-open socket back into an
+    EOF the existing teardown already handles correctly.
+
+    Asserted on the ACCEPTED socket (the runtime's own end), because that is
+    the side the fix configures and the side whose registry entry goes stale;
+    an unpatched client gets the benefit for free, which is the point.
+    """
+    import socket as _socket
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        _, writer = await _dial(record, client="attach")
+        conns = [c for c in runtime._clients.values() if c.kind == "attach"]
+        assert len(conns) == 1
+        sock = conns[0].writer.get_extra_info("socket")
+        assert sock is not None
+        assert sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE) != 0
+        writer.close()
+    finally:
+        runtime.close()
+
+
+def test_keepalive_setup_never_raises_on_a_socketless_writer() -> None:
+    """It runs in the accept path, so it must not be able to refuse a client.
+
+    A transport with no socket (an in-process pair, a platform that hides it)
+    answers None, and every unsupported option is swallowed — the contract
+    that lets the accept path call this unconditionally.
+    """
+    from local_operator.session.runtime.server import _enable_tcp_keepalive
+
+    class _NoSocket:
+        def get_extra_info(self, _name: str) -> None:
+            return None
+
+    _enable_tcp_keepalive(cast(Any, _NoSocket()))

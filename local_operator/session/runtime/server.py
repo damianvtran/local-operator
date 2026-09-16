@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 import weakref
@@ -166,6 +167,77 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
+
+#: TCP keepalive shape for an accepted control connection. The DEFAULT idle
+#: (two hours on every platform this runs on) is useless here: a parked gate
+#: routes on whether a terminal is watching, so a viewer that died without a
+#: FIN must be noticed in seconds, not after the gate's whole 24 h wait.
+_KEEPALIVE_IDLE_S = 30
+_KEEPALIVE_INTERVAL_S = 10
+_KEEPALIVE_FAILED_PROBES = 3
+
+
+def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
+    """Ask the kernel to notice a control peer that vanished without a FIN.
+
+    THE DEFECT THIS CLOSES. A terminal attach is removed from the registry by
+    exactly one route — the reader loop's ``finally`` — which needs the socket
+    to report EOF. Close a window abruptly, drop a laptop's wifi, or kill the
+    emulator, and the peer's FIN never arrives: the connection stays in
+    ``_clients``, ``_visible_attach_surfaces`` keeps reporting ``attach``, and
+    ``_announce_pending`` takes its "something is watching, send no toast"
+    branch forever. The gate then parks in silence for the full unattended
+    timeout, which is the "three threads hung, no notification" report this
+    fixes. ``ATTACH_MAX_CLIENTS`` was the only prior defence and it is a CAP,
+    not a reaper: under the cap a ghost is never evicted at all.
+
+    Desktop attaches already solve this with an application-level lease
+    (``DESKTOP_WATCH_LEASE_S``), but a terminal negotiates no lease and the
+    TUI sends nothing periodic, so there is no in-band signal to age out. The
+    kernel's own probe is the one liveness source available without changing
+    the protocol or requiring every client to be upgraded first — which
+    matters because an OLD ``lop`` attaching to a NEW runtime must benefit
+    too, and it does: the socket is the runtime's, and so are these options.
+
+    BEST-EFFORT BY CONTRACT. ``SO_KEEPALIVE`` is POSIX; the three tuning knobs
+    are not, and their names differ per platform (``TCP_KEEPIDLE`` on Linux,
+    ``TCP_KEEPALIVE`` on macOS, absent elsewhere). Each is applied only when
+    the running kernel exposes it, and every failure is swallowed: a platform
+    that refuses the tuning still gets plain keepalive at its own default,
+    which is strictly better than the status quo of never noticing at all.
+    Never raises — this runs inside the accept path, where an exception would
+    refuse a connection over what is only a latency optimisation.
+    """
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError, NameError):
+        return
+    # Linux spells the idle-before-first-probe knob TCP_KEEPIDLE; macOS calls
+    # the same thing TCP_KEEPALIVE. Probing by attribute rather than by
+    # `sys.platform` keeps this honest on kernels that disagree with their OS.
+    for option in ("TCP_KEEPIDLE", "TCP_KEEPALIVE"):
+        constant = getattr(socket, option, None)
+        if constant is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, constant, _KEEPALIVE_IDLE_S)
+        except OSError:
+            continue
+        break
+    for option, value in (
+        ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL_S),
+        ("TCP_KEEPCNT", _KEEPALIVE_FAILED_PROBES),
+    ):
+        constant = getattr(socket, option, None)
+        if constant is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, constant, value)
+        except OSError:
+            pass
 
 
 def _frame_size_without_delta(frame: dict[str, Any]) -> int:
@@ -1256,6 +1328,7 @@ class RuntimeServer:
         sockets liveness detection cannot see.
         """
         peer = writer.get_extra_info("peername")
+        _enable_tcp_keepalive(writer)
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
             frame = json.loads(line.decode("utf-8", "replace"))
