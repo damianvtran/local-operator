@@ -18578,7 +18578,7 @@ class OperatorApp(App[None]):
         # conversation after a pasted stack trace is not what the user asked.
         # `@path` REFERENCES ARE DELIBERATELY NOT EXPANDED HERE. `Session.prompt`
         # expands them, before it takes `_turn_lock` and with the approval gate
-        # passed (`session.py:5140`), which is what makes the deny-list and the
+        # passed (`session.py:5159`), which is what makes the deny-list and the
         # outside-workspace escalation reachable at all.
         #
         # Expanding here instead — the design's §2.7 "preferred" mitigation —
@@ -18595,7 +18595,11 @@ class OperatorApp(App[None]):
         # is the single expansion site for it, exits 3 and 4 (ruling D). The
         # ASIDE is the one exception and must be, because `_ask_aside` never
         # reaches `Session.prompt` — it expands in `_aside_worker`, which is a
-        # `run_worker` and so is off the pump, where the gate IS answerable.
+        # `run_worker` and so is off the pump (an await there is legal), under a
+        # DECLINING gate — the interactive one is not answerable from inside the
+        # aside either, for the cancellation chain `_expand_references`
+        # documents: `request_tool_approval` → `_close_aside` → cancels the
+        # `aside` worker group, which is where `_aside_worker` awaits.
         #
         # The cost is that exit 1 paints no reference notice (an unresolved
         # `@nope.py` is sent verbatim and silently). Exits 3 and 4 already
@@ -36536,13 +36540,13 @@ class OperatorApp(App[None]):
         is three hops and invisible from this line:
 
         1. :meth:`request_tool_approval` calls :meth:`_close_aside`
-           (``app.py:20177``), deliberately: its card floats over the transcript,
+           (``app.py:20181``), deliberately: its card floats over the transcript,
            so a question raised behind an open aside would be drawn underneath
            it while still taking focus.
         2. :meth:`_close_aside` cancels the ``aside`` worker group
-           (``app.py:34020``) — it retires the in-flight request, not just the
+           (``app.py:34024``) — it retires the in-flight request, not just the
            surface.
-        3. :meth:`_aside_worker` RUNS in that group (``app.py:34120``).
+        3. :meth:`_aside_worker` RUNS in that group (``app.py:34124``).
 
         So awaiting the interactive gate from here is self-cancelling. Probed on
         a real app with ``/btw what is in @.env ?``: ``_close_aside CALLED`` →

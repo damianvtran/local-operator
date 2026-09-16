@@ -132,7 +132,7 @@ def _active_at(line: str, column: int) -> int | None:
 
     The last boundary sigil at or before the caret is the one being edited
     (``@a @sr|`` is ``@sr``), which is ``_active_sigil``'s rule in
-    ``command_picker.py:648-656`` — expressed here through :func:`is_boundary`
+    ``command_picker.py:655-667`` — expressed here through :func:`is_boundary`
     so the composer and the submit-side resolver cannot disagree about where a
     token starts.
     """
