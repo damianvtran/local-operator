@@ -397,3 +397,76 @@ def test_arming_a_stopped_session_leaves_it_stopped(
     assert entry["last_fired_at"] == 8765
     assert entry["last_attempt_at"] == 9876
     assert len(entry["schedules"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# The rules this command no longer re-words, and the cap it gained
+# ---------------------------------------------------------------------------
+#
+# The refactor moved the message-length bound into the shared validator, so
+# `lop wake create --message <2001 chars>` is refused where the old command
+# (which built the model directly) armed it — a fourth user-visible change.
+# These pin the SENTENCES as the validator's, because that is the property the
+# code claims: the floor and the bound-on-a-repeat used to print this command's
+# own prose for the same mistakes.
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("every", "30s", "wake interval must be at least 60s."),
+        ("limit", 3, "'until' and 'limit' bound a repeat — add an 'every' interval."),
+        ("limit", 0, "'limit' must be a positive integer."),
+    ],
+)
+def test_a_rule_refusal_is_the_shared_validators_sentence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object, expected: str
+) -> None:
+    from local_operator.cli import _wake_create
+
+    session = _session(tmp_path, "wakecreate01")
+
+    assert _wake_create(_args(**{field: value})) == 1
+
+    assert expected in capsys.readouterr().err
+    assert _persisted_wakes(session) == []
+
+
+def test_the_message_cap_is_the_shared_validators(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bound at the boundary rather than somewhere inside it: the length that
+    is allowed still arms, and the one past it is refused with the validator's
+    sentence — the same text the desktop dialog and the agent's tool show."""
+    from local_operator.cli import _wake_create
+    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+
+    session = _session(tmp_path, "wakecreate01")
+
+    assert _wake_create(_args(message="x" * MAX_WAKE_MESSAGE_CHARS)) == 0
+    assert len(_persisted_wakes(session)[0]["message"]) == MAX_WAKE_MESSAGE_CHARS
+
+    assert _wake_create(_args(message="x" * (MAX_WAKE_MESSAGE_CHARS + 1))) == 1
+    assert f"at most {MAX_WAKE_MESSAGE_CHARS} characters" in capsys.readouterr().err
+    assert len(_persisted_wakes(session)) == 1
+
+
+def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI is a second external writer, so it meets the same guard the
+    route's cold path does: a runtime owns the schedules, and a row appended
+    behind it would be deleted by its next persist without ever firing."""
+    import local_operator.wakes.supervisor as supervisor
+    from local_operator.cli import _wake_create
+
+    session = _session(tmp_path, "wakecreate01")
+
+    async def live(config_dir: Path, session_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+
+    assert _wake_create(_args()) == 1
+    assert "Retry in a moment" in capsys.readouterr().err
+    assert _persisted_wakes(session) == []

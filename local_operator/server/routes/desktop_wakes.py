@@ -72,7 +72,13 @@ from local_operator.server.routes.desktop_sessions import (
     reply,
 )
 from local_operator.server.utils.desktop_sessions import read_desktop_marker
-from local_operator.wakes.arm import WakeWriteError, arm_wake, cancel_wake, edit_wake
+from local_operator.wakes.arm import (
+    WEDGED_MESSAGE,
+    WakeWriteError,
+    arm_wake,
+    cancel_wake,
+    edit_wake,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +107,14 @@ _STATUS_FOR_CODE = {
     "wake_unavailable": 409,
     "wake_write_conflict": 409,
     "wake_store_corrupt": 409,
+    # 503 for every "nothing was written; retrying is the fix": an owner that
+    # exists (and is either answering nothing or not answering), and a write
+    # lock another writer is holding. The writer decides which of its own codes
+    # applies; this table is the only place that decides what a code MEANS on
+    # the wire, and it is shared by the owner path and the file path.
+    "wake_owner_present": 503,
+    "wake_owner_wedged": 503,
+    "wake_write_busy": 503,
 }
 
 
@@ -204,7 +218,6 @@ async def create_wake(body: WakeCreate, request: Request):
                 body.session_id,
                 op="create",
                 wake_request=_wake_request(body),
-                created_session=False,
             )
             if body.title:
                 # An EXPLICIT name is the only reason to touch an existing
@@ -216,6 +229,25 @@ async def create_wake(body: WakeCreate, request: Request):
         session_id, cwd = await _create_session(request, body)
         try:
             outcome = await arm_wake(root, session_id, _wake_request(body), cwd=cwd)
+        except WakeWriteError as error:
+            # THIS SHAPE TRANSLATES ITS REFUSALS TOO. It used to call the writer
+            # directly and re-raise, so every refused schedule answered 500
+            # while the identical body with `session_id` answered 422/409 with
+            # the validator's sentence — the "New scheduled task" flow, i.e. the
+            # shape the whole feature exists for (review round 1, R1; QA Q1,
+            # 5 of 5 refusal kinds).
+            #
+            # The refusal is ALSO this request's recorded outcome rather than a
+            # raised-and-forgotten exception: `run` stores what the operation
+            # RETURNS, and a raised one leaves the receipt row NULL, so a retry
+            # of the same request_id met the journal's "outcome is
+            # indeterminate" — a dead end for a mistyped duration.
+            removed = await asyncio.to_thread(_rollback_created, root, session_id)
+            # The created id only when the directory SURVIVED (the rollback
+            # declined because something adopted it): that is the case the
+            # design's "retry the arm against it" is about. Offering an id whose
+            # directory was just removed would send the caller to a 404.
+            return _refused(error, session_id="" if removed else session_id)
         except BaseException:
             # Nothing may be left behind that the user cannot see or reach:
             # a session directory with no wake in it is a phantom conversation
@@ -235,6 +267,18 @@ async def create_wake(body: WakeCreate, request: Request):
             body.model_dump(by_alias=True, exclude_unset=True),
             create,
         )
+        if result.get("refused"):
+            # Raised AFTER the journal write on purpose: the recorded refusal is
+            # what a retry replays, instead of the journal answering
+            # "indeterminate" for a request whose outcome it now knows.
+            raise HTTPException(
+                _refusal_status(str(result["code"])),
+                _refusal_detail(
+                    str(result["code"]),
+                    str(result["message"]),
+                    session_id=str(result.get("session_id") or ""),
+                ),
+            )
         if result.get("replayed"):
             result = {**result, "receipt": "replayed"}
         return reply(result)
@@ -464,7 +508,6 @@ async def _mutate(
     op: str,
     wake_request: dict[str, Any],
     wake_id: str = "",
-    created_session: bool = False,
 ) -> dict[str, Any]:
     root = request.app.state.config_manager.config_dir
     async with host(request).session(session_id) as bridge:
@@ -480,14 +523,8 @@ async def _mutate(
             # 503, with a sentence naming the next step, because the client's
             # move is to retry or stop that conversation.
             raise HTTPException(
-                503,
-                {
-                    "code": "wake_owner_wedged",
-                    "message": (
-                        "This conversation's runtime is not responding. "
-                        "Retry in a moment, or stop that conversation."
-                    ),
-                },
+                _refusal_status("wake_owner_wedged"),
+                _refusal_detail("wake_owner_wedged", WEDGED_MESSAGE),
             )
         return await _via_files(
             root,
@@ -496,7 +533,6 @@ async def _mutate(
             wake_id=wake_id,
             wake_request=wake_request,
             cwd=bridge.cwd,
-            created_session=created_session,
         )
 
 
@@ -524,8 +560,8 @@ async def _via_owner(
         data = outcome.get("data") or {}
         code = str(data.get("code") or "wake_refused")
         raise HTTPException(
-            _STATUS_FOR_CODE.get(code, 409),
-            {"code": code, "message": str(outcome.get("text") or "The wake was refused.")},
+            _refusal_status(code),
+            _refusal_detail(code, str(outcome.get("text") or "The wake was refused.")),
         )
     data = outcome.get("data") or {}
     root = Path(config_dir)
@@ -552,9 +588,14 @@ async def _via_files(
     wake_id: str,
     wake_request: dict[str, Any],
     cwd: str | None,
-    created_session: bool,
 ) -> dict[str, Any]:
-    """The cold path: nobody owns the session, so ``arm.py`` is the writer."""
+    """The cold path: nobody owns the session, so ``arm.py`` is the writer.
+
+    ``created_session`` is not a parameter: this shape is reached for a session
+    the caller NAMED, so its receipt always says False. The create+arm branch
+    passes the literal at its own ``_receipt`` call, which is the one place the
+    answer can be True (review round 1, N2).
+    """
 
     async def run():
         if op == "create":
@@ -568,14 +609,17 @@ async def _via_files(
     try:
         outcome = await run()
     except WakeWriteError as error:
-        raise HTTPException(error.status, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            _refusal_status(error.code, error.status),
+            _refusal_detail(error.code, str(error), session_id=session_id),
+        ) from None
     return _receipt(
         root,
         session_id,
         outcome.wake_id,
         outcome.next_due_at,
         outcome.index_written,
-        created_session,
+        False,
     )
 
 
@@ -595,6 +639,56 @@ def _receipt(
         "supervisor": _supervisor_info(Path(config_dir)).model_dump(),
         "receipt": "applied",
         "index_written": index_written,
+    }
+
+
+def _refusal_status(code: str, default: int = 409) -> int:
+    """The status a wake refusal travels as.
+
+    ONE table for every refusal this module can produce, whichever path raised
+    it — the owner command's error envelope, the file writer's ``WakeWriteError``
+    and a refusal REPLAYED out of the receipt journal — so the same mistake can
+    never mean two different statuses depending on which writer handled it.
+
+    ``default`` is the writer's own status, for the codes the table does not
+    know (``session_not_found``); a caller that has no writer to ask uses 409.
+    """
+    return _STATUS_FOR_CODE.get(code, default)
+
+
+def _refusal_detail(code: str, message: str, *, session_id: str = "") -> dict[str, Any]:
+    """The refusal body, in the shape every other refusal on this router uses.
+
+    ``session_id`` is present only when it tells the caller something they
+    cannot already see: the create+arm shape's id exists only after this request
+    made the conversation, and it is included only when that conversation
+    SURVIVED (see ``create_wake``). On the named-session shape it is echoed,
+    which keeps the body shape uniform for a client that reads it.
+    """
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if session_id:
+        detail["session_id"] = session_id
+    return detail
+
+
+def _refused(error: WakeWriteError, *, session_id: str = "") -> dict[str, Any]:
+    """A refusal as THIS REQUEST'S RECORDED OUTCOME, for the receipt journal.
+
+    ``receipts().run`` stores whatever the operation RETURNS, so a refusal that
+    is raised instead leaves the row NULL — and a NULL row makes the retry of
+    the same ``request_id`` answer "outcome is indeterminate" for what was a
+    user typo (review round 1, R1). Returning it is what makes a retry
+    actionable: the journal replays the same sentence.
+
+    A refusal is honest to record, which is why this needs no journal change:
+    nothing was created (``_rollback_created`` proves it), so replaying the
+    answer is exactly right.
+    """
+    return {
+        "refused": True,
+        "code": error.code,
+        "message": str(error),
+        "session_id": session_id,
     }
 
 
@@ -647,14 +741,17 @@ async def _create_session(request: Request, body: WakeCreate) -> tuple[str, str]
     return session_id, cwd
 
 
-def _rollback_created(config_dir: Path, session_id: str) -> None:
+def _rollback_created(config_dir: Path, session_id: str) -> bool:
     """Remove the session directory this request just made — and NOTHING else.
 
-    The arm failed after the create succeeded, so the alternative is a phantom
-    conversation: a directory with a marker and no transcript, listed in the
-    sidebar, that can never fire the wake the user asked for. The removal is
-    guarded on every fact that would make the directory NOT provably ours and
-    empty, because deleting a session the user can see holds real work:
+    Returns whether it actually removed it, because the caller's refusal body
+    differs: a directory that SURVIVED means something adopted it, and that is
+    the case where the ``session_id`` is worth returning (retry the arm against
+    it); a directory this call removed names nothing.
+
+    WHAT MAKES THE REMOVAL SAFE is one identity proof, checked here on every
+    fact that could mean the directory is no longer ours to remove — deleting a
+    session the user can see would destroy real work:
 
     - a transcript (something wrote into it — it is a real conversation now);
     - a wake index entry (a wake exists, so the session must not vanish);
@@ -663,21 +760,19 @@ def _rollback_created(config_dir: Path, session_id: str) -> None:
       this is not the directory ``create`` returned).
 
     Anything else — including a failure during the removal itself — leaves the
-    directory alone and lets the caller's error body carry the ``session_id``,
-    which is the state the API documents: retry the arm against that id.
+    directory alone and returns False.
 
     **Why this is not ``cleanup.remove_session_dir``**, which is otherwise the
     one remover of a session directory in this tree, and why the call is
     allow-listed by name in ``tests/unit/session/test_no_session_deletion.py``
     (reviewers: the row records the same argument): that remover refuses any
     target in a store without the cleanup STORE MARKER, and ``mark_store``'s
-    own contract forbids cleanup from marking its own target. A store where no
-    session has ever been BUILT carries no marker — and that is precisely the
-    store a freshly created desktop draft lives in, so routing this through
-    the remover would turn the rollback into a silent no-op in the one case it
-    exists for. The safety here is the identity proof above rather than the
-    store marker, and it is strictly narrower: it removes one directory, this
-    request's own, and only while it is still empty of everything.
+    own contract forbids cleanup from marking its own target. The identity proof
+    above is strictly narrower than the marker — it removes one directory, this
+    request's own, and only while it is still empty of everything — and it is
+    the half that carries the decision; the missing marker would merely make the
+    other route a no-op in the store a fresh desktop draft lives in (review
+    round 1, N3: the argument leads with the proof, not with the marker).
     """
     from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.resume import TRANSCRIPT_NAME
@@ -686,18 +781,20 @@ def _rollback_created(config_dir: Path, session_id: str) -> None:
     path = Path(config_dir) / "sessions" / session_id
     try:
         if not path.is_dir():
-            return
+            return False
         if read_desktop_marker(path) is None:
-            return
+            return False
         if (path / TRANSCRIPT_NAME).exists():
-            return
+            return False
         if read_entry(Path(config_dir), session_id) is not None:
-            return
+            return False
         if find_runtime_record(Path(config_dir), session_id)[1] is not None:
-            return
+            return False
         shutil.rmtree(path)
+        return True
     except Exception:  # noqa: BLE001 — a failed cleanup must not mask the arm error
         logger.warning("could not roll back the session created for a wake", exc_info=True)
+        return False
 
 
 def _birth_title(config_dir: Path, session_id: str, text: str | None, user_set: bool) -> None:

@@ -16,7 +16,9 @@ land on disk.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -558,3 +560,205 @@ async def test_an_explicit_title_names_the_conversation_it_arms(desktop) -> None
 
     assert named.status_code == 200, named.text
     assert session_name(directory) == "Nightly backup watch"
+
+
+# ---------------------------------------------------------------------------
+# The create+arm shape's refusals, the recorded outcome, and concurrency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index", "wake_fields", "status", "code"),
+    [
+        (40, {"message": "boom", "in": "banana"}, 422, "wake_invalid"),
+        (41, {"message": "boom", "in": "10m", "every": "30s"}, 422, "wake_invalid"),
+        (42, {"message": "boom", "at": "2001-01-01T00:00:00+00:00"}, 409, "wake_refused"),
+        (43, {"message": "boom", "in": "10m", "limit": 3}, 422, "wake_invalid"),
+        (44, {"message": "x" * 2100, "in": "10m"}, 422, "wake_invalid"),
+    ],
+)
+async def test_a_refused_schedule_on_the_create_shape_is_a_typed_refusal(
+    desktop, index: int, wake_fields: dict[str, Any], status: int, code: str
+) -> None:
+    """R1/Q1: the shape the create dialog uses must answer the SAME refusals the
+    named-session shape does.
+
+    It used to call the writer directly and re-raise, so this branch answered
+    500 for every one of these bodies while the identical schedule with
+    ``session_id`` answered 422/409 carrying the validator's sentence — and it
+    is the "New scheduled task" flow, i.e. the call the whole feature exists
+    for. Five refusal kinds, one per row, because the defect was the branch and
+    not one input.
+    """
+    client, root = desktop
+
+    response = await client.post(
+        "/v1/desktop/wakes",
+        json={"request_id": _request_id(index), "cwd": str(root), **wake_fields},
+    )
+
+    assert response.status_code == status, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert detail["message"], "the validator's sentence travels with the code"
+    # ROLLED BACK, not left behind: a draft with no wake in it is a phantom
+    # conversation in the sidebar.
+    assert not (root / "sessions").exists() or list((root / "sessions").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_create_replays_its_refusal_instead_of_indeterminate(desktop) -> None:
+    """The receipt records the REFUSAL, so a retry is actionable.
+
+    ``receipts().run`` stores what the operation returns; a raised refusal left
+    the row NULL, and the retry of the same ``request_id`` met the journal's
+    "outcome is indeterminate" — a dead end for a user who mistyped a duration.
+    Same id, same body, same answer.
+    """
+    client, root = desktop
+    body = {
+        "request_id": _request_id(45),
+        "cwd": str(root),
+        "message": "boom",
+        "in": "banana",
+    }
+
+    first = await client.post("/v1/desktop/wakes", json=body)
+    second = await client.post("/v1/desktop/wakes", json=body)
+
+    assert first.status_code == 422, first.text
+    assert second.status_code == 422, second.text
+    assert second.json()["detail"] == first.json()["detail"]
+    assert "indeterminate" not in json.dumps(second.json())
+
+
+@pytest.mark.asyncio
+async def test_the_created_id_comes_back_when_the_rollback_declines(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one case the design's "retry the arm against it" is about.
+
+    The rollback removes the draft only while it is provably untouched; when
+    something has adopted it, the directory stays and the refusal has to name
+    it, or the caller is left holding an error and no way to reach the
+    conversation the request created.
+    """
+    import local_operator.server.routes.desktop_wakes as route
+
+    client, root = desktop
+
+    async def arm_and_adopt(config_dir, session_id, request, *, cwd=None, now_ms=None):
+        # Something wrote into the draft between the create and the arm, so the
+        # rollback's identity proof fails by design — then the arm refuses.
+        (Path(config_dir) / "sessions" / session_id / "transcript.jsonl").write_text(
+            '{"id":"x","ts":1.0,"type":"message","payload":{}}\n', encoding="utf-8"
+        )
+        raise route.WakeWriteError(
+            "at most 16 wake schedules are allowed.", status=409, code="wake_refused"
+        )
+
+    monkeypatch.setattr(route, "arm_wake", arm_and_adopt)
+
+    response = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": _request_id(46),
+            "cwd": str(root),
+            "message": "boom",
+            "in": "10m",
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "wake_refused"
+    assert detail["session_id"]
+    assert (root / "sessions" / detail["session_id"]).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_appearing_at_the_append_is_refused_through_the_route(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2/Q3 end to end through the route: the owner check that matters is the
+    one the WRITER makes, because the route's is a moment old by then."""
+    import local_operator.wakes.supervisor as supervisor
+
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+
+    async def live(config_dir, session_id):
+        return True
+
+    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+
+    response = await client.post(
+        "/v1/desktop/wakes",
+        json={
+            "request_id": _request_id(47),
+            "session_id": "aaaaaaaaaaaa",
+            "message": "raced wake",
+            "in": "30m",
+        },
+    )
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "wake_owner_present"
+    assert "Retry in a moment" in detail["message"]
+    assert _rows_on_disk(session_dir) == []
+    assert read_entry(root, "aaaaaaaaaaaa") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_arms_through_the_route_leave_one_row_each(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA's Q2 cell at the HTTP level: five simultaneous arms of one cold
+    session, five 200s, five rows, five distinct handles — never six rows and
+    never a 409 for a write that landed.
+
+    The read is slowed so the race is a deterministic catch rather than a
+    probabilistic one (the same magnifier a large transcript provided when this
+    was found): without the per-session lock all five requests merge onto one
+    base and the assertions below collapse to a single row.
+    """
+    import local_operator.wakes.arm as arm_module
+    from local_operator.harness.wake import WakeSchedule
+
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+    original_read = arm_module._read_rows
+
+    def slow_read(directory: Path) -> list[WakeSchedule]:
+        time.sleep(0.02)
+        return original_read(directory)
+
+    monkeypatch.setattr(arm_module, "_read_rows", slow_read)
+
+    responses = await asyncio.gather(
+        *[
+            client.post(
+                "/v1/desktop/wakes",
+                json={
+                    "request_id": _request_id(50 + index),
+                    "session_id": "aaaaaaaaaaaa",
+                    "message": f"w{index}",
+                    "in": f"{index + 1}0m",
+                },
+            )
+            for index in range(5)
+        ]
+    )
+
+    assert [response.status_code for response in responses] == [200] * 5, [
+        response.text for response in responses
+    ]
+    handles = [response.json()["result"]["wake_id"] for response in responses]
+    rows = _rows_on_disk(session_dir)
+    assert len(rows) == 5, "one row per request, and none dropped"
+    assert len(set(handles)) == 5, "no handle handed out twice"
+    assert sorted(row["id"] for row in rows) == sorted(handles)
+    entry = read_entry(root, "aaaaaaaaaaaa")
+    assert entry is not None and len(entry["schedules"]) == 5

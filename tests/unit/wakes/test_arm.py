@@ -433,3 +433,168 @@ def _rows_from_transcript(directory: Path) -> list[dict[str, Any]]:
         latest = list((payload.get("details") or {}).get("schedules") or [])
     assert latest is not None, "no wake_schedules entry was written"
     return latest
+
+
+# ---------------------------------------------------------------------------
+# Writing from OUTSIDE, correctly: serialised, and never behind an owner
+# ---------------------------------------------------------------------------
+#
+# Both of these were found by driving a real server, not by reading the code:
+# five concurrent arms left SIX rows and five 200s on one cold session (one
+# request's row written at two ids, and a 409 for a write that had landed), and
+# an arm whose session gained a runtime mid-request answered
+# `200 {index_written: true}` for a row the owner's next persist then deleted
+# from the transcript and the index while the supervisor skipped the session.
+
+import asyncio  # noqa: E402 — grouped with the tests that need it
+import functools  # noqa: E402
+import threading  # noqa: E402
+
+from local_operator.wakes.lock import WakeWriteLock  # noqa: E402
+
+
+def _arms_in_parallel(
+    root: Path, session_id: str, count: int
+) -> tuple[list[Any], list[BaseException]]:
+    """``count`` arms of one session at once, each on its own thread and loop.
+
+    Threads rather than coroutines on purpose: the writers that race in the
+    field are separate PROCESSES (the CLI, the desktop server, a second app),
+    and a lock that only serialised coroutines would leave that race intact.
+    """
+    outcomes: list[Any] = []
+    failures: list[BaseException] = []
+    start = threading.Barrier(count)
+
+    def arm(index: int) -> None:
+        try:
+            start.wait(timeout=30)
+            outcomes.append(
+                asyncio.run(
+                    arm_wake(root, session_id, {"message": f"w{index}", "in": f"{index + 1}0m"})
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 — reported, not swallowed
+            failures.append(exc)
+
+    threads = [threading.Thread(target=arm, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    return outcomes, failures
+
+
+@pytest.mark.asyncio
+async def test_concurrent_arms_leave_one_row_each_and_no_conflict(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N arms of one cold session ⇒ N rows, N distinct ids, N successes.
+
+    The window is WIDENED on purpose so this is a deterministic catch rather
+    than a probabilistic one: ``_read_rows`` is the step that makes the race,
+    and slowing it is the same magnifier a 103 MB transcript provided when this
+    was found. Without the per-session lock every thread reads the same base and
+    the last append wins, so the assertion below fails at 1 row instead of 5.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    _session(root, "concurrent01")
+    original_read = arm_module._read_rows
+
+    def slow_read(session_dir: Path) -> list[WakeSchedule]:
+        time.sleep(0.02)
+        return original_read(session_dir)
+
+    monkeypatch.setattr(arm_module, "_read_rows", slow_read)
+
+    outcomes, failures = _arms_in_parallel(root, "concurrent01", 5)
+
+    assert failures == []
+    assert len(outcomes) == 5
+    rows = _rows_from_transcript(root / "sessions" / "concurrent01")
+    assert len(rows) == 5, "one row per request, and no dropped update"
+    assert len({row["id"] for row in rows}) == 5, "no id handed out twice"
+    assert sorted(row["message"] for row in rows) == [f"w{i}" for i in range(5)]
+    # Every id the callers were told about is on disk exactly once: a returned
+    # id that no row carries is the "written twice, returned once" shape.
+    assert sorted(outcome.wake_id for outcome in outcomes) == sorted(row["id"] for row in rows)
+
+    entry = read_entry(root, "concurrent01")
+    assert entry is not None
+    assert len(entry["schedules"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_that_appears_at_the_append_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route's owner check is a moment old by the time the writer runs. When
+    a runtime has appeared in between, the row would be deleted by that owner's
+    next persist — so the writer refuses instead of answering 200."""
+    import local_operator.wakes.supervisor as supervisor
+
+    session_dir = _session(root, "owned01", [_row("w1")])
+
+    async def live(config_dir: Path, session_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(supervisor, "_has_live_runtime", live)
+
+    with pytest.raises(WakeWriteError) as refused:
+        await arm_wake(root, "owned01", {"message": "must not land", "in": "30m"})
+
+    assert refused.value.status == 503
+    assert refused.value.code == "wake_owner_present"
+    assert "Retry in a moment" in str(refused.value)
+    # NOTHING was written: the live row the session already had is untouched,
+    # which is the point — the refusal happens before the append.
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_owner_is_refused_by_the_writer_too(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Alive, heartbeat stale, lease held: the supervisor cannot engage it and
+    its in-memory list is still loaded, so a write here is just as doomed as one
+    behind a healthy owner — and says the same sentence the route says."""
+    import local_operator.wakes.supervisor as supervisor
+
+    session_dir = _session(root, "wedged01", [_row("w1")])
+    monkeypatch.setattr(supervisor, "wedged_runtime", lambda *args, **kwargs: (4321, 99.5))
+
+    with pytest.raises(WakeWriteError) as refused:
+        await arm_wake(root, "wedged01", {"message": "must not land", "in": "30m"})
+
+    assert refused.value.status == 503
+    assert refused.value.code == "wake_owner_wedged"
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
+
+
+@pytest.mark.asyncio
+async def test_a_contended_lock_refuses_rather_than_writing_unlocked(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Contention is refused, never degraded. Running unlocked is precisely the
+    duplicate row the lock exists to prevent, so the caller gets a retryable
+    503 — the opposite of the group reaper's best-effort lock, which may run
+    unlocked because its worst case is the behaviour it already had."""
+    import local_operator.wakes.arm as arm_module
+
+    session_dir = _session(root, "busy01", [_row("w1")])
+    holder = WakeWriteLock(session_dir)
+    holder.acquire()
+    try:
+        monkeypatch.setattr(
+            arm_module, "WakeWriteLock", functools.partial(WakeWriteLock, timeout_s=0.05)
+        )
+        with pytest.raises(WakeWriteError) as refused:
+            await arm_wake(root, "busy01", {"message": "queued behind a peer", "in": "30m"})
+    finally:
+        holder.release()
+
+    assert refused.value.status == 503
+    assert refused.value.code == "wake_write_busy"
+    assert "Retry in a moment" in str(refused.value)
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]

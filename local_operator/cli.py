@@ -840,7 +840,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "when",
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
-    wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    # Lazy, like every other harness import in this module (see the module
+    # docstring): the flag's help names the SHARED cap rather than a second
+    # number that could drift from it.
+    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+
+    wake_create.add_argument(
+        "message",
+        # The cap is the SHARED one (``MAX_WAKE_MESSAGE_CHARS``, enforced by
+        # ``build_wake_schedule``), and this command used to build the model
+        # directly so it had no cap at all. Said here rather than leaving the
+        # limit to be discovered by being refused (review round 1, R5).
+        help=(
+            "the self-prompt delivered when it fires "
+            f"(at most {MAX_WAKE_MESSAGE_CHARS} characters)"
+        ),
+    )
     wake_create.add_argument(
         "--every",
         default="",
@@ -3578,6 +3593,13 @@ def _cell_len(text: str) -> int:
 
 
 def _wake_create(args: argparse.Namespace) -> int:
+    # THE READ IS THE WRITER'S NOW. Upstream built a ``Transcript`` here so the
+    # append could reuse it rather than parse the journal twice; this command no
+    # longer builds a list at all — ``arm_wake`` reads the transcript's latest
+    # ``wake_schedules`` entry with the one-row reader and appends through the
+    # object the write already needs — so that double parse is not reachable
+    # from here, and the note it carried is answered rather than dropped.
+
     """``lop wake create <session> "<when>" "<message>"``.
 
     Persists through the TRANSCRIPT first, exactly like the in-session wake
@@ -3594,11 +3616,7 @@ def _wake_create(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from local_operator.harness.wake import (
-        MIN_WAKE_INTERVAL_MS,
-        parse_wake_at,
-        parse_wake_duration,
-    )
+    from local_operator.harness.wake import parse_wake_at, parse_wake_duration
     from local_operator.paths import config_dir
     from local_operator.wakes.arm import WakeWriteError, arm_wake
 
@@ -3633,40 +3651,27 @@ def _wake_create(args: argparse.Namespace) -> int:
         print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
         return 1
 
-    # THE READ IS THE WRITER'S NOW (upstream kept a note here about building a
-    # ``Transcript`` once so the append could reuse it, rather than parsing the
-    # journal twice). This command no longer builds a list at all: ``arm_wake``
-    # reads the transcript's latest ``wake_schedules`` entry with the one-row
-    # reader and appends through the object the write already needs, so the
-    # double parse that note existed to avoid is not reachable from here.
-    # Per-session handles (``w1``…), matching the in-session numbering so the
-    # id a user sees here is the id `/wake` would have given it.
-    every_ms: int | None = None
+    # WHAT THIS COMMAND CHECKS, AND WHAT IT DOES NOT. Everything here that
+    # prints and returns is FLAG TRANSLATION: turning ``"in 2m"``/``"at 09:30"``
+    # into the request's own vocabulary, choosing which key carries it, and
+    # telling the user when a flag's value cannot be read as that flag's kind at
+    # all. Every RULE — the 16-schedule cap, the first free id slot, the interval
+    # floor, the bound-on-a-one-shot rule, the message length — is decided once,
+    # by ``build_wake_schedule`` inside ``wakes/arm.py``, and reaches this command
+    # as the SAME sentence the desktop route and the agent's tool print. This
+    # command used to re-word the floor and the bound for itself, which made "one
+    # rule, one place" half true; the ONLY check kept locally is that a repeat
+    # interval is parseable as a duration, because "which of these two kinds is
+    # this flag" is this command's question and nobody else's (review round 1,
+    # R4).
     every_raw = str(getattr(args, "every", "") or "").strip()
-    if every_raw:
-        every_ms = parse_wake_duration(every_raw)
-        if every_ms is None:
-            # The same refusal the tool path gives, for the same reason: a
-            # bare number is ambiguous between seconds and milliseconds, and
-            # guessing wrong is a runaway loop.
-            print(
-                f"could not read a repeat interval from {every_raw!r} "
-                "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
-                file=sys.stderr,
-            )
-            return 1
-        if every_ms < MIN_WAKE_INTERVAL_MS:
-            # Caught HERE rather than at the model validator so the user gets
-            # a sentence instead of a pydantic traceback. The floor is
-            # deliberate: a wake starts a full turn, so a sub-minute repeat
-            # starves the session it is meant to serve.
-            print(
-                f"repeat interval {every_raw!r} is too short — "
-                f"the minimum is {MIN_WAKE_INTERVAL_MS // 1000}s, "
-                "because each wake starts a full turn",
-                file=sys.stderr,
-            )
-            return 1
+    if every_raw and parse_wake_duration(every_raw) is None:
+        print(
+            f"could not read a repeat interval from {every_raw!r} "
+            "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
+            file=sys.stderr,
+        )
+        return 1
 
     until_at: int | None = None
     until_raw = str(getattr(args, "until", "") or "").strip()
@@ -3696,16 +3701,6 @@ def _wake_create(args: argparse.Namespace) -> int:
         request["until"] = "+" + body if duration is not None else body
 
     limit = getattr(args, "limit", None)
-    if limit is not None and limit < 1:
-        print("--limit must be at least 1", file=sys.stderr)
-        return 1
-
-    # Both bounds only mean something for a repeat: a one-shot already fires
-    # exactly once, so silently accepting them would promise a behaviour the
-    # schedule does not have.
-    if every_ms is None and (until_at is not None or limit is not None):
-        print("--until and --limit bound a repeat — add --every", file=sys.stderr)
-        return 1
     if every_raw:
         request["every"] = every_raw
     if limit is not None:
