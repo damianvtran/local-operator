@@ -1,0 +1,160 @@
+{
+  "first_touch_ledger": {
+    "calls": 1155845,
+    "cpu_ms": 1779.93,
+    "path": "",
+    "wall_ms": 4345.93
+  },
+  "host": {
+    "cpu_count": 14,
+    "loadavg": [
+      245.16,
+      216.23,
+      197.38
+    ],
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.3"
+  },
+  "label": "before",
+  "ledger": {
+    "calls": 1155845,
+    "file_bytes": 342773760,
+    "has_session_daily": false,
+    "session_daily_rows": 0,
+    "sessions": 7241,
+    "span_ms": [
+      1787422417226,
+      1789587682771
+    ],
+    "table_bytes": {
+      "calls": 186273792,
+      "idx_calls_parent": 19632128,
+      "idx_calls_provider": 22716416,
+      "idx_calls_session": 28794880,
+      "idx_calls_ts": 19881984,
+      "idx_tool_calls_session": 17657856,
+      "idx_tool_calls_ts": 12070912,
+      "session_names": 552960,
+      "sqlite_autoindex_session_names_1": 163840,
+      "sqlite_autoindex_usage_daily_1": 12288,
+      "sqlite_autoindex_usage_monthly_1": 4096,
+      "sqlite_schema": 12288,
+      "sqlite_sequence": 4096,
+      "tool_calls": 34971648,
+      "usage_daily": 20480,
+      "usage_monthly": 4096
+    }
+  },
+  "module": "~/local-operator-worktrees/analytics-rollup-base/local_operator/__init__.py",
+  "read_ledger": {
+    "all_time": {
+      "by_session": 7241,
+      "calls": 1155845,
+      "cpu_ms": {
+        "max": 1808.74,
+        "min": 1764.77,
+        "n": 3,
+        "p50": 1800.97,
+        "p90": 1808.74
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 4724.18,
+        "min": 3009.42,
+        "n": 3,
+        "p50": 3186.37,
+        "p90": 4724.18
+      }
+    },
+    "last_7d": {
+      "by_session": 4726,
+      "calls": 530459,
+      "cpu_ms": {
+        "max": 1399.96,
+        "min": 1337.06,
+        "n": 3,
+        "p50": 1379.76,
+        "p90": 1399.96
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 6139.09,
+        "min": 2944.74,
+        "n": 3,
+        "p50": 5928.01,
+        "p90": 6139.09
+      }
+    },
+    "panel_30d": {
+      "by_session": 7241,
+      "calls": 1155845,
+      "cpu_ms": {
+        "max": 2791.16,
+        "min": 2738.96,
+        "n": 3,
+        "p50": 2764.83,
+        "p90": 2791.16
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 6222.86,
+        "min": 4386.24,
+        "n": 3,
+        "p50": 4828.68,
+        "p90": 6222.86
+      }
+    }
+  },
+  "route_payload": {
+    "by_session_entries": 7241,
+    "bytes": 3743004,
+    "cpu_ms": {
+      "max": 41.21,
+      "min": 37.6,
+      "n": 3,
+      "p50": 38.76,
+      "p90": 41.21
+    },
+    "path": "",
+    "wall_ms": {
+      "max": 151.12,
+      "min": 37.61,
+      "n": 3,
+      "p50": 90.1,
+      "p90": 151.12
+    }
+  },
+  "samples": 3,
+  "source_ledger": "/tmp/bench-live/analytics.db",
+  "tree": "~/local-operator-worktrees/analytics-rollup-base",
+  "write": {
+    "batch_1": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 1.02,
+        "min": 0.08,
+        "n": 25,
+        "p50": 0.14,
+        "p90": 0.27
+      }
+    },
+    "batch_20": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 2.23,
+        "min": 0.38,
+        "n": 25,
+        "p50": 0.45,
+        "p90": 0.96
+      }
+    },
+    "batch_5": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 0.73,
+        "min": 0.18,
+        "n": 25,
+        "p50": 0.25,
+        "p90": 0.45
+      }
+    },
+    "with_rollup_arm": false
+  }
+}

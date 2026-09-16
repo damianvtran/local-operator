@@ -2304,6 +2304,27 @@ Things that will bite you if you forget them:
   `idx_calls_parent` over a 475k-row ledger is a ~660 ms stall on the first open
   after upgrade (on the recorder's background thread) and ~4.9 MB of growth.
 
+- **`aggregate()` reads a maintained day rollup, behind a fail-closed gate.**
+  `session_daily` is a per-`(local day, session, provider)` accumulate-upsert
+  written in the SAME transaction as the ledger row (`record_batch`) — the
+  `usage_daily` mechanism at a second grain, so there is still one write path
+  and no separate hook to double-count against. `AnalyticsStore.aggregate()`
+  serves from it ONLY when the gate can prove the same numbers (day-aligned
+  bounds, coverage down to the window's first day, the same bucketing zone, a
+  rollup as new as the ledger's newest row, and a ledger bottom the prune has
+  not cut inside), and otherwise runs the original three ledger scans
+  unchanged, naming the refusal in a `debug` log. Measured on the operator's
+  341 MB ledger (1.16 M calls): the panel's 30-day window goes from 13.5 s wall
+  / 3 339 ms CPU to 0.43 s / 63 ms CPU — `scripts/bench_panel_latency.py`,
+  `bench/analytics-rollup-*.json`. Two properties matter more than the
+  mechanism: the gate FAILS CLOSED (a wrong fast-path number is far worse than
+  a slow one; `store.last_aggregate_source` says which path ran and every
+  refusal has a test), and the equivalence is STRUCTURAL (`_assemble_aggregate`
+  builds the result for both paths, so only the table differs). The sweep that
+  fills an existing ledger is `backfill_analytics_session_daily`, on the
+  store-maintenance thread, newest-first in bounded per-day transactions;
+  until it reaches a day, reads touching it stay on the ledger, so an upgrade
+  can cost latency but never a number.
 - **Session parentage has exactly ONE rule: `store._PARENT_EDGE_SQL`.** Both
   the `/analytics` per-session rollup and the `/session` subtree walk resolve a
   session's parent through that constant. They used to derive it separately —

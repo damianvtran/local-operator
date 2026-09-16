@@ -360,3 +360,68 @@ What the rows say, in order:
   calmer windows), and two of the five blocks cannot overlap anyway because
   `process` and `agents` are built from the sessions block's output. That is why
   the read is still serial.
+## analytics-rollup-before.json / analytics-rollup-after.json
+
+The `/analytics` open: `AnalyticsStore.aggregate()` — the read
+`/v1/desktop/analytics` performs for the panel and the TUI's `/analytics` screen
+performs for its tables — before and after the maintained day-grain rollup.
+`scripts/bench_panel_latency.py` calls the store exactly as the route does on a
+**copy** of the operator's live ledger, and reports the path each arm actually
+took, so a "fast" number cannot come from the wrong code:
+
+```sh
+PYTHONPATH=. .venv/bin/python scripts/bench_panel_latency.py \
+  --ledger ~/.local-operator/analytics.db --label after --json out.json
+```
+
+Both JSONs were produced by the same command against the *same* snapshot copy
+(`/tmp/bench-live/analytics.db`, 342.8 MB, 1,155,845 calls, 7,241 sessions,
+2026-08-22 → 2026-09-16): `before` from a worktree at `f8111eecc`, `after` from
+the change's worktree, sequentially, on a 14-core host at load **206-265** from
+sibling agent worktrees. Wall time is inflated by that load and moves 2.5x
+between runs of the same code; **CPU is the portable column** and is reported
+beside it everywhere.
+
+| arm (1.16 M calls, 342.8 MB) | before: raw ledger | after: rollup | ratio |
+| --- | --- | --- | --- |
+| panel's 30-day window, wall p50 | 4,829 ms | **334 ms** | 14x |
+| panel's 30-day window, CPU p50 | 2,765 ms | **110 ms** | 25x |
+| TUI all-time (`aggregate()`, no bounds), wall p50 | 3,186 ms | **314 ms** | 10x |
+| TUI all-time, CPU p50 | 1,801 ms | **103 ms** | 17x |
+| last 7 days, wall p50 / CPU p50 | 5,928 / 1,380 ms | **302 / 85 ms** | 20x / 16x |
+| **first** read of a fresh copy (cold stand-in) | 4,346 ms | **457 ms** | 10x |
+| route payload (`asdict` + `json.dumps`, 3.74 MB) | 38.8 ms CPU | 54.5 ms CPU | — |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.14 / 0.25 / 0.45 ms | 0.29 / 0.43 / 0.77 ms | +0.12 / +0.10 / +0.21 ms |
+| backfill sweep of an existing ledger | n/a (falls back to the ledger) | 26 days, 9,983 ms wall / 1,929 ms CPU | 212 ms/day p50 |
+
+Reading the table:
+
+- **The windowed read is the more expensive shape, and it is the one the panel
+  asks for.** A bounded window makes SQLite use `idx_calls_ts` for random table
+  lookups where the unbounded query falls back to a sequential scan, so the
+  panel (day-aligned bounds) used to be *slower* than the TUI (no bounds) despite
+  touching the same rows. Fixing only the TUI path would not have fixed the
+  panel; both are served by the same rollup because both real callers are
+  day-aligned or unbounded, which is exactly the assumption the gate enforces.
+- **The first-touch row is the one a warm A/B cannot see.** Copying a new
+  342.8 MB file each time is the stand-in for an evicted page cache (`sudo purge`
+  is not available here), and the rollup's 1.1 MB of buckets versus the ledger's
+  ~300 MB of table and index is the durable part of the claim: at 6.4 s vs
+  457 ms this is the difference between a panel that appears broken on a cold
+  morning and one that does not.
+- **The write row is measured as an interleaved A/B inside one interpreter**, so
+  host drift lands on both arms: the control is the same `record_batch`
+  transaction with the new upsert disabled, which is precisely what the parent
+  tree runs. The cost is +0.10-0.21 ms of CPU per batch on the recorder's
+  background thread, against a sub-millisecond transaction that already pays a
+  commit — and none of it is on a session's event loop.
+- **The sweep is the upgrade path, not the steady state.** It runs once per
+  launch on the store-maintenance thread, newest-first, one bounded transaction
+  per day, and a read touching a day it has not reached is answered by the ledger
+  (i.e. the before column) rather than by a partial total. On this ledger the
+  panel's 30-day window is fast once all 26 days are derived; Today is fast
+  immediately because the writer maintains today's buckets.
+- **Nothing here is a test assertion.** The suite asserts which path ran, never a
+  duration (AGENTS.md §Timing); these files are where a duration is a
+  measurement, and the `path` field inside each arm is the evidence that the
+  number came from the code it names.
