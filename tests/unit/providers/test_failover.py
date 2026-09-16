@@ -4,8 +4,10 @@ streaming with fake clients/auth."""
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import random
+import ssl
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
@@ -4893,6 +4895,213 @@ def test_ordinary_transient_5xx_is_not_connectivity_loss() -> None:
     assert refused.kind == "transient"
 
 
+def _dial_failure(cause: BaseException) -> httpx.ConnectError:
+    """The exception chain a REAL failed dial leaves behind, reproduced.
+
+    Measured on this machine (httpx 0.28.1) rather than invented — the layers
+    wrap an anyio connect failure like this::
+
+        httpx.ConnectError("All connection attempts failed")      # ours, on top
+          __cause__  -> httpcore.ConnectError                     # (same class
+            __context__ -> OSError("All connection attempts failed")  #  name)
+              __cause__ -> the OS-level OSError, errno intact
+
+    BOTH links are load-bearing and they are different links: anyio raises its
+    aggregate with ``from`` (``__cause__``) while httpcore reaches the same
+    ``OSError`` through ``__context__``. The inner hop is a plain
+    ``httpx.ConnectError`` here only because httpcore is not a direct
+    dependency of this package; the walk keys on the class NAME and the
+    ``OSError``/group beneath, so the shape under test is the real one.
+    """
+    aggregate = OSError("All connection attempts failed")
+    aggregate.__cause__ = cause
+    inner = httpx.ConnectError("All connection attempts failed")
+    inner.__context__ = aggregate
+    outer = httpx.ConnectError("All connection attempts failed")
+    outer.__cause__ = inner
+    return outer
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        # macOS words EADDRNOTAVAIL "can't", Linux "Cannot"; the box in the
+        # 2026-09-15 incident hit the macOS one.
+        OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"),
+        # A multi-address connect reports one failure per address family, so a
+        # genuinely offline machine arrives as a GROUP rather than one OSError.
+        ExceptionGroup(
+            "multiple connection attempts failed",
+            [OSError(errno.ENETUNREACH, "Network is unreachable")],
+        ),
+        # anyio's aggregate with nothing readable under it. Silence is the
+        # offline case — see THE HONEST RULE FOR A SILENT CHAIN on the
+        # classifier — because the ONLY other thing this point in the dial can
+        # report, a refusal, leaves evidence the walk would have found.
+        OSError("All connection attempts failed"),
+    ],
+    ids=["eaddrnotavail", "unreachable-group", "silent"],
+)
+def test_an_offline_dial_is_classified_from_its_cause_chain(cause: BaseException) -> None:
+    """The chain carries the evidence the top-level sentence does not.
+
+    ``ConnectError: All connection attempts failed`` is byte-identical for an
+    offline laptop and a refused connection — it is anyio's own summary of a
+    dial that never completed, with the errno left one hop down. Reading only
+    the top level is what gave the incident's turn the FAST budget
+    (``maxRetries=3``, ~3.5s) and ended it in seconds instead of riding out the
+    flap. Wrapped as well as raw, because this is the form the driver holds.
+    """
+    raw = _dial_failure(cause)
+    wrapped = wrap_transport_error(raw)
+
+    assert is_connectivity_loss(raw)
+    assert is_connectivity_loss(wrapped)
+    # The flag the harness loop reads to decide whether an interrupted turn can
+    # be continued, not just the predicate: they must agree.
+    assert wrapped.connectivity_loss
+    # Frame label unchanged: a connectivity loss is still a transient error.
+    assert wrapped.kind == "transient"
+
+
+def test_the_offline_verdict_survives_the_transport_wrapper() -> None:
+    """The two failures that had to be told apart reach us IDENTICAL as text.
+
+    ``wrap_transport_error`` flattens to ``"<ClassName>: <detail>"``, so both
+    arrive as exactly the incident's ``ConnectError: All connection attempts
+    failed``. The chain is the only difference left, which is why it has to
+    survive the wrap: if it did not, no rewrite of the classifier could
+    separate them.
+    """
+    offline = wrap_transport_error(
+        _dial_failure(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+    )
+    refused = wrap_transport_error(
+        _dial_failure(OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 9)"))
+    )
+
+    # The incident's rendered text, verbatim, in BOTH cases.
+    assert offline.message == "ConnectError: All connection attempts failed"
+    assert refused.message == offline.message
+
+    assert is_connectivity_loss(offline)
+    assert offline.connectivity_loss
+    assert not is_connectivity_loss(refused)
+    assert not refused.connectivity_loss
+
+
+def test_a_group_of_refusals_is_not_a_connectivity_loss() -> None:
+    """A refusal is a TCP RST from the destination, so the host WAS reachable.
+
+    Every address of a multi-address dial being REFUSED still means this
+    machine has a working network — the excluded cluster is one
+    ``ExceptionGroup`` of refusals, not one bare errno, and it must not be
+    swallowed now that the classifier reads inside groups.
+    """
+    refusals = ExceptionGroup(
+        "multiple connection attempts failed",
+        [
+            OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 9)"),
+            OSError(errno.ECONNREFUSED, "Connect call failed ('::1', 9)"),
+        ],
+    )
+    assert not is_connectivity_loss(_dial_failure(refusals))
+    assert not is_connectivity_loss(wrap_transport_error(_dial_failure(refusals)))
+
+
+def test_a_tls_failure_is_not_a_connectivity_loss() -> None:
+    """httpcore maps ``ssl.SSLError`` to ``ConnectError``, so a certificate
+    failure arrives looking exactly like the offline case.
+
+    It is not one: the TCP connection was ESTABLISHED before the handshake
+    began, so the host was reached and the problem is a certificate or a
+    protocol. This is the exclusion that keeps a broken-certificate session on
+    its fast retry instead of parking it for the patient budget — the silent
+    regression a classifier rewrite is most likely to leave behind.
+    """
+    tls = _dial_failure(
+        ssl.SSLError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    )
+    assert not is_connectivity_loss(tls)
+    assert not is_connectivity_loss(wrap_transport_error(tls))
+
+
+def test_a_real_http_status_still_outranks_a_connect_chain() -> None:
+    """``status is not None`` means a provider WAS reached, whatever the chain
+    below it claims — the guard the incident must not cost us."""
+    error = ProviderError(
+        503,
+        "service unavailable",
+        retryable=True,
+        transport=True,
+        transport_cause=_dial_failure(
+            OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+        ),
+    )
+    assert not is_connectivity_loss(error)
+
+
+#: What asyncio actually builds for a failed connect: the errno is stated and the
+#: message is its OWN wording, so the text carries no route phrase at all.
+#: Measured live for `http://[2606:4700::1111]/` on this box, which raises
+#: ``ConnectError("All connection attempts failed")`` over
+#: ``OSError(65, "Connect call failed ('2606:4700::1111', 80)")`` — the shape
+#: agent review R1-3 was measured on.
+def _route_error(errno_value: int, address: str) -> OSError:
+    return OSError(errno_value, f"Connect call failed ({address!r}, 80)")
+
+
+@pytest.mark.parametrize("errno_value", [errno.ENETUNREACH, errno.EHOSTUNREACH])
+def test_a_lone_route_error_reached_by_unwinding_stays_on_the_fast_path(
+    errno_value: int,
+) -> None:
+    """A route error on a chain hop is PER-DESTINATION evidence, not machine evidence.
+
+    "No route to host" means either "this machine has no default route" or "this
+    one address is not routable from here", and unwinding the chain destroyed the
+    only thing that told them apart: this is a single-address dial, so every other
+    target may still be reachable and the remedy is the fallback walk. Parking it
+    for ``CONNECTIVITY_MAX_RETRIES`` instead was measured as a regression by agent
+    review R1-3, so a lone route error keeps the fast path it had before this
+    change. `test_a_multi_address_route_failure_is_a_connectivity_loss` and
+    `test_route_wording_in_the_failures_own_sentence_keeps_its_meaning` pin the two
+    corroborated cases that DO count.
+    """
+    assert not is_connectivity_loss(_dial_failure(_route_error(errno_value, "2606:4700::1111")))
+    assert not is_connectivity_loss(
+        wrap_transport_error(_dial_failure(_route_error(errno_value, "2606:4700::1111")))
+    )
+
+
+def test_a_multi_address_route_failure_is_a_connectivity_loss() -> None:
+    """anyio groups a dial that tried MORE THAN ONE address (`oserrors[0]` only
+    when there is exactly one), so a group of route failures is the machine
+    saying every address of the name was unroutable — the waking-laptop case.
+    This is also the shape the original report listed as a wrong answer."""
+    group = ExceptionGroup(
+        "multiple connection attempts failed",
+        [
+            OSError(errno.ENETUNREACH, "Connect call failed ('2606:4700::1111', 80)"),
+            OSError(errno.EHOSTUNREACH, "Connect call failed ('104.16.0.1', 80)"),
+        ],
+    )
+    assert is_connectivity_loss(_dial_failure(group))
+    assert is_connectivity_loss(wrap_transport_error(_dial_failure(group)))
+
+
+def test_route_wording_in_the_failures_own_sentence_keeps_its_meaning() -> None:
+    """The failure's OWN account is read exactly as this module always read it.
+
+    A caller handed ``ConnectError("[Errno 65] No route to host")`` has been
+    told the route by the failure itself, which is the documented waking-laptop
+    case the patient budget exists for; the stricter treatment above applies to
+    the same errno only where it was found by unwinding.
+    """
+    for detail in ("[Errno 65] No route to host", "[Errno 51] Network is unreachable"):
+        assert is_connectivity_loss(httpx.ConnectError(detail)), detail
+        assert is_connectivity_loss(wrap_transport_error(httpx.ConnectError(detail))), detail
+
+
 def test_connectivity_backoff_is_patient_not_the_8s_cap() -> None:
     """The patient delays grow past the 8s fast cap toward the ~60s ceiling,
     which is what lets the total budget span minutes."""
@@ -4957,6 +5166,56 @@ async def test_connectivity_loss_recovers_within_patient_budget(monkeypatch) -> 
     assert max(sleeps) <= CONNECTIVITY_BACKOFF_CAP_MS
 
 
+async def test_the_incident_shape_rides_out_a_flap_instead_of_dying(monkeypatch) -> None:
+    """The 2026-09-15 failure, end to end: the turn SURVIVES the flap.
+
+    The client raises the chain a real offline dial produces — a bare
+    ``ConnectError: All connection attempts failed`` over an ``EADDRNOTAVAIL``
+    — which is byte-identical by text to a refused connection and was therefore
+    classified as an ordinary transient. Under the FAST budget (this test's
+    ``maxRetries=3``, 500ms base) that is ~3.5s against the same target, which
+    is how the reported turn ended in about 3s while the network was still
+    coming back. Eight failures in a row — past what the fast budget could ever
+    allow — must still end in a completed stream, on the same credential and
+    without touching the fallback chain (an offline machine makes every target
+    equally unreachable, so walking it only multiplies the failure).
+    """
+    sleeps: list[int] = []
+    attempts = {"n": 0}
+    flap_failures = 8
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def flapping(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts["n"] += 1
+        if attempts["n"] <= flap_failures:
+            raise _dial_failure(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+
+        async def ok() -> AsyncIterator[Any]:
+            yield StreamEndEvent(stop_reason="stop")
+
+        return ok()
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(flapping)
+
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    settings = {"retry": {"maxRetries": 3, "baseDelayMs": 500, "fallbackChains": {}}}
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    assert attempts["n"] == flap_failures + 1
+    # More in-place retries than the fast budget allows, and no credential
+    # rotated: the machine being offline is nobody's fault.
+    assert len(sleeps) == flap_failures
+    assert auth.rotations == []
+
+
 async def test_connectivity_loss_does_not_walk_fallback_chain(monkeypatch) -> None:
     """The patient path retries the PRIMARY in place and never walks the chain.
 
@@ -5012,6 +5271,53 @@ async def test_connectivity_loss_does_not_walk_fallback_chain(monkeypatch) -> No
     # It rode out the offline window in place — no rotation to the sibling either.
     assert attempts["n"] == offline_failures + 1
     assert auth.rotations == []
+
+
+async def test_a_lone_route_error_walks_the_cascade_instead_of_parking(monkeypatch) -> None:
+    """The driver-level half of R1-3: a per-destination route error must reach the chain.
+
+    `test_a_lone_route_error_reached_by_unwinding_stays_on_the_fast_path` pins the
+    predicate; this pins what the verdict is FOR. A single unreachable address is
+    a condition another target can serve, so the failure has to charge the ordinary
+    budget and reach the configured fallback — the opposite of the connectivity
+    path, which retries the SAME target in place for minutes. Measured before the
+    fix: the patient path was taken here, the fallback's client was never built,
+    and the turn sat on one unreachable address instead of routing around it.
+    """
+    sleeps: list[int] = []
+    specs_seen: list[str] = []
+
+    async def capture_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", capture_sleep)
+
+    def route_failure(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        # Raised synchronously, exactly as the driver sees a raw transport error.
+        raise _dial_failure(_route_error(errno.EHOSTUNREACH, "2606:4700::1111"))
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.model_id == "gpt-4o":
+            return _FnClient(route_failure)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+    settings = {
+        "retry": {
+            "maxRetries": 1,
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-x"]},
+        }
+    }
+    events = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert any(isinstance(e, StreamEndEvent) for e in events)
+    assert "anthropic/claude-x" in specs_seen, "the fallback must be reached, not parked"
 
 
 async def test_ordinary_transient_5xx_still_uses_fast_budget(monkeypatch) -> None:

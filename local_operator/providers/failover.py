@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import errno
 import inspect
 import logging
 import random
+import ssl
 import time
 from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
     Collection,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -132,12 +135,22 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #:   - "temporary failure in name resolution" / "name or service not known" /
 #:     "getaddrinfo failed": Linux/glibc ``EAI_AGAIN`` / ``EAI_NONAME`` and the
 #:     generic resolver-failure wording.
-#:   - "network is unreachable" / "errno 51": no route to the network at all
-#:     (macOS ``ENETUNREACH`` 51, Linux 101) — the interface has no default
-#:     route yet after waking.
-#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113).
+#:   - "network is unreachable" / "errno 51": ``ENETUNREACH`` (macOS 51, Linux
+#:     101) — no route to the network, which is the interface having no default
+#:     route yet after waking... but ALSO what one unroutable address family
+#:     looks like, which is why this half is held to a stricter standard below.
+#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113),
+#:     and ambiguous in exactly the same way.
 #:   - "network is down" / "errno 50": ``ENETDOWN`` — the interface is still
 #:     coming up.
+#:   - "can't assign requested address" / "cannot assign requested address" /
+#:     "errno 49" / "errno 99": ``EADDRNOTAVAIL`` (macOS 49, Linux 99) — the
+#:     socket had no source address it could bind. macOS words it "can't" and
+#:     Linux "Cannot", so both spellings are listed. This is the one the
+#:     2026-09-15 incident actually carried, and it is the reason the markers
+#:     below are no longer the WHOLE of the evidence: a laptop mid-wifi-reconnect
+#:     reports it, and it arrives one hop down the cause chain (see
+#:     :func:`_transport_chain`), where the top-level sentence says nothing.
 #:
 #: DELIBERATELY EXCLUDED — do not re-add: ``ECONNREFUSED`` ("connection refused"
 #: / errno 61 on macOS, 111 on Linux). A refused connection is a TCP RST from the
@@ -148,19 +161,112 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #: genuinely-down LOCAL provider (ollama, LM Studio, a localhost proxy) the
 #: 8-minute patient wait AND suppress the fallback-chain walk that otherwise
 #: routes around it — a regression. A refusal stays an ordinary transient error.
-_CONNECTIVITY_LOSS_MARKERS = (
+#:
+#: The list is split in two below by WHAT THE EVIDENCE PROVES, which is not a
+#: stylistic division: see :data:`_MACHINE_ONLY_MARKERS` for the failures no
+#: destination can cause, and :data:`_ROUTE_EVIDENCE_MARKERS` for the route
+#: errors that can mean either the machine or the one address that was dialled.
+_MACHINE_ONLY_MARKERS = (
     "nodename nor servname",
     "errno 8",
     "temporary failure in name resolution",
     "name or service not known",
     "getaddrinfo failed",
-    "network is unreachable",
-    "errno 51",
-    "no route to host",
-    "errno 65",
     "network is down",
     "errno 50",
+    "can't assign requested address",
+    "cannot assign requested address",
+    "errno 49",
+    "errno 99",
 )
+
+#: Route errors: evidence that can mean EITHER "this machine has no route" or
+#: "this one address is not routable from here", and therefore NOT sufficient
+#: on its own when it is only reached by unwinding the chain.
+#:
+#: The ambiguity is real and was measured (agent review R1-3): a dial to a single
+#: IPv6 literal from a machine with no v6 route raises
+#: ``ConnectError("All connection attempts failed")`` over ``OSError(65)`` — the
+#: same shape as an interface that woke up with no default route yet. The two
+#: want opposite treatment: the first is a per-target condition whose remedy is
+#: the fallback walk, the second is the waking-laptop case this whole path
+#: exists for.
+#:
+#: So a route error counts on its own only when it is the failure's OWN account
+#: (the exception the caller holds, or the ``message`` of a wrapped one — see
+#: ``is_connectivity_loss``), which is what this module has always read and what
+#: its docstring above promised. Reached any other way it must be corroborated,
+#: by :data:`_MACHINE_ONLY_MARKERS`/``_MACHINE_ONLY_ERRNOS`` or by anyio's
+#: multi-address aggregate: ``connect_tcp`` raises an ``ExceptionGroup`` for
+#: ``len(oserrors) > 1`` and a bare ``OSError`` otherwise, so a group IS anyio
+#: telling us EVERY address of the name failed to route, where one lone failure
+#: says nothing about the machine.
+_ROUTE_EVIDENCE_MARKERS = (
+    "network is unreachable",  # macOS ENETUNREACH 51, Linux 101
+    "errno 51",
+    "no route to host",  # EHOSTUNREACH — macOS 65, Linux 113
+    "errno 65",
+)
+
+#: Every wording that marks a pre-connect failure, in one tuple, for callers that
+#: only want "does this text look like connectivity at all". The two halves are
+#: kept separate above because ``is_connectivity_loss`` weights them differently.
+_CONNECTIVITY_LOSS_MARKERS = _MACHINE_ONLY_MARKERS + _ROUTE_EVIDENCE_MARKERS
+
+#: ``errno`` values no DESTINATION can cause: the socket could not be given a
+#: source address, or the interface is down. Sufficient on their own, wherever on
+#: the chain they appear. Read off the ``OSError`` objects rather than parsed out
+#: of their text, and through the ``errno`` module rather than as literals, so
+#: each entry is correct on BOTH platforms at once: ``EADDRNOTAVAIL`` is 49 on
+#: macOS and 99 on Linux, and hard-coding either number is a classifier that
+#: silently stops working when the same code runs under Linux.
+#:
+#: NOT a one-for-one mirror of the marker lists, and the difference is not an
+#: oversight to be "restored": the resolution half of
+#: :data:`_MACHINE_ONLY_MARKERS` (``nodename nor servname``, ``errno 8``,
+#: ``temporary failure in name resolution``, ``name or service not known``,
+#: ``getaddrinfo failed``) has NO counterpart here, because ``getaddrinfo``
+#: reports ``EAI_*`` codes, which are not ``errno`` values at all and whose
+#: numbering is not stable across platforms. The mapping is exact for the
+#: route/address/interface failures only.
+_MACHINE_ONLY_ERRNOS: tuple[int, ...] = (
+    errno.EADDRNOTAVAIL,  # macOS 49 / Linux 99 — no source address to bind
+    errno.ENETDOWN,  # macOS 50 / Linux 100 — the interface is still coming up
+)
+
+#: The ``errno`` counterparts of :data:`_ROUTE_EVIDENCE_MARKERS`, and admitted on
+#: the same terms: sufficient when the failure's own text carries it, otherwise
+#: only with corroboration.
+_ROUTE_EVIDENCE_ERRNOS: tuple[int, ...] = (
+    errno.ENETUNREACH,  # macOS 51 / Linux 101 — no route to the network
+    errno.EHOSTUNREACH,  # macOS 65 / Linux 113 — no route to that host
+)
+
+#: Wordings that prove the DESTINATION was reached, which refutes
+#: :func:`is_connectivity_loss` whatever else the chain says. The complement of
+#: :data:`_CONNECTIVITY_LOSS_MARKERS`, and consulted only from
+#: :func:`_is_destination_reached`:
+#:   - "connection refused" / "econnrefused" / "errno 61" / "errno 111":
+#:     ``ECONNREFUSED`` (macOS 61, Linux 111) — a TCP RST from the far end. The
+#:     errno is also compared as an integer (see
+#:     :data:`_DESTINATION_REACHED_ERRNOS`); these wordings cover the case where
+#:     the errno survives only inside a message. Kept EXPLICIT rather than
+#:     implied by "no marker matched", because the fallback at the end of
+#:     :func:`is_connectivity_loss` treats exactly that silence as offline.
+_DESTINATION_REACHED_MARKERS = (
+    "connection refused",
+    "econnrefused",
+    "errno 61",
+    "errno 111",
+)
+
+#: ``errno`` values proving the far end answered. ``ECONNREFUSED`` only: a
+#: reset, a broken pipe or a protocol error all say the connection was
+#: ESTABLISHED, but they arrive as their own classes
+#: (:data:`_MID_STREAM_TRANSPORT_LOSS_CLASSES` handles the ones that matter),
+#: and widening this set would start excusing the pre-connect failures the
+#: patient budget exists for.
+_DESTINATION_REACHED_ERRNOS: tuple[int, ...] = (errno.ECONNREFUSED,)
 
 #: Transport failures that mean "a connection that was ALREADY WORKING died" —
 #: the mid-stream counterpart to :data:`_CONNECTIVITY_LOSS_MARKERS`, and
@@ -606,6 +712,7 @@ class ProviderError(RenderedStreamError):
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
         transport: bool = False,
+        transport_cause: BaseException | None = None,
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -641,14 +748,35 @@ class ProviderError(RenderedStreamError):
         #: that builds its own connectivity ``ProviderError`` must keep taking
         #: the patient path there.
         self.transport = transport
+        #: The transport exception this error was BUILT from, carried on the
+        #: standard chain (``__cause__``) rather than a bespoke attribute so
+        #: that :func:`is_connectivity_loss` — and anything else that walks a
+        #: cause chain, a traceback printer included — can see the evidence the
+        #: wrapper would otherwise throw away. It has to be preserved somewhere:
+        #: ``wrap_transport_error`` keeps only the class name and ``str(exc)``,
+        #: and for anyio's aggregate that string is a sentence with NO errno in
+        #: it ("All connection attempts failed") — measured on this machine, a
+        #: dial that failed with EADDRNOTAVAIL and one refused with ECONNREFUSED
+        #: both arrive as exactly ``ConnectError: All connection attempts
+        #: failed``. The errno that separates them is one hop further down, so
+        #: the chain has to survive the wrap or the classifier is guessing.
+        #:
+        #: Assigned BEFORE ``connectivity_loss`` below, which is computed from
+        #: this chain. Only :func:`wrap_transport_error` passes one, so every
+        #: other construction site leaves ``__cause__`` untouched — including
+        #: the callers that later do their own ``raise wrapped from exc``, where
+        #: the interpreter assigns the same link again.
+        if transport_cause is not None:
+            self.__cause__ = transport_cause
         #: Stamped at construction so the flag travels with the exception across
         #: the layer boundary (see ``RenderedStreamError.connectivity_loss``):
         #: the harness must decide whether an interrupted turn is continuable,
         #: and it cannot import this module to ask. Computed by the SAME
         #: classifier every other call site uses rather than re-derived, so
         #: there is still exactly one definition of "the machine is offline".
-        #: Safe to evaluate here — the classifier reads only ``status`` and
-        #: ``message``, both already assigned above.
+        #: Safe to evaluate here — everything the classifier reads is already
+        #: assigned above: ``status`` and ``message`` on this object, and the
+        #: ``transport_cause`` chain handed to ``__cause__`` a few lines up.
         #:
         #: This is the PRE-CONNECT half only. The mid-stream half cannot be
         #: decided here, because it turns on a fact no exception carries:
@@ -1130,6 +1258,171 @@ def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None 
         error.connectivity_loss = True
 
 
+def _transport_chain(error: BaseException) -> Iterator[BaseException]:
+    """Every exception reachable from ``error`` through the standard chain.
+
+    WHY the chain, and not just the exception in hand: anyio reports a failed
+    ``connect_tcp`` as ``OSError("All connection attempts failed")``
+    (``anyio/_core/_sockets.py``), a sentence that carries **no errno** — the
+    whole of the evidence sits one hop away, on the exception it was raised
+    ``from``. That ``OSError`` is wrapped twice more before it reaches us
+    (httpcore's ``ConnectError``, then httpx's), so ``ProviderError.message``
+    is, for a real offline laptop AND for a real refused connection alike,
+    exactly ``"ConnectError: All connection attempts failed"``. Reading only
+    the top level cannot tell those apart, and did not: a machine that could
+    not open any socket at all classified as an ordinary transient and got the
+    3-attempt fast budget, which is the 2026-09-15 incident this fixes.
+
+    Both links are walked because the layers above use both interchangeably.
+    anyio raises with ``from`` (``__cause__``) while httpcore's
+    ``map_exceptions`` reaches the same ``OSError`` through ``__context__``; a
+    real chain measured on this machine is
+    ``httpx.ConnectError --cause--> httpcore.ConnectError --context-->
+    OSError("All connection attempts failed") --cause--> OSError(49, ...)``.
+    Skipping either link would leave a shape that looks identical to the
+    offline case classified as transient. That is a considered difference from
+    the MCP transport renderer, which walks ONLY ``__cause__`` (agent review
+    R1-6): that one puts the first network-ish exception it finds into a
+    USER-VISIBLE sentence ("cannot resolve <host>"), where a stale neighbour
+    would print a wrong diagnosis, while here the walk only decides which
+    BUDGET a failure gets and a wrong answer is a longer wait. The errno the
+    incident turns on is under a ``__context__`` hop, so excluding it would
+    leave the real failure exactly as misclassified as before this change.
+
+    ``BaseExceptionGroup`` members are unwound because a multi-address connect
+    reports one failure per address family — a genuinely offline machine yields
+    a group of ``ENETUNREACH``/``EADDRNOTAVAIL``, and so does a reachable host
+    whose v6 route happens to be missing. Which of the two it is can only be
+    decided by looking inside. ``id()`` memoisation is what makes a cyclic or
+    self-referential chain terminate instead of spinning.
+
+    ``__context__`` IS the interpreter's IMPLICIT link, so this walk can reach
+    an exception that has nothing to do with the failure: any exception raised
+    inside an unrelated ``except`` block inherits its handler's as ``__context__``.
+    Nothing today is affected, and one constraint keeps it that way — every
+    caller hands the classifier the exception the client ACTUALLY raised
+    (``wrap_transport_error`` is passed the ``exc`` of the ``except`` it is
+    called from, and passes that one on), so the chain walked is this failure's
+    own. A future caller that wraps an error it merely happened to be holding
+    inside an unrelated handler would be reading that neighbour's evidence as
+    this failure's. That is the reason the walk is not offered as a general
+    "what went wrong" utility.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        yield node
+        if isinstance(node, BaseExceptionGroup):
+            stack.extend(node.exceptions)
+        if node.__cause__ is not None:
+            stack.append(node.__cause__)
+        if node.__context__ is not None:
+            stack.append(node.__context__)
+
+
+def _evidence_text(node: BaseException) -> str:
+    """The lowercased text ONE chain node contributes as evidence.
+
+    A :class:`ProviderError` contributes its ``message`` — the provider's own
+    words behind the wrapped class name (``"<ClassName>: <detail>"``, see
+    :func:`wrap_transport_error`) — rather than ``str()``, which would prepend
+    the kind label the harness itself wrote (``"transient provider error: ..."``).
+    Running harness-authored words back through a classifier is how this file
+    has already misdiagnosed its own bugs once (see :func:`wrap_transport_error`
+    on ``KeyError('usage')`` reading as quota exhaustion), so the label is kept
+    out of the haystack here as well.
+    """
+    if isinstance(node, ProviderError):
+        return node.message.lower()
+    return f"{type(node).__name__}: {node}".lower()
+
+
+def _is_connect_class(node: BaseException) -> bool:
+    """Did our own client fail to ESTABLISH the connection?
+
+    True for ``httpx.ConnectError`` and for httpcore's ``ConnectError`` under
+    it, matched by MRO NAME rather than by importing httpcore: what matters is
+    what the failure WAS, not which library happens to build it, and a
+    subclass or a vendored copy must not slip past. ``ConnectTimeout`` is
+    deliberately NOT here — a connect that timed out is its own kind
+    (``kind="timeout"``), with its own budget.
+
+    The second arm covers the same failure after :func:`wrap_transport_error`
+    has flattened it: that message is built as ``"<ClassName>: <detail>"``, so
+    a ``ProviderError`` wrapped from a connect failure still names the class in
+    its first token. It keeps clients that build their own connectivity error
+    (rather than letting :func:`wrap_transport_error` do it) classifying as
+    before.
+    """
+    if any(cls.__name__ == "ConnectError" for cls in type(node).__mro__):
+        return True
+    return isinstance(node, ProviderError) and node.message.split(":", 1)[0].strip() == (
+        "ConnectError"
+    )
+
+
+def _is_destination_reached(node: BaseException) -> bool:
+    """Did this node prove the DESTINATION answered, whatever else it says?
+
+    Two pieces of evidence refute "this machine has no network at all", and
+    both mean the far end was reached:
+
+    - A REFUSAL (``ConnectionRefusedError``, errno ``ECONNREFUSED``, or the
+      wordings in :data:`_DESTINATION_REACHED_MARKERS`): a TCP RST from the
+      destination. An offline machine cannot even resolve or route to a host,
+      so it never produces one. This is the exclusion the marker tuple's
+      docstring defends — a genuinely-down LOCAL provider (ollama, LM Studio, a
+      localhost proxy) must keep its fast retry and its fallback walk instead
+      of being parked for the patient budget.
+    - A TLS handshake failure (``ssl.SSLError``): the TCP connection was
+      ESTABLISHED before the handshake began, so the host was reached and the
+      problem is a certificate or a protocol, never a missing network. Without
+      this the fallback below would newly park a broken-certificate session for
+      minutes, which is the kind of silent regression a classifier rewrite is
+      most likely to leave behind.
+
+    Checked ahead of the offline evidence, and it WINS: a v6 ``ENETUNREACH``
+    beside a v4 ``ECONNREFUSED`` in one group means one address family has no
+    route, not that the box is offline.
+    """
+    if isinstance(node, (ConnectionRefusedError, ssl.SSLError)):
+        return True
+    if getattr(node, "errno", None) in _DESTINATION_REACHED_ERRNOS:
+        return True
+    lowered = _evidence_text(node)
+    return any(marker in lowered for marker in _DESTINATION_REACHED_MARKERS)
+
+
+def _carries_machine_only_evidence(node: BaseException) -> bool:
+    """Does this node state a failure no DESTINATION can cause?
+
+    Resolution failures, ``EADDRNOTAVAIL`` and ``ENETDOWN`` are about this
+    machine and nothing else, so they are sufficient wherever they appear — see
+    :data:`_MACHINE_ONLY_MARKERS` / :data:`_MACHINE_ONLY_ERRNOS`.
+    """
+    if getattr(node, "errno", None) in _MACHINE_ONLY_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _MACHINE_ONLY_MARKERS)
+
+
+def _carries_route_evidence(node: BaseException) -> bool:
+    """Does this node state a ROUTE failure — machine, or one address?
+
+    Deliberately a separate question from the one above: this evidence is
+    ambiguous, and :func:`is_connectivity_loss` decides whether anything
+    corroborates it. See :data:`_ROUTE_EVIDENCE_MARKERS`.
+    """
+    if getattr(node, "errno", None) in _ROUTE_EVIDENCE_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _ROUTE_EVIDENCE_MARKERS)
+
+
 def is_connectivity_loss(error: BaseException) -> bool:
     """The MACHINE is offline — DNS/route/socket-connect failed before any HTTP.
 
@@ -1141,6 +1434,46 @@ def is_connectivity_loss(error: BaseException) -> bool:
     cycle, which takes several minutes — longer than the ordinary ~80s transport
     budget — during which every provider and every credential is equally
     unreachable and rotation buys nothing.
+
+    THE EVIDENCE IS THE WHOLE CHAIN, not one exception's text. It is gathered
+    from every node :func:`_transport_chain` reaches — the exception itself, its
+    ``__cause__``/``__context__`` links, and the members of any
+    ``BaseExceptionGroup`` — and it is read three ways: the marker wordings
+    below, the ``errno`` an ``OSError`` states exactly, and the class of the
+    failure. That is what lets the two cases the incident could not tell apart
+    be told apart: a machine with no usable source address raises
+    ``EADDRNOTAVAIL`` on the chain under a sentence that says nothing, while a
+    refused connection raises ``ECONNREFUSED`` in the same place.
+
+    THE HONEST RULE FOR A SILENT CHAIN. A connect-class failure
+    (:func:`_is_connect_class`) that yields no other readable evidence, no HTTP
+    status and no sign the destination answered is classified as a connectivity
+    loss. The reasoning is a negative one: at that point our own client could
+    not open a socket, and the only alternative explanation it could have
+    produced — a refusal, or a TLS failure — leaves evidence this walk would
+    have seen. What remains is the machine. The alternative, returning ``False``
+    on silence, is what the incident did, and the cost of it is worse than the
+    cost of being wrong here: the failure it discards is the one that heals by
+    itself within seconds, while a false positive on a genuinely broken
+    CERTIFICATE is already excluded above and a false positive on a refusal is
+    excluded by the veto.
+
+    ROUTE EVIDENCE IS NOT SILENCE, AND NOT ENOUGH ON ITS OWN. A route error on
+    the chain means the walk DID find an explanation, which is why it never
+    reaches the fallback above — but that explanation is ambiguous ("this machine
+    has no route" or "this one address is not routable from here"), so it is
+    believed only where something corroborates it: in the failure's own text, or
+    beside anyio's multi-address group. A lone route error reached by unwinding
+    stays on the fast path it had before this change, because its remedy is the
+    fallback walk, and parking that target for minutes instead was measured as a
+    regression (agent review R1-3).
+
+    Deliberately NOT gated on ``ProviderError.transport`` (provenance), unlike
+    :func:`is_mid_stream_connectivity_loss`: this predicate only chooses a
+    BACKOFF on that path, where believing a provider that narrates its own
+    upstream trouble merely means waiting patiently, and the constructor gates
+    the control-flow flag on provenance separately. See the ``KNOWN IMPRECISION``
+    note on the mid-stream predicate for the split.
 
     Read from the same lowercased ``class name + detail`` haystack
     :func:`wrap_transport_error` builds, so it works both on the wrapped
@@ -1168,18 +1501,41 @@ def is_connectivity_loss(error: BaseException) -> bool:
     same way would change the patient-backoff behaviour of every existing
     caller, which is out of scope for the mid-stream fix that needed it.
     """
-    if isinstance(error, ProviderError):
-        # `message` already carries the wrapped "<ClassName>: <detail>" text
-        # (see wrap_transport_error), and the class name is the load-bearing
-        # half — httpx.ConnectError is routinely raised with an errno-only
-        # detail. status must be absent: a real HTTP response means a provider
-        # WAS reached, so it is a 5xx/timeout, never a connectivity loss.
-        if error.status is not None:
+    # A real HTTP response means a provider WAS reached, so it is a 5xx/timeout,
+    # never a connectivity loss — whatever the chain below it looks like.
+    if isinstance(error, ProviderError) and error.status is not None:
+        return False
+    machine_only = False
+    route_evidence = False
+    multi_address = False
+    connect_class = False
+    # The failure's OWN account — the exception handed to us, or the message a
+    # ProviderError was built from. Route evidence HERE is what this module has
+    # always read (and what its docstring promises); the same wording reached by
+    # unwinding is held to a stricter standard. See the tuples.
+    route_in_own_account = _carries_route_evidence(error)
+    for node in _transport_chain(error):
+        if _is_destination_reached(node):
             return False
-        haystack = error.message.lower()
-    else:
-        haystack = f"{type(error).__name__}: {error}".lower()
-    return any(marker in haystack for marker in _CONNECTIVITY_LOSS_MARKERS)
+        if _is_connect_class(node):
+            connect_class = True
+        if isinstance(node, BaseExceptionGroup):
+            # anyio's shape for a dial that tried MORE THAN ONE address
+            # (`oserrors[0] if len(oserrors) == 1 else ExceptionGroup(...)`), so
+            # its presence is the multi-address corroboration route evidence
+            # needs — every address of the name failed to route.
+            multi_address = True
+        if _carries_machine_only_evidence(node):
+            machine_only = True
+        if _carries_route_evidence(node):
+            route_evidence = True
+    if machine_only:
+        return True
+    if route_evidence:
+        return route_in_own_account or multi_address
+    # ``connect_class`` alone: see THE HONEST RULE FOR A SILENT CHAIN above for
+    # why silence is a verdict here rather than a shrug.
+    return connect_class
 
 
 def is_invalidated_credential_error(error: BaseException) -> bool:
@@ -2455,6 +2811,15 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
         # by a provider. `is_mid_stream_connectivity_loss` needs that distinction
         # and cannot recover it from the text — see `ProviderError.transport`.
         transport=True,
+        # The CLASS NAME and the message are not the whole evidence this
+        # exception carries, and for the connectivity classifier they are the
+        # wrong half: anyio reports a failed connect as
+        # `OSError("All connection attempts failed")`, raising it `from` the
+        # `OSError` that actually holds the errno. Flattening to text threw that
+        # away, so an offline machine and a refused connection became
+        # indistinguishable here — the 2026-09-15 incident. Handing the original
+        # to the ProviderError keeps it reachable without a second channel.
+        transport_cause=exc,
     )
 
 
