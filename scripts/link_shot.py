@@ -16,6 +16,9 @@ things that can look wrong about this card are each a different shape:
                         place the cut is visible
     many                more links than the card shows at once, for the window
                         and its `showing 3–14 of 24` counter row
+    parens              one markdown link whose URL contains BALANCED parentheses,
+                        the shape review round 1 found listed twice with the
+                        truncated target under the cursor
 
 Driven through the real command — typed into the editor and submitted — rather
 than by pushing the screen directly: the extraction walk and the app's own
@@ -67,6 +70,16 @@ def _seed(app: OperatorApp, shape: str) -> None:
                 "Here it is: https://example.com/reports/2026/09/"
                 + "very-long-segment/" * 4
                 + "index.html\n\nand the summary is https://example.com/short"
+            )
+        )
+        return
+
+    if shape == "parens":
+        app._append_block(UserBlock("which one is the Foo case?", fold_width=100))
+        app._append_block(
+            _answer(
+                "See [Foo (bar)](https://en.wikipedia.org/wiki/Foo_(bar)) for the case,"
+                " and **https://a.test/bold** for the emphasis form."
             )
         )
         return

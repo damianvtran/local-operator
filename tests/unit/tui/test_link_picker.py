@@ -25,6 +25,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from textual import events
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import (
@@ -114,6 +115,27 @@ def _body_region(screen: LinkPickerScreen):
     body = screen._body
     assert body is not None
     return body.region
+
+
+def _wheel(screen: LinkPickerScreen, down: bool):
+    """A real wheel notch aimed at the card, the shape `test_copy_picker_mouse`
+    posts: the event carries the body as its widget and screen coordinates over
+    it, so it reaches the screen through the normal dispatch path."""
+    kind = events.MouseScrollDown if down else events.MouseScrollUp
+    region = _body_region(screen)
+    return kind(
+        widget=screen._body,
+        x=0,
+        y=0,
+        delta_x=0,
+        delta_y=1 if down else -1,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=region.x + 2,
+        screen_y=region.y + 2,
+    )
 
 
 def _picker(app: OperatorApp) -> LinkPickerScreen | None:
@@ -265,6 +287,73 @@ async def test_a_click_opens_the_row_it_landed_on() -> None:
             await pilot.pause()
             await pilot.pause()
     assert opener.urls == ["https://bare.test/x"], opener.urls
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_later_row_opens_that_row() -> None:
+    """The cursor IS the selection model, so the second row has to open the
+    second URL. A suite that only ever presses Enter on row 0 would not notice
+    `action_choose` reading the wrong index."""
+    opener = _Opener()
+    app = _real_app()
+    with _spy(opener):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            await _stream(pilot, app, ANSWER)
+            await _submit(pilot, app, "/links")
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+    assert opener.urls == ["https://bare.test/x"], opener.urls
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_moves_one_row_and_clamps_at_both_ends() -> None:
+    """CLAMPED where the arrows wrap, and the difference is AGENTS.md's: a
+    scroll gesture that teleported to the other end of the list reads as the
+    list resetting itself. `move_picker`'s wheel makes the same choice."""
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        targets = _targets(*[f"https://a.test/{n}" for n in range(3)])
+        screen = await _open_picker(app, targets, pilot)
+        await app.on_event(_wheel(screen, down=False))
+        await pilot.pause()
+        assert screen._selected == 0, "a notch up at the top must not wrap"
+        for _ in range(3):
+            await app.on_event(_wheel(screen, down=True))
+            await pilot.pause()
+        assert screen._selected == 2, "one notch moves one row, to the last one"
+        # The notch that distinguishes a clamp from a wrap, and the reason this
+        # test counts rather than loops: wrapping here would land on 0.
+        await app.on_event(_wheel(screen, down=True))
+        await pilot.pause()
+        assert screen._selected == 2, "a notch down at the end must not wrap"
+
+
+@pytest.mark.asyncio
+async def test_a_parenthesised_link_paints_one_row_and_opens_whole() -> None:
+    """MAJOR-1 as the user met it: the extraction used to yield two entries for
+    one link — the truncated target first, because both patterns matched at the
+    same offset and the truncated one came from the markdown pattern — so the
+    card painted two rows and the cursor sat on the broken one."""
+    url = "https://en.wikipedia.org/wiki/Foo_(bar)"
+    opener = _Opener()
+    app = _real_app()
+    with _spy(opener):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            await _stream(pilot, app, f"See [Foo (bar)]({url}) for the case.")
+            await _submit(pilot, app, "/links")
+            screen = _picker(app)
+            assert screen is not None
+            assert len(screen._targets) == 1, [t.url for t in screen._targets]
+            painted = screen.render_lines_for_test()
+            assert f"❯ {url}" in painted[2], painted[2]
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+    assert opener.urls == [url], opener.urls
 
 
 # --- the command ---------------------------------------------------------------
