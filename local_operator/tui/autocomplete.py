@@ -58,6 +58,54 @@ class ArgumentMode(Enum):
     REQUIRED = "required"
 
 
+class ArgumentShape(Enum):
+    """What the TEXT AFTER a command's word IS, for the desktop.
+
+    The registry's declaration for the third source of "this trailing text is
+    the command's argument" — the two the composer derives from ``consumes_prompt``
+    (free text) and ``prefixes_text`` (a value chosen from a list) are narrower
+    than the field they approximate. What is left over is text the desktop
+    VALIDATES or FORWARDS: the MCP subcommand and server name, a provider id, a
+    selection, a filter, a path, a title.
+
+    Read on the desktop's ADMISSION rule (``slash_commands.
+    command_argument_is_used``) and by the command route's own validator, so
+    "is this trailing text this command's argument" has exactly one answer per
+    shape rather than one per call site. That is the second-decision defect
+    class this repo has already paid for: a host planning a draft as prose while
+    the other refuses it as a command leaves a message that no resend can clear.
+
+    NOT :class:`ArgumentMode`, and the difference is the whole reason both exist.
+    ``ArgumentMode`` answers "does a space open a VALUE LIST in THIS TERMINAL, and
+    does Enter on the bare word also send it" — a TUI completion question. This
+    answers "would the DESKTOP use text typed here", which is true for commands
+    whose trailing text never opens a TUI list at all (``/mcp logout`` is a
+    subcommand, ``/move ~/x`` is a path). Widening one into the other was probed
+    and is wrong in both directions: ``/login`` is ``REQUIRED`` yet its word is a
+    provider id the route validates, while ``/usage`` is no ``ArgumentMode`` list
+    at all yet ``/usage on`` is a control the composer runs.
+    """
+
+    #: No argument. Text after the word is prose, whatever it says.
+    NONE = "none"
+    #: ONE whitespace-free token — a selector the desktop forwards as a
+    #: ``selection``/``filter``/``selected`` value (a view, a mode, a session id).
+    #: A sentence here is prose, which is what keeps `/usage more prose` a message.
+    WORD = "word"
+    #: One token naming a provider THIS INSTALL knows — the route's own lookup
+    #: (``get_provider_definition``), so ``/login openai`` is the command and
+    #: ``/login zzz`` is prose.
+    PROVIDER = "provider"
+    #: ``<subcommand> [name]`` — the MCP shape the command route validates
+    #: against ``MCP_SUBCOMMANDS`` and ``SERVER_NAME_RE``. At most two tokens, so
+    #: ``/mcp logout`` is the command while ``/mcp logout seems to cause a crash``
+    #: is prose.
+    SUBCOMMAND = "subcommand"
+    #: Any text at all: a handler or a form field takes it (a session title, a
+    #: working directory, a path).
+    ANY = "any"
+
+
 #: Exact / prefix tiers, with registry-order tie-break.
 SCORE_EXACT = 1000
 SCORE_PREFIX = 900
@@ -152,6 +200,23 @@ class SlashCommand:
     #: the planner answering differently turns a prose draft into a permanent
     #: refusal no resend can clear.
     prefixes_text: bool = field(default=False, kw_only=True)
+    #: What TEXT AFTER this command's word IS, for the desktop — the third source
+    #: of "this trailing text is the command's argument", beside
+    #: ``consumes_prompt`` (free text) and ``prefixes_text`` (a value chosen from
+    #: a list). See :class:`ArgumentShape` for the values and why neither of the
+    #: other two can stand in for it.
+    #:
+    #: Keyword-only and defaulting to :attr:`ArgumentShape.NONE` for the reason
+    #: ``echo`` and ``consumes_prompt`` do: a command that has not stated a shape
+    #: gets the behaviour that changes nothing — text after it is PROSE, which is
+    #: the direction that cannot turn a user's message into a command.
+    #:
+    #: The ADMISSION rule reads this after the two booleans, so a command that
+    #: consumes a prompt or a listed value does not need to name a shape as well
+    #: (``/goal`` is ``NONE`` here and still owns its text). ``SLASH_COMMANDS`` is
+    #: pinned entry-by-entry in ``tests/unit/tui/test_slash_prefixes_text.py`` so a
+    #: new command cannot be added without stating this choice.
+    argument_shape: ArgumentShape = field(default=ArgumentShape.NONE, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

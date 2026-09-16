@@ -117,6 +117,39 @@ WHOLE_DRAFT_TABLE = [
     ("what does /usage mean?", None),
     ("", None),
     ("   ", None),
+    # --- the THIRD source: text the desktop validates or forwards -------------
+    # These rows were this PR's round-1 MAJOR. Each is a whole-draft control the
+    # desktop RUNS today (the route forwards the text, or the runtime dispatch
+    # reads it), so each must stay REFUSED: a client whose command surface is off
+    # plans `send` for everything, and a control accepted here would spend a paid
+    # model turn on it.
+    ("/mcp logout", "mcp"),
+    ("/login openai", "login"),
+    ("/logout openai", "logout"),
+    ("/provider openai", "provider"),
+    ("/accounts x", "accounts"),
+    ("/rename x", "rename"),
+    ("/rename my thing", "rename"),
+    ("/resume abc", "resume"),
+    ("/new foo", "new"),
+    ("/reload abc", "reload"),
+    ("/settings foo", "settings"),
+    ("/search foo", "search"),
+    ("/usage on", "usage"),
+    ("/skills x", "skills"),
+    ("/analytics view", "analytics"),
+    ("/move ~/x", "move"),
+    ("/move ~/my folder", "move"),
+    ("/stop now", "stop"),
+    ("/fast on", "fast"),
+    # And each shape's PROSE side, which is what keeps them from swallowing the
+    # operator's report: a sentence is not a selector, an unknown provider is not
+    # a provider, and an over-long MCP invocation is not one either.
+    ("/usage more prose", None),
+    ("/mcp logout seems to cause a crash", None),
+    ("/login zzz", None),
+    ("/mcp zzz", None),
+    ("/stop now and then", None),
 ]
 
 
@@ -130,18 +163,27 @@ def test_whole_draft_command_matches_the_policy_table(draft: str, expected: str 
         assert resolved[0].name == expected
 
 
-def test_an_interior_newline_makes_a_draft_prose_whatever_it_opens_with() -> None:
+def test_any_newline_makes_a_draft_prose() -> None:
     """Stated separately because the rule is load-bearing, not incidental.
 
     Every prefixing command is reachable single-line, so the newline rule is the
     one thing standing between a body that opens with a command word and the
-    permanent refusal the operator reported. The predicate strips first, so what
-    matters is that the newline is INTERIOR — a draft that only TRAILS one
-    (`/team ops\\n`) is still the command, and that is deliberate: the composer
-    sends on Enter, and a trailing newline is the user's own whitespace, not a
-    second line. The shapes below all carry text on both sides of the newline.
+    permanent refusal the operator reported.
+
+    ANY newline, including one that only TRAILS. The earlier "interior newline"
+    test (``"\n" in text.strip()``) read ``/team ops\n`` as the command while the
+    composer plans ``send`` for it — the caret sits on the empty last line — so
+    the route refused a draft the composer had already decided to send, which is
+    the permanent-refusal class this whole rule exists to remove. The endpoint
+    has no caret, so the faithful translation of the composer's per-LINE decision
+    is "a newline anywhere means prose".
+
+    Whitespace that is NOT a newline still does not make prose: leading and
+    trailing spaces are stripped, so ``  /compact`` and ``/compact   `` stay the
+    command — neither turns the draft into two lines.
     """
     drafts = [
+        # interior newlines: the operator's shape, and the QA round 2 Q4 regression
         "/team ops fix this\nand ship it",
         "/team ops fix this\n\nand ship it",
         "/goal ship it\nand then verify",
@@ -152,11 +194,22 @@ def test_an_interior_newline_makes_a_draft_prose_whatever_it_opens_with() -> Non
         "/mcp logout\nseems to be broken",
         "hello\n/team ops",
         "/tmp/test\n\nThe above is a test file path",
+        # trailing newlines: a paste or Shift+Enter leaves the caret on the empty
+        # last line, which is the case the two hosts disagreed about
+        "/team ops\n",
+        "/compact\n",
+        "/compact\n   ",
+        "/usage\n\t",
+        "/goal ship it\n ",
+        "\n/compact",
+        "\n",
     ]
     for draft in drafts:
-        assert "\n" in draft.strip(), draft  # the newline must be interior
         assert whole_draft_command(draft) is None, draft
 
-    # The trailing-newline counterpart, pinned so the interior rule is not
+    # The non-newline whitespace counterpart, pinned so "any newline" is not
     # widened into "any whitespace at all is prose".
-    assert whole_draft_command("/team ops\n") is not None
+    assert whole_draft_command("/team ops") is not None
+    assert whole_draft_command("  /compact") is not None
+    assert whole_draft_command("/compact   ") is not None
+    assert whole_draft_command("/compact\t") is not None

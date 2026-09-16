@@ -34,6 +34,17 @@ class CommandMetadata(BaseModel):
     #: so a response produced before this field existed still validates — the
     #: renderer ignores the key or falls back to its own derivation.
     prefixes_text: bool = False
+    #: The SHAPE the trailing text must have for the desktop to use it as this
+    #: command's argument — ``none`` (never), ``word`` (one selector token),
+    #: ``provider`` (one token naming a provider), ``subcommand`` (``<sub>
+    #: [name]``, the MCP shape) or ``any`` (a handler/form field takes any text).
+    #: See ``ArgumentShape``. Additive with a default like ``prefixes_text``.
+    argument_shape: Literal["none", "word", "provider", "subcommand", "any"] = "none"
+    #: The vocabulary ``argument_shape``'s first token must come from; empty
+    #: means any word. Carried so a renderer reproduces the endpoint's answer
+    #: (``/login openai`` is a command, ``/login zzz`` is a message) without a
+    #: second copy of the provider or subcommand list.
+    argument_words: list[str] = Field(default_factory=list)
     destination: str
     execution: Literal["owner", "native"]
 

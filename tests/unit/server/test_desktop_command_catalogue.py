@@ -56,6 +56,65 @@ def test_the_catalogue_carries_prefixes_text_on_every_row(monkeypatch):
     }
 
 
+def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch):
+    """The THIRD source crosses too, with the vocabulary a renderer needs.
+
+    `prefixes_text` says "the composer can complete text here"; it does not say
+    that `/mcp logout` and `/login openai` are commands the desktop RUNS. A
+    renderer reading only the booleans plans those as prose — messages the
+    composer would have run — so the shape and its vocabulary are the fields that
+    let the two hosts answer `/mcp logout` (command) and `/mcp logout seems to
+    cause a crash` (message) identically.
+
+    `argument_words` must be the SAME vocabulary the validator reads (the provider
+    registry, the MCP subcommand tuple), which is why it is compared against those
+    sources rather than a literal: a hand-copied list is the drift this field
+    exists to prevent.
+    """
+    from local_operator.mcp.config import SERVER_NAME_RE
+    from local_operator.providers.registry import known_provider_ids
+    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+    from local_operator.slash_commands import _is_mcp_invocation, _is_provider
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "catalogue-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/desktop/commands", headers={"Authorization": "Bearer catalogue-token"}
+        )
+        assert response.status_code == 200
+        rows = response.json()["result"]["commands"]
+
+    by_name = {spec.name: spec for spec in SLASH_COMMANDS if spec.desktop_destination}
+    for row in rows:
+        assert row["argument_shape"] == by_name[row["name"]].argument_shape.value, row["name"]
+
+    shapes = {row["name"]: row["argument_shape"] for row in rows}
+    assert shapes["mcp"] == "subcommand"
+    assert shapes["login"] == "provider"
+    assert shapes["rename"] == "any"
+    assert shapes["usage"] == "word"
+    assert shapes["compact"] == "none"
+
+    words = {row["name"]: row["argument_words"] for row in rows}
+    assert words["mcp"] == sorted(MCP_SUBCOMMANDS)
+    assert words["login"] == list(known_provider_ids())
+    # Every other shape takes any word, so the list is empty rather than absent:
+    # an older renderer ignores the key, and a newer one must not read "empty" as
+    # "no argument may be typed".
+    assert words["usage"] == [] and words["compact"] == [] and words["rename"] == []
+
+    # And the wire vocabulary really is what the validators answer with, so a
+    # renderer applying it reaches the endpoint's own decision.
+    for provider in known_provider_ids():
+        assert _is_provider(provider) is True
+    assert _is_provider("zzz") is False
+    assert _is_mcp_invocation(words["mcp"][0]) is True
+    assert _is_mcp_invocation("logout seems to cause a crash") is False
+    assert SERVER_NAME_RE.fullmatch("my-server") is not None
+
+
 def test_the_commands_capability_reports_the_narrowed_policy():
     """`commands: 2` is the renderer's only signal for which refusal it may see.
 

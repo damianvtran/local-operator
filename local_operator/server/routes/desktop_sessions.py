@@ -75,7 +75,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.session.session_search import search_store
-from local_operator.slash_commands import slash_command_for, whole_draft_command
+from local_operator.slash_commands import (
+    command_argument_refusal,
+    slash_command_for,
+    whole_draft_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -729,10 +733,19 @@ class Prompt(Input):
         # A slash CONTROL must never become paid model chat, and this is the one
         # test that decides it: a draft that, as a whole, IS a command was meant
         # for the command endpoint. Anything else — every multi-line draft, every
-        # leading command word followed by prose, every path and every sentence —
+        # leading command word followed by PROSE, every path and every sentence —
         # is a message and is accepted (the operator's own report: a three-line
         # draft opening with "/mcp logout …" was refused forever by the blanket
         # `lstrip().startswith("/")` this replaces).
+        #
+        # "IS a command" is not "starts with a command word": it is the word PLUS
+        # an argument the desktop actually consumes — a prompt, a value from a
+        # list, or a shape the command route validates or forwards
+        # (`slash_commands.command_argument_is_used`). That is what keeps
+        # `/compact hello` and `/usage more prose` messages while `/mcp logout`,
+        # `/login openai` and `/move ~/x` stay refused: those three are controls
+        # the composer RUNS, and a control that became prose here would spend a
+        # paid turn on it.
         #
         # The predicate is `slash_commands.whole_draft_command`, not a second
         # inline test, because the composer plans the same draft and a second
@@ -1609,27 +1622,22 @@ async def command(session_id: str, body: Command, request: Request):
     if spec is None or not spec.desktop_destination:
         raise HTTPException(422, "Unknown command")
     if spec.name == "credential" and body.args:
+        # The ONE command whose trailing text the desktop never consumes: the
+        # secret is entered in the masked form (`argument_shape` is NONE), so any
+        # text here is prose the caller sent to the wrong route. Left as its own
+        # check because the sentence is about the FORM, not about a shape the
+        # admission rule reads.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
         )
-    if spec.name == "mcp" and body.args.strip():
-        from local_operator.mcp.config import SERVER_NAME_RE
-        from local_operator.session.frontend_state import MCP_SUBCOMMANDS
-
-        parts = body.args.split()
-        if (
-            len(parts) > 2
-            or parts[0] not in MCP_SUBCOMMANDS
-            or (len(parts) == 2 and not SERVER_NAME_RE.fullmatch(parts[1]))
-        ):
-            raise HTTPException(
-                422, "Use the MCP setup form for configuration and secret references"
-            )
-    if spec.name in {"login", "logout"} and body.args.strip():
-        from local_operator.providers.registry import get_provider_definition
-
-        if get_provider_definition(body.args.strip()) is None:
-            raise HTTPException(422, "Choose a provider in the authentication panel")
+    refusal = command_argument_refusal(spec, body.args)
+    if refusal is not None:
+        # ONE derivation with the messages endpoint's admission test: the shape
+        # validators live in `slash_commands` beside the registry, so the route
+        # cannot start refusing text the admission rule accepts (or the reverse)
+        # — the `/mcp logout` / `/login openai` class where a control was accepted
+        # as a message while the route would still have run it.
+        raise HTTPException(422, refusal)
     async with errors(), host(request).session(session_id) as bridge:
 
         async def execute():
