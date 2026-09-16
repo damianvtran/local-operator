@@ -10,11 +10,14 @@ import pytest
 
 from local_operator.evaluation import deadlines
 from local_operator.evaluation.adapters.api import (
+    CloseParams,
     ExecuteParams,
     InspectRequirementsParams,
+    ObserveParams,
 )
 from local_operator.evaluation.adapters.rpc import (
     MAX_RPC_BYTES,
+    CancelRequest,
     IncrementalReader,
     IncrementalWriter,
     RpcClient,
@@ -103,10 +106,14 @@ async def test_wrong_response_id_or_method_poison_and_terminate() -> None:
         IncrementalWriter(responses_write).write(canonical_line(response))
 
     task = asyncio.create_task(peer())
-    with pytest.raises(RpcProtocolError, match="ID or method"):
+    with pytest.raises(RpcProtocolError, match="ID or method") as excinfo:
         await client.call("inspect_requirements", InspectRequirementsParams(), timeout=1)
     await task
     assert terminated.is_set()
+    # Both sides of the disagreement are named: "the response ID differs" does
+    # not tell a reader of the artifact which id was expected or which arrived.
+    assert "expected inspect_requirements id 1" in str(excinfo.value)
+    assert "got inspect_requirements id 2" in str(excinfo.value)
     for fd in (requests_read, requests_write, responses_read, responses_write):
         os.close(fd)
 
@@ -375,6 +382,228 @@ async def test_the_derived_budget_is_a_deadline_and_not_a_licence(
     # a deadline rather than a licence.
     assert elapsed < 10.0
     assert poisoned_at_timeout
+
+
+async def _silent_peer(requests_read: int, seen: list[bytes] | None = None) -> None:
+    """Take requests off the wire and never answer them.
+
+    The shape of the observed failure: the guest-side call outran its budget,
+    so the parent's read never completed and the only thing it could report was
+    that something timed out.
+    """
+
+    reader = IncrementalReader(requests_read)
+    while True:
+        try:
+            line = await asyncio.to_thread(reader.read_line)
+        except (EOFError, RpcProtocolError):
+            return
+        if seen is not None:
+            seen.append(line)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_names_the_call_and_the_budget_it_exceeded() -> None:
+    """The observed failure: 6078 s of paid episode ended on ``TimeoutError: ``.
+
+    A guest call outran its budget, and the artifact the run left behind -- 143
+    bytes, ``TimeoutError: `` plus a stderr tail -- could not say WHICH call or
+    WHICH budget. The method and the budget were both in scope on this path and
+    were discarded by a bare ``raise``. The behaviour the path has always had
+    (cancel for this exact request, one second of grace, poison, no channel
+    reuse) is asserted in the same test so legibility cannot be bought with it.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+    seen: list[bytes] = []
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    peer = asyncio.create_task(_silent_peer(requests_read, seen))
+    params = CloseParams(operation_id="close-ep-fca426e92c42", episode_id="ep-fca426e92c42")
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            await client.call("close", params, timeout=0.05)
+        message = str(excinfo.value)
+        assert "close exceeded its 0.05s budget" in message
+        assert "request 1" in message
+        # Cheaply available, and the only fact that distinguishes two calls of
+        # the same method once the worker's replay cache has re-keyed them.
+        assert "operation_id close-ep-fca426e92c42" in message
+        # Method and budget lead the line: the readouts that consume the fatal
+        # diagnostic truncate it at 110-160 characters.
+        assert message.index("close exceeded") < message.index("request 1")
+        assert len(message) < 110
+        assert len(seen) == 2
+        cancel = parse_canonical_line(seen[1], CancelRequest)
+        assert isinstance(cancel, CancelRequest) and cancel.id == 1
+        assert terminated.is_set()
+    finally:
+        peer.cancel()
+        await asyncio.gather(peer, return_exceptions=True)
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_the_raised_timeout_stays_a_TimeoutError() -> None:
+    """Type is part of the contract: message is the defect, type is not.
+
+    ``_diagnostic_code`` derives the bundle's ``diagnostic_code`` from the
+    exception type name, and the campaign's bundles and readouts bucket on
+    ``timeouterror``; a subclass would carry the same text while silently
+    re-keying every historical comparison. Callers in this repo ``except
+    TimeoutError`` as well.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+
+    async def terminate() -> None:
+        return None
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    peer = asyncio.create_task(_silent_peer(requests_read))
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            await client.call("inspect_requirements", InspectRequirementsParams(), timeout=0.05)
+        assert type(excinfo.value) is TimeoutError
+        assert str(excinfo.value) != ""
+    finally:
+        peer.cancel()
+        await asyncio.gather(peer, return_exceptions=True)
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_a_late_reply_is_never_misattributed_and_the_poison_names_its_cause() -> None:
+    """The channel is dead after a timeout, and now says what killed it.
+
+    A late reply arriving after the deadline must be unreadable by a later
+    request -- the reason the poison exists -- and the SENTENCE a poisoned
+    client raises is often the fatal one in a bundle, because the harness's
+    teardown calls (cleanup, close, rescue) are the next to run. Naming only
+    "poisoned" left that bundle unable to say which call died or why.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+    seen: list[bytes] = []
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    peer = asyncio.create_task(_silent_peer(requests_read, seen))
+    try:
+        with pytest.raises(TimeoutError):
+            await client.call("close", CloseParams(operation_id="close-1"), timeout=0.05)
+        # The reply the timed-out call was waiting for, written AFTER the
+        # deadline: a valid response for request 1 sitting in the pipe.
+        assert len(seen) == 2
+        stale = parse_canonical_line(seen[0], RpcRequest)
+        assert isinstance(stale, RpcRequest)
+        IncrementalWriter(responses_write).write(
+            canonical_line(
+                RpcResponse(
+                    jsonrpc="2.0",
+                    id=stale.id,
+                    method=stale.method,
+                    result={"accepted": True},
+                )
+            )
+        )
+        with pytest.raises(RpcProtocolError) as excinfo:
+            await client.call("observe", ObserveParams(episode_id="ep-fca426e92c42"), timeout=0.05)
+        message = str(excinfo.value)
+        assert "poisoned by a timeout on close, request 1" in message
+        assert "observe was not sent" in message
+        assert terminated.is_set()
+    finally:
+        peer.cancel()
+        await asyncio.gather(peer, return_exceptions=True)
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_dies_before_replying_names_the_in_flight_call() -> None:
+    """A channel death is attributed, not just reported.
+
+    This is the parent's view when a worker exits on a protocol fault: it
+    answers with a torn channel rather than an error frame, so the read fails.
+    The bare ``EOFError`` named neither the method nor the request, which is
+    why the sibling rescue path in ``worker.py`` raised an adapter error
+    instead of a protocol error to avoid it.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+
+    async def dying_peer() -> None:
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        os.close(responses_write)
+
+    peer = asyncio.create_task(dying_peer())
+    try:
+        with pytest.raises(EOFError) as excinfo:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=5)
+        assert "closed the channel before replying to observe (request 1)" in str(excinfo.value)
+        await peer
+        assert terminated.is_set()
+    finally:
+        for fd in (requests_read, requests_write, responses_read):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_reply_names_both_the_cause_and_the_call() -> None:
+    """The parse already named the cause; the attribution was missing.
+
+    "RPC message is malformed" in a bundle of a hundred calls does not say
+    which reply was malformed, so the operator cannot tell a worker that is
+    emitting junk from one that is emitting junk for ONE method.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+
+    async def malformed_peer() -> None:
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        IncrementalWriter(responses_write).write(b"not json at all\n")
+
+    peer = asyncio.create_task(malformed_peer())
+    try:
+        with pytest.raises(RpcProtocolError) as excinfo:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=5)
+        message = str(excinfo.value)
+        assert "malformed" in message
+        assert "while reading the reply to observe, request 1" in message
+        await peer
+        assert terminated.is_set()
+    finally:
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
 
 
 def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:
