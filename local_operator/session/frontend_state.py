@@ -4690,6 +4690,37 @@ class FrontendStateStore:
             attachment_root=str(getattr(transcript, "directory", "") or "") or None,
             slash_capabilities=_slash_capabilities(),
         )
+        if not bool(getattr(session, "is_streaming", False)) and current.live_events:
+            # The in-flight seed is cleared by the same rule its three
+            # neighbours above are gated on: its whole contract is "a
+            # frontend that joins MID-TURN", so a session with no turn in
+            # flight must publish NO seed.
+            #
+            # A stale one is not cosmetic. The fold that clears it lives on the
+            # event path, which is gated in turn (``Session._emit``), so a
+            # runtime with no UI and no attached client could carry an ENDED
+            # turn's ``tool_execution_end`` rows in its state indefinitely —
+            # and every later snapshot handed them to a viewer opening a
+            # conversation that had settled hours earlier, which folded them
+            # after its own durable history page and painted old tool rows
+            # BELOW the final assistant message (local-operator-ui#215 is the
+            # renderer's half of that report; this is the half that stops
+            # SERVING a seed for a turn that is over).
+            #
+            # Spelled as a conditional INSERT rather than as another
+            # ``x if streaming else y`` entry beside its neighbours ON PURPOSE:
+            # the field is the one in this dict that can hold megabytes (up to
+            # ``LIVE_EVENT_END_ROWS_MAX`` settled calls, each with a whole tool
+            # result), and ``mutate`` decides "changed" by deep-copying both
+            # sides through ``_json_value``. Keeping the current value in
+            # ``changes`` would put that copy on EVERY boundary refresh of a
+            # live turn to conclude what omission already states — the same
+            # clone the ``_emit`` history-generation read above exists to
+            # avoid. ``current.live_events`` being empty needs no delta either.
+            #
+            # Read from the SESSION, not from the store's own ``streaming``:
+            # ``is_streaming`` is the flag the turn itself ends on.
+            changes["live_events"] = []
         if initial:
             payload = current.model_dump()
             payload.update(changes)

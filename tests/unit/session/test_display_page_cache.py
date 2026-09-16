@@ -199,6 +199,14 @@ async def test_actual_session_subscribe_replays_once_then_reuses_tool_seed_cut(
         ]
     )
     session = build_session(directory, ScriptedStream([]), cwd=tmp_path)
+    # The scenario is a viewer subscribing to a turn that is IN FLIGHT, and the
+    # flag is part of the fixture rather than decoration: the seed folded below
+    # is the mid-turn seed, and ``refresh_from_session`` -- which
+    # ``subscribe_frontend`` calls before it snapshots -- publishes no seed for a
+    # session with no turn running. A session that omits the flag is asking for
+    # the "no turn in flight" answer and would hand the window an empty seed cut.
+    # Same trap, same reason, as ``test_frontend_state._live_session``.
+    session._is_streaming = True
     try:
         for tool_result in (result, ToolResult(tool_call_id="not-durable", tool_name="bash")):
             session._frontend_state_store._fold_live_event(
@@ -228,6 +236,9 @@ async def test_actual_session_subscribe_replays_once_then_reuses_tool_seed_cut(
             finally:
                 subscription.unsubscribe()
     finally:
+        # Cleared before disposal so the teardown does not read a turn that this
+        # test never ran as one it must abort.
+        session._is_streaming = False
         await session.dispose()
 
 
