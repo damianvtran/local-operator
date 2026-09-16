@@ -780,12 +780,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    async def attach_existing(self) -> bool:
+    async def attach_existing(self, *, budget: float | None = None) -> bool:
         """Bind to a runtime if one is already live, without starting one.
 
         The desktop host calls this on a cold viewer so that serving a history
         read never promotes a reader into an executor: losing the runtime must
         not move execution into the HTTP worker.
+
+        ``budget`` selects READ MODE: a read gets one attempt bounded by that many
+        seconds and is then answered from disk rather than refused, with the
+        authenticated dial retained in case the owner's canonical state lands
+        afterwards. ``None`` keeps the CONTROL envelope every other caller has,
+        where the same failure is a raise.
         """
         ...
 
