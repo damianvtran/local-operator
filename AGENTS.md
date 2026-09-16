@@ -698,8 +698,9 @@ The bump branch lives in a throwaway worktree so the root checkout's branch
 is untouched, but `lop-update` itself runs against `~/local-operator`: it
 gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
 `LOCAL_OPERATOR_REPO` at a worktree fails with `local-operator repository not
-found` (reproduced). The owner fetches and advances the root checkout's `main`
-ref, then runs `lop-update` there. The order matters: the bump PR is opened
+found` (reproduced). The owner fetches and advances the root checkout's
+`main` ref, then runs the drained install there (see "Installing over a live
+fleet"). The order matters: the bump PR is opened
 first as the lock, merged only after every PR in the window has merged, and
 nothing is installed until the tag exists. The claim and the bump are ONE
 commit on ONE branch: the owner amends and force-pushes with
@@ -747,10 +748,16 @@ $EDITOR /tmp/lop-release-X.Y.Z-notes.md   # headline, ## Major/Minor/Fixes, ## I
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
   --title 'X.Y.Z: <theme>' --notes-file /tmp/lop-release-X.Y.Z-notes.md
 
-# 5. Install and verify.
-lop-update
+# 5. Install and verify — with the fleet DRAINED: wait until no session
+#    reports `busy`, install, then re-engage what the swap displaced.
+#    See "Installing over a live fleet" below; a plain `lop-update` is only
+#    safe when nothing is running.
+<install>
 cat ~/.local/share/uv/tools/local-operator/.lop-source
-cd /tmp && lop --version
+# Smoke the built command from outside the repository, naming the uv-tool build
+# by path where the host has more than one `lop`: a bare `lop` can resolve to a
+# different install and report a version that is not this one.
+cd /tmp && ~/.local/bin/lop --version
 
 # 6. Reclaim the worktree.
 git -C ~/local-operator worktree remove /tmp/lop-release-next
@@ -771,6 +778,44 @@ checked out", and "if `main` is the checked-out branch, use
 `git -C ~/local-operator merge --ff-only origin/main` instead" — `update-ref`
 under a checked-out `main` moves the branch without touching the index, so
 `git status` would then show every merged change as a local modification.
+
+### Installing over a live fleet
+
+**The install must not run against a busy fleet.** That is the rule; the command
+that carries it out is the host's business. An install replaces site-packages
+inside the shared uv-tool environment **under whatever runtimes are running**,
+and a runtime that is mid-turn never checks for a newer build — by design, only
+an idle runtime notices one — so it goes on importing from a tree that is being
+deleted beneath it, dies torn, and writes no exit record. Measured on
+2026-09-15 at 19:23, installing 0.55.8 took every running session on the fleet
+down mid-turn; and because only sessions **watched** by a frontend re-engage
+eagerly, the unwatched half — the `daemon`-kind sessions, woken by `lop send`
+or a wake, as against the `attach` viewers a frontend is holding open — stayed
+down until they were resumed by hand.
+
+So the step is: **wait until no session reports `busy`, install, then re-engage
+whatever the swap displaced** — turns that were in flight when it landed, and
+the sessions no frontend is holding open. A host that has a drain wrapper for
+exactly this may use it, and it is the convenient way to do those three things
+in order; the wrapper is a host-local convenience, not part of the protocol,
+and the release owner owes the behaviour above whether or not one exists.
+
+Two cautions that hold wherever the install runs:
+
+- **Never force an install past a busy fleet to save time.** Displacing
+someone's turn is a real cost, and an expired drain budget means waiting and
+running it again, not forcing it.
+- **Verify the build; do not read it off an installer's own summary.** A
+summary that resolves `lop` on `PATH` can describe a different install than
+the one it just wrote: measured on 2026-09-15, such a summary printed
+`v0.55.9` after installing `0.55.10`, because a bare `lop` had resolved to a
+desktop app's managed environment. Read
+`~/.local/share/uv/tools/local-operator/.lop-source` and smoke the built
+command from outside the repository for the answer.
+
+It is still `lop-update` underneath, so the mechanics above about the committed
+`main` ref, the source revision record and the remote-check gate apply
+unchanged.
 
 Warnings that still hold, each of which has already cost a release:
 
@@ -883,8 +928,9 @@ Warnings that still hold, each of which has already cost a release:
   for a release.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
-  step: merge, bump, tag, `lop-update`, verify `.lop-source`, then smoke test
-  `lop` from outside the repository.
+  step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke
+  the built command from outside the repository — naming the uv-tool build by
+  path, because a bare `lop` can resolve to a different install.
 
 Every agent asked to "update local-operator" or make a change available through
 `lop` follows this protocol: merge the tested change when its rounds are clean,
