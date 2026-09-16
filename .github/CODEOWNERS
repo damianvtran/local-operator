@@ -1,70 +1,57 @@
 # Code owners for local-operator.
 #
-# `main` is governed by a repository ruleset whose `pull_request` rule sets
-# `require_code_owner_review: true`. That rule resolves the owning reviewer
-# through THIS file: without it, the requirement matches nobody, no ordinary
-# approval can ever satisfy it, and every PR is forced through an admin
-# bypass. That is what happened between 2026-09-05 and 2026-09-06 -- PRs #686
-# and #688 through #696 all merged at `reviewDecision: REVIEW_REQUIRED` with
-# zero approvals, because the rule was on and this file was absent. A control
-# that cannot be satisfied is worse than no control: it produces no review
-# while training everyone to override it.
+# 2026-09-16 -- NO CODE OWNERS, AND NO AUTOMATIC REVIEW REQUESTS (operator
+# decision). This file used to end with a `*` line naming five owners. GitHub
+# creates a review request for every handle on a pattern that matches a pull
+# request's changed files, at the moment the PR opens, and that request pinged
+# `bbqben`, `olafagbemi`, `sherman-tsui` and `SanaKetabchi` on every PR this
+# repository opened -- usually while the diff was still churning through
+# remediation rounds, so four people were notified per PR about work that was
+# not yet worth reading. There is no GitHub setting that keeps an ownership map
+# and drops the request: matching a pattern IS the request. The pattern is
+# therefore gone, and this path is kept, pattern-free, as the record of the
+# change and the reason for it.
 #
-# Keep this list to people who can actually approve. GitHub's documented rule
-# ("About code owners"): "The people you choose as code owners must have write
-# permissions for the repository." A handle that is not a collaborator with
-# write access is silently ignored -- the line looks correct and matches
-# nobody, which is the same failure this file exists to fix. Verify an entry
-# against `gh api repos/damianvtran/local-operator/collaborators`:
-# `damianvtran` (admin) and `bbqben` (write) were confirmed that way, and the
-# syntax against GitHub's own CODEOWNERS validator
-# (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
-# validates the default branch; the pre-change baseline on `main` returned an
-# empty error list). As of 2026-09-11 every handle on the `*` line below
-# resolves to a current collaborator with write -- or, for `damianvtran`,
-# admin -- access confirmed through that call, so the line is effective in
-# full: five names, all live.
+# What had to move with it, because a code-owner list and a code-owner rule are
+# two halves of one mechanism:
 #
-# 2026-09-10 ADDITIONS -- `olafagbemi` and `sherman-tsui` were added as
-# owners on 2026-09-10 by explicit operator decision, and each was invited
-# as a collaborator with `write` permission the same day (15:54 UTC). Both
-# ACCEPTED on 2026-09-10: invitations 332543900 (olafagbemi) and 332543903
-# (sherman-tsui) are consumed, and
-# `gh api repos/damianvtran/local-operator/collaborators/<handle>/permission`
-# returns `write` for each, so both handles on the `*` line are effective.
+#   * The `Main Protection` ruleset (id 3622629) no longer sets
+#     `require_code_owner_review`. It still requires
+#     `required_approving_review_count: 1`, so an outside contributor's PR still
+#     cannot reach `main` without a collaborator's approval -- the tier-2
+#     protection described in AGENTS.md, "Who may merge: two tiers". Leaving the
+#     code-owner rule on with nobody declared would have made the approval
+#     requirement unsatisfiable and pushed every merge through the configured
+#     admin bypass -- the exact failure this file was originally added to fix
+#     (PRs #686 and #688-#696, 2026-09-05/06, all merged at
+#     `reviewDecision: REVIEW_REQUIRED` with zero approvals).
+#   * Pull requests are opened **non-draft** again. The draft step existed only
+#     to suppress the code-owner request while a PR was still in flux; with no
+#     patterns to match there is nothing to suppress, and a draft only delays the
+#     merge, since a draft PR cannot be merged at all.
 #
-# 2026-09-11 RESOLUTION -- `SanaKetabchi` was on the same 2026-09-10 operator
-# request and was invited with `write` permission (invitation 332543898,
-# issued 2026-09-10 15:54 UTC), but that invitation was still PENDING as of
-# 2026-09-10 21:50 UTC, so she was held off the owners line then by operator
-# decision: per the documented rule above a pending handle is silently
-# ignored by GitHub -- the exact failure mode this file exists to prevent.
-# That deferral was recorded in PR #911, which shipped the two accepted
-# owners over the same 2026-09-10 request and stated a later PR would add her
-# if and when she accepted. She has now ACCEPTED: invitation 332543898 is
-# consumed (`gh api repos/damianvtran/local-operator/invitations` returns an
-# empty list) and
-# `gh api repos/damianvtran/local-operator/collaborators/<handle>/permission`
-# (with her handle substituted for `<handle>`, exactly as in the 2026-09-10
-# block above) returns `write`, so as of 2026-09-11 her handle on the `*`
-# line below is effective. This PR is that promised follow-up, and it closes
-# the deferral.
+# The review itself is unchanged in substance: an independent reviewer
+# subagent's round, posted on the PR, repeated until no blocker or major remains
+# and fresh against the head, is still what authorizes a merge here -- with
+# `--admin` disclosed on the PR when the ruleset's self-approval limitation
+# forces it (see AGENTS.md, "Who may merge: two tiers").
 #
-# Handle verification for the 2026-09-10 candidates, in the same
-# evidence-first spirit: all three are listed together in
-# `pergamon-labs/pergamon-infra-services/.github/CODEOWNERS`; the
-# `pergamon-labs/pergamon-developer-platform` Helm chart values.yaml carries
-# their GitHub user-ids (SanaKetabchi=U_kgDOBypusA,
-# olafagbemi=MDQ6VXNlcjU4NDUzMTQy, sherman-tsui=MDQ6VXNlcjgzOTMyMTc4), which
-# pin the accounts behind the handles; and `gh api users/<login>` returns
-# matching display names for SanaKetabchi and olafagbemi.
+# When a human review IS wanted it is now a deliberate act rather than a side
+# effect of opening a PR: add the reviewer by hand at the point the PR is
+# actually ready to be read, `gh pr edit <n> --add-reviewer <handle>`. Who to ask
+# -- the handles whose judgement stands in for the project's: `damianvtran`
+# (admin), `bbqben`, `olafagbemi`, `sherman-tsui`, `SanaKetabchi`. One mechanical
+# difference since 2026-09-16: the ruleset's `required_approving_review_count: 1`
+# is satisfied by an approving review from *any* collaborator with write access
+# other than the author — self-approval is refused — not only from those five,
+# because no code owners are declared any more. Ask the
+# five by preference. `sebkow` and `jcobhams` also hold write access but are
+# deliberately NOT in that set: ownership here means "can approve on behalf of
+# the project", which is narrower than commit access. Verify a handle before
+# relying on it with `gh api repos/damianvtran/local-operator/collaborators`,
+# since a handle without write access is silently ignored by GitHub.
 #
-# `sebkow` and `jcobhams` also hold write access but are deliberately NOT
-# owners: ownership here means "can approve on behalf of the project", which
-# is a narrower thing than commit access. That principle is unchanged -- the
-# 2026-09-10 additions widen the approving set by explicit operator decision,
-# not as a side effect of commit access; `sebkow` and `jcobhams` remain
-# non-owners because no such decision covers them.
-
-# Default owners for everything in the repository.
-* @damianvtran @bbqben @olafagbemi @sherman-tsui @SanaKetabchi
+# Validate any future edit with GitHub's own parser rather than by eye, and pin
+# the ref or it silently validates the default branch instead of your branch:
+# `gh api 'repos/damianvtran/local-operator/codeowners/errors?ref=<branch>'` (an
+# empty error list means the file parsed).
