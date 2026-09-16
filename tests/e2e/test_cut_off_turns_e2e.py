@@ -51,7 +51,15 @@ PARK_S = 30
 #: rebuilds a child's environment, and ``_strip_child_env`` removes them from
 #: THIS process so a runtime the code under test spawns itself (with
 #: ``dict(os.environ)``) also gets a clean one.
-CHILD_ENV_FAMILIES = ("CMUX_", "LOP_MOBILE_CHILD_", "LOP_RUNTIME_")
+#:
+#: ``LOP_BUILD_PREFIX`` is the fourth entry and it is a single name rather than a
+#: family, deliberately: it points the install stamp at a FAKE tree, so a
+#: developer who has it exported gives a child whose turn journal records one
+#: root and compares it against another — every death then reads as an
+#: install-window tear (reviewer round 1, R2). A cell that means to exercise the
+#: seam sets it explicitly on the child, which is the only legitimate use for it
+#: outside ``tests/e2e`` (see ``buildwatch.build_prefix``).
+CHILD_ENV_FAMILIES = ("CMUX_", "LOP_MOBILE_CHILD_", "LOP_RUNTIME_", "LOP_BUILD_PREFIX")
 
 
 def _seed(config_dir: Path, session_id: str) -> Path:

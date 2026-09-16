@@ -52,14 +52,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, HOST_RUN_DIRNAME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.update import BuildStamp
@@ -72,12 +74,36 @@ logger = logging.getLogger(__name__)
 #: host's: a host may spawn and observe, a runtime may only be spawned.
 BOOT_RECORD_KIND = "runtime-boot"
 
-#: The signal names a runtime's own exit path can have recorded in a row it did
-#: not get to close. A row carrying one of these is the ESCALATED SWEEP — the
-#: case where the target was asked to leave, was draining, and was killed before
-#: its turn ended — which is the one shape of sweep that names itself, because
-#: the runtime wrote the signal down before the second signal arrived.
-_SIGNAL_EXIT_PREFIX = "SIG"
+#: The signal a runtime's own exit path can have recorded in a row it did not get
+#: to close. A row carrying one is the ESCALATED SWEEP — the target was asked to
+#: leave, was draining, and was killed before its turn ended — which is the one
+#: shape of sweep that names itself, because the runtime wrote the signal down
+#: before the second signal arrived.
+#:
+#: ONE WRITER-SIDE NORMALIZER, because the two writers spell it differently and
+#: the reader keys on the token: ``amain``'s shutdown block passes the signal's
+#: own name (``SIGTERM``), while the signal drain reaches ``_clean_exit`` with a
+#: sentence (``"leaving after SIGTERM"``). Matching the raw spellings would make
+#: the escalated-sweep rung hold only by WHICH writer happened to run last —
+#: and a mislabel there hands the operator ``runtime-killed``, whose sentence
+#: ends "and nothing recorded a stop", for a death where a signal was recorded.
+_SIGNAL_TOKEN = re.compile(
+    r"\bSIG(?:HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|"
+    r"TERM|CHLD|CONT|STOP|TSTP|TTIN|TTOU|URG|XCPU|XFSZ|VTALRM|PROF|WINCH|IO|PWR|SYS)\b"
+)
+
+
+def signal_exit_token(text: str) -> str:
+    """The signal name inside an exit cause, or ``""`` when there is none.
+
+    The single spelling both writers funnel through and the single one the
+    reader matches, so "who wrote last" cannot decide whether a sweep is named.
+    Deliberately matched on the SIGNAL NAMES rather than on a bare ``SIG``
+    prefix: a future cause spelled ``SIGnalled by a peer`` would otherwise be
+    read as a termination signal.
+    """
+    match = _SIGNAL_TOKEN.search(str(text or ""))
+    return match.group(0) if match else ""
 
 
 def _now() -> float:
@@ -211,6 +237,19 @@ class BootRecord:
         return _build_label({"version": self.build_version, "source_ref": self.build_ref})
 
 
+#: The boot record THIS process published, held in memory so the durable second
+#: opinion can prove the row it reads back is its own.
+#:
+#: The identity check is the whole reason this exists rather than re-reading the
+#: file: a nonce is not available, macOS offers no cheap process start time
+#: (``psutil`` is deliberately not a dependency), and the pid alone is a
+#: RECYCLABLE name — so a process that never managed to publish could otherwise
+#: pick up a long-dead stranger's build for its own pid, and
+#: ``update.classify_import_failure`` would name ``install-mid-update`` for a
+#: genuine packaging bug, the false positive its docstring forbids.
+_own_record: "BootRecord | None" = None
+
+
 def write_boot_record(
     session_id: str,
     build: "BuildStamp | None",
@@ -226,6 +265,7 @@ def write_boot_record(
     swallows that, because a runtime whose boot record cannot be written must
     still run its turns.
     """
+    global _own_record
     record = BootRecord(
         pid=os.getpid() if pid is None else pid,
         session_id=session_id,
@@ -235,7 +275,14 @@ def write_boot_record(
         install_root=_install_root(),
         cwd=cwd if cwd is not None else os.getcwd(),
     )
-    return registry.publish(record, root, HOST_RUN_DIRNAME)
+    path = registry.publish(record, root, HOST_RUN_DIRNAME)
+    if record.pid == os.getpid() and root is None:
+        # Only the AMBIENT record is "ours": a caller writing into an explicit
+        # root (a test, a tool) is describing some other process's namespace,
+        # and treating that as this process's own would let
+        # ``recorded_boot_build`` vouch for a stranger's row.
+        _own_record = record
+    return path
 
 
 def clear_boot_record(pid: int | None = None, root: Path | None = None) -> None:
@@ -264,15 +311,94 @@ def read_boot_record(pid: int, root: Path | None = None) -> "BootRecord | None":
     return BootRecord.from_json(data)
 
 
-def recorded_boot_build(pid: int, root: Path | None = None) -> "BuildStamp | None":
-    """The build a pid RECORDED itself booting from, or ``None``.
+def recorded_boot_build(pid: int | None = None, root: Path | None = None) -> "BuildStamp | None":
+    """The build THIS process recorded for itself, or ``None``.
 
     The durable second opinion for ``update.classify_import_failure``: a process
     whose install is torn badly enough that the live stamp cannot be read still
-    has this row to say what it loaded.
+    has its own boot record to say what it loaded.
+
+    ONLY THIS PROCESS'S OWN RECORD ANSWERS, and that is a correctness rule
+    rather than caution: the pid is a recyclable name and ``run/host`` outlives
+    the processes that wrote it, so "the record on disk with my pid" can be
+    somebody else's — long dead, from another build. Handing that build to the
+    import classifier would name an install race for a genuine packaging bug,
+    which is the one direction its own docstring forbids. The on-disk row is
+    compared against the one this process published (``_own_record``), so a
+    process that never published one gets ``None`` — no evidence, the legacy
+    path — rather than a stranger's.
     """
-    record = read_boot_record(pid, root)
-    return None if record is None else record.build_stamp()
+    target = os.getpid() if pid is None else pid
+    own = _own_record
+    if own is None or own.pid != target:
+        return None
+    record = read_boot_record(target, root)
+    if record is None or record.started_at != own.started_at or record.kind != own.kind:
+        return None
+    return record.build_stamp()
+
+
+def prune_boot_records(root: Path | None = None, *, now: float | None = None) -> int:
+    """Drop boot records whose process is gone. Returns how many were removed.
+
+    ``run/host`` is the one namespace nothing else reaps. ``registry.scan``
+    reaps ``run/mobile`` and ``_prune_reaped`` bounds only the ``reaped/``
+    sidecar, so without this the directory grows one file per UNCLEAN death
+    forever — and a growing directory is what makes the pid-recycling case above
+    reachable at all.
+
+    A LIVE pid's record is never touched, whatever its age: that is the record
+    of a runtime still running, and deleting it would erase the "this pid
+    existed, on this build" evidence the namespace exists for. Retention reuses
+    ``registry``'s own numbers rather than inventing a second policy for the
+    same kind of artifact — evidence is worth one look soon after the death, not
+    indefinite storage.
+
+    Called from the boot path, which is the one moment a new writer joins this
+    namespace. Cheap by construction: one directory listing, and a signal-0 probe
+    per record, on a directory that this function keeps small.
+
+    THE ZOMBIE PROBE IS DERIVED, NOT PAID ON EVERY RECORD: the same
+    ``age > HEARTBEAT_INTERVAL_S * 1.5`` policy ``registry.classify`` uses, so a
+    healthy runtime's record costs a signal-0 and nothing more while the record
+    this is about to judge pays the ``ps`` fork (~2.4-4.6 ms, see
+    ``procstate.is_zombie``). A boot on this box finds a record for every live
+    runtime, and forking per live runtime would put tens of milliseconds on a
+    boot path to save one file — the module's own rule is that the fork is spent
+    only where the answer changes what the caller does.
+    """
+    directory = (root or config_dir()) / HOST_RUN_DIRNAME
+    try:
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return 0
+    if not paths:
+        return 0
+    moment = _now() if now is None else now
+    dead: list[tuple[float, Path]] = []
+    for path in paths:
+        try:
+            record = BootRecord.from_json(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+        if record is None:
+            continue
+        quiet = moment - (record.heartbeat_at or record.started_at) > HEARTBEAT_INTERVAL_S * 1.5
+        if registry.pid_alive(record.pid, check_zombie=quiet):
+            continue
+        dead.append((record.started_at or path.stat().st_mtime, path))
+    removed = 0
+    for started_at, path in dead:
+        aged_out = (moment - started_at) > registry.REAPED_MAX_AGE_S
+        over_count = len(dead) - removed > registry.REAPED_MAX_FILES
+        if not (aged_out or over_count):
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +619,21 @@ class TurnJournal:
         row = self._row
         if row is None or not row.get("open"):
             return
-        row["exit_cause"] = str(cause or "")
+        # ONE VOCABULARY, whatever the writer was handed (see
+        # ``signal_exit_token``): the row is a machine artifact and
+        # ``death_verdict`` keys on the token, so a sentence from the drain and a
+        # bare name from the shutdown block must land identically.
+        token = signal_exit_token(cause) or str(cause or "")
+        # A SIGNAL IS STICKY. The two writers are two rungs of one exit, and
+        # which of them runs last is an ordering accident: a later writer with
+        # no signal to report must not unname a signal that was recorded, or an
+        # escalated sweep would be reported as a crash whose sentence claims
+        # nothing recorded a stop.
+        if row.get("exit_cause") and signal_exit_token(str(row["exit_cause"])):
+            row["still_open_at_exit"] = True
+            self._write("exit")
+            return
+        row["exit_cause"] = token
         row["still_open_at_exit"] = True
         self._write("exit")
 
@@ -523,6 +663,11 @@ def row_detail(row: TurnJournalRow, *, lead: str = "") -> str:
     parts = [f"{row.turn_label()} in flight on {row.build_label()}"]
     if row.last_boundary:
         parts.append(f"last boundary {row.last_boundary}")
+    if row.install_root:
+        # The field that separates a uv-tool install from a dev checkout's venv,
+        # and the one an investigation reads first when two hosts disagree about
+        # what a build was.
+        parts.append(f"install {row.install_root}")
     parts.append(f"pid {row.pid}")
     if lead:
         parts.insert(0, lead)
@@ -552,28 +697,68 @@ def open_row_after_death(conversation_dir: Path) -> TurnJournalRow | None:
 
 
 def install_moved(row: TurnJournalRow) -> bool:
-    """Did the install on disk move away from the build this row booted from?
+    """Did the install move away from this row's build WHILE its runtime was alive?
 
     The one comparison that separates an INSTALL-WINDOW TEAR from a plain death,
     and it is the same comparison ``update.classify_import_failure`` makes for a
-    live process: ``lop-update`` replaces the tree in place, so a runtime whose
-    loaded build no longer matches the disk was running against a tree that was
-    being rewritten under it.
+    live process — with the bound that function does not need and this reader
+    does.
 
-    ``False`` on any missing half — an unreadable on-disk stamp is not evidence
-    that the install moved, and treating it as such would name a tear on every
-    death on a machine whose install metadata is absent (a dev checkout).
+    WHY THE BOUND IS LOAD-BEARING. A "differs" comparison alone answers the
+    wrong question, because the reader runs LATER: a successor process reading a
+    row hours after the death is running whatever install is on disk NOW, and on
+    this host a release can land minutes after a sweep. The 19:41 fleet died
+    while 0.55.10 was being published, so the unbounded comparison attributed
+    that sweep to "a local-operator install was being replaced on disk while
+    this turn was running" — a named-but-wrong cause on the artifact this PR
+    exists to make trustworthy, and one that MASKS the sweep pattern it exists
+    to reveal.
+
+    THE BOUND IS THE ROW'S OWN LAST WRITE. ``updated_at``/``started_at`` are
+    written by the runtime itself at turn start and at every tool boundary, so
+    they are the last moment this runtime is KNOWN to have been alive; the
+    install's own date comes from ``update.build_marker_age_s`` (the newest of
+    ``.lop-source`` and the running dist-info). The tear is claimed only when
+    the install had ALREADY moved no later than that instant, i.e. when the
+    runtime is demonstrably alive after the tree under it was rewritten — which
+    is exactly the ordering the docstring claims, for the provable subset.
+
+    The conservative direction is deliberate: an install that moved AFTER the
+    runtime's last known write leaves it unknowable whether the runtime was
+    already dead, so the row falls through to ``runtime-killed`` (a crash) rather
+    than claiming a tear it cannot prove. ``False`` on any missing half — an
+    unreadable on-disk stamp, an absent install date, a row with no timestamp —
+    for the same reason: naming a tear on no evidence would mislabel every death
+    on a machine whose install metadata is absent (a dev checkout).
+
+    The prefix is read through the SAME seam as the writer
+    (``buildwatch.build_prefix``), because both sides of this comparison have to
+    mean the same tree: the row's build is stamped through it at boot, so
+    comparing against an unprefixed ``sys.prefix`` would label every death a
+    tear on any host where the e2e seam is set (and would fail the e2e cell
+    itself for a developer who has ``LOP_BUILD_PREFIX`` exported).
     """
     recorded = row.build_stamp()
     if recorded is None:
         return False
     try:
-        from local_operator.update import installed_build
+        from local_operator import buildwatch
+        from local_operator.update import build_marker_age_s, installed_build
 
-        current = installed_build()
+        prefix = buildwatch.build_prefix()
+        if installed_build(prefix) == recorded:
+            return False
+        age = build_marker_age_s(prefix)
     except Exception:  # noqa: BLE001 — an unreadable stamp is not evidence
         return False
-    return current != recorded
+    if age is None:
+        # No install date is no evidence: the comparison degrades to the
+        # question this reader must not answer unbound.
+        return False
+    alive_until = row.updated_at or row.started_at
+    if not alive_until:
+        return False
+    return (_now() - age) <= alive_until
 
 
 def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
@@ -599,12 +784,13 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     """
     from local_operator.incidents import render_cut_off_reason
 
-    if row.exit_cause.startswith(_SIGNAL_EXIT_PREFIX):
+    signal = signal_exit_token(row.exit_cause)
+    if signal:
         return (
             "error",
             "runtime-shutdown",
             render_cut_off_reason(
-                "runtime-shutdown", detail=row_detail(row, lead=f"{row.exit_cause} received")
+                "runtime-shutdown", detail=row_detail(row, lead=f"{signal} received")
             ),
         )
     if install_moved(row):
@@ -623,9 +809,10 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
 
 def _current_build_label() -> str:
     try:
+        from local_operator import buildwatch
         from local_operator.update import installed_build
 
-        return installed_build().label()
+        return installed_build(buildwatch.build_prefix()).label()
     except Exception:  # noqa: BLE001 — the detail is a nicety, never a gate
         return "<unknown>"
 

@@ -24,6 +24,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -241,9 +243,10 @@ def test_the_boot_record_is_readable_by_a_successor_for_another_pid(tmp_path: Pa
     assert record is not None, "the successor has to be able to see that this pid existed"
     assert record.kind == journal.BOOT_RECORD_KIND
     assert record.build_stamp() is not None
-    # ``recorded_boot_build`` is the durable second opinion the import classifier
-    # falls back to when a torn install makes the live stamp unreadable.
-    assert journal.recorded_boot_build(killed_pid, root=root) is not None
+    # And the STRICTER reader refuses it: a dead pid's row is not this process's
+    # evidence (see ``recorded_boot_build``), and the pid alone is a recyclable
+    # name.
+    assert journal.recorded_boot_build(killed_pid, root=root) is None
 
 
 def test_the_exit_path_touches_no_filesystem_when_nothing_was_recorded(
@@ -289,33 +292,216 @@ def test_the_exit_path_withdraws_the_record_this_process_wrote(
 
 
 # ---------------------------------------------------------------------------
+# The WRITER side: what the runtime records, not just what the reader makes of it
+# ---------------------------------------------------------------------------
+
+
+def test_note_exit_normalizes_both_writers_to_one_token(tmp_path: Path) -> None:
+    """R3: the two exit writers must land the SAME token.
+
+    ``amain``'s shutdown block passes the signal's own name (``SIGTERM``) while
+    the signal drain reaches ``_clean_exit`` with a sentence (``leaving after
+    SIGTERM``). The reader keys on the token, so without one vocabulary the
+    escalated-sweep rung would hold only by which writer happened to run last —
+    and it would answer ``runtime-killed`` ("nothing recorded a stop") for a
+    death where a signal WAS recorded.
+    """
+    directory = _session_directory(tmp_path, "sess-writer")
+    writer = journal.TurnJournal(directory, "sess-writer", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-9")
+
+    # The drain's spelling.
+    writer.note_exit("leaving after SIGTERM")
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == "SIGTERM", row.exit_cause
+    assert row.still_open_at_exit is True
+    # And the reader agrees, on the row the RUNTIME wrote rather than one a test
+    # hand-stamped.
+    assert journal.death_verdict(row)[1] == "runtime-shutdown"
+
+
+def test_a_recorded_signal_survives_a_later_writer_without_one(tmp_path: Path) -> None:
+    """R3, the ordering half: a signal is sticky.
+
+    The shutdown block runs after the drain and may have no signal to report
+    (``trigger.get("why") or "unknown"``). If that overwrote the token, the same
+    escalation would be a named sweep or a crash depending on rung order.
+    """
+    directory = _session_directory(tmp_path, "sess-sticky")
+    writer = journal.TurnJournal(directory, "sess-sticky", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn()
+    writer.note_exit("leaving after SIGKILL")
+    writer.note_exit("unknown")
+
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == "SIGKILL", row.exit_cause
+    assert journal.death_verdict(row)[1] == "runtime-shutdown"
+
+
+def test_a_non_signal_exit_cause_is_recorded_verbatim(tmp_path: Path) -> None:
+    """The normalizer is for signals only: a planned exit keeps its own word."""
+    directory = _session_directory(tmp_path, "sess-planned")
+    writer = journal.TurnJournal(directory, "sess-planned", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn()
+    writer.note_exit("retiring for 0.56.0")
+
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == "retiring for 0.56.0"
+    # Not a signal, so no sweep claim: the reader must not read "SIG" out of a
+    # word that merely starts with those letters.
+    assert journal.signal_exit_token("signalled by a peer") == ""
+    assert journal.death_verdict(row)[1] in {"runtime-killed", "install-mid-update"}
+
+
+def test_recorded_boot_build_answers_only_for_this_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R4: the durable second opinion is identity-bound, not pid-bound.
+
+    A pid is a recyclable name and ``run/host`` outlives the processes that
+    wrote it, so "the record on disk with my pid" can be a long-dead stranger's.
+    Handing THAT build to the import classifier would name an install race for a
+    genuine packaging error — the false positive its docstring forbids.
+    """
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(journal, "_own_record", None)
+
+    # A record for OUR pid that we did not write (a recycled identity).
+    stranger = journal.BootRecord(
+        pid=os.getpid(), session_id="stranger", started_at=time.time() - 10_000.0
+    )
+    registry.publish(stranger, root, "run/host")
+    assert journal.read_boot_record(os.getpid(), root=None) is not None
+    assert journal.recorded_boot_build() is None, "a stranger's record must not answer"
+
+    # Ours, published through the production writer.
+    journal.write_boot_record("mine", update.BuildStamp("1.0.0", "aaa"))
+    assert journal.recorded_boot_build() is not None
+
+
+def test_prune_boot_records_drops_dead_pids_and_keeps_live_ones(tmp_path: Path) -> None:
+    """R4: ``run/host`` is bounded by AGE, and never at a live runtime's expense."""
+    root = tmp_path / "cfg"
+    now = time.time()
+    an_old_death = _pid_from_child()
+    a_fresh_death = _pid_from_child()
+    registry.publish(
+        journal.BootRecord(
+            # Past the retention bound (``registry.REAPED_MAX_AGE_S``), which is
+            # the same policy the reaped sidecar uses: evidence is worth one look
+            # soon after the death, not indefinite storage.
+            pid=an_old_death,
+            session_id="dead",
+            started_at=now - registry.REAPED_MAX_AGE_S - 60.0,
+        ),
+        root,
+        "run/host",
+    )
+    registry.publish(
+        # A death from minutes ago: still evidence, still kept.
+        journal.BootRecord(pid=a_fresh_death, session_id="just-died", started_at=now - 120.0),
+        root,
+        "run/host",
+    )
+    # Our own pid is alive by definition, and ancient: age alone must not take it.
+    registry.publish(
+        journal.BootRecord(
+            pid=os.getpid(), session_id="live", started_at=now - registry.REAPED_MAX_AGE_S * 5
+        ),
+        root,
+        "run/host",
+    )
+
+    removed = journal.prune_boot_records(root, now=now)
+    assert removed == 1
+    assert journal.read_boot_record(an_old_death, root=root) is None
+    assert journal.read_boot_record(a_fresh_death, root=root) is not None
+    assert journal.read_boot_record(os.getpid(), root=root) is not None
+
+
+def test_a_closed_row_that_left_a_turn_open_is_not_an_unfinished_turn(tmp_path: Path) -> None:
+    """Q10, pinned as a decision rather than left as prose.
+
+    A SIGTERM the drain bound cut exits CLEANLY: the row ends closed with
+    ``end_cause="runtime-shutdown"`` and ``still_open_at_exit=true``. The turn
+    did end — the runtime ran its own exit ordering and published the cause to
+    the attention store, which is the surface and the notice both read — so
+    ``open_row_after_death`` refusing it is correct: "a turn was in flight and
+    never ended" would be false, and accepting it would give the same run a
+    second narrator under a cause the first one already named.
+    """
+    directory = _session_directory(tmp_path, "sess-drained")
+    _write_open_row(
+        directory,
+        _pid_from_child(),
+        open=False,
+        ended_at=time.time(),
+        end_cause="runtime-shutdown",
+        exit_cause="SIGTERM",
+        still_open_at_exit=True,
+    )
+    assert journal.open_row_after_death(directory) is None
+    # The evidence is still ON the row for a reader that asks the writer's
+    # question rather than the death question.
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert journal.signal_exit_token(row.exit_cause) == "SIGTERM"
+    assert row.still_open_at_exit is True
+
+
+# ---------------------------------------------------------------------------
 # The classifier's preference order
 # ---------------------------------------------------------------------------
 
 
 def _current_build_fields() -> dict[str, str]:
-    """The build this process is running, as a row would record it."""
-    stamp = update.installed_build()
+    """The build this process is running, as a row would record it.
+
+    Through ``buildwatch.build_prefix`` — the same seam the runtime stamps its
+    rows with — so that "the row's build equals the install" is a statement
+    about ONE tree.
+    """
+    from local_operator import buildwatch
+
+    stamp = update.installed_build(buildwatch.build_prefix())
     return {"version": stamp.version, "source_ref": stamp.source_ref}
 
 
 def _write_open_row(
-    directory: Path, pid: int, *, build: dict[str, str] | None = None, **fields: Any
+    directory: Path,
+    pid: int,
+    *,
+    build: dict[str, str] | None = None,
+    alive_until: float | None = None,
+    **fields: Any,
 ) -> journal.TurnJournalRow:
     """An open row whose owner is gone, written the way the runtime writes it.
 
+    ``alive_until`` is the LAST INSTANT THIS RUNTIME IS KNOWN TO HAVE BEEN
+    ALIVE — the row's own ``updated_at``/``started_at``, which the tear rung
+    binds its comparison to. It defaults to ``now`` because a real row is
+    written by a live runtime; the epoch-1970 stamp this fixture used to carry
+    was itself the defect reviewer round 1 (R1) filed, since a 1970 timestamp
+    makes the install look "older than the runtime" no matter what it is and so
+    pinned the unbounded answer.
+
     The build defaults to the RUNNING install unless a test overrides it: the
     classifier's tear rung compares the row's build against the install on disk,
-    so a fabricated build would make every cell read as an install-window tear
-    unless the test that means to exercise that says so explicitly.
+    so a fabricated build would make every cell read as a tear unless the test
+    that means to exercise one says so explicitly.
     """
+    stamp = time.time() - 1.0 if alive_until is None else alive_until
     payload: dict[str, Any] = {
         "session_id": directory.name,
         "pid": pid,
         "parent_pid": 1,
         "turn_seq": 4,
         "command_id": "cmd-4",
-        "started_at": 1000.0,
+        "started_at": stamp - 30.0,
         "ended_at": None,
         "open": True,
         "end_cause": "",
@@ -324,13 +510,23 @@ def _write_open_row(
         "last_boundary": "bash",
         "build": _current_build_fields() if build is None else build,
         "install_root": "/tmp/install",
-        "updated_at": 1001.0,
+        "updated_at": stamp,
     }
     payload.update(fields)
     registry.write_turn_journal(directory, payload)
     row = journal.TurnJournalRow.from_json(payload)
     assert row is not None
     return row
+
+
+# NOTE ON ISOLATION. ``LOP_BUILD_PREFIX`` points the install stamp at a fake
+# tree, so a developer who has it exported would have every cell here compare a
+# row's build against a different root from the one it was stamped with — the
+# writer/reader mislabel reviewer round 1 (R2) filed, reproduced from the
+# ambient shell. No fixture is needed for it HERE: ``tests/conftest.py``'s
+# autouse ``isolate_environment`` clears every ``_AMBIENT_VARS`` name for every
+# test in the suite, and that list carries this variable with that exact reason.
+# One central scrub, not a second copy per module.
 
 
 def test_the_classifier_names_a_crash_from_the_runtimes_own_row(tmp_path: Path) -> None:
@@ -362,19 +558,74 @@ def test_the_classifier_names_the_escalated_sweep(tmp_path: Path) -> None:
     assert "SIGTERM" in reason
 
 
-def test_the_classifier_names_the_install_window_tear(tmp_path: Path, monkeypatch) -> None:
-    """An install that moved under the runtime names the tear, not the crash."""
-    directory = _session_directory(tmp_path, "sess-torn")
-    _write_open_row(
-        directory, _pid_from_child(), build={"version": "0.55.9", "source_ref": "beef1234"}
-    )
+def _torn_install(monkeypatch: pytest.MonkeyPatch, *, installed_ago_s: float | None) -> None:
+    """Make the on-disk install a DIFFERENT build, last written N seconds ago."""
     monkeypatch.setattr(
         update, "installed_build", lambda *_a, **_k: update.BuildStamp("0.56.0", "cafe9999")
     )
+    monkeypatch.setattr(update, "build_marker_age_s", lambda *_a, **_k: installed_ago_s)
+
+
+def test_the_classifier_names_the_install_window_tear(tmp_path: Path, monkeypatch) -> None:
+    """An install that moved while the runtime was ALIVE names the tear.
+
+    R1's bound, positive arm: the install was last written an hour before the
+    row's last write, so the runtime is demonstrably alive after the tree under
+    it was replaced — the ordering the rung claims.
+    """
+    directory = _session_directory(tmp_path, "sess-torn")
+    _write_open_row(
+        directory,
+        _pid_from_child(),
+        build={"version": "0.55.9", "source_ref": "beef1234"},
+        alive_until=time.time(),
+    )
+    _torn_install(monkeypatch, installed_ago_s=3600.0)
 
     kind, cause, reason = _classify_orphaned_run(directory)
     assert (kind, cause) == ("error", "install-mid-update")
     assert "0.55.9@beef123" in reason and "0.56.0@cafe999" in reason
+
+
+def test_the_classifier_does_not_blame_an_install_that_moved_after_the_death(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R1's regression arm — the 19:41 read, which the unbounded rule got wrong.
+
+    A runtime SIGKILLed at 19:41 with a turn in flight, read at 20:30 by a
+    successor running the build that was published in between: the builds
+    differ, and yet the death was a kill, not a tear. The row's last write is
+    the discriminator — the install is NEWER than the last instant this runtime
+    is known to have been alive.
+    """
+    directory = _session_directory(tmp_path, "sess-killed-then-released")
+    killed_at = time.time() - 3000.0
+    _write_open_row(
+        directory,
+        _pid_from_child(),
+        build={"version": "0.55.9", "source_ref": "beef1234"},
+        alive_until=killed_at,
+    )
+    # The install landed 200 s after the kill — a release riding the same window.
+    _torn_install(monkeypatch, installed_ago_s=2800.0)
+
+    kind, cause, reason = _classify_orphaned_run(directory)
+    assert (kind, cause) == ("error", "runtime-killed"), reason
+    assert "install-mid-update" not in cause
+    assert "turn 4 in flight" in reason
+
+
+def test_install_moved_refuses_to_guess(tmp_path: Path, monkeypatch) -> None:
+    """No install date, or no row timestamp, is no evidence — never a tear."""
+    directory = _session_directory(tmp_path, "sess-unbounded")
+    row = _write_open_row(
+        directory, _pid_from_child(), build={"version": "0.55.9", "source_ref": "beef1234"}
+    )
+    _torn_install(monkeypatch, installed_ago_s=None)
+    assert journal.install_moved(row) is False
+
+    _torn_install(monkeypatch, installed_ago_s=1.0)
+    assert journal.install_moved(replace(row, updated_at=0.0, started_at=0.0)) is False
 
 
 def test_the_classifier_keeps_the_legacy_paths_without_a_row(tmp_path: Path) -> None:

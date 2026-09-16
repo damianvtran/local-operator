@@ -16,19 +16,27 @@ it left behind from ANOTHER process:
 * and the successor's classification, which now NAMES the cause from that
   evidence instead of inferring it from a missing record.
 
+A third cell covers the exit the runtime DOES get to announce: a real SIGTERM
+whose drain bound expires with the turn still open, read back from the row the
+runtime wrote (reviewer round 1, R3). It parks the turn on an armed approval
+gate so the escalated shape is reached by construction, and takes its shortened
+bound from the signal suite's own driver.
+
 Isolation: ``headless_tui_env`` redirects the config dir and the root conftest
 redirects ``HOME``; the child environment is rebuilt from the cut-off suite's
-helper, which removes EVERY ``CMUX_*`` / ``LOP_MOBILE_CHILD_*`` /
-``LOP_RUNTIME_*`` variable, because a runtime that inherited a workspace id could
-address the operator's live window (#648). Nothing here signals a process this
-file did not spawn, and every signal is :meth:`Popen.kill` on that exact pid — a
-pattern kill on a box holding dozens of live agent sessions is the hazard this
-whole design exists to remove.
+helper, which removes every ``CMUX_*`` / ``LOP_MOBILE_CHILD_*`` /
+``LOP_RUNTIME_*`` variable and the ``LOP_BUILD_PREFIX`` install seam, because a
+runtime that inherited a workspace id could address the operator's live window
+(#648) and one that inherited a fake install root would misread its own build.
+Nothing here signals a process this file did not spawn, and every signal is
+:meth:`Popen.kill` on that exact pid — a pattern kill on a box holding dozens of
+live agent sessions is the hazard this whole design exists to remove.
 """
 
 from __future__ import annotations
 
 import asyncio
+import signal
 from pathlib import Path
 
 import pytest
@@ -44,9 +52,30 @@ from tests.e2e.test_cut_off_turns_e2e import (
     _spawn,
     _successor_boot,
 )
+from tests.e2e.test_signal_drain_e2e import _spawn_with_drain_bound
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
+
+
+def _seed_parked_gate(config_dir: Path, session_id: str) -> Path:
+    """``_seed``, with the approval gate ARMED so the turn cannot finish by itself.
+
+    ``_seed`` arms ``tool_approval_mode: auto`` because its cells want the bash
+    sleep to actually run. This cell wants a turn that cannot end inside the
+    drain bound, so the escalated shape — a signal whose bound expires with the
+    turn still open, the only shape in which a row ever carries an exit cause —
+    is reached by CONSTRUCTION. The earlier version of this cell parked the same
+    sleep and raced the bound instead: whether the row kept the signal came down
+    to the millisecond the signal landed in (it failed twice, then passed
+    fourteen times). A race is a flaky test, and a flaky test is not evidence.
+    """
+    directory = _seed(config_dir, session_id)
+    (config_dir / "config.yml").write_text(
+        "values:\n  hosting: test\n  model_name: mock\n  tool_approval_mode: manual\n",
+        encoding="utf-8",
+    )
+    return directory
 
 
 @pytest.mark.asyncio
@@ -192,3 +221,57 @@ async def test_a_clean_idle_exit_withdraws_its_boot_record(headless_tui_env: Pat
         journal.read_boot_record(child.pid, root=config) is None
     ), "a clean exit must withdraw its boot record"
     assert registry.read_turn_journal(directory) is None, "no turn ran, so no row"
+
+
+@pytest.mark.asyncio
+async def test_a_sigterm_the_drain_bound_cuts_records_the_readers_own_token(
+    headless_tui_env: Path,
+) -> None:
+    """R3, on a REAL signal: the writer records the token the reader keys on.
+
+    Reviewer round 1 found this arm uncovered — the reader was tested against a
+    hand-stamped row and the sibling cell only SIGKILLs, so nothing proved that
+    the two exit writers (``amain``'s ``"SIGTERM"`` and the drain's
+    ``"leaving after SIGTERM"``) land ONE token. The bound is shortened for this
+    child by the signal suite's own driver (``_spawn_with_drain_bound``), which
+    patches the constant before ``main()`` — the knob stays in the test rather
+    than becoming a shipped env override; the code path is the production one
+    and the shipped 120 s value is pinned by ``test_residency_guard.py``.
+    """
+    config = headless_tui_env
+    session_id = "journalsigterm01"
+    directory = _seed_parked_gate(config, session_id)
+    child = _spawn_with_drain_bound(config, session_id, 3.0)
+    viewer = None
+    try:
+        with bounded(240, "session survival: sigterm writer"):
+            viewer = await _attach(config, session_id)
+            await _park_a_turn(viewer, directory, seconds=20)
+
+            before = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+            assert before is not None and before.open is True and before.pid == child.pid
+            assert before.exit_cause == "", "no exit cause before any signal"
+
+            child.send_signal(signal.SIGTERM)
+            await asyncio.to_thread(child.wait, 180)
+            assert child.returncode == 0, child.returncode
+
+            row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+            assert row is not None and row.pid == child.pid, row
+            # THE FINDING'S POINT: one token, whichever writer ran last.
+            assert journal.signal_exit_token(row.exit_cause) == "SIGTERM", row
+            assert row.still_open_at_exit is True
+            # And the reader names the escalation from the row the RUNTIME wrote.
+            assert journal.death_verdict(row)[1] == "runtime-shutdown"
+            # The exit ran its own ordering, so the record is withdrawn and the
+            # row is CLOSED — which is why the boot-seam classifier refuses it
+            # (Q10) and the attention path, not this row, is what narrates it.
+            assert journal.read_boot_record(child.pid, root=config) is None
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001 — teardown of a runtime that left
+                pass
+        if child.poll() is None:
+            _reap(child, config)

@@ -648,6 +648,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "runtime/<pid>.json -> runtime/reaped/<pid>.json; both run_dir()-derived",
     ),
+    # The boot-record namespace (``run/host``, see ``journal.HOST_RUN_DIRNAME``)
+    # is the one place the runtime's own instrumentation deletes anything, and it
+    # is bounded by ``prune_boot_records`` rather than by the session-cleanup
+    # guards for a reason the row has to justify: nothing here is derived from a
+    # session id. The directory is the FIXED constant joined to the config root,
+    # and the glob matches one level of ``*.json`` under it, so the only paths
+    # this loop can name are boot records — a session directory is not reachable
+    # from it, and a record of a LIVE pid is skipped whatever its age.
+    (
+        "local_operator/session/runtime/journal.py::prune_boot_records",
+        "<path>.unlink",
+        "boot records under <config>/run/host only; fixed dirname + one-level "
+        "'*.json' glob, never a session path",
+    ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
     # and reaching sessions/ no more than that one does.

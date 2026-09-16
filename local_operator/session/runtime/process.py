@@ -682,6 +682,11 @@ def _bind_boot_instrumentation(
     try:
         journal.write_boot_record(identity, build, cwd=cwd)
         _boot_record_pid = os.getpid()
+        # THIS BOOT IS THE ONE MOMENT A NEW WRITER JOINS THE NAMESPACE, so it is
+        # where the namespace is bounded: nothing else reaps ``run/host`` (see
+        # ``journal.prune_boot_records``), and a directory that only ever grows
+        # is what makes a recycled pid's stale record reachable.
+        journal.prune_boot_records()
     except OSError:
         logger.warning("session runtime: could not write its boot record", exc_info=True)
 

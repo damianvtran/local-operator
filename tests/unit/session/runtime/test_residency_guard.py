@@ -146,21 +146,31 @@ def test_the_readiness_terms_fail_open() -> None:
     assert process._should_exit(_Handle(), _BrokenViewers()) is True
 
 
-def test_no_journal_binding_reaches_the_residency_predicate() -> None:
-    """The instruments are not wired into the predicate, structurally.
+def test_no_journal_binding_reaches_a_lifetime_predicate() -> None:
+    """The instruments are not wired into EITHER predicate that ends a runtime.
 
     A source assertion rather than a behavioural one, and deliberately so:
     ``_should_exit`` reads exactly two objects (the handle and the runtime), so a
     reference to the journal inside it could only arrive by someone editing the
-    predicate itself — which is the change this file exists to catch. Named
-    imports of the instrument modules are what it looks for, because a `getattr`
-    probe spelled out at a call site is not how this module reaches its inputs.
+    predicate itself — which is the change this file exists to catch.
+
+    TWO SLICES, because a runtime can be ended by two different decisions and
+    this file's claim is about the lifetime policy as a whole (reviewer round 1,
+    R7): the idle-reap predicate (``_work_in_flight`` → ``_should_exit``) and the
+    refresh half (``_idle_for_refresh`` → ``_should_refresh``), which retires a
+    runtime whose build moved under it. Covering only the first would let a
+    subsystem reach for the instrument from the second without tripping it.
     """
     import inspect
 
     source = inspect.getsource(process)
-    start = source.index("def _work_in_flight")
-    end = source.index("async def _clean_exit")
-    assert (
-        "journal" not in source[start:end]
-    ), "the residency predicate and the work probe must not consult the instruments"
+    slices = {
+        "idle-reap": ("def _work_in_flight", "async def _clean_exit"),
+        "build-refresh": ("def _idle_for_refresh", "class _BuildWatch"),
+    }
+    for name, (start_marker, end_marker) in slices.items():
+        start = source.index(start_marker)
+        end = source.index(end_marker)
+        assert (
+            "journal" not in source[start:end]
+        ), f"the {name} predicate must not consult the instruments"
