@@ -7,19 +7,25 @@ import asyncio
 import inspect
 import logging
 import os
+import threading
 from pathlib import Path
+from typing import Any, Coroutine
 
 import pytest
 
+from local_operator.mobile import attach_client
 from local_operator.mobile.attach_client import (
     ACK_TIMEOUT_S,
     ASIDE_DEADLINE_S,
+    RETIRING_REASON,
     AttachClient,
     OwnerAckTimeout,
+    dialable_record_exists,
     find_runtime_record,
 )
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.providers.clients import STREAM_READ_TIMEOUT_S
+from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 
@@ -95,6 +101,91 @@ def _marker(config: Path, session_id: str, pid: int) -> None:
     d = config / "sessions" / session_id
     d.mkdir(parents=True, exist_ok=True)
     (d / ".session.pid").write_text(str(pid))
+
+
+# How long a structural wait here may take before the assertion, not the clock,
+# decides. It is a backstop for a wedged setup — every wait below is released by an
+# observed fact (the lock took, the send queued), never by this number elapsing.
+_STRUCTURAL_WAIT_S = 5.0
+
+
+def _lock_waiters(lock: asyncio.Lock) -> list[Any]:
+    """The tasks queued on ``lock``, read from the lock itself.
+
+    ``asyncio.Lock`` exposes no public "is anybody waiting" view, so this reads the
+    implementation's ``_waiters``. It is the structural fact this file needs: "the
+    send is genuinely blocked behind a holder", as opposed to "a broadcast probably
+    happened to be in flight". If a future CPython renames it the read degrades to
+    an empty list, which FAILS the assertion it feeds (a loud failure) rather than
+    passing it (a silent one).
+    """
+    return list(getattr(lock, "_waiters", None) or [])
+
+
+async def _on_runtime_loop(r: RuntimeServer, coro: Coroutine[Any, Any, Any]) -> Any:
+    """Drive a runtime-owned coroutine from the runtime's OWN loop.
+
+    ``RuntimeServer.start()`` hosts the runtime on a dedicated thread with its own
+    loop, and the send path owns objects that belong to that loop — ``conn.writer``
+    and ``conn.send_lock``. Awaiting such a coroutine from the TEST's loop is the
+    defect that cancelled ten CI shard jobs (runs from 2026-09-15T22:49Z on): with
+    ``send_lock`` contended, the test loop parks a waiter future of its own and the
+    owner's ``Lock.release()`` completes it from the wrong thread, whose callback is
+    scheduled with plain ``call_soon`` — no self-pipe write — so a loop already in
+    ``select()`` is never woken and the await never returns. ``_send_to`` now refuses
+    the cross-loop call outright; this is how a test is supposed to reach it.
+    """
+    loop = r._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
+
+async def _announce_under_a_held_send_lock(r: RuntimeServer, reason: str, **fields: Any) -> None:
+    """``announce_retiring`` on the owner's loop, driving the CONTENDED lock branch.
+
+    The park these tests were involved in exists only on the contended branch: an
+    uncontended lock takes the fast path, creates no waiter, and cannot park
+    anything. So the lock is held FOR REAL, by a coroutine on its own loop, and the
+    announce is only released once its send has visibly queued behind that holder —
+    a structural handshake (``_lock_waiters``) rather than a sleep long enough to
+    usually overlap, which is how a test gets to look green while the branch it
+    exists for is never taken.
+    """
+    loop = r._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    conn = next(c for c in r._clients.values() if c.kind == "attach")
+    acquired = threading.Event()
+    release = threading.Event()
+
+    async def hold() -> None:
+        async with conn.send_lock:
+            acquired.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+    holder = asyncio.run_coroutine_threadsafe(hold(), loop)
+    try:
+        took = await asyncio.get_running_loop().run_in_executor(
+            None, acquired.wait, _STRUCTURAL_WAIT_S
+        )
+        assert took, "the runtime loop never took send_lock"
+        sent = asyncio.run_coroutine_threadsafe(r.announce_retiring(reason, **fields), loop)
+        try:
+            deadline = asyncio.get_running_loop().time() + _STRUCTURAL_WAIT_S
+            while asyncio.get_running_loop().time() < deadline and not _lock_waiters(
+                conn.send_lock
+            ):
+                await asyncio.sleep(0.01)
+            assert _lock_waiters(conn.send_lock), (
+                "the send never queued behind the holder, so the contended branch "
+                "was not exercised"
+            )
+        finally:
+            release.set()
+        await asyncio.wrap_future(sent)
+    finally:
+        release.set()
+        holder.cancel()
 
 
 @pytest.fixture
@@ -214,6 +305,160 @@ async def test_prompt_ack_and_repaint_flow(config: Path) -> None:
             await asyncio.sleep(0.05)
         assert any(e.kind == "user" and e.text == "hello owner" for e in projections[-1].transcript)
         await client.detach()
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_retiring_frame_reaches_the_hook_before_the_socket_closes(config: Path) -> None:
+    """The op is an EVENT, not only a disconnect reason (review round 4, MINOR 1).
+
+    Until this round the attach client recorded ``retiring`` as the REASON for a
+    close it had not seen yet and told the host nothing; on the drain rung the
+    EOF is ~26 s behind the frame, which is exactly why the notice the PR adds
+    landed after the refusals it exists to warn about. These are the two
+    properties the paint rests on and nothing above them — the frame reaches
+    ``on_retiring`` when it is SENT, verbatim, so the ``draining`` the runtime
+    decided crosses intact; and the same op still latches the reason the
+    re-engage path reads when the socket does close.
+
+    The frame is fed by the real emitter (``RuntimeServer.announce_retiring``),
+    not by a hand-built dict: what is under test is the pair, and a stub on
+    either side would pin the side that already works. It is driven on the
+    OWNER'S loop and under a held ``send_lock`` — see
+    :func:`_announce_under_a_held_send_lock` for why both of those matter.
+    """
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        frames: list[dict[str, Any]] = []
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append, on_retiring=frames.append)
+        await client.connect(record, "sess-a")
+
+        await _announce_under_a_held_send_lock(r, "stale-build", to="0.55.0@f4a70b9", draining=True)
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not frames:
+            await asyncio.sleep(0.05)
+        assert len(frames) == 1, frames
+        assert frames[0]["op"] == "retiring"
+        assert frames[0]["draining"] is True, frames[0]
+        assert frames[0]["to"] == "0.55.0@f4a70b9", frames[0]
+        assert not disconnected, "the frame is not the close, and must not be read as one"
+
+        # The idle rung sends the SAME op with no drain; the client still
+        # delivers it, because the gating belongs one level up
+        # (``AttachedSession._on_retiring_frame`` reads ``draining``), which is
+        # what makes a field-less frame from an older runtime harmless.
+        await _on_runtime_loop(r, r.announce_retiring("stale-build", to="0.55.0@f4a70b9"))
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and len(frames) < 2:
+            await asyncio.sleep(0.05)
+        assert len(frames) == 2, frames
+        assert frames[1]["draining"] is False, frames[1]
+
+        # The close still carries the reason the op latched: the re-engage path
+        # is untouched by the hook.
+        r.close()
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline and not disconnected:
+            await asyncio.sleep(0.05)
+        assert disconnected == [RETIRING_REASON], disconnected
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_key_drain_frame_places_the_refusal_the_raiser_could_not_name(
+    config: Path,
+) -> None:
+    """U14/M-1/D11: the refusal speaks for the departure the SAME wire announced.
+
+    THE CROSS-VERSION WINDOW, and the one place round 5 found the two faces of
+    one state disagreeing. ``error_trigger`` is new in this branch, so a runtime
+    older than it crosses with ``error_code`` alone — and at least one of those
+    runtimes, the rungs of this very branch that had the work-aware SIGTERM
+    drain but not the phrase key, then SIGNAL-drained while its viewer painted
+    "switching to a newer build". Reached with a build this old: the viewer held
+    the phrase off the frame it had just read and the refusal knew nothing.
+
+    So the client remembers the departure's own words and hands them to the
+    decoder, and these three arms are the three populations that can arrive that
+    way: a RELEASED build (its only draining announce is the stale-build
+    handover, so the build sentence stays true), a pre-key rung of this branch
+    (a signal drain, which must NOT be told about a build), and a phrase from a
+    build newer than this one, which establishes nothing and so earns the
+    sentence that names no departure.
+
+    The drain frames come from the real emitter (``RuntimeServer`` over a real
+    socket to a real ``AttachClient``); the refusal frame is the shape an older
+    raiser sends, which was captured on the wire in round 5 — ``op``/``req``,
+    ``error_code``, ``message``, and nothing naming the departure.
+    """
+    from local_operator.session.runtime.types import (
+        LEAVING_ON_SIGNAL,
+        drain_phrase_for_frame,
+    )
+
+    #: What a runtime too old to send ``error_trigger`` puts on the wire when its
+    #: drain refuses a message. The ``message`` it composed is never read here
+    #: (the category is), so an old build's own build-sentence wording is not a
+    #: variable in this cell.
+    older_raiser = {
+        "op": "error",
+        "req": 1,
+        "error_code": RuntimeRetiring.code,
+        "message": "the session runtime is retiring (runtime-retired)",
+    }
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        frames: list[dict[str, Any]] = []
+        client = AttachClient(lambda p: None, lambda reason: None, on_retiring=frames.append)
+        await client.connect(record, "sess-a")
+
+        async def announce(reason: str, **fields: Any) -> dict[str, Any]:
+            before = len(frames)
+            await _on_runtime_loop(r, r.announce_retiring(reason, **fields))
+            deadline = asyncio.get_running_loop().time() + 5
+            while asyncio.get_running_loop().time() < deadline and len(frames) == before:
+                await asyncio.sleep(0.05)
+            assert len(frames) == before + 1, frames
+            return frames[-1]
+
+        # A pre-key SIGNAL drain: no phrase key, the trigger only in the reason.
+        signal_frame = await announce("shutdown-drain", to="", draining=True)
+        assert signal_frame.get("leaving") == "", signal_frame
+        with pytest.raises(RuntimeRetiring) as refused:
+            client._raise_for_reply_error(older_raiser)
+        assert refused.value.HEAD == RuntimeRetiring.HEAD_SIGNALLED, refused.value.HEAD
+        assert "newer build" not in str(refused.value), str(refused.value)
+        # And the phrase the app is handed for that SAME frame is the one the
+        # notice paints from, so the two faces of one drain cannot disagree.
+        assert drain_phrase_for_frame(signal_frame) == LEAVING_ON_SIGNAL
+
+        # A RELEASED build's drain, which is the handover and nothing else.
+        build_frame = await announce("stale-build", to="0.55.6@f4a70b9", draining=True)
+        assert build_frame.get("leaving") == "", build_frame
+        with pytest.raises(RuntimeRetiring) as handover:
+            client._raise_for_reply_error(older_raiser)
+        assert handover.value.HEAD == RuntimeRetiring.HEAD, handover.value.HEAD
+
+        # A phrase this build has never heard of, off a NEWER runtime's frame:
+        # the phrase is carried through untouched — the app looks its notice up
+        # in a table keyed on exactly this string — and it places no departure at
+        # the decoder, which is why the refusal may not borrow another's words.
+        future_frame = await announce(
+            "a-reason-from-the-future", draining=True, leaving="leaving for parts unknown"
+        )
+        assert future_frame["leaving"] == "leaving for parts unknown", future_frame
+        with pytest.raises(RuntimeRetiring) as unplaced:
+            client._raise_for_reply_error(older_raiser)
+        assert unplaced.value.HEAD == RuntimeRetiring.HEAD_UNNAMED, unplaced.value.HEAD
     finally:
         r.close()
 
@@ -593,3 +838,71 @@ async def test_a_late_reply_for_an_abandoned_request_is_logged(
         await client.detach()
     finally:
         r.close()
+
+
+def _synthetic(pid: int, session_id: str, protocol: int = 5) -> registry.SessionRecord:
+    return registry.SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="",
+        cwd="/tmp",
+        model_label="",
+        control_port=1,
+        control_key="k",
+        protocol=protocol,
+    )
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        # The m3 case: a LIVE, dialable record for this pid under ANOTHER
+        # session_id — the rebind race `find_runtime_record` reports as
+        # `(None, pid)`. It is dialable, so no caller may call the process old.
+        ([(_synthetic(91234, "sess-previous"), "live")], True),
+        # A WEDGED record is dialable as well (review round 3, MINOR-2): the pid
+        # is alive and `scan` keeps the record for the recovery the redial exists
+        # to outlast, so a caller must pace this owner rather than age it.
+        ([(_synthetic(91234, "sess-previous"), "wedged")], True),
+        # A v1 record is not dialable at all, whatever it names.
+        ([(_synthetic(91234, "sess-other", protocol=1), "live")], False),
+        # Not live: the pid holds no record this build could talk to.
+        ([(_synthetic(91234, "sess-other"), "stale")], False),
+        # A live record for a DIFFERENT pid says nothing about this one.
+        ([(_synthetic(1, "sess-other"), "live")], False),
+        ([], False),
+    ],
+)
+def test_dialable_record_exists_answers_for_the_pid_not_the_session(
+    monkeypatch, tmp_path: Path, records, expected
+) -> None:
+    """The question `(None, pid)` cannot answer, asked where it can be.
+
+    `find_runtime_record` collapses "no usable record" and "a live dialable
+    record stamped with the previous session_id" into the same tuple, so the
+    `/resume` refusal has to ask the registry itself before it names a cause
+    (review m3). The session_id is deliberately NOT part of the question: the pid
+    is what a caller refuses about.
+    """
+    monkeypatch.setattr(attach_client, "scan", lambda _root: list(records))
+
+    assert dialable_record_exists(tmp_path, 91234) is expected
+
+
+def test_dialable_record_exists_is_unknown_when_the_registry_cannot_be_read(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A failed read is not evidence of absence, so it is not a `bool`.
+
+    The refusal it gates names a cause ("open in an older Local Operator
+    process"); a scan that raised has established nothing about the process, so
+    the tri-state is what keeps the caller from printing that sentence anyway.
+    """
+
+    def unreadable(_root: Path):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(attach_client, "scan", unreadable)
+
+    assert dialable_record_exists(tmp_path, 91234) is None

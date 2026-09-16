@@ -18,10 +18,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from local_operator import procname
+from local_operator import launchd, procname
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import (
     DEFAULT_PORT,
@@ -133,19 +134,30 @@ def log_path() -> Path:
 
 
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
+    """The LaunchAgent for this config root and port.
+
+    ``launchd_job`` rather than ``launchd_program``: ``Program`` carries the
+    branded image (what Activity Monitor reads) and ``ProgramArguments[0]``
+    carries this daemon's role label (what ``ps`` reads), so the bridge stops
+    reading as the same bare row as the mobile daemon and the tunnel. macOS
+    names a background item by the basename of ``ProgramArguments[0]``, so the
+    old bare ``sys.executable`` is what made installing the bridge notify that
+    'python3 is running in the background'. The trade-off that shape accepts is
+    recorded in ``procname.launchd_job``; with no link to plant, this is
+    byte-for-byte the plist this function wrote before. On a machine with the
+    generation layout ``Program`` is the stable shim instead (see
+    ``procname.supervised_image``) and the role label is unchanged.
+    """
     return {
         # Per-config-root label (this PR) over #752's branded interpreter
         # image: the two are orthogonal — one decides WHICH daemon launchd is
         # told about, the other decides what the user sees it called.
         "Label": label(),
-        # Branded interpreter image when one can be planted: macOS names this
-        # background item by the basename of ProgramArguments[0], so a bare
-        # `sys.executable` is what made installing the bridge notify that
-        # 'python3 is running in the background'. Falls back to sys.executable.
-        "ProgramArguments": procname.launchd_program(
+        **procname.launchd_job(
             "local_operator.browser_bridge.daemon",
             "--port",
             str(port),
+            label=procname.branded_argv0(procname.LABEL_BROWSER, port=port),
         ),
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
@@ -153,6 +165,56 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         "StandardErrorPath": str(log_path()),
         "ProcessType": "Interactive",
     }
+
+
+def refresh_plist_if_stale() -> launchd.PlistRefresh:
+    """Rewrite this daemon's LaunchAgent when an older build wrote it.
+
+    Same gap as the mobile and tunnel daemons, and nothing repaired it either:
+    ``lop-update`` never touched the bridge plist, so a daemon installed before
+    branding keeps its bare ``python3`` image until someone reinstalls.
+
+    Guarded like the others: only the plist the real passwd home produces is
+    eligible (``launchctl`` always addresses the real user's session whatever
+    ``HOME`` says), and the port comes off the plist being replaced, so a daemon
+    on a non-default port stays there. There is deliberately no config-dir guard:
+    a non-default config ROOT does not share this plist at all — it has its own
+    label and its own path (:func:`label`, :func:`plist_path`), so a sandbox
+    either finds no file or finds one whose identity check fails.
+
+    Never raises. A platform without ``launchctl`` is reported unsupported: the
+    systemd unit is re-read on every start and has no image name to go stale.
+    """
+    name = "browser bridge"
+    try:
+        if _supervisor() != "launchctl":
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not launchd.is_own_plist(path, label()):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        # The port comes off the plist being REPLACED: a repair must not move a
+        # daemon someone installed on a non-default port back to the default.
+        port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind != "repaired":
+            return outcome
+        # bootout + bootstrap, NOT kickstart -k: measured — a kickstart after a
+        # rewrite restarts the job from launchd's in-memory definition and keeps
+        # running the old argv. See :mod:`local_operator.launchd`.
+        _launchctl("bootout", _domain(), str(path))
+        loaded = _launchctl("bootstrap", _domain(), str(path))
+        if loaded.returncode:
+            # Names the recovery, because the job is DOWN at this point: see
+            # `launchd.reload_failure`.
+            return launchd.reload_failure(
+                name,
+                path,
+                "lop browser install",
+                loaded.stderr.strip()[:200] or str(loaded.returncode),
+            )
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
 
 
 #: ``StandardOutput=append:`` landed in systemd 240 (upstream NEWS; confirmed
@@ -207,7 +269,12 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = 
     Reproduced on real systemd 255: ``tail`` of that path reported
     ``No such file or directory`` while the output sat in the journal.
     """
-    command = f"{sys.executable} -m local_operator.browser_bridge.daemon --port {port}"
+    # A unit is re-executed on every restart, so its image must be a path that
+    # survives a generation flip and a prune: ``procname.supervised_image``
+    # answers with the stable shim when this machine has the layout, and ``None``
+    # (either branded image or bare interpreter) when it does not.
+    image = procname.supervised_image() or Path(sys.executable)
+    command = f"{image} -m local_operator.browser_bridge.daemon --port {port}"
     # ``_DETECT`` and not ``None`` as the default: ``None`` is a MEANINGFUL
     # version value here ("systemd is present but its version could not be
     # read"), so overloading it to also mean "caller did not pass one" would
@@ -393,6 +460,154 @@ def stale_heartbeat_age(root: Path | None = None) -> float | None:
     if status_value is not state_store.Liveness.STALE or current is None:
         return None
     return state_store.heartbeat_age(current)
+
+
+def pin_driver(target: str, port: int | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Ask the daemon to make one authorised extension THE driver.
+
+    The escape hatch from the incumbency rule (design §8.2): with two installs
+    connected, the one already driving keeps the wheel, and reconnecting the
+    other cannot take it — so without this command the operator's only lever is
+    quitting a browser.
+
+    Carries the discovery file's session key, exactly as the session leg does:
+    moving the wheel to another browser is the same authority a session already
+    holds, and the key is what keeps that decision off the loopback interface
+    for any other local user.
+    """
+    current = state_store.read(root)
+    resolved_port = port or (current.port if current else DEFAULT_PORT)
+    if current is None or not state_store.pid_alive(current.pid):
+        return {
+            "ok": False,
+            "error": "no running bridge daemon; run 'lop browser install' first.",
+        }
+    body = json.dumps({"target": target}).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{resolved_port}/driver",
+        data=body,
+        method="POST",
+        headers={"X-Bridge-Key": current.session_key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload: Any = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            # TWO different 404s arrive here, and conflating them would send the
+            # operator to restart a daemon that is perfectly current. The daemon's
+            # own miss answers with a JSON `unknown_extension` body naming the ids
+            # that ARE connected; a daemon with no /driver route at all answers
+            # Starlette's plain-text 404.
+            body_text = ""
+            with suppress(Exception):
+                body_text = error.read().decode()
+            named = _ids_from_payload(body_text)
+            if named or "unknown_extension" in body_text:
+                # "no SINGLE" rather than "no" (copy review C1): the daemon
+                # refuses an AMBIGUOUS target as well as an unmatched one, and
+                # saying "nothing matched" about a target two installs matched
+                # sends the user to re-check an id that is not the problem. Same
+                # formulation `pair --revoke` already uses for the same refusal.
+                #
+                # `matches` lets the CALLER say which of the two happened (copy
+                # review C8); absent on a daemon that predates the field, which is
+                # why the sentence above stays as the default.
+                return {
+                    "ok": False,
+                    "error": f"no single connected extension matches '{target}'.",
+                    "authorized_extension_ids": named,
+                    "matches": _int_from_payload(body_text, "matches"),
+                }
+            # An older daemon answers /health but has no /driver. Saying so beats
+            # reporting a generic failure the user would read as "my id is wrong".
+            return {
+                "ok": False,
+                "error": (
+                    f"the daemon on port {resolved_port} predates this command. Run "
+                    "'lop browser restart' to load the current build."
+                ),
+            }
+        body_text = ""
+        with suppress(Exception):
+            body_text = error.read().decode()
+        # A daemon sentence written FOR the reader beats a JSON dump around it
+        # (copy review C5): `not_paired`/`not_connected`/`not_driving` all carry a
+        # `message` that says what to do, and it arrived as the middle of a blob.
+        # Parsed, not matched: a body without one falls through to the dump, which
+        # is still better than swallowing an answer nobody predicted.
+        message = _message_from_payload(body_text)
+        if message:
+            return {
+                "ok": False,
+                "error": message,
+                "authorized_extension_ids": _ids_from_payload(body_text),
+            }
+        return {
+            "ok": False,
+            "error": f"daemon returned HTTP {error.code} on port {resolved_port}: {body_text}",
+            "authorized_extension_ids": _ids_from_payload(body_text),
+        }
+    except Exception as error:  # noqa: BLE001 - report, do not raise, at a CLI edge
+        return {
+            "ok": False,
+            "error": (
+                f"daemon is not answering on port {resolved_port} ({error}); "
+                "run 'lop browser restart'."
+            ),
+        }
+    return {
+        "ok": bool(payload.get("ok")),
+        "driver_extension_id": payload.get("driver_extension_id", ""),
+    }
+
+
+def _message_from_payload(body_text: str) -> str:
+    """The human sentence a failed /driver response carries, or "" if it has none.
+
+    Only the daemon's own `message` field is used: it is written for the operator
+    and is the actionable half of an otherwise machine-shaped body. Anything
+    unexpected (no field, wrong type, unparseable) returns "" so the caller keeps
+    printing the raw response rather than an invented error.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        if isinstance(parsed, dict):
+            message = parsed.get("message")
+            if isinstance(message, str):
+                return message.strip()
+    return ""
+
+
+def _int_from_payload(body_text: str, key: str) -> int | None:
+    """One integer field from a failed response body, or None if it is not there.
+
+    Best-effort like `_ids_from_payload`: a missing or non-integer field means the
+    caller keeps its default wording rather than reporting a guess.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        if isinstance(parsed, dict):
+            value = parsed.get(key)
+            if isinstance(value, bool):  # bool is an int subclass; not a count
+                return None
+            if isinstance(value, int):
+                return value
+    return None
+
+
+def _ids_from_payload(body_text: str) -> list[str]:
+    """The authorised ids a failed /driver response names, or [] if it names none.
+
+    Best-effort: this only feeds the CLI's "did you mean" list, so an
+    unparseable body must not turn one error into a different one.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        listed = parsed.get("authorized_extension_ids")
+        if isinstance(listed, list):
+            return [str(item) for item in listed]
+    return []
 
 
 def repair(port: int | None = None, root: Path | None = None) -> dict[str, Any]:
@@ -906,7 +1121,9 @@ def status(port: int | None = None) -> dict[str, object]:
         "state": current.model_dump(mode="json", exclude={"session_key"}) if current else None,
         "paired": pairing["paired"],
         "extension_id": pairing["extension_id"],
+        "identities": pairing["identities"],
         "pending_code": pairing["pending_code"],
+        "pending": pairing["pending"],
         "pending_expires_at": pairing["pending_expires_at"],
         # The location the output is ACTUALLY readable from, which on a systemd
         # too old for `append:` is the journal, not a file that never exists.

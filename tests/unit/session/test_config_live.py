@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,7 @@ from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
@@ -47,6 +49,18 @@ from local_operator.session.transcript import Transcript
 from local_operator.spawn.policy import fork_cmux_placement, fork_mode
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+
+#: A spec of the shape ``build_model_spec`` produces for a model with a
+#: documented default: the level is SEEDED (both fields equal) and becomes a
+#: choice only once the user picks one. The M2 probe needs this shape, because
+#: ``MODEL`` seeds nothing and the seed-versus-choice rule is the whole point.
+SEEDED = ModelSpec(
+    provider="test",
+    model_id="m",
+    context_window=100_000,
+    reasoning_effort="high",
+    reasoning_default_effort="high",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +122,12 @@ class RebindableStream:
 def make_session(tmp_path, stream, **kwargs) -> Session:
     # Both web tools OFFERED at build, the way the factory builds a session on
     # default config, so the ``web_*.enabled`` probes can observe a disable as
-    # the tool leaving the inventory at the next turn boundary.
+    # the tool leaving the inventory at the next turn boundary. The two
+    # effort-carrying tools are offered for the same reason: a rebuild can only
+    # replace a tool that is already in the inventory, so the
+    # ``subagents.model_choice`` probe (which reads the task tool's BUILT
+    # description) needs one there to read.
+    from local_operator.agents import AgentRegistry
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
@@ -119,14 +138,27 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
                 cwd=str(tmp_path),
                 web_search_settings={"enabled": True},
                 web_fetch_settings={"enabled": True},
+                subagent_launcher=lambda label, prompt, **_: f"job:{label}",
+                agent_registry=AgentRegistry(tmp_path / "agents"),
             ),
-            enabled=("web_search", "web_fetch"),
+            enabled=("web_search", "web_fetch", "task", "agent"),
         ),
     )
+    # ``model`` is overridable so a probe can seat a spec that SEEDS an effort
+    # (``build_model_spec`` sets ``reasoning_effort`` ==
+    # ``reasoning_default_effort``), which is the shape M2 is about; ``MODEL``
+    # seeds nothing and would leave the seed/choice distinction untested.
     return Session(
-        model=MODEL,
+        model=kwargs.pop("model", MODEL),
         stream_fn=stream,
         tools=tools,
+        # A registry, so the ``agent`` tool is advertised at all: without one
+        # ``build_agent_tool`` returns None, and
+        # ``Session._rebuild_effort_tier_tools`` then leaves the stale ``agent``
+        # tool in place while it replaces ``task`` — the half-rebuild the
+        # ``subagents.model_choice`` probe exists to catch, which this fixture
+        # would otherwise manufacture for itself.
+        agent_registry=kwargs.pop("agent_registry", AgentRegistry(tmp_path / "agents")),
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
         **kwargs,
@@ -183,6 +215,44 @@ def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = No
 
 def subscribe(session: Session, watcher: ConfigWatcher) -> None:
     session.add_dispose_hook(watcher.subscribe(session._apply_config_change))
+
+
+def _task_effort_arm(session: Session, watcher: ConfigWatcher) -> str:
+    """The arm the session's ``task`` tool was last BUILT in.
+
+    A TOOL-BUILD product on purpose. ``read_model_choice()`` re-reads the file
+    on every call, so a probe that asked the reader would pass with
+    ``Session._apply_config_change``'s rebuild entirely unwired — and the
+    rebuild is the only part of this key that can be wrong once a session is
+    running, which is the whole reason the key is registered LIVE.
+
+    No tier is configured in this table's file, so the model arm and the
+    operator arm render the same field-less ``task`` schema and the description
+    is the witness that tells them apart here; the structural assertions (the
+    field present/absent with tiers configured) live in
+    ``tests/unit/tools/test_effort_tier_schema.py``. Both effort-carrying tools
+    are read, because one rebuild renders both and a rebuild that patched only
+    one of them is exactly the half-wiring this probe should catch.
+    """
+    from local_operator.harness.subagent import (
+        MODEL_CHOICE_MODEL,
+        MODEL_CHOICE_OPERATOR,
+    )
+
+    task = next(tool for tool in session._tools if tool.name == "task")
+    agent = next(tool for tool in session._tools if tool.name == "agent")
+    pin = ((agent.parameters.get("properties") or {}).get("effort") or {}).get("description", "")
+    operator_mode = "model_choice=operator" in task.description
+    assert (
+        "no effort tiers are yours to choose" in pin
+    ) == operator_mode, "task and agent were rebuilt into different arms"
+    if operator_mode:
+        # The operator arm drops the field whatever the tier map says. The model
+        # arm keeps it only when a tier exists to offer, and this file
+        # configures none — which is why the description, not the field, is the
+        # witness that can tell the two arms apart here.
+        assert "effort" not in (task.parameters.get("properties") or {})
+    return MODEL_CHOICE_OPERATOR if operator_mode else MODEL_CHOICE_MODEL
 
 
 def compaction_of(session: Session) -> CompactionSettings:
@@ -265,6 +335,28 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # a PATCH route or hand-written YAML stores). Non-default in every case:
     # the section's contract is that defaults resolve to NO ``provider``
     # object at all.
+    # The one key in this section that is NOT a wire preference: it gates the
+    # harness-side cache affinity pin, so it is probed through the gate that
+    # actually reads it rather than through the `provider` resolver (which
+    # deliberately ignores it — see test_openrouter_defaults_mean_no_opinion).
+    # Probed False because the default is True: the probe must observe a
+    # CHANGE reaching the live session.
+    "providers.openrouter.provider_affinity": (
+        False,
+        # Built against the session's LIVE routing mapping, which is the thing
+        # a cross-process write has to reach; the gate itself is pure over that
+        # mapping, so this observes the same decision `__call__` would make.
+        lambda s, w: SessionStreamFn(MagicMock(), s.routing_settings, "probe")._affinity_enabled(
+            ChatRequest(
+                model=ModelSpec(
+                    provider="openrouter",
+                    model_id="deepseek/deepseek-v4.1-flash",
+                    supports_prompt_cache=True,
+                ),
+                messages=[Message.user("hi")],
+            )
+        ),
+    ),
     "providers.openrouter.sort": (
         "price",
         lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("sort"),
@@ -381,6 +473,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # -- subagents ---------------------------------------------------------------
     "subagents.max_running": (3, lambda s, w: s.jobs.max_running),
+    # The policy key beside them, and the ONLY probe in this table that reads a
+    # TOOL-BUILD product: ``subagents.models.*`` are launched-through (read per
+    # spawn), while this one is baked into the ``task``/``agent`` schemas at
+    # build time and reaches a running session only through the rebuild.
+    "subagents.model_choice": ("model", _task_effort_arm),
     "subagents.models.lo": ("openai/lo-model", lambda s, w: _spawn_model(s, "lo")),
     "subagents.models.med": ("openai/med-model", lambda s, w: _spawn_model(s, "med")),
     "subagents.models.hi": ("openai/hi-model", lambda s, w: _spawn_model(s, "hi")),
@@ -401,6 +498,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "http://searx.local",
         lambda s, w: _search_settings(w).searxng_endpoint,
     ),
+    # The evidence pass and the read tool are read through the SAME per-call
+    # loader the search settings above use, so the probe goes through it.
+    "web_search.deepseek_evidence": (True, lambda s, w: _search_settings(w).deepseek_evidence),
+    # Defaults to True, so the probe disables it -- the tuple is (value written,
+    # reader), and a reader that negated would report the BASELINE as the change.
+    "web_search.read_enabled": (False, lambda s, w: _search_settings(w).read_enabled),
     "web_fetch.timeout_seconds": (5.0, lambda s, w: _fetch_settings(w).timeout_seconds),
     "web_fetch.max_bytes": (1_048_576, lambda s, w: _fetch_settings(w).max_bytes),
     "web_fetch.max_redirects": (1, lambda s, w: _fetch_settings(w).max_redirects),
@@ -408,6 +511,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.allow_private": (True, lambda s, w: _fetch_settings(w).allow_private),
     "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
     "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
+    # Both retry knobs are read per fetch (the service resolves settings on every
+    # call), so a change takes effect on the NEXT fetch with no reload — which is
+    # what LIVE means here.
+    "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
+    "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
     # -- web_tools: the inventory after the next turn boundary -----------------
     # Observed through the SAME reconcile the turn start runs, on a session
@@ -437,6 +545,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: file drives. Both are covered where they live: the resume behaviour in the
 #: TUI suite, the gate policy in ``tests/unit/session/runtime/test_parked_gates.py``.
 #:
+#: ``desktop`` is here for the ``runtime`` reason exactly: its one key is read
+#: at CLICK time, by the notification's click handler, which is a fresh process
+#: macOS handed an activation and has no ``Session`` at all. There is nothing
+#: for a probe in this file to watch move. Its live read is
+#: ``tui/resume_click.py::_configured_launch_command``, covered by
+#: ``tests/unit/tui/test_resume_click.py`` (the argv it builds from a set
+#: command, the discovery order when it is unset, and the fall-through).
+#:
 #: ``keymap`` is host-owned in the same sense as ``appearance``, and more
 #: strictly: a hotkey is a ``BindingsMap`` entry on the ``OperatorApp``, and a
 #: ``Session`` has no bindings at all, so there is no session attribute for a
@@ -446,7 +562,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: (``tests/unit/tui/test_keymap_pilot.py``), which asserts the same two
 #: directions this file does: a write from another process reaches a running
 #: app, and a write from the /settings page in THIS process moves this pane.
-HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap"}
+HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap", "desktop"}
 
 
 def _live_sections() -> set[str]:
@@ -1089,8 +1205,15 @@ async def test_saving_the_default_here_never_reports_the_torn_pair(tmp_path, mon
         _EVENTS[id(session)].clear()
 
         # Exactly the loop in ``OperatorApp._activate_resolved_model``: the
-        # facade, one call per key, each notifying this process's watcher.
-        for key, value in (("hosting", "openai"), ("model_name", "gpt-x")):
+        # facade, one call per key, each notifying this process's watcher. The
+        # third key is the effort the persist path now writes LAST (D7); it
+        # notifies on its own, and must be silent for the same reason the pair
+        # is — the command printed its own receipt.
+        for key, value in (
+            ("hosting", "openai"),
+            ("model_name", "gpt-x"),
+            ("model_effort", "low"),
+        ):
             setting = settings_io.resolve_key(key)
             assert setting is not None, key
             settings_io.write_setting(manager, setting, value)
@@ -1102,6 +1225,7 @@ async def test_saving_the_default_here_never_reports_the_torn_pair(tmp_path, mon
         saved = ConfigManager(config_dir)
         assert saved.get_config_value("hosting") == "openai"
         assert saved.get_config_value("model_name") == "gpt-x"
+        assert saved.get_config_value("model_effort") == "low"
     finally:
         await session.dispose()
 
@@ -1311,3 +1435,274 @@ async def test_a_re_enabled_web_tool_returns_to_its_registry_position(
         assert after[-1] != "web_search", "the re-enabled tool was appended"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_external_effort_edit_says_so_once(tmp_path, monkeypatch) -> None:
+    """D9: the model-default notice covers an ``model_effort``-only edit too.
+
+    The TUI's own listener SKIPS the whole ``model`` section — a local write is
+    the author's own receipt — so without the effort in this predicate an edit
+    made in another process would move new conversations' birth default with no
+    signal anywhere: the one member of the section that changed silently. The
+    notice's advice is now literally true, because ``/model saved`` adopts the
+    configured effort here (D8) — so naming the change names the remedy.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", MODEL.provider)
+    manager.set_config_value("model_name", MODEL.model_id)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        session.set_model(MODEL.model_copy(update={"model_id": "chosen"}), explicit=True)
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        write_from_another_process(config_dir, "model_effort", "high")
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        # One key, so the delivery cannot tear; the predicate's third member is
+        # what makes it differ from the spec's level and print.
+        assert change.changed_keys == frozenset({"model_effort"})
+        await _settle(session)
+
+        notices = _notices(session)
+        assert len(notices) == 1, notices
+        assert "keeping test/chosen" in notices[0] and "new sessions" in notices[0]
+        # The key is a birth default for NEW conversations: a running session's
+        # model and level are untouched.
+        assert session.model.model_id == "chosen"
+        assert session.model.reasoning_effort == MODEL.reasoning_effort
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_external_write_of_the_same_pair_says_nothing(tmp_path, monkeypatch) -> None:
+    """M2: a delivery carrying the SAME model pair must stay silent even when the
+    session's spec SEEDS a level.
+
+    ``build_model_spec`` sets ``reasoning_effort`` to ``reasoning_default_effort``
+    at build time and "they diverge as soon as the user picks a level" — so a
+    spec whose two fields are equal carries a SEED, not a choice, while a stored
+    ``""`` means "no opinion". Comparing the stored string against the raw field
+    made the guard fail to short-circuit for every seed-carrying model (Anthropic
+    seeds ``high``), so a write that changed nothing about the effective default
+    printed "someone changed your default" — on the exact surface the session
+    uses to tell the user that.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", SEEDED.provider)
+    session = make_session(
+        tmp_path, RebindableStream({}), model=SEEDED, compaction_settings=CompactionSettings()
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        # The model name arriving on disk under a session already on that model:
+        # one key changes, and the pair it lands on is the pair in force.
+        write_from_another_process(config_dir, "model_name", SEEDED.model_id)
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        assert change.changed_keys == frozenset({"model_name"})
+        await _settle(session)
+
+        assert _notices(session) == [], _notices(session)
+        assert session.model.model_id == SEEDED.model_id
+        assert session.model.reasoning_effort == "high"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_effort_only_external_edit_names_the_effort(tmp_path, monkeypatch) -> None:
+    """U6: with the model pair unchanged, the notice names the member that moved
+    AND its value.
+
+    "keeping <model>; default changed for new sessions" is literally true for an
+    effort edit, and it left the reader unable to tell whether the model default,
+    the effort default or both had moved — short of opening ``/settings``. The
+    value shown is the stored one, in the registry's vocabulary (``auto`` for the
+    empty string).
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", SEEDED.provider)
+    manager.set_config_value("model_name", SEEDED.model_id)
+    session = make_session(
+        tmp_path, RebindableStream({}), model=SEEDED, compaction_settings=CompactionSettings()
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        write_from_another_process(config_dir, "model_effort", "medium")
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        assert change.changed_keys == frozenset({"model_effort"})
+        await _settle(session)
+
+        events = [e for e in _EVENTS[id(session)] if e.type == "notice"]
+        assert len(events) == 1, events
+        assert events[0].headline == "Effort default changed"
+        # No `keeping <label>` clause: the pair MATCHES this session's model by
+        # construction on this branch, so the label restated the band and the 24
+        # cells it cost are what pushed this row over budget (U7).
+        assert events[0].text == (
+            "reasoning effort default changed for new sessions (medium); "
+            "/model saved adopts it here"
+        )
+        # The birth default moved; the running session did not.
+        assert session.model.reasoning_effort == "high"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_model_default_notice_is_change_based(tmp_path, monkeypatch) -> None:
+    """The round-3 ruling: announce iff the pair still matches AND
+    ``model_effort`` is one of the keys that MOVED.
+
+    A value comparison cannot express that, which is what three rounds of
+    findings on this predicate amount to. It has to decide what the session's
+    "own" level is, and every version of that rule mis-fires in one direction:
+    comparing against the raw spec field announced for every seed-carrying model
+    (M2); normalising the seed to ``""`` announced for a session holding a
+    DELIBERATE level (Q2); and it made a genuine move to ``""`` silent for a
+    session on the seeded level (Q3) — the one member of this section the effort
+    term exists to keep audible. ``ConfigChange.changed_keys`` states which
+    registry key really moved, which is a fact about the writer rather than a
+    guess about the reader.
+
+    Every row below is driven through a real ``Session`` on the real
+    config-directory watcher, with a fresh config dir per case. The disk rows
+    write a key whose value is genuinely new (a matching pair that was not on
+    disk before), so each delivery is real rather than an unchanged-file no-op.
+    """
+
+    async def drive(
+        name: str,
+        *,
+        config: dict[str, Any],
+        spec: ModelSpec,
+        write: tuple[str, Any],
+        local: bool = False,
+    ) -> tuple[Any, list[str]]:
+        case = tmp_path / name
+        config_dir = case / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        manager = ConfigManager(config_dir)
+        for key, value in config.items():
+            manager.set_config_value(key, value)
+        session = make_session(
+            case, RebindableStream({}), model=spec, compaction_settings=CompactionSettings()
+        )
+        _capture_events(session)
+        watcher = process_watcher(config_dir)
+        subscribe(session, watcher)
+        try:
+            await _settle(session)
+            _EVENTS[id(session)].clear()
+            key, value = write
+            change = None
+            if local:
+                setting = settings_io.resolve_key(key)
+                assert setting is not None, key
+                settings_io.write_setting(manager, setting, value)
+            else:
+                write_from_another_process(config_dir, key, value)
+                change = watcher.poll_now()
+            await _settle(session)
+            return change, _notices(session)
+        finally:
+            await session.dispose()
+
+    pair = {"hosting": MODEL.provider, "model_name": MODEL.model_id}
+    #: A spec in the M2/Q2 shape: the level it CARRIES is not the one it was
+    #: seeded with, i.e. the session holds a deliberate pick.
+    deliberate = MODEL.model_copy(
+        update={
+            "reasoning_effort": "low",
+            "reasoning_default_effort": "high",
+            "reasoning_efforts": ("low", "medium", "high"),
+        }
+    )
+
+    # 1. An unrelated write: the pair is re-stated (the key was not on disk
+    #    before) and no effort key moved. Silent.
+    change, notices = await drive(
+        "unrelated", config={"hosting": MODEL.provider}, spec=MODEL, write=("model_name", "m")
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_name"})
+    assert notices == [], notices
+
+    # 2. The same write against a session holding a DELIBERATE level: still
+    #    silent. This is Q2 exactly — the round-1 rule compared values and
+    #    announced here because "low" != "".
+    change, notices = await drive(
+        "deliberate",
+        config={"hosting": MODEL.provider},
+        spec=deliberate,
+        write=("model_name", "m"),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_name"})
+    assert notices == [], notices
+
+    # 3. Effort-only, to a rung: announced, naming the member and the value.
+    change, notices = await drive(
+        "rung",
+        config={**pair, "model_effort": ""},
+        spec=MODEL,
+        write=("model_effort", "medium"),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_effort"})
+    assert notices == [
+        "reasoning effort default changed for new sessions (medium); /model saved adopts it here"
+    ], notices
+
+    # 4. Effort-only, to auto (the stored empty string), on a session sitting on
+    #    the SEEDED level: announced, and named `auto`. This is Q3 — the round-1
+    #    rule was silent here, which is the direction that loses a change.
+    change, notices = await drive(
+        "auto",
+        config={**pair, "model_effort": "medium"},
+        spec=MODEL,
+        write=("model_effort", ""),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_effort"})
+    assert notices == [
+        "reasoning effort default changed for new sessions (auto); /model saved adopts it here"
+    ], notices
+
+    # 5. The same change written by THIS process's facade: silent, because the
+    #    surface that wrote it printed its own receipt (#785's source gate).
+    _change, notices = await drive(
+        "local", config=pair, spec=MODEL, write=("model_effort", "high"), local=True
+    )
+    assert notices == [], notices
+
+    # 6. The model pair itself moved: the #785 notice, unchanged — the session
+    #    keeps its model and hears that new conversations will not.
+    change, notices = await drive("pair", config=pair, spec=MODEL, write=("model_name", "other"))
+    assert change is not None
+    assert notices == [
+        "keeping test/m; default changed for new sessions. /model saved adopts it here"
+    ], notices

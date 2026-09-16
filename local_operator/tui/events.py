@@ -69,6 +69,7 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.session.runtime.types import EVENT_MUTE_DROP_TYPES
 from local_operator.tui.widgets.transcript import NoticeKind
 
 #: Streaming updates flush at ~30 fps (the coalesced cadence).
@@ -105,10 +106,18 @@ class TurnEnded(SessionEvent):
         context_tokens: int = 0,
         usage: Any = None,
         context_is_estimate: bool = False,
+        cut_off: bool = False,
     ) -> None:
         super().__init__()
         self.aborted = aborted
         self.error = error
+        #: True when the session CLASSIFIED this end as an involuntary cut-off
+        #: (``AgentEndEvent.cut_off_cause``). A distinct fact from ``aborted``,
+        #: and the only one that can tell a runtime death apart from the user's
+        #: own cancel: the taxonomy reports both as an aborted end, with the
+        #: cut-off carrying an error notice beside it. Consumers that need the
+        #: WORD (the stranded ledger cards) read this.
+        self.cut_off = cut_off
         self.context_tokens = context_tokens
         self.usage = usage
         self.context_is_estimate = context_is_estimate
@@ -575,6 +584,24 @@ class EventController:
         if parked == self._parked:
             return
         self._parked = parked
+        # The app-side drop above is the semantic contract; the DELIVERY
+        # underneath it is not free — measured ~0.26 ms per delivered frame,
+        # linear in frames/s, scaling with payload bytes (the frames carry the
+        # accumulated message), on top of the owner serialising each frame per
+        # connection. So the parked state is pushed DOWN to the wire as well:
+        # a viewer whose owner advertises ``event-mute-v1`` asks it to stop
+        # sending the same delta-grade types until reveal, which removes the
+        # socket read, JSON decode and deserialization entirely. Best-effort
+        # and idempotent — a viewer on an older owner, or a lost op, simply
+        # keeps paying the delivery the app-side drop already covers.
+        #
+        # NOT the cause of the open-vs-closed TYPING gap (see the docstring:
+        # the ceiling arm retired viewer-side gating as that class). This is a
+        # throughput/CPU fix for what the parked subscription literally sends.
+        session = self._session
+        set_mute = getattr(session, "set_event_mute", None)
+        if callable(set_mute):
+            set_mute(parked)
         if parked:
             # A parked controller must not hold a 30 Hz timer for text nobody
             # can see; the buffer it would flush is dropped below anyway.
@@ -765,6 +792,11 @@ class EventController:
                 context_tokens=(settled_context if settled_context is not None else context_tokens),
                 usage=usage,
                 context_is_estimate=settled_context is not None,
+                # The classifier's verdict, carried beside the outcome it
+                # rewrote: `_classify_cut_off` reports a cut-off as
+                # `aborted=False, error=<notice>`, so the fact that this was an
+                # involuntary stop exists nowhere else on the wire.
+                cut_off=bool(getattr(event, "cut_off_cause", "") or getattr(event, "cut_off", "")),
             )
         )
 
@@ -978,8 +1010,12 @@ class EventController:
     }
 
     #: Event types a PARKED source drops outright (see :meth:`set_parked`).
-    #: Grouped with ``_HANDLERS`` because both are class-level dispatch tables
-    #: read by ``_on_event``, and this file keeps its class constants together.
+    #: The ROLE split: this is the app-side half of the same contract the wire
+    #: mute enforces, and the definition is SHARED with the server
+    #: (``EVENT_MUTE_DROP_TYPES``, ``session/runtime/types.py``) so the two
+    #: halves cannot drift — a parked viewer whose owner still sent a frame
+    #: would pay delivery for it, and one whose owner stopped sending a frame
+    #: this set does NOT contain would lose state on reveal.
     #:
     #: MEMBERSHIP RULE, all three clauses required: the event carries a
     #: fragment of something in flight, the owner's ``live_events`` seed
@@ -1002,13 +1038,7 @@ class EventController:
     #: These three ARE the volume: at 12 streaming sessions they were ~229
     #: events/s of the traffic measured, against a handful per turn for
     #: everything above.
-    _PARKED_DROP_TYPES: frozenset[str] = frozenset(
-        {
-            "message_update",  # one per assistant token
-            "tool_execution_update",  # one per streamed tool-output chunk
-            "subagent_progress",  # one per child progress beat
-        }
-    )
+    _PARKED_DROP_TYPES: frozenset[str] = EVENT_MUTE_DROP_TYPES
 
     # -- flush timer --------------------------------------------------------
     def _request_flush_timer(self) -> None:

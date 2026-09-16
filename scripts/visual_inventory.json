@@ -47,7 +47,11 @@
       "long",
       "mixed"
     ],
-    "fallback_shot.py": [
+    "dock_band_shot.py": [
+      "failed",
+      "connecting"
+    ],
+  "fallback_shot.py": [
       "before",
       "after"
     ],
@@ -63,6 +67,10 @@
     ],
     "help_keys_shot.py": [
       "default"
+    ],
+    "liveness_shot.py": [
+      "info",
+      "sidebar"
     ],
     "model_picker_shot.py": [
       "default"

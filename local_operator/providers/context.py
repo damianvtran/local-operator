@@ -146,7 +146,12 @@ class ContextBinding:
 
 
 def bind_native_context(
-    request: ChatRequest, endpoint: str, protocol: str, scope: str | None, slope: float
+    request: ChatRequest,
+    endpoint: str,
+    protocol: str,
+    scope: str | None,
+    slope: float,
+    extra_native_tokens: int = 0,
 ) -> ChatRequest:
     """Finalize native admission after credentials and replay validity are known.
 
@@ -155,6 +160,15 @@ def bind_native_context(
     reported reasoning tokens. Google thought signatures are retained protocol
     bytes, but its thoughtsTokenCount measures generated work, not evidence of
     charged input on replay; never convert that output counter into input.
+
+    ``extra_native_tokens`` carries reasoning bytes the BODY BUILDER adds rather
+    than replays, and it is a parameter rather than a second calculation here
+    because the builder is the only layer that knows which turns it filled in:
+    a model that requires a reasoning echo gets a placeholder on every assistant
+    turn it has no reasoning for (``replay.REASONING_ECHO_PLACEHOLDER``), and the
+    API concatenates that echo into the context and bills it as input. Counting
+    it here keeps a request's calibration from silently under-counting what the
+    provider is about to read.
     """
     last_user = next(
         (
@@ -165,7 +179,7 @@ def bind_native_context(
         -1,
     )
     validity = []
-    reasoning = 0
+    reasoning = extra_native_tokens
     for index, message in enumerate(request.messages):
         native = replay_items(message, request.model, endpoint, protocol, scope)
         validity.append(native is not None)

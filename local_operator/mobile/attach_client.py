@@ -50,7 +50,12 @@ from local_operator.mobile.types import (
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import scan
-from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
+from local_operator.session.runtime.types import (
+    DESKTOP_WATCH_CAPABILITY,
+    EVENT_MUTE_CAPABILITY,
+    EXCLUSIVE_MOVE_CAPABILITY,
+    drain_phrase_for_frame,
+)
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -679,7 +684,7 @@ def _decode_quietly(data_b64: str) -> bytes:
 
 
 def find_runtime_record(
-    config_dir: Path, session_id: str
+    config_dir: Path, session_id: str, *, check_zombie: bool = True
 ) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
@@ -694,10 +699,17 @@ def find_runtime_record(
     ``(None, pid)`` means an owner exists but no usable record does (old
     binary, registrant failed to start): the caller degrades gracefully.
     ``(None, None)`` means no owner at all.
+
+    ``check_zombie`` is forwarded to :func:`resume.live_runtime_pid`, which owns
+    the decision and documents both modes. It is a parameter because this
+    function is on the engage loop's dense 10 ms path as well as on every attach
+    path, and only the former can afford to defer the proof: there the owner
+    answer can only cause a wait, while an attach turns it into a refusal the
+    user sees.
     """
     from local_operator.resume import live_runtime_pid
 
-    owner = live_runtime_pid(config_dir, session_id)
+    owner = live_runtime_pid(config_dir, session_id, check_zombie=check_zombie)
     if owner is None:
         return None, None
     best: SessionRecord | None = None
@@ -722,6 +734,50 @@ def find_runtime_record(
     return None, owner
 
 
+def dialable_record_exists(config_dir: Path, pid: int) -> bool | None:
+    """Whether ``pid`` publishes a record this build could dial.
+
+    `find_runtime_record` collapses two very different states into
+    ``(None, pid)``: an owner that publishes no usable record at all (an older
+    binary, or a registrant that failed to start), and the rebind race — a
+    record for that pid that is dialable but is still stamped with the
+    PREVIOUS ``session_id``, which that function's own docstring describes as a
+    state whose record "is returned anyway and the welcome projection's
+    identity check ... arbitrates". A caller about to tell the user the process
+    is an old one must therefore ask this rather than infer it from the tuple;
+    otherwise it reports a cause the code has not established and skips the
+    pacing the race asks for (review m3).
+
+    A WEDGED RECORD ANSWERS ``True``, because that is the whole of "could this
+    pid's record be dialled" (review round 3, MINOR-2). The registry has a
+    third state — the pid is alive and the heartbeat is older than
+    ``HEARTBEAT_TIMEOUT_S``, i.e. the owner is stuck — and `scan` keeps that
+    record for exactly the reason the redial exists: a stuck owner may recover
+    on its own, which is the transient the budget is sized to outlast. Asking
+    only for ``live`` made a wedged owner answer ``False``, so it earned the
+    older-process sentence AND skipped the pacing: a cause the code had not
+    established, on the one state a redial could have healed. ``stale`` (the
+    pid is gone) is the state that is genuinely absent, and it stays ``False``.
+
+    The threshold is ``2``, the same floor `find_runtime_record` uses to decide
+    a record is usable — deliberately NOT `FRONTEND_ATTACH_MIN_PROTOCOL`: the
+    question here is only "could this pid's record be dialled at all", and a
+    record below the frontend attach protocol is a case
+    `frontend_attach_refusal` already answers with its own sentence.
+
+    ``None`` when the registry could not be read at all. Not a plain bool on
+    purpose: a failed read is not evidence of absence, so the caller must pace
+    rather than refuse on it.
+    """
+    try:
+        for record, state in scan(config_dir):
+            if state in ("live", "wedged") and record.pid == pid and record.protocol >= 2:
+                return True
+    except OSError:
+        return None
+    return False
+
+
 class AttachClient:
     """One authenticated ``attach`` connection to a live session's registrant.
 
@@ -744,6 +800,7 @@ class AttachClient:
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
+        on_retiring: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
     ) -> None:
         self._surface = surface
@@ -773,6 +830,33 @@ class AttachClient:
         self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
+        #: Fired the moment a ``retiring`` frame ARRIVES, with the frame itself.
+        #: The op also sets the disconnect reason below, and that was the whole
+        #: of its original job — but the reason is only read when the socket
+        #: CLOSES, and on the drain rung the socket stays open until the
+        #: in-flight work is done (measured 26 s). A host that wants to say
+        #: anything to the operator before then has to hear it here; the frame's
+        #: ``draining`` field is the runtime's own verdict on whether refusals
+        #: are in force, and is the only honest source for that (QA round 3,
+        #: Q-1). Deliberately separate from ``on_disconnected`` for the same
+        #: reason: they are the start and the end of a handover, not one event.
+        self._on_retiring = on_retiring
+        #: The phrase THIS connection's drain published — ``LEAVING_ON_SIGNAL`` or
+        #: ``LEAVING_FOR_BUILD`` — or ``""`` while no draining frame has been
+        #: heard on it. Kept because the REFUSAL this connection is about to hand
+        #: back is decoded on this same client, and a runtime built before
+        #: ``error_trigger`` cannot say in the refusal which departure it is: the
+        #: only witness to that is the frame it published moments earlier, on
+        #: this socket. Without it the far side fell back to the build sentence
+        #: under a signal notice (agent review round 5, MINOR-1; UX round 5, U14;
+        #: design round 5, D11). Set from the frame and from nothing else, and only
+        #: from a frame that says ``draining`` — the same gate the host's notice
+        #: uses, so what the refusal quotes is what the operator was told. A
+        #: non-draining handover paints no notice and its phrase is therefore not
+        #: evidence for a refusal here; an idle handover CAN still race one, and
+        #: the raiser's own token (or the sentence that names no departure) is the
+        #: honest answer for it.
+        self._drain_phrase = ""
         self._frontend_epoch: str | None = None
         self._frontend_sequence: int | None = None
         self._reader: asyncio.StreamReader | None = None
@@ -782,6 +866,8 @@ class AttachClient:
         self._req_seq = 0
         self._session_id = ""
         self._attention_supported = False
+        self._event_mute_supported = False
+        self._exclusive_move_supported = False
         self._connected = False
 
     @property
@@ -791,6 +877,47 @@ class AttachClient:
     @property
     def supports_completion_ack(self) -> bool:
         return self.connected and self._attention_supported
+
+    @property
+    def supports_event_mute(self) -> bool:
+        """Whether this owner advertised ``EVENT_MUTE_CAPABILITY``.
+
+        Read from the RECORD, at dial, the way ``_attention_supported`` is:
+        the owner's build cannot change while it lives, and a record is
+        rewritten on every start, so one read at connect is complete. An
+        owner without the string is exactly the pre-mute behaviour — it keeps
+        sending every frame and the parked controller keeps discarding them —
+        so the caller must gate the send on this and never send blind.
+        """
+        return self.connected and self._event_mute_supported
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether this owner advertised ``EXCLUSIVE_MOVE_CAPABILITY``.
+
+        Read from the RECORD at dial, like ``supports_event_mute``: the owner's
+        build cannot change while it lives. An owner without the string is one
+        that would IGNORE the ``exclusive`` field on ``retire_now`` and retire
+        unguarded — so the caller must gate the send on this and refuse instead,
+        which is what makes the desktop move fail CLOSED against old owners
+        rather than silently running without the sibling-viewer guarantee.
+        """
+        return self.connected and self._exclusive_move_supported
+
+    async def set_event_muted(self, muted: bool) -> bool:
+        """Ask the owner to stop (``True``) or resume delta-grade event frames.
+
+        Best-effort by contract: the mute is an optimisation over the parked
+        controller's app-side discard, so a refusal or a dead connection here
+        costs delivery, never correctness. Returns whether the owner acked;
+        callers that cannot wait (a synchronous park toggle) run this in a
+        task and ignore the result. The op is idempotent, which is what makes
+        the reconnect re-assert legal rather than a special case.
+        """
+        if not self.supports_event_mute:
+            return False
+        await self._request("event_mute" if muted else "event_unmute")
+        return True
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Dial, authenticate as an attach client, and verify identity.
@@ -805,7 +932,13 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        # A reconnect dials what may be a different conversation (the welcome
+        # below fails the identity check when it is), so no phrase the previous
+        # one published may survive into this one's refusals.
+        self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
+        self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -891,9 +1024,18 @@ class AttachClient:
                 except ValueError as exc:
                     # ``StreamReader.readline`` raises ValueError (via
                     # LimitOverrunError) when one frame exceeds the connection's
-                    # ``limit``. It is NOT a transport failure and it is not
-                    # recoverable by reading on: the oversized line stays in the
-                    # buffer, so every subsequent read raises the same way.
+                    # ``limit``. It is NOT a transport failure, and it is not
+                    # recoverable by SKIPPING: the raise DOES consume the
+                    # offending bytes (``readline`` drains through the
+                    # separator when it found one and clears the buffer when it
+                    # did not — CPython ``asyncio/streams.py``; the runtime's own
+                    # inbound guard relies on exactly that), so later reads would
+                    # continue, but the frame it dropped is one this client
+                    # cannot reconstruct: a projection carries the session's
+                    # identity, a sync its canonical state, and a delta its
+                    # sequence. Continuing on state known to be incomplete is
+                    # drift by this client's own contract, so the overrun is
+                    # reported and the pump ends.
                     #
                     # Before this it fell through as an unhandled task exception
                     # that killed the pump silently, and the host — which only
@@ -998,6 +1140,25 @@ class AttachClient:
                     # already reads that string. The host goes cold at once
                     # and re-engages rather than chasing a record for 8 s.
                     reason = RETIRING_REASON
+                    # AND the frame is an event in its own right, straight away:
+                    # on the drain rung the EOF is NOT moments away (the runtime
+                    # stays until its work is done), and a host that only heard
+                    # the reason at the close learned of the handover after it
+                    # was over. A callback failure must not kill the pump, same
+                    # contract as the event relay above.
+                    #
+                    # REMEMBERED BEFORE IT IS ANNOUNCED, because every refusal
+                    # this connection hands back arrives after this frame and
+                    # some of them cannot name their own departure: the phrase is
+                    # the far side's evidence for the trigger (see
+                    # ``_raise_for_reply_error``).
+                    if frame.get("draining"):
+                        self._drain_phrase = drain_phrase_for_frame(frame)
+                    if self._on_retiring is not None:
+                        try:
+                            self._on_retiring(frame)
+                        except Exception:  # noqa: BLE001
+                            continue
                 elif op in ("ack", "error", "result"):
                     req = frame.get("req")
                     future = self._pending.pop(req, None)
@@ -1056,16 +1217,43 @@ class AttachClient:
 
     # -- requests ---------------------------------------------------------------
 
+    def _raise_for_reply_error(self, reply: dict[str, Any]) -> None:
+        """Turn an error frame into the exception this client raises for it.
+
+        Shared by every op reader, because the mapping is a protocol fact (an
+        admission refusal is a typed error, anything else is the owner's own
+        sentence) and a second copy of it is a second place to forget one.
+
+        AN INSTANCE METHOD BECAUSE ONE ARGUMENT IS THIS CONNECTION'S OWN: a
+        retirement refusal from a runtime older than ``error_trigger`` names no
+        departure in the frame, and the phrase this client heard on the draining
+        frame is the only thing that can place it. Passed as evidence, never as
+        text — it keys a table in ``session.errors``.
+        """
+        if reply.get("op") != "error":
+            return
+        from local_operator.session.errors import admission_error
+
+        # ``getattr``, because this decoder's callers include CONSTRUCTION-FREE
+        # doubles: three cells drive a real op over ``object.__new__(AttachClient)``
+        # with ``_request_frame`` stubbed, so the phrase this connection would
+        # have heard is absent rather than empty. Absent evidence and "this
+        # frame named no trigger" are the same thing to the decoder, and a
+        # double must not have to know the member exists to exercise the path.
+        known = admission_error(
+            str(reply.get("error_code", "")),
+            reply.get("error_count"),
+            reply.get("error_trigger"),
+            getattr(self, "_drain_phrase", ""),
+        )
+        if known is not None:
+            raise known
+        raise RuntimeError(str(reply.get("message", "request failed")))
+
     async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
         reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
-        if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+        self._raise_for_reply_error(reply)
         return str(reply.get("detail", ""))
 
     async def request_ack_with_duplicate(self, op: str, **fields: Any) -> tuple[str, bool]:
@@ -1080,13 +1268,7 @@ class AttachClient:
         which reads as False — the pre-idempotency behaviour.
         """
         reply = await self._request_frame(op, **fields)
-        if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+        self._raise_for_reply_error(reply)
         return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
 
     async def _request_frame(
@@ -1160,12 +1342,9 @@ class AttachClient:
         finally:
             self._pending.pop(req, None)
         if reply.get("op") == "error":
-            from local_operator.session.errors import admission_error
-
-            known = admission_error(str(reply.get("error_code", "")), reply.get("error_count"))
-            if known is not None:
-                raise known
-            raise RuntimeError(str(reply.get("message", "request failed")))
+            # The shared reader, so the phrase this connection heard is applied
+            # here too rather than only on the ops that call it as a method.
+            self._raise_for_reply_error(reply)
         return reply.get("data")
 
     async def prompt(
@@ -1229,10 +1408,24 @@ class AttachClient:
     async def abort(self) -> str:
         return await self._request("abort")
 
-    async def acknowledge_attention(self, token: str) -> str:
+    async def acknowledge_attention_state(self, token: str) -> dict[str, Any]:
+        """Acknowledge a completion and return the state the OWNER computed.
+
+        The follower's own projection cannot answer "did my receipt land?": the
+        owner publishes it on the event queue while this ack is written
+        directly, so the ack is resolved a whole writer ahead of the state it
+        produced and an honest receipt reads as a lost one (agent review round
+        1, R4). The owner therefore hands the state back ON the ack (see
+        ``AckDetail`` in ``session.runtime.server``); an owner older than that
+        field sends none, and an empty mapping is the honest answer -- the
+        caller must treat it as INCONCLUSIVE rather than as a verdict.
+        """
         if not self._attention_supported:
             raise RuntimeError("update the owner to acknowledge completions")
-        return await self._request("acknowledge_attention", completion_token=token)
+        reply = await self._request_frame("acknowledge_attention", completion_token=token)
+        self._raise_for_reply_error(reply)
+        attention = reply.get("attention")
+        return dict(attention) if isinstance(attention, dict) else {}
 
     async def request_stop(self) -> str:
         """Ask the owner to stop itself — the follower's bare ``/stop``.
@@ -1283,12 +1476,14 @@ class AttachClient:
         resume in the seconds after ``lop-update`` binds before the runtime
         has noticed the change, and without this the viewer would either wait
         for it or warn. As with ``retire_if_pristine`` the answer is the
-        runtime's ("retiring", or "kept: …"); an owner too old to know the op
-        answers the unknown-op error, which the caller reads as kept.
+        runtime's (``retiring`` — optionally followed by the label of the build
+        it is leaving FOR, which a caller may quote back — or ``kept: …``); an
+        owner too old to know the op answers the unknown-op error, which the
+        caller reads as kept.
         """
         return await self._request("refresh_if_idle")
 
-    async def retire_now(self) -> str:
+    async def retire_now(self, *, exclusive: bool = False) -> str:
         """Ask an IDLE owner to retire so a successor can start elsewhere.
 
         ``/move``'s transport. The session's working directory is fixed when
@@ -1305,7 +1500,16 @@ class AttachClient:
         and refuses if work arrived. An owner too old to know the op answers the
         standard unknown-op error, which the caller surfaces as a refusal to
         move rather than moving anyway.
+
+        ``exclusive`` (default OFF, so every existing caller keeps the exact
+        legacy byte shape) asks the owner to honour the move only while no other
+        ACTUAL attach is registered, under its own admission fence. The caller
+        MUST gate this on :attr:`supports_exclusive_move` first: an old owner
+        ignores the unknown field and retires anyway, so sending it blind would
+        buy the sibling-viewer guarantee without the owner enforcing it.
         """
+        if exclusive:
+            return await self._request("retire_now", exclusive=True)
         return await self._request("retire_now")
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
@@ -1375,6 +1579,29 @@ class AttachClient:
         """
         return await self._request_payload("credential", action=action, key=key, value=value)
 
+    async def mcp_credentials(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Dedicated value transport: never a slash/receipt payload."""
+        return await self._request_payload("mcp_credentials", body=body)
+
+    async def variables(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> Any:
+        """Run one code-memory verb on the OWNER's live eval kernel.
+
+        A payload op like ``credential``, and for the same reason: the answer is
+        the data itself (a variable list, a refusal with its own code) rather
+        than a receipt line, and the ``busy``/``unsupported`` states must reach
+        the panel as states — a receipt-shaped reply would have to encode them in
+        prose the front end then parses.
+
+        The session is not named on the wire: the owner answers for the session
+        it IS, so naming it here could only ever address a DIFFERENT namespace
+        than the one this viewer is attached to.
+        """
+        return await self._request_payload(
+            "variables", action=action, key=key, value=value, type=value_type
+        )
+
     async def register_secret_redaction(self, value: str) -> None:
         """Ask the owner to register ONE §6 value with its own redactor.
 
@@ -1413,8 +1640,18 @@ class AttachClient:
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         return await self._request("complete_aside", deadline_s=ASIDE_DEADLINE_S, turns=turns)
 
-    async def set_model(self, provider: str, model_id: str) -> str:
-        return await self._request("set_model", provider=provider, model_id=model_id)
+    async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
+        """Select a model on the owner, at ``effort`` when one was chosen.
+
+        The key is OMITTED when no level was chosen rather than sent as null, so
+        to an owner that predates it the frame is byte-identical to the one it
+        has always received (the dispatch reads the key it knows and ignores
+        the rest, and there is no protocol bump for an optional field).
+        """
+        fields: dict[str, Any] = {"provider": provider, "model_id": model_id}
+        if effort:
+            fields["effort"] = effort
+        return await self._request("set_model", **fields)
 
     async def set_effort(self, effort: str) -> str:
         return await self._request("set_effort", effort=effort)
@@ -1460,6 +1697,10 @@ class AttachClient:
         ``AttachedSession`` is that case.
         """
         self._on_disconnected = lambda _reason: None
+        # The frame hook is dropped with it: an abandoned connection's frames
+        # are not this host's to hear, and a late ``retiring`` from the socket
+        # it refused to keep would paint a handover it is no longer part of.
+        self._on_retiring = None
         self.close()
 
     def close(self) -> None:

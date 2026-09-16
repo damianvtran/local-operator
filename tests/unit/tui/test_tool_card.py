@@ -22,6 +22,7 @@ hexes so a ramp change moves one file, not this suite.
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from types import SimpleNamespace
 from typing import Any, cast
@@ -36,6 +37,7 @@ from textual.app import App, ComposeResult
 from local_operator.tui import bindings
 from local_operator.tui import glyphs as glyph_mod
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.app import _first_line
 from local_operator.tui.glyphs import (
     NERD_TOOL_ICONS,
     PLAIN_ICON_DEFAULT,
@@ -59,15 +61,26 @@ from local_operator.tui.widgets.tool_card import (
     LIVE_HEADER_RUNNING,
     LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
+    OUTPUT_INDENT,
+    QUEUED_NOTICE,
+    REASON_MAX_CELLS,
+    REASON_MAX_ROWS,
     ROW_INDENT,
     ROW_INDENT_MIN_WIDTH,
     RUNNING_NOTICE,
+    START_UNKNOWN,
     TERSE_NO_OUTPUT_NOTICE,
+    TERSE_QUEUED_NOTICE,
     ToolCard,
     _category_element,
     compact_path,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    TranscriptView,
+    wrap_cells,
+)
+from local_operator.web_fetch.failure import FetchFailure, describe, retry_after_note
 from tests.unit.tui.conftest import TCSS_PATH, StyledTranscriptApp
 
 #: Every width the one-line guarantee is checked at: pathological narrow,
@@ -571,6 +584,577 @@ def test_web_fetch_non_2xx_renders_error_treatment() -> None:
     assert _style_at(card._build_content(120), "⚠ HTTP 403").color == Color.parse(danger)
 
 
+def test_a_blocked_card_names_the_vendor_and_the_attempt_count() -> None:
+    """Design review round 1, D1 + D2 + D4 + DN2, on the operator's own case.
+
+    Before this round the card printed the vendor-less generic copy in its danger
+    row while the row above it said "blocked by Akamai" — two wordings of one
+    fact, with the *name* only on the line the card throws away — and the
+    successfully-escalated fetch was character-for-character a one-attempt
+    success. It also reported the discarded challenge page's byte count on a row
+    whose line count described the replacement.
+    """
+    url = "https://www.shoppersdrugmart.ca/?lang=en&query=power+bar"
+    preview = (
+        f"⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content. {url}\n"
+        "text · text/html · cache miss · 2 attempts (default, browser-profile)\n\n"
+        "The origin's bot protection refused this request. A browser-shaped retry was "
+        "also refused, so no headless fetch of this URL will succeed.\n"
+        "Origin reference: 18.4b182117.1789250183.345ea6ea\n"
+        "Next step: use the `browser` tool on this URL.\n"
+        f"{url}"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_done(
+        preview,
+        {
+            "url": url,
+            "final_url": url,
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "bytes": 382,
+            "lines": 4,
+            "ok": False,
+            "http_error": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "failure_kind": "blocked",
+            "block_vendor": "akamai",
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(120).plain
+
+    # D2: ONE danger row, and it is the one that names the vendor.
+    assert content.count("⚠ HTTP 403 Forbidden") == 1
+    assert "blocked by Akamai bot protection" in content
+    assert "error/block page, not page content" not in content
+    # D1: the count and the identity change §3.6 promises are on the card.
+    assert "2 attempts (default, browser-profile)" in content
+    # DN2: no byte count for a replaced body — it describes the discarded page.
+    assert "382 B" not in content
+    # D7: the summary leads the counts, so the clip zone can only take a count.
+    assert "text · 2 attempts (default, browser-profile) · 4 lines" in content
+
+    # D4: the actionable sentence is the anchor, the opaque reference recedes,
+    # and the prose itself is NOT dim (3.32:1 on the light error-tinted panel).
+    built = card._build_content(120)
+    assert _triplet(_style_at(built, "Next step:").color) == _triplet(
+        Style(color=theme_mod.semantic_color("signal")).color
+    )
+    assert _triplet(_style_at(built, "Origin reference:").color) == _triplet(
+        Style(color=theme_mod.semantic_color("dim")).color
+    )
+    assert _triplet(_style_at(built, "The origin's bot protection").color) == _triplet(
+        Style(color=theme_mod.semantic_color("muted")).color
+    )
+
+
+def test_a_terminal_failure_card_is_the_same_visual_family() -> None:
+    """Design review round 1, D5 + D3: a stall is a FETCH card, not a bash row.
+
+    A terminal failure carries no ``render_method``/``final_url``, so this card
+    used to fall through to the generic output body: no ⚠ lead, transcript ink,
+    and a ``Fetched:`` row with no status — two failure shapes of one tool reading
+    as two different tools. ``failure_kind`` is the key both carry.
+
+    D3 rides along here: the statement is fitted to the card's own width at paint
+    time, so it is one row where there is room and never clipped mid-word where
+    there is not.
+    """
+    url = "https://stalls.example/x"
+    explanation = (
+        "A browser-shaped retry was tried as well, since a stalled request is "
+        "frequently a silent block."
+    )
+    text = (
+        "Read timed out after 20.0s — the origin accepted the connection but never "
+        "sent a response (2 attempts: default, browser-profile)\n"
+        f"{explanation}\n"
+        "Next step: use the `browser` tool on this URL. It drives the real browser "
+        "(a write-tier, approval-gated action), which is the only path that clears "
+        "an interactive challenge.\n"
+        f"{url}"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.restore(
+        state="error",
+        result_text=text,
+        error=text.splitlines()[0],
+        details={
+            "url": url,
+            "cache": "miss",
+            "failure_kind": "stall",
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(100).plain
+
+    # The fetch family: a structured Fetched row and a ⚠ lead…
+    assert "Fetched: " + url in content
+    assert "⚠ Read timed out after 20.0s" in content
+    # …and the lead is not repeated in the body (it was promoted, like the
+    # response family's lead is stripped).
+    assert content.count("Read timed out after 20.0s") == 1
+
+    # D3 at 80 columns: every row of the sentence is painted in full — no
+    # mid-word ellipsis, which is what the 76-cell hard wrap produced.
+    narrow = card._build_content(80).plain.splitlines()
+    explained = [row for row in narrow if "bot " in row or "silent block" in row]
+    assert explained
+    assert all("…" not in row for row in explained)
+    # D3 at 150: the sentence fits ONE row, because the wrap follows the card's
+    # width instead of stopping at a constant 76 cells.
+    wide = card._build_content(150).plain.splitlines()
+    assert any(explanation in row for row in wide)
+
+
+def test_the_reflow_permission_belongs_to_our_prose_only() -> None:
+    """Design review round 2, D6 — the cause, asserted head-on.
+
+    The permission was keyed on ``isinstance(failure_kind, str)``, which is true
+    for EVERY classified non-2xx, so a 404/500's ORIGIN body — the bytes
+    ``service.py`` keeps verbatim on purpose — began being re-wrapped where
+    round 1 had proved the frame byte-identical. A body may only be reflowed when
+    it is OUR prose: the replaced challenge statement, or a failure that got no
+    response at all. The predicate is exactly the promotion test beside it.
+    """
+
+    def permission(details: dict[str, Any]) -> bool:
+        card = ToolCard("t", "web_fetch", {"url": "https://walled.example/x"})
+        card.mark_done("body", details)
+        return card._fetch_statement
+
+    def shape(**overrides: Any) -> dict[str, Any]:
+        # ``_fetch_result_output`` needs a URL to build any header row at all, so
+        # every fixture carries one — the flag is only ever set on a card whose
+        # fetch branch ran.
+        base: dict[str, Any] = {
+            "url": "https://walled.example/x",
+            "final_url": "https://walled.example/x",
+            "cache": "miss",
+        }
+        base.update(overrides)
+        return base
+
+    # The origin's own response, whatever its class: never reflowed.
+    for kind, status in (("client", 404), ("server", 500), ("ratelimit", 429)):
+        assert (
+            permission(
+                shape(
+                    status=status,
+                    failure_kind=kind,
+                    render_method="markdownify",
+                    http_error=True,
+                )
+            )
+            is False
+        ), kind
+    # Our prose: the replaced challenge body and a no-response diagnosis.
+    assert permission(shape(failure_kind="blocked", render_method="text")) is True
+    assert permission(shape(failure_kind="stall")) is True
+
+
+def test_a_404_body_is_painted_exactly_as_it_arrived() -> None:
+    """D6, on the pixels: the wrap permission cannot touch the 404 body.
+
+    Asserted as a DIFF against the same card with the permission forced off, so
+    this test fails on any future change that lets the flag reach an origin body
+    — not just on the specific re-wrap the designer caught.
+    """
+    preview = (
+        "⚠ HTTP 404 Not Found — this is an error/block page, not page content.\n"
+        "markdownify · text/html · cache miss\n\n"
+        "| /guide/old-page | /guide/new-page | the 3.0 tree; the redirect table keeps 90 days |\n"
+        "    GET /guide/old-page -> 301 https://docs.example.com/guide/new-page\n"
+    )
+    details = {
+        "url": "https://docs.example.com/x",
+        "final_url": "https://docs.example.com/x",
+        "status": 404,
+        "content_type": "text/html",
+        "render_method": "markdownify",
+        "cache": "miss",
+        "bytes": 512,
+        "lines": 2,
+        "ok": False,
+        "http_error": True,
+        "failure_kind": "client",
+    }
+    card = ToolCard("t", "web_fetch", {"url": details["url"]})
+    card.mark_done(preview, details)
+    card.toggle_expanded()
+    shipped = card._build_content(60).plain
+    rows = shipped.splitlines()
+
+    # One row per origin line, clipped like every other fixed-width row: the
+    # route line keeps its indent and the table stays ONE row (the re-wrap split
+    # it into three, one of them a bare ``|``).
+    assert sum(1 for row in rows if row.strip().startswith("|")) == 1
+    route = [row for row in rows if row.strip().startswith("GET /guide/old-page")]
+    assert len(route) == 1
+    # ONE row: the URL the re-wrap pushed onto a second row is still on the
+    # route's own row, and the indent is intact in front of it.
+    assert "-> 301" in route[0] and "https://docs" in route[0]
+    assert route[0].startswith("      GET /guide/old-page")
+
+    # And the flag is what gates it: forcing it ON is the D6 defect, so the
+    # shipped frame is provably the un-reflowed one rather than a coincidence of
+    # the fixture.
+    card._fetch_statement = True
+    assert card._build_content(60).plain != shipped
+    card._fetch_statement = False
+    assert card._build_content(60).plain == shipped
+
+
+def test_the_escalation_survives_the_narrow_rendered_row() -> None:
+    """Design review round 2, D7 — the live medium.com numbers at 80 columns.
+
+    The summary was appended last, so a large escalated page clipped it first:
+    ``Rendered: markdownify · 800 lines · 51.8 KB · 2 attempts (default,
+    brow…``. The identity change is the fact D1 exists for, so it leads the row
+    after the method and only a count can be dropped.
+    """
+    card = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    card.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss · "
+        "2 attempts (default, browser-profile)\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 53067,
+            "lines": 800,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    card.toggle_expanded()
+    row = next(
+        line.strip()
+        for line in card._build_content(80).plain.splitlines()
+        if line.strip().startswith("Rendered:")
+    )
+    assert "2 attempts (default, browser-profile)" in row
+    # Order: the summary is not the trailing field, so the clip can only eat a
+    # count. At the standard width the byte count is the field that goes.
+    assert row.index("2 attempts") < len(row)
+    assert "Rendered: markdownify · 2 attempts (default, browser-profile) · 800 lines" in row
+
+
+def test_a_no_response_card_paints_no_rendered_row_and_d7_ordering_holds() -> None:
+    """Design review round 3, D12, and the D7 fact it must not break.
+
+    Moving the attempt summary so it could LEAD a narrowed success row (D7) also
+    let it stand alone on a card with no field of its own: a terminal no-response
+    failure has no ``render_method``/``lines``/``bytes``, so the row claimed
+    ``Rendered: 2 attempts (default, browser-profile)`` on a fetch that rendered
+    nothing AND repeated the ``(2 attempts: …)`` clause the ``⚠`` lead already
+    carried one row up. Both cards are asserted here because they are one
+    decision — where the summary may ride — and a guard that fixed one by
+    breaking the other has to fail this test.
+    """
+    url = "https://stalls.example/x"
+    # The preview is composed by the engine's OWN ``describe`` (the shipped path
+    # for a terminal failure), not re-typed here: the promoted ⚠ lead is what
+    # carries the attempt clause, and a hand-written body without it would test a
+    # card the app never paints.
+    stall = ToolCard("t", "web_fetch", {"url": url})
+    stall.restore(
+        state="error",
+        result_text=describe(
+            FetchFailure(
+                kind="stall",
+                retryable=False,
+                detail=(
+                    "read timed out after 9.6s — the origin accepted the connection "
+                    "but never sent a response"
+                ),
+            ),
+            attempts=2,
+            profiles=("default", "browser"),
+            url=url,
+        ),
+        error="Read timed out after 9.6s",
+        details={
+            "url": url,
+            "cache": "miss",
+            "failure_kind": "stall",
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "suggested_tool": "browser",
+        },
+    )
+    stall.toggle_expanded()
+    stalled = stall._build_content(100).plain
+    # The false row is gone…
+    assert "Rendered:" not in stalled
+    # …and the escalation is still stated, exactly once, by the promoted lead.
+    # Normalised first: the lead reflows at 100 columns, so the clause straddles
+    # a row boundary as ``(2\n  attempts: …)``.
+    flat = " ".join(stalled.split())
+    assert flat.count("(2 attempts: default, browser-profile)") == 1
+
+    # D7, re-pinned on a RESPONSE-bearing card: the summary leads the row's
+    # counts, so a narrow clip can only ever take a count.
+    ok = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    ok.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 53067,
+            "lines": 800,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    ok.toggle_expanded()
+    rendered = next(
+        row.strip()
+        for row in ok._build_content(80).plain.splitlines()
+        if row.strip().startswith("Rendered:")
+    )
+    assert rendered.startswith("Rendered: markdownify · 2 attempts (default, browser-profile)")
+
+
+def test_the_retry_after_note_reflows_while_origin_bytes_still_clip() -> None:
+    """Design review round 3, D13, and the D6 boundary it must not move.
+
+    On a 503 carrying ``Retry-After`` the §3.4 sentence is OUR prose, but it
+    arrives in the BODY beside the origin's own bytes, where the painter may not
+    reflow anything (D6). Painted with the body's clip rule it read
+    ``…the wait was not spen…`` at 80 columns and lost exactly the clause it
+    exists for. It takes the wrap path per line, recognised by the lead
+    ``failure.py`` exports, and keeps the body ink because the terminal shape of
+    the same sentence rides the statement path in ``muted`` — the origin body on
+    the next row still clips, which is the boundary.
+    """
+    url = "https://api.example.com/v1/orders"
+    note = retry_after_note(600.0)
+    origin_body = (
+        "<html><body><h1>503 Service Unavailable</h1><p>The orders service is "
+        "draining and cannot take new work until the pool refills.</p></body></html>"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_failed(
+        "⚠ HTTP 503 Service Unavailable — error/block page, not page content.",
+        result_text=(
+            "⚠ HTTP 503 Service Unavailable — error/block page, not page content. "
+            f"{url}\ntext · text/html · cache miss · 1 attempts\n"
+            "(The body below is the error response, not the requested page.)\n"
+            f"{note}\n\n{origin_body}"
+        ),
+        details={
+            "url": url,
+            "final_url": url,
+            "status": 503,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "bytes": 612,
+            "lines": 1,
+            "ok": False,
+            "http_error": True,
+            "attempts": 1,
+            "failure_kind": "server",
+            "retry_after_s": 600.0,
+        },
+        measured_s=0.4,
+    )
+    card.toggle_expanded()
+
+    narrow = card._build_content(80).plain.splitlines()
+    start = next(
+        index for index, row in enumerate(narrow) if row.strip().startswith("The origin asked")
+    )
+    # The sentence reflows instead of clipping: the lead opens it and the last
+    # row carries the clause the note exists for.
+    note_rows: list[str] = []
+    for row in narrow[start:]:
+        if not row.strip():
+            break
+        note_rows.append(row.strip())
+    assert len(note_rows) >= 2
+    joined = " ".join(note_rows)
+    assert "the wait was not spent inside this call." in joined
+    assert "…" not in joined
+
+    # The origin body's own row is untouched by the permission: still clipped.
+    body_rows = [row.strip() for row in narrow if row.strip().startswith("<html>")]
+    assert body_rows
+    assert body_rows[0].endswith("…")
+    assert "draining and cannot take" not in body_rows[0]
+
+    # Ink: the same sentence in its terminal shape rides ``muted``, so the
+    # response-bearing shape must not disagree about it.
+    built = card._build_content(80)
+    assert _triplet(_style_at(built, "The origin asked us to wait").color) == _triplet(
+        Style(color=theme_mod.semantic_color("muted")).color
+    )
+
+    # At 100 columns the sentence fits on its own row whole.
+    wide = card._build_content(100).plain.splitlines()
+    wide_note = [row.strip() for row in wide if row.strip().startswith("The origin asked")]
+    assert len(wide_note) == 1
+    assert wide_note[0].endswith("the wait was not spent inside this call.")
+
+    # The permission is structural, not a bare prefix match: an ORIGIN body that
+    # happens to begin with the same sentence, on a failure that reported NO
+    # interval, is still clipped. Without the ``retry_after_s`` precondition a
+    # line of origin bytes could be reflowed, which is the D6 defect.
+    echo = ToolCard("t", "web_fetch", {"url": url})
+    echo.mark_failed(
+        "⚠ HTTP 503 Service Unavailable — error/block page, not page content.",
+        result_text=(
+            "⚠ HTTP 503 Service Unavailable — error/block page, not page content. "
+            f"{url}\ntext · text/html · cache miss\n"
+            "(The body below is the error response, not the requested page.)\n\n"
+            f"{note} The origin quoted our own sentence back at us, at length.\n"
+            "and then some more of its own body, long enough to clip as well."
+        ),
+        details={
+            "url": url,
+            "final_url": url,
+            "status": 503,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "ok": False,
+            "http_error": True,
+            "attempts": 1,
+            "failure_kind": "server",
+        },
+        measured_s=0.4,
+    )
+    echo.toggle_expanded()
+    echoed = echo._build_content(80).plain.splitlines()
+    echoed_note = [row.strip() for row in echoed if row.strip().startswith("The origin asked")]
+    assert len(echoed_note) == 1
+    assert echoed_note[0].endswith("…")
+    assert "quoted our own sentence back" not in echoed_note[0]
+
+
+def test_the_classified_danger_row_wraps_at_seventy_columns() -> None:
+    """Design review round 2, D8.
+
+    ``⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content.``
+    is 74 cells against the 58-cell generic row it replaced, so at 70 columns it
+    used to clip mid-sentence where the old row fitted whole. A card headline is
+    a sentence, not a fixed-width ledger cell, so it reflows like the promoted
+    terminal lead.
+    """
+    url = "https://www.shoppersdrugmart.ca/?lang=en&query=power+bar"
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_done(
+        f"⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content. {url}\n"
+        "text · text/html · cache miss · 2 attempts (default, browser-profile)\n\n"
+        "The origin's bot protection refused this request.\n"
+        "Next step: use the `browser` tool on this URL.\n",
+        {
+            "url": url,
+            "final_url": url,
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "lines": 2,
+            "ok": False,
+            "http_error": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "failure_kind": "blocked",
+            "block_vendor": "akamai",
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    rows = [row.strip() for row in card._build_content(70).plain.splitlines()]
+    start = next(i for i, row in enumerate(rows) if row.startswith("⚠ HTTP 403"))
+    # The headline is a sentence, so it takes the next row: the whole clause is
+    # painted and nothing is elided, where the clipped row ended
+    # ``…blocked by Akamai bot protection, not page…``.
+    danger = rows[start : start + 2]
+    assert danger[0].startswith("⚠ HTTP 403 Forbidden — blocked by Akamai")
+    assert "bot protection, not page content." in " ".join(danger)
+    assert all("…" not in row for row in danger)
+
+
+def test_the_attempt_summary_wears_signal_ink() -> None:
+    """Design review round 2, D9, reconciled with D4's one rule.
+
+    The row's metadata stays ``dim``; the attempt summary is the actionable
+    escalation — the reason this fetch succeeded — and the panel's ``dim``
+    measures 3.32:1 on the light error tint, below the body floor. One rule: the
+    sentence a reader may act on is ``signal``, the metadata recedes.
+    """
+    card = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    card.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 1024,
+            "lines": 3,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    card.toggle_expanded()
+    built = card._build_content(100)
+    assert _triplet(_style_at(built, "· 2 attempts").color) == _triplet(
+        Style(color=theme_mod.semantic_color("signal")).color
+    )
+    assert _triplet(_style_at(built, "Rendered: markdownify").color) == _triplet(
+        Style(color=theme_mod.semantic_color("dim")).color
+    )
+
+
+def test_a_same_identity_retry_prints_only_the_count() -> None:
+    """Design review round 2, D10 on the card: ``2 attempts (default)`` → ``2 attempts``."""
+    card = ToolCard("t", "web_fetch", {"url": "https://flaky.example/x"})
+    card.mark_done(
+        "[200] https://flaky.example/x\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://flaky.example/x",
+            "final_url": "https://flaky.example/x",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 96,
+            "lines": 1,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "default"],
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(100).plain
+    assert "2 attempts" in content
+    assert "(default)" not in content
+
+
 def test_web_fetch_low_quality_note_surfaced_once() -> None:
     """The low-quality advisory appears, and (D4) only ONCE: the model-facing
     header carried a second `· sparse/JS-gated` copy that D1's header strip
@@ -839,7 +1423,7 @@ def test_the_notice_wears_the_apps_bracket_idiom() -> None:
     colour at all it is just ``a no output``. This slot is the direct remedy
     for "nothing happens when I click", so it has to be the least ambiguous
     thing on the row — and the app already owns a bracket for chrome."""
-    for notice in (NO_OUTPUT_NOTICE, RUNNING_NOTICE):
+    for notice in (NO_OUTPUT_NOTICE, RUNNING_NOTICE, QUEUED_NOTICE):
         assert notice.startswith("⟨") and notice.endswith("⟩"), notice
     # Same idiom as the affordance they stand in for, so the slot reads as
     # one slot rather than as two unrelated things sharing a cell range.
@@ -899,6 +1483,46 @@ def test_the_answer_outranks_the_summary_and_the_offer_does_not() -> None:
     # Paid for out of the summary, which is unchanged, still on screen, and
     # the least interesting thing on a row that produced no output.
     assert "plan" in row
+
+
+def test_the_queued_notice_does_not_repeat_the_state_word() -> None:
+    """The slot answers "why did nothing expand?"; the row already says which
+    wait it is in.
+
+    ``⟨queued⟩`` landed two cells from the status column's own ``queued``, so an
+    activation printed the same word twice — which reads as a repaint fault, not
+    as an answer (the same class the working line's docstring cites for
+    ``· compacting context…`` sitting above ``· compacting context``). The
+    family's word for this wait is the sibling of ``still running``: ``waiting``.
+    """
+    for width in WIDTHS:
+        card = ToolCard("q", "wake", {"text": "30m"})
+        card.set_composing(14, "wake")
+        card.mark_queued()
+        card.activate()
+        row = card._build_row(width).plain
+        # The state word is on the row once (or not at all, narrower than the
+        # status column can be drawn) — never twice. `⟨queued⟩` printed it
+        # twice on the rows wide enough to hold both runs.
+        assert row.count("queued") <= 1, (width, row)
+
+    # Where the slot has room for an answer at all, it IS the wait...
+    for width in (40, 80, 200):
+        card = ToolCard("q", "wake", {"text": "30m"})
+        card.set_composing(14, "wake")
+        card.mark_queued()
+        card.activate()
+        row = card._build_row(width).plain
+        assert QUEUED_NOTICE in row or TERSE_QUEUED_NOTICE in row, (width, row)
+
+    # ...and at the width the frames are read at, the answer and the state word
+    # are two different words: the wait, and the state.
+    card = ToolCard("q", "wake", {"text": "30m"})
+    card.set_composing(14, "wake")
+    card.mark_queued()
+    card.activate()
+    row = card._build_row(110).plain
+    assert QUEUED_NOTICE in row and "queued" in row, row
 
 
 def test_every_rung_of_the_notice_ladder_still_fits_the_card() -> None:
@@ -1424,6 +2048,347 @@ def test_expanded_output_never_widens_the_card() -> None:
     for width in WIDTHS:
         for line in card._build_content(width).plain.splitlines():
             assert cell_len(line) <= width, (width, len(line))
+
+
+#: The lead every row of a wrapped failure REASON carries after OUTPUT_INDENT:
+#: the card's own error glyph on the first row, two blanks on the continuations
+#: (design round 1, D1). It is a GLYPH rather than an ink step because the plain
+#: body paints its reason in `tool.output.error`, which IS the captured rows' ink
+#: on an error card (both resolve to `tint-danger`) — so ink separates nothing,
+#: and on a colourless terminal it would say nothing either.
+REASON_LEAD = f"{ICON_ERROR} "
+
+
+def _collapsed(text: str) -> str:
+    """The one-space form the collapsed row's status is stored in."""
+    return " ".join(text.split())
+
+
+def _reason_rows(body: list[str]) -> list[str]:
+    """The reason block's text: the body indent and the D1 lead removed.
+
+    Also asserts the lead SHAPE, because it is the one thing telling these rows
+    from the tool's captured bytes on a monochrome terminal.
+    """
+    rows: list[str] = []
+    for index, line in enumerate(body):
+        assert line.startswith(" " * OUTPUT_INDENT), (index, line)
+        text = line[OUTPUT_INDENT:]
+        lead = REASON_LEAD if index == 0 else " " * len(REASON_LEAD)
+        assert text.startswith(lead), (index, line)
+        rows.append(text[len(lead) :])
+    return rows
+
+
+def _reason_block(rows: list[str]) -> list[str]:
+    """The reason block's painted rows, located by its lead rather than by index.
+
+    The rows above it are the summary and the ARGUMENT block, and the argument
+    block's own row count moves with the width (it wraps the command, and drops
+    its label on a narrow frame), so the block is found by the lead it is the
+    only carrier of. The overflow marker carries the same two blanks, so it is
+    part of the block too.
+    """
+    start = next(
+        index
+        for index, line in enumerate(rows)
+        if line.startswith(" " * OUTPUT_INDENT + REASON_LEAD)
+    )
+    end = start + 1
+    while end < len(rows) and rows[end].startswith(" " * OUTPUT_INDENT + " " * len(REASON_LEAD)):
+        end += 1
+    return rows[start:end]
+
+
+def test_a_long_failure_reason_wraps_with_the_body_indent() -> None:
+    """The expansion is the ONLY state that can carry a long failure's cause.
+
+    The collapsed row's status cap is a fraction of the row that the reason
+    shares with the glyph and the clock, so at 80 columns the row paints
+    ``Web search fail…`` and the cause is unreachable there at every width.
+    Measured on the real card before this fix: the expanded body cropped the
+    sentence at its 72-cell measure, leaving ``refused this search`` and
+    ``only provider tried`` ABSENT from the frame entirely (#1066).
+    """
+    message = (
+        "Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for "
+        "keyed Sonar: the anonymous tier refused this search (wall "
+        "fraud_authwall_upsell/LOGIN) ('perplexity' was the only provider tried)"
+    )
+    card = ToolCard("t", "web_search", {"query": "openai rate limits"})
+    card.mark_failed(message)
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    # Every continuation keeps the body indent, so a wrapped fragment does not
+    # read as a stray transcript row — the defect `session_panel._Body.note`
+    # was fixed for — and every row carries the block's lead.
+    rows = _reason_rows(body)
+    assert len(rows) == 3
+    # The sentence is whole: only the wrap's own line breaks were added.
+    assert _collapsed(" ".join(rows)) == _collapsed(message)
+    assert all(cell_len(line) <= 80 for line in body)
+
+
+def test_the_body_wrap_is_budgeted_to_the_reason_not_captured_output() -> None:
+    """A tool's own bytes still clip: one output line is one row.
+
+    This is the half of the budget the merge is judged on. Measured at 80
+    columns on the real card: a 40-line stdout of 397-cell lines occupies 40
+    body rows before AND after the wrap — zero rows added. Wrapping every body
+    line instead would have spent six rows on each of those lines (240 rows
+    against 40), turning one tool call into a scroll trap in the transcript.
+    """
+    long_line = "payload=" + "x" * 400
+    card = ToolCard("t", "bash", {"command": "curl"})
+    card.mark_done("\n".join([long_line] * 5))
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert len(body) == 5
+    assert all(line.rstrip().endswith("…") for line in body)
+    assert all(cell_len(line) <= 80 - 2 for line in body)
+
+
+def test_a_failure_wraps_its_reason_and_still_clips_its_captured_output() -> None:
+    """One card, both halves: the reason wraps, the receipt beside it crops."""
+    reason = "ModelProviderError: " + "rate limited; " * 12
+    card = ToolCard("t", "bash", {"command": "pytest"})
+    card.mark_failed(reason, reason + "\n" + "x" * 400)
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert len(body) == 4
+    rows = _reason_rows(body[:-1])
+    assert sum(1 for row in rows if "rate limited" in row) == 3
+    assert rows[0].startswith("ModelProviderError:")
+    # The captured line after the reason is still exactly one cropped row.
+    assert body[-1].rstrip().endswith("…")
+
+
+def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:
+    """The expansion is the tool's OUTPUT — no synthetic row restating the row.
+
+    ``mark_failed(error, result_text)`` with a ``result_text`` that does not
+    begin with the error means the body's head line is captured output, so it
+    keeps the crop and the card does not grow a duplicate of the reason the
+    collapsed row already carries in full.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed("exit status 1", "Traceback:\n  boom")
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    assert body == ["  Traceback:", "    boom"]
+
+
+def test_a_tool_authored_head_line_is_claimed_when_the_status_leads_with_it() -> None:
+    """R2: the guard is a LEADS test, not a provenance test.
+
+    On the bash surfaces the reason IS the tool's own first output line
+    (``app.py`` settles a failed call with
+    ``mark_failed(_first_line(result.text), result.text, …)``), so an invariant
+    phrased around who composed the line would be false on the surface this card
+    most often shows. What the guard tests is whether the collapsed row's status
+    leads with the body's head line — and the other half of that same test: a
+    body whose head line is NOT the head of the status stays captured.
+    """
+    raw = "exit status 1: no such file or directory"
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(_first_line(raw), raw + "\nretry 1")
+    assert card._failure_reason() == _first_line(raw)
+
+    other = ToolCard("t", "bash", {"command": "false"})
+    other.mark_failed("exit status 2: oops", raw + "\nboom")
+    assert other._failure_reason() == ""
+
+
+#: The three shapes R1 reproduced, as the ``(error, result_text)`` pairs the app
+#: itself builds for them. The first two go through the bash surface's settle
+#: call (``app.py:22491``/``:38272``: ``mark_failed(_first_line(result.text),
+#: result.text, details)``) and are what the whitespace COLLAPSE hides — the body
+#: keeps the caller's spacing while ``_error`` is stored ``" ".join(error.split())``,
+#: so the raw head line is never equal to it. The third is the executor throw's
+#: ``mark_failed(str(error), str(error))`` (``app.py:22464``), whose collapsed
+#: status is the head line PLUS the traceback lines: equality can never match it.
+_WS_RUN = (
+    "ERROR  at 2026-09-13T00:00Z  could not connect to "
+    "https://api.example.com/v1/hook after 3 tries"
+)
+_TAB = "ERROR:\tcould not connect to https://api.example.com/v1/hook after 3 tries, giving up"
+_MULTILINE = (
+    "ERROR: could not connect to https://api.example.com/v1/hook after 3 "
+    'tries, giving up\n  File "/app/hook.py", line 12, in post\n'
+    "    raise TimeoutError"
+)
+APP_SHAPED_FAILURES = (
+    pytest.param(_first_line(_WS_RUN), _WS_RUN, id="whitespace-run-in-the-head-line"),
+    pytest.param(_first_line(_TAB), _TAB, id="tab-in-the-head-line"),
+    pytest.param(_MULTILINE, _MULTILINE, id="multi-line-error"),
+)
+
+
+@pytest.mark.parametrize(("error", "result_text"), APP_SHAPED_FAILURES)
+def test_an_app_shaped_failure_wraps_the_head_line_its_status_leads_with(
+    error: str, result_text: str
+) -> None:
+    """R1: the wrap must fire for the shapes the app actually builds.
+
+    On the pre-fix tree every shape below answered "" from ``_failure_reason()``
+    — the whitespace-exact comparison against the collapsed ``_error`` refused
+    them — so the cause stayed cropped, silently, with no test covering the
+    class.
+    """
+    head = _first_line(result_text)
+    assert cell_len(head) > 80 - 2 - OUTPUT_INDENT, head
+    card = ToolCard("t", "bash", {"command": "curl"})
+    card.mark_failed(error, result_text, None, measured_s=0.4)
+    card.toggle_expanded()
+
+    reason = card._failure_reason()
+    assert reason, "the collapsed row's status leads with this line"
+    assert _collapsed(reason) == _collapsed(head)
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    raw_traceback = result_text.splitlines()[1:]
+    if raw_traceback:
+        # Only the HEAD line is claimed. The rest of a multi-line error stays in
+        # the body, cropped like every other captured line, and is never painted
+        # twice.
+        assert [line[OUTPUT_INDENT:] for line in body[-len(raw_traceback) :]] == raw_traceback
+        body = body[: -len(raw_traceback)]
+    rows = _reason_rows(body)
+    assert _collapsed(" ".join(rows)) == _collapsed(head)
+    assert not rows[-1].rstrip().endswith("…")
+
+
+def test_the_reason_block_is_bounded_by_cells_and_rows_at_every_width() -> None:
+    """Two budgets: CELLS bound the content, ROWS bound the shape.
+
+    A cell budget alone would let a 16-column frame (an 8-cell measure) turn 432
+    cells into 54 rows; a row budget alone could not carry the shipped 201-cell
+    sentence at 40 columns (8 rows at that frame's 32-cell measure). Measured
+    over every width the one-line guarantee is checked at, rather than trusted
+    from the comment.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(" ".join(["boom"] * 2000))
+    card.toggle_expanded()
+
+    for width in WIDTHS:
+        all_rows = card._build_content(width).plain.splitlines()
+        body = _reason_block(all_rows)
+        marker = bool(body) and body[-1].strip().startswith("…")
+        rows = _reason_rows(body[:-1] if marker else body)
+        assert len(rows) <= REASON_MAX_ROWS, (width, len(rows))
+        # One row is exempt from the cell budget on purpose: a reason the reader
+        # cannot see at all is the bug this exists to fix.
+        if len(rows) > 1:
+            assert sum(cell_len(row) for row in rows) <= REASON_MAX_CELLS, width
+        assert all(cell_len(line) <= width for line in all_rows), width
+
+
+def test_the_reason_overflow_marker_names_the_rows_it_dropped() -> None:
+    """D2/Q1: the cut carries the surface's own ``… N more lines``.
+
+    A bare ``…`` reads as an in-sentence elision; the block says how many rows
+    went, the way the captured crop and the live body already do.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(" ".join(["boom"] * 2000))
+    card.toggle_expanded()
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    marker = body[-1].strip()
+    assert marker.startswith("… ")
+    assert marker.endswith(" more lines")
+    # And it counts exactly the rows this card dropped: the wrapped sentence
+    # minus the rows the body still holds (the marker is not one of them).
+    wrapped = wrap_cells(card._failure_reason(), 80 - 2 - OUTPUT_INDENT)
+    assert int(marker.split()[1]) == len(wrapped) - (len(body) - 1)
+    # No sentence row carries a bare ellipsis any more.
+    assert not any(line.rstrip().endswith("…") for line in body[:-1])
+
+
+def test_the_reason_survives_the_narrow_frame_the_flat_row_cap_cut() -> None:
+    """D2/Q1: the row bound is a SHAPE backstop, not a cut at the sentence's scale.
+
+    Measured: the shipped 201-cell sentence needs 7 rows at the 45-column frame's
+    37-cell measure and 8 at the 40-column frame's 32-cell one — so the flat
+    six-row cap dropped ``only provider tried`` off the frame at both widths: the
+    #1066 symptom returning below ~48 columns, where ``REASON_MAX_CELLS`` alone
+    could not bound the shape.
+    """
+    message = (
+        "Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for "
+        "keyed Sonar: the anonymous tier refused this search (wall "
+        "fraud_authwall_upsell/LOGIN) ('perplexity' was the only provider tried)"
+    )
+    # The card's own lane at a 40- and a 45-column frame (the transcript hands
+    # the card 4 cells fewer than the terminal, as the evidence frames show).
+    for card_width in (36, 41):
+        card = ToolCard("t", "web_search", {"query": "openai rate limits"})
+        card.mark_failed(message)
+        card.toggle_expanded()
+
+        body = card._build_content(card_width).plain.splitlines()[2:]
+        joined = " ".join(line.strip() for line in body)
+        # The CAUSE is on the frame. This is the assertion the flat six-row cap
+        # failed at both widths — it stopped at ``… fraud_authwall_upsell/LO``
+        # (36) and ``… ('perplexity' was the on`` (41), so the tail clause the
+        # issue is about went missing again below ~48 columns.
+        assert "only provider tried" in joined, card_width
+        assert not any(line.strip().startswith("…") for line in body), card_width
+        # And it is still the leaded block the rest of this round pins.
+        rows = _reason_rows(body)
+        assert _collapsed(" ".join(row.strip() for row in rows)) == _collapsed(message), card_width
+
+
+def test_the_wrapped_reason_carries_a_monochrome_lead() -> None:
+    """D1: the block says “this is the card's own sentence” without ink.
+
+    The reason rides ``tool.output.error``, which is the captured rows' ink on an
+    error card (both resolve to ``tint-danger``), so before this round a 42-row
+    failure card had no visual answer to “which of these rows is our sentence?” —
+    the wrap is what made the question askable. The lead echoes the collapsed
+    row's own glyph: the card's one piece of monochrome-safe state vocabulary.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed("ModelProviderError: " + "rate limited; " * 12)
+    card.toggle_expanded()
+
+    content = card._build_content(80)
+    body = content.plain.splitlines()[2:]
+    assert len(body) == 3
+    # Asserts the lead's SHAPE on every row: the glyph on the first, two blanks
+    # on the continuations, both after OUTPUT_INDENT.
+    rows = _reason_rows(body)
+    assert rows[0].startswith("ModelProviderError:")
+    assert all(cell_len(line) <= 80 for line in body)
+    # The glyph rides the outcome ink the collapsed row paints it in, and the
+    # needle is body-only because the summary row puts the reason BEFORE its
+    # glyph.
+    assert _triplet(_style_at(content, f"{REASON_LEAD}ModelProviderError").color) == _triplet(
+        Style(color=theme_mod.semantic_color("danger")).color
+    )
+
+
+def test_the_reason_is_painted_once_and_the_hidden_count_follows_it() -> None:
+    """The reason is not printed twice, and the marker counts what is left.
+
+    ``mark_failed`` defaults ``result_text`` to the error, so the sentence is
+    both the reason and the body's first line: the wrap claims that line, and
+    the hidden-line marker must then count the lines the body still holds
+    rather than the raw result.
+    """
+    total = EXPAND_MAX_LINES + 5
+    card = ToolCard("t", "read", {"path": "big.txt"})
+    card.mark_failed("boom", "boom\n" + "\n".join(f"line {i}" for i in range(total)))
+    card.toggle_expanded()
+
+    rows = card._build_content(80).plain.splitlines()
+    assert rows.count(f"  {REASON_LEAD}boom") == 1
+    assert rows[-1].strip() == f"… {total - EXPAND_MAX_LINES} more lines"
 
 
 def test_failed_output_renders_in_the_danger_tint() -> None:
@@ -2415,3 +3380,172 @@ def test_a_resize_to_a_new_width_does_rebuild() -> None:
     card.on_resize(SimpleNamespace(size=SimpleNamespace(width=card._built_width - 20)))
 
     assert builds["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The seeded clock: a row adopted for a call that is ALREADY running.
+#
+# Reported from the field: switch away from a session whose tool is executing
+# and switch back, and the row's elapsed reading restarts at zero and counts up
+# from the switch — a `bash` row reading `27s` (and the band above it saying the
+# same) while the call is half an hour old. The row was not wrong to refuse a
+# number: it had NO start instant, so any number it printed was a claim about
+# when the VIEWER arrived. What changed is that the start is now knowable, so
+# the refusal is precise rather than total.
+#
+# These drive the card directly with an INJECTED clock, so "the number is the
+# call's true age" is arithmetic rather than a sleep: a test that slept 27
+# seconds to prove a count-up would be a test nobody runs. The wall-clock part
+# only converts the epoch once, at the seed; see `monotonic_from_epoch`.
+# ---------------------------------------------------------------------------
+
+
+def test_a_restored_running_row_arms_from_the_call_start_epoch() -> None:
+    """The epoch is the call's own start, so the number IS its age.
+
+    And it keeps ticking from that anchor — the second read is three seconds
+    later on the injected monotonic clock, not a re-conversion of the epoch, so
+    a wall-clock adjustment after the seed cannot move a running counter.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    card.restore(state="running", started_at=time.time() - 27.0)
+
+    assert card.started_at is not None, "a call whose start is known dates itself"
+    assert card.started_at == pytest.approx(now[0] - 27.0, abs=0.05)
+    assert card._build_row(80).plain.rstrip().endswith("27s")
+
+    now[0] += 3.0
+    assert card._build_row(80).plain.rstrip().endswith("30s")
+
+
+def test_a_restored_running_row_without_a_start_epoch_still_withholds() -> None:
+    """The other half of the same arm, and not a legacy curiosity.
+
+    A `subagent_view` child row and a call whose producer predates the field
+    both reach this with nothing to seed from, and the honest rendering for
+    them is still the blank column: their ``_started`` is when this surface
+    painted the row, so any number here would be about the viewer.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    card.restore(state="running")
+
+    assert card.started_at is None
+    assert card._elapsed() is None
+    assert not card._build_row(80).plain.rstrip().endswith("s")
+
+
+def test_a_settled_row_ignores_a_start_epoch() -> None:
+    """Settled states are rendered from the executor's measured interval.
+
+    Passing an epoch must not change that: the receipt for a finished call is
+    ``duration_s``, and a start instant has no part in it.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 1"}, clock=lambda: now[0])
+    card.restore(state="success", result_text="done", duration_s=6.0, started_at=time.time() - 27.0)
+
+    assert card.started_at is None, "a settled row holds no running start"
+    assert card._duration == 6.0, "the executor's measured interval is the receipt"
+    row = card._build_row(80).plain
+    assert "6.0s" in row
+    assert "27s" not in row, "the epoch has no part in a settled receipt"
+
+
+def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
+    """The re-entry arm, which the switch actually takes.
+
+    A re-delivered ``ToolStarted`` — `/resume` onto the running turn, or a
+    switch away and back replaying the owner's live seed — reaches the SAME
+    card the projection restored, through ``begin_running``. Seeding only
+    ``restore`` would leave this call resetting the row to zero, which is
+    exactly the reported frame.
+    """
+    now = [2_000.0]
+    card = ToolCard("t", "bash", clock=lambda: now[0])
+    card.set_composing(12, "bash")
+    card.begin_running("bash", {"command": "sleep 30"}, None, started_at=time.time() - 41.0)
+
+    assert card.started_at == pytest.approx(now[0] - 41.0, abs=0.05)
+    assert card._build_row(80).plain.rstrip().endswith("41s")
+
+    # Without an epoch the re-entry keeps the withheld clock, which is what a
+    # caller with nothing to pass must not be able to lose by accident.
+    other = ToolCard("t2", "bash", clock=lambda: now[0])
+    other.restore(state="running")
+    other.begin_running("bash", {"command": "sleep 30"}, None)
+    assert other.started_at is None
+
+
+def test_an_unknown_start_mounts_clockless_where_none_still_means_begins_now() -> None:
+    """QA round 1, Q1: the constructor had one word for two different cases.
+
+    ``None`` on ``started_at`` means "this call begins now", and that is right
+    for the ordinary mount — the row appears with the event that started the
+    call, so the two instants coincide. It is WRONG for the adopted mount: a
+    start event that reaches a view with no row for its call (a re-delivered
+    live seed, a rebuilt transcript) is mounting a row for work already in
+    flight, and stamping the arrival instant there prints an age about the
+    VIEWER — measured at `0s` on the mount and `3s`/`5s` end to end for a call
+    that was by then ~13s old.
+
+    So the second case gets its own value. ``START_UNKNOWN`` withholds the
+    clock, which is the same reading ``restore`` and ``begin_running`` already
+    give a missing epoch, and leaves the ordinary path exactly as it was —
+    asserted together, because a fix that withheld both would have broken every
+    native row to fix one seam.
+    """
+    now = [1_500.0]
+    unknown = ToolCard(
+        "u", "bash", {"command": "sleep 30"}, clock=lambda: now[0], started_at=START_UNKNOWN
+    )
+    assert unknown.started_at is None
+    assert unknown._elapsed() is None
+    assert not unknown._build_row(80).plain.rstrip().endswith("s")
+    # Not even after time passes and the clock is asked again: this row can
+    # never date itself, because it never learned when the call began.
+    now[0] += 5.0
+    assert unknown._elapsed() is None
+    assert not unknown._build_row(80).plain.rstrip().endswith("s")
+
+    ordinary = ToolCard("n", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    assert ordinary.started_at == 1_505.0, "the ordinary mount still takes the mount instant"
+    assert ordinary._build_row(80).plain.rstrip().endswith("0s")
+
+
+def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
+    """The seeded arm must not displace the ordinary one.
+
+    A call this process watched begin dates itself from the event that started
+    it. Pushing a session epoch through this path could only be a re-statement
+    of the same instant, so the assertion is that a fresh card's own clock is
+    untouched by the arrival of the feature.
+    """
+    now = [3_000.0]
+    card = ToolCard("t", "bash", {"command": "ls"}, clock=lambda: now[0])
+    assert card.started_at == 3_000.0
+    now[0] += 2.0
+    assert card._build_row(80).plain.rstrip().endswith("2s")
+
+
+def test_a_cut_off_turn_names_its_cards_cut_off() -> None:
+    """D2: the word changes, the glyph and the tier do not.
+
+    ``interrupted`` is now reserved for a positively recorded stop, so a row
+    stranded by a cut-off that still said ``interrupted ⊘`` re-stated the
+    ambiguity the taxonomy removed — on the same screen as the ``✗ turn cut
+    off`` notice that had just resolved it (design review round 1, D2).
+    """
+    card = ToolCard("t", "bash", {"command": "pytest tests/unit -q"})
+    card.mark_interrupted(cut_off=True)
+    row = card._build_row(100).plain
+    assert "cut off" in row
+    assert "interrupted" not in row
+    # Same mark, same ink: only the word was the ambiguity, and a new glyph or
+    # a colour would be new design surface for a finding this small.
+    assert "⊘" in row
+
+    deliberate = ToolCard("t", "bash", {"command": "pytest tests/unit -q"})
+    deliberate.mark_interrupted()
+    assert "interrupted" in deliberate._build_row(100).plain, "a stop still says so"

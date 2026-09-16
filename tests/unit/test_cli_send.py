@@ -583,7 +583,11 @@ def test_send_to_a_stored_session_by_name_spools(monkeypatch, tmp_path, capsys) 
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "spooled" in out
+    # The receipt leads with the effect; the shared constant is the pin, so the
+    # CLI, the draining runtime and the cold spool cannot drift apart.
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert SPOOL_RECEIPT_NOTE in out
     assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
 
 
@@ -764,3 +768,40 @@ def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, mo
         assert ("not both" in err) or ("not responding" in err), label
         # The stored lookalike received nothing: the refusal was the answer.
         assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists(), label
+
+
+def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
+    """R4: a deadline expiry is not proof the message did not land.
+
+    ``_dial_or_explain`` gives the message-less ``TimeoutError`` a sentence, and
+    it re-raises the SAME exception class on purpose: both callers branch on the
+    type to choose their wording, and the confident "could not deliver" arm is
+    reserved for ``RuntimeError`` — the peer ANSWERING no. Reporting a timeout
+    that way asserts a non-delivery this side cannot know (the op is already in
+    the owner's socket buffer, and the receiver commits before it acks), and a
+    sender who believes it duplicates the steer or the wake.
+
+    The retry half of R4 is asserted too, because the wording alone is not the
+    guarantee: a timed-out dial may have LANDED, so a second submission is the
+    duplicate the sentence warns about. One dial, one failure, no automatic
+    re-send — the sender decides, and the sentence tells them what they know.
+    """
+    other_pid = os.getppid() + 9999
+    with (
+        patch("local_operator.cli._resolve_peer_target", return_value=(_Record(other_pid), [], "")),
+        patch("local_operator.cli._peer_red") as red,
+        patch(
+            "local_operator.mobile.peer_client.send_peer_message",
+            side_effect=TimeoutError,
+        ) as dial,
+    ):
+        rc = send_command(_send_args(steer=True))
+
+    assert dial.call_count == 1, dial.call_args_list
+    assert rc == 1
+    assert red.called
+    line = red.call_args[0][0]
+    assert line.startswith("no delivery confirmation:"), line
+    assert "could not deliver" not in line, line
+    assert "delivery is UNCONFIRMED" in line, line
+    assert "do not send it again" in line, line

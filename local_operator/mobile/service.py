@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 
+from local_operator.logger import configure_console_logging, quiet_wire_clients
 from local_operator.mobile.auth import load_password
 from local_operator.mobile.daemon import DEFAULT_PORT, MobileDaemon, build_app
 
@@ -20,6 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 async def amain(port: int = DEFAULT_PORT) -> int:
+    # The daemon's stderr IS its log file: the LaunchAgent this repo installs
+    # points StandardOutPath and StandardErrorPath at log_dir()/mobile.log. So
+    # this process has to own that stream, because unconfigured it inherits
+    # whatever a dependency's `basicConfig` installed — the MCP client's is
+    # `level=INFO` — and one record per HTTP request is what filled the relay
+    # log with hundreds of thousands of unusable lines.
+    #
+    # The wire-client pin is called explicitly rather than left to
+    # `configure_console_logging`: that function quietens those libraries only as
+    # a side effect of the level it is given, so a future call here with
+    # `level=INFO` (a reasonable-looking change, since a daemon's own records are
+    # what a reader wants) would silently restore the flood.
+    configure_console_logging()
+    quiet_wire_clients()
     password = load_password()
     if not password:
         # First-run is an operator action, not a silent default: the daemon
@@ -82,6 +97,12 @@ def main(port: int = DEFAULT_PORT) -> int:
 
 
 if __name__ == "__main__":
+    # Linux comm axis: the LaunchAgent/unit names the IMAGE on macOS and this
+    # daemon's `comm` has to be set by the process itself there (see
+    # :func:`procname.brand_this_process`; a no-op on macOS).
+    from local_operator import procname
+
+    procname.brand_this_process()
     # ``python -m local_operator.mobile.service`` is what the LaunchAgent
     # runs: re-entering the installed package means an upgrade changes what
     # the supervised process runs with no reinstall step.

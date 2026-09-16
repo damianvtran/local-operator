@@ -7,6 +7,8 @@ rather than depending on live DNS.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -330,3 +332,596 @@ def test_cache_prune_keeps_newest(monkeypatch: pytest.MonkeyPatch) -> None:
         )
     remaining = list(service.cache_dir().iterdir())
     assert len(remaining) <= 3
+
+
+# --- retries, deadline, and the blocked-profile escalation ------------------
+#
+# These cover §3-§4 of docs/design/web_fetch_robustness.md. The recurring shape
+# is a MockTransport that counts its calls, because "how many requests did we
+# actually issue" is the property every one of these rests on and a mock's
+# return value cannot show it.
+
+
+class _Recorder:
+    """Counts requests and records the identity each one carried.
+
+    The profile is read off the User-Agent rather than asserted through an
+    internal hook: what an origin sees is the only thing that matters here, and
+    a test that inspected our own call arguments would keep passing if the
+    headers stopped reaching the wire.
+    """
+
+    def __init__(self, responder) -> None:
+        self.requests: list[httpx.Request] = []
+        self._responder = responder
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._responder(len(self.requests), request)
+
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
+
+    @property
+    def profiles(self) -> list[str]:
+        return [
+            "browser" if "Chrome/" in r.headers.get("user-agent", "") else "default"
+            for r in self.requests
+        ]
+
+
+CHALLENGE_HEADERS = {"content-type": "text/html", "cf-mitigated": "challenge"}
+CHALLENGE_BODY = "<html><head><title>Just a moment...</title></head><body></body></html>"
+
+
+@pytest.fixture
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record backoff sleeps instead of serving them.
+
+    Per AGENTS.md ("wait on the event, never on the clock"), the assertions
+    below are on WHAT was slept, never on elapsed wall time — so these tests
+    cannot flake under load and do not spend a second of suite time proving a
+    backoff happened.
+    """
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(service, "_backoff_sleep", fake_sleep)
+    return slept
+
+
+@pytest.mark.asyncio
+async def test_transient_500_then_200_recovers(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The headline case: a 500 from a rolling deploy no longer fails the call."""
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        if n == 1:
+            return httpx.Response(500, text="broke")
+        return httpx.Response(200, text="recovered", headers={"content-type": "text/plain"})
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://example.com/x")
+
+    assert result.status == 200
+    assert "recovered" in result.content
+    assert result.attempts == 2
+    assert recorder.calls == 2
+    assert len(_no_sleep) == 1  # exactly one backoff, between the two attempts
+    # A retried SUCCESS is a success: the earlier 500 must not be reported as
+    # the outcome's failure class.
+    assert result.failure_kind is None
+
+
+@pytest.mark.asyncio
+async def test_persistent_500_stops_at_max_attempts(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The attempt count is bounded and asserted on the TRANSPORT, not inferred."""
+    recorder = _Recorder(lambda n, req: httpx.Response(500, text="still broke"))
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder), max_attempts=3)
+    result = await svc.fetch("https://example.com/x")
+
+    assert result.status == 500
+    assert recorder.calls == 3
+    assert result.attempts == 3
+    assert result.failure_kind == "server"
+
+
+@pytest.mark.asyncio
+async def test_404_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 404 will not become a 200; retrying spends the user's turn for nothing."""
+    recorder = _Recorder(lambda n, req: httpx.Response(404, text="gone"))
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://example.com/missing")
+
+    assert recorder.calls == 1
+    assert result.attempts == 1
+    assert result.failure_kind == "client"
+
+
+@pytest.mark.asyncio
+async def test_retry_after_small_value_is_honoured(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The origin named its own interval and it fits inside the turn: sleep it."""
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        if n == 1:
+            return httpx.Response(429, text="slow down", headers={"retry-after": "2"})
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://example.com/x")
+
+    assert result.status == 200
+    # Honoured, PLUS the same ±25 % jitter our own backoff curve carries
+    # (design §3.4). The burst it prevents is real: the tool description invites
+    # parallel fetches, and several calls refused by one rate-limited origin
+    # would otherwise sleep the identical interval and retry in lockstep.
+    assert len(_no_sleep) == 1
+    assert 2.0 * (1 - service._RETRY_JITTER) <= _no_sleep[0] <= 2.0 * (1 + service._RETRY_JITTER)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_large_value_is_reported_not_slept(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """Blocking a live turn for 15 minutes to obey a header is worse for the user
+    than handing the agent the number and letting it come back later."""
+    recorder = _Recorder(
+        lambda n, req: httpx.Response(429, text="later", headers={"retry-after": "900"})
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://example.com/x")
+
+    assert recorder.calls == 1
+    assert _no_sleep == []  # nothing was slept
+    assert result.retry_after_s == 900.0
+
+
+@pytest.mark.asyncio
+async def test_validate_public_url_runs_once_per_attempt(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """THE rebinding guard across retries (§8 risk 1).
+
+    Hoisting ``validate_public_url`` out of the attempt loop "for efficiency"
+    would let a host that turns private between attempts be re-contacted without
+    a check. The count is asserted directly: one validation per network attempt,
+    never one per hop.
+    """
+    validations: list[str] = []
+    real_validate = service.validate_public_url
+
+    def counting_validate(url: str, *, allow_private: bool = False) -> str | None:
+        validations.append(url)
+        return real_validate(url, allow_private=allow_private)
+
+    monkeypatch.setattr(service, "validate_public_url", counting_validate)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+
+    recorder = _Recorder(lambda n, req: httpx.Response(503, text="down"))
+    svc = _service(httpx.MockTransport(recorder), max_attempts=3)
+    await svc.fetch("https://example.com/x")
+
+    assert recorder.calls == 3
+    assert len(validations) == 3
+    assert validations == ["https://example.com/x"] * 3
+
+
+@pytest.mark.asyncio
+async def test_retry_refuses_a_host_that_turns_private(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The consequence of the above, end to end: attempt 1 resolves public and
+    fails; attempt 2 resolves to loopback and must be REFUSED, not followed."""
+    resolutions = iter([["93.184.216.34"], ["127.0.0.1"], ["127.0.0.1"]])
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: next(resolutions))
+
+    recorder = _Recorder(lambda n, req: httpx.Response(500, text="broke"))
+    svc = _service(httpx.MockTransport(recorder))
+    with pytest.raises(FetchError, match="private/loopback/reserved"):
+        await svc.fetch("https://rebind.example/x")
+
+    # The second attempt never reached the transport.
+    assert recorder.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_every_attempt_including_the_escalation_stays_pinned(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The pin must survive the browser profile: the escalated request carries
+    its own headers, and merging them over the pin's ``Host`` would unpin it."""
+    recorder = _Recorder(
+        lambda n, req: httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    await svc.fetch("https://pinned.example/x")
+
+    assert recorder.calls == 2
+    assert recorder.profiles == ["default", "browser"]
+    for request in recorder.requests:
+        assert request.url.host == "93.184.216.34"  # the vetted IP, never the name
+        assert request.headers["host"] == "pinned.example"
+        assert request.extensions.get("sni_hostname") == "pinned.example"
+
+
+@pytest.mark.asyncio
+async def test_blocked_retry_flips_a_challenge_to_success(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The measured medium.com win, reproduced deterministically: the honest
+    profile is refused and the browser-shaped one is served."""
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        if "Chrome/" in request.headers.get("user-agent", ""):
+            return httpx.Response(200, text="the real page", headers={"content-type": "text/html"})
+        return httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://walled.example/x")
+
+    assert result.status == 200
+    assert "the real page" in result.content
+    assert result.attempts == 2
+    assert result.profile == "browser"
+    assert recorder.profiles == ["default", "browser"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_retry_fires_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """A refusal costs exactly 2 requests: the honest one and the escalation.
+    There is no third, and the block class is never retried with the same
+    identity (the origin already decided about this client)."""
+    recorder = _Recorder(
+        lambda n, req: httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder), max_attempts=3)
+    result = await svc.fetch("https://walled.example/x")
+
+    assert recorder.calls == 2
+    assert result.failure_kind == "blocked"
+    assert result.block_vendor == "cloudflare"
+
+
+@pytest.mark.asyncio
+async def test_blocked_retry_disabled_costs_one_request(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The switch exists for an operator who wants the client to stay honest
+    even in the face of a refusal."""
+    recorder = _Recorder(
+        lambda n, req: httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder), blocked_retry=False)
+    result = await svc.fetch("https://walled.example/x")
+
+    assert recorder.calls == 1
+    assert recorder.profiles == ["default"]
+    assert result.failure_kind == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_escalation_is_once_per_fetch_not_once_per_hop(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """A redirect chain must not be able to multiply the escalation budget."""
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/a":
+            return httpx.Response(302, headers={"location": "https://example.com/b"})
+        return httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    await svc.fetch("https://example.com/a")
+
+    # hop 1 (the 302) + hop 2 default + hop 2 escalation == 3, never 4.
+    assert recorder.calls == 3
+    assert recorder.profiles.count("browser") == 1
+
+
+@pytest.mark.asyncio
+async def test_deadline_bounds_the_whole_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hard invariant (§3.3): retries divide ONE budget rather than each
+    getting a fresh copy of the timeout.
+
+    Asserted structurally on a fake clock rather than on wall time, per AGENTS.md
+    "prefer a structural invariant to a numeric one": the timeout each attempt is
+    granted must never exceed what is left of the call's budget.
+    """
+    granted: list[float] = []
+    clock = {"t": 0.0}
+    monkeypatch.setattr(service, "_now", lambda: clock["t"])
+
+    async def fake_sleep(delay: float) -> None:
+        clock["t"] += delay
+
+    monkeypatch.setattr(service, "_backoff_sleep", fake_sleep)
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions.get("timeout") or {}
+        granted.append(float(timeout.get("read", 0.0)))
+        # Each attempt "spends" most of what it was granted before failing.
+        clock["t"] += granted[-1] * 0.9
+        return httpx.Response(503, text="down")
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder), max_attempts=5)
+    await svc.fetch("https://example.com/x", timeout_seconds=10.0)
+
+    assert granted, "no attempt recorded its timeout"
+    # Every attempt's budget fits inside what remained, and the total never
+    # exceeds the call's timeout.
+    assert all(t > 0 for t in granted)
+    assert clock["t"] <= 10.0
+    # The deadline, not max_attempts, is what stopped it.
+    assert recorder.calls < 5
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_gets_the_full_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """Review round 1, R1: there is NO first-attempt cap, and this pins it.
+
+    A cap of ``min(remaining, 0.6 * T)`` used to apply to the first attempt of a
+    hop whenever a fallback remained — which, with the defaults, is always. It
+    read as "reserve time for the escalation", but ``httpx``'s read timeout
+    bounds the wait for response HEADERS as well as inter-chunk gaps, so it was
+    really a 12 s timeout on a 20 s fetch: any origin whose time-to-first-byte
+    fell between 12 s and 20 s was cut off on its first, honest attempt and then
+    handed a browser-profile retry with the remaining 8 s, reported to the model
+    as a silent block naming a vendor we never saw. See
+    ``test_slow_but_working_origin_still_succeeds`` for that end to end.
+
+    The stall case here also pins the CONSEQUENCE the manager accepted: a stall
+    that spends the budget leaves the escalation nothing to spend, so it does not
+    run at all — one honest request, and an honest stall.
+    """
+    granted: list[float] = []
+    clock = {"t": 0.0}
+    monkeypatch.setattr(service, "_now", lambda: clock["t"])
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions.get("timeout") or {}
+        granted.append(float(timeout.get("read", 0.0)))
+        # The origin accepts the connection and never answers: it burns exactly
+        # what it was granted, which is what a black-holing host does.
+        clock["t"] += granted[-1]
+        raise httpx.ReadTimeout("", request=request)
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(_Recorder(responder)))
+    with pytest.raises(FetchError) as excinfo:
+        await svc.fetch("https://stalls.example/x", timeout_seconds=20.0)
+
+    assert granted == [pytest.approx(20.0)]  # the WHOLE budget, not 0.6 * 20
+    assert len(granted) == 1  # the spent budget funds no escalation
+    assert "Read timed out" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_slow_but_working_origin_still_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE regression guard for review round 1, R1.
+
+    A 13 s-first-byte origin is inside the default 20 s budget and succeeded on
+    the pre-change engine. Under the 0.6 first-attempt cap it FAILED: attempt 1
+    was granted 12 s, timed out, and the escalation was granted 8 s — also short
+    — so a working URL became a terminal "stall" whose text claimed the origin
+    "never sent a response". This test is the guard, and it did not exist before
+    the cap was removed.
+
+    Fake clock, structural assertion (AGENTS.md: "prefer a structural invariant to
+    a numeric one"): the transport answers 200 only when the read budget it was
+    granted covers what the origin needs, and otherwise burns the budget and
+    raises, exactly like a real slow origin. No wall-clock waiting.
+    """
+    needed = 13.0  # > 0.6 * 20 = 12, < 20
+    granted: list[float] = []
+    clock = {"t": 0.0}
+    monkeypatch.setattr(service, "_now", lambda: clock["t"])
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions.get("timeout") or {}
+        budget = float(timeout.get("read", 0.0))
+        granted.append(budget)
+        if budget < needed:
+            clock["t"] += budget
+            raise httpx.ReadTimeout("", request=request)
+        clock["t"] += needed
+        return httpx.Response(200, text="slow but real", headers={"content-type": "text/plain"})
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://slow.example.com/x", timeout_seconds=20.0)
+
+    assert result.status == 200
+    assert "slow but real" in result.content
+    assert result.attempts == 1
+    assert recorder.calls == 1
+    assert granted == [pytest.approx(20.0)]
+
+
+@pytest.mark.asyncio
+async def test_stall_message_names_the_class_and_is_never_empty(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """The §1.3 regression, end to end: ``httpx.ReadTimeout`` stringifies to ""
+    and the old message ended in ``': '`` with nothing after it."""
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(_Recorder(responder)))
+    with pytest.raises(FetchError) as excinfo:
+        await svc.fetch("https://stalls.example/x", timeout_seconds=5.0)
+
+    message = str(excinfo.value)
+    assert "timed out" in message
+    assert "never sent a response" in message
+    assert "https://stalls.example/x" in message
+    assert not message.rstrip().endswith(":")
+    assert not message.rstrip().endswith("': '")
+
+
+@pytest.mark.asyncio
+async def test_enrichment_probe_never_spends_the_escalation(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """A speculative ``.md`` twin is an optimisation, and must not pay a second
+    request to diagnose itself — nor consume the escalation the real fetch may
+    need."""
+    recorder = _Recorder(
+        lambda n, req: (
+            httpx.Response(403, text=CHALLENGE_BODY, headers=CHALLENGE_HEADERS)
+            if req.url.path.endswith(".md")
+            else httpx.Response(200, text="the page", headers={"content-type": "text/html"})
+        )
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    settings = WebFetchSettings(enrich=True)
+    svc = WebFetchService(settings, transport=httpx.MockTransport(recorder))
+    result = await svc.fetch("https://docs.example.com/guide/page")
+
+    assert result.status == 200
+    # The blocked probe cost exactly one request, and the escalation was still
+    # available (unspent) for the real fetch.
+    md_calls = [r for r in recorder.requests if r.url.path.endswith(".md")]
+    assert len(md_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_one_reproduces_the_pre_retry_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``max_attempts: 1`` with the escalation off is byte-for-byte today's
+    engine: one request, one result, no diagnostics invented."""
+    recorder = _Recorder(
+        lambda n, req: httpx.Response(200, text="hello", headers={"content-type": "text/plain"})
+    )
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder), max_attempts=1, blocked_retry=False)
+    result = await svc.fetch("https://example.com/x")
+
+    assert recorder.calls == 1
+    assert result.attempts == 1
+    assert result.profile == "default"
+    assert result.failure_kind is None
+    assert "hello" in result.content
+
+
+@pytest.mark.asyncio
+async def test_retry_after_does_not_ride_into_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch, _no_sleep: list[float]
+) -> None:
+    """Review round 1, R3: the reported ``Retry-After`` belongs to the outcome.
+
+    Reproduced before the fix: a 429 carrying ``Retry-After: 2`` followed by a
+    persistent 503 reported ``failure_kind=server`` **with** ``retry_after_s=2.0``
+    — a number the reported failure never sent, which is worse than no number,
+    because a caller acting on it waits out an interval nothing asked for.
+    """
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        if n == 1:
+            return httpx.Response(429, headers={"retry-after": "2"}, text="slow down")
+        return httpx.Response(503, text="down")
+
+    recorder = _Recorder(responder)
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    svc = _service(httpx.MockTransport(recorder))
+    result = await svc.fetch("https://flaky.example/x", timeout_seconds=20.0)
+
+    assert result.status == 503
+    assert result.failure_kind == "server"
+    assert result.retry_after_s is None
+
+
+@pytest.mark.asyncio
+async def test_the_attempt_timeout_is_recomputed_after_the_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, R4: the attempt timeout used to be computed BEFORE the
+    (unbounded) DNS validation, so a slow resolver pushed the request's own
+    timeout past the deadline and the "hard ceiling T" claim had a hole.
+
+    Structural, with a fake clock: the resolver spends 5 s of a 20 s budget, so
+    the request that follows must be granted 15 s, not 20.
+    """
+    clock = {"t": 0.0}
+    monkeypatch.setattr(service, "_now", lambda: clock["t"])
+    granted: list[float] = []
+
+    def slow_validate(url: str, *, allow_private: bool = False) -> str | None:
+        clock["t"] += 5.0
+        return "93.184.216.34"
+
+    def responder(n: int, request: httpx.Request) -> httpx.Response:
+        granted.append(float((request.extensions.get("timeout") or {}).get("read", 0.0)))
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(service, "validate_public_url", slow_validate)
+    svc = _service(httpx.MockTransport(_Recorder(responder)))
+    result = await svc.fetch("https://slow-dns.example/x", timeout_seconds=20.0)
+
+    assert result.status == 200
+    assert granted == [pytest.approx(15.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_hung_resolver_cannot_outlast_the_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of R4: ``getaddrinfo`` has no timeout of its own, so the
+    lookup is bounded by the same remaining budget the request is.
+
+    Asserted on the EVENT, not the clock (AGENTS.md): the resolver here sleeps far
+    longer than the budget, and the call must return a classified failure — the
+    outer ``wait_for`` is a guard so a regression FAILS rather than hangs.
+    """
+    import time as _time
+
+    def hung_validate(url: str, *, allow_private: bool = False) -> str | None:
+        _time.sleep(3.0)
+        return "93.184.216.34"
+
+    monkeypatch.setattr(service, "validate_public_url", hung_validate)
+    svc = _service(httpx.MockTransport(_Recorder(lambda n, req: httpx.Response(200))))
+
+    with pytest.raises(FetchError) as excinfo:
+        await asyncio.wait_for(
+            svc.fetch("https://hung.example/x", timeout_seconds=1.0), timeout=2.5
+        )
+    assert "could not be resolved in time" in str(excinfo.value)
+
+
+def test_coerce_clamps_attempts() -> None:
+    assert coerce_fetch_settings({"max_attempts": 99}).max_attempts == 5
+    assert coerce_fetch_settings({"max_attempts": 0}).max_attempts == 1
+    assert coerce_fetch_settings({}).max_attempts == 3
+    assert coerce_fetch_settings({}).blocked_retry is True

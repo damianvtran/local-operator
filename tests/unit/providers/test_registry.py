@@ -8,6 +8,7 @@ import pytest
 
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
+    credential_file_names,
     env_key_name,
     get_provider_definition,
     list_login_providers,
@@ -152,6 +153,40 @@ def test_env_key_resolution_callable_form(monkeypatch: pytest.MonkeyPatch) -> No
     assert resolve_env_key("anthropic") == "oauth-token"
     # Callable resolvers have no single display name.
     assert env_key_name("anthropic") is None
+
+
+def test_credential_file_names_covers_both_env_keys_forms() -> None:
+    """The legacy credential file's key names, for BOTH ``env_keys`` forms.
+
+    ``env_key_name`` answers only the plain-string form, so a reader built on it
+    alone silently drops ``anthropic`` — the sole callable-form provider, and the
+    one whose key a user is most likely to have set with ``lop credential
+    update``. That is not hypothetical: it is how the phone's model sheet came
+    back empty on an install the desktop listed 18 models for.
+    """
+    assert credential_file_names("deepseek") == ["DEEPSEEK_API_KEY"]
+    # The callable form, which `env_key_name` cannot answer.
+    assert env_key_name("anthropic") is None
+    assert "ANTHROPIC_API_KEY" in credential_file_names("anthropic")
+    # Alias-aware: a login flavour holds its key under the provider it stores as.
+    assert "XAI_API_KEY" in credential_file_names("xai-oauth")
+    # A provider with no key name at all, and an unknown id, are both empty
+    # rather than raising — callers iterate over the result unconditionally.
+    assert credential_file_names("ollama") == []
+    assert credential_file_names("no-such-provider") == []
+
+
+def test_every_registry_provider_with_a_string_key_resolves_a_file_name() -> None:
+    """No provider that declares a key name may resolve to nothing.
+
+    The class-level guard behind the ``anthropic`` defect: a provider that
+    declares how it is configured but resolves no file name is invisible to the
+    legacy credential rung.
+    """
+    for definition in PROVIDER_REGISTRY:
+        if definition.env_keys is None:
+            continue
+        assert credential_file_names(definition.id), definition.id
 
 
 def test_env_key_resolution_missing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,6 +26,7 @@ from local_operator.session.runtime.exec_control import (
     maybe_start_exec_control,
     start_exec_control,
 )
+from local_operator.session.runtime.server import RuntimeServer
 
 
 class FakeSession:
@@ -97,6 +98,33 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
+
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
 
@@ -164,6 +192,65 @@ async def test_start_publishes_an_exec_record(isolated_config: Path) -> None:
         assert str(control.port) in control.endpoint_line
         assert control.record_path in control.endpoint_line
         assert control.runtime.record.control_key not in control.endpoint_line
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_printed_record_path_is_the_file_this_run_published(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 2, Q2: the correlation handle names a file that EXISTS.
+
+    `start_exec_control` resolves the run's root once, but the file is written
+    later — and the environment can move in either of two windows between the
+    two:
+
+    * the pin is taken inside `start_in_process`, so a move BEFORE it lands the
+      record in a different directory than the one this function resolved; and
+    * `_serve` reaches its first yield (`await asyncio.start_server`) BEFORE it
+      builds the publisher, so a move during that await is resolved by the
+      publisher itself.
+
+    Both are forced here, so the printed path must be the file the publisher
+    holds rather than anything recomputed from the environment. It fails under
+    both earlier spellings — `registry.record_path(record.pid, config_dir())`
+    (a second read) and the run's own pre-resolved `config_directory` — which
+    is the point: only asking the runtime cannot disagree with it.
+    """
+    moved_to = tmp_path / "moved-to"
+    third = tmp_path / "third"
+    original_start_in_process = RuntimeServer.start_in_process
+    original_serve = RuntimeServer._serve
+
+    async def start_after_the_config_dir_moved(server: RuntimeServer) -> None:
+        # Window 1: after `start_exec_control` resolved its root, before the
+        # pin the runtime actually publishes under.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+        await original_start_in_process(server)
+
+    async def serve_after_the_config_dir_moved(server: RuntimeServer) -> None:
+        # Window 2: `_serve`'s first yield, after the pin was taken.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(third))
+        await original_serve(server)
+
+    monkeypatch.setattr(RuntimeServer, "start_in_process", start_after_the_config_dir_moved)
+    monkeypatch.setattr(RuntimeServer, "_serve", serve_after_the_config_dir_moved)
+    control = await start_exec_control(FakeSession(), cwd="/tmp")
+    try:
+        printed = Path(control.record_path)
+        # Compared against the PUBLISHER's own file rather than the runtime's
+        # accessor, which the product itself now reads: going through the same
+        # property on both sides could not catch a wrong path.
+        publisher = control.runtime._publisher
+        assert publisher is not None, "start_exec_control publishes before it returns"
+        assert printed == publisher.path
+        assert (
+            printed.is_file()
+        ), "the path a supervisor is handed must name the record this run published"
+        # Specifically neither of the directories a recomputation would pick.
+        assert not (tmp_path / "run" / "mobile" / printed.name).exists()
+        assert not (third / "run" / "mobile" / printed.name).exists()
     finally:
         await control.aclose()
 

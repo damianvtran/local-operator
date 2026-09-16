@@ -80,6 +80,28 @@ source that leaves the screen during a gate does not lose its initiating prompt
 or the later result. Reconnect pages back through the previous durable frontier;
 a replay-changing generation produces an explicit presentation reset.
 
+## Parked-source event mute
+
+A prewarmed source stays subscribed so its conversation is warm, and everything
+it receives while nobody is looking is discarded app-side. The DELIVERY of those
+frames is not free — the owner serialises each frame once per connection, and the
+viewer decodes and deserialises it before the drop, with `message_update` frames
+carrying the accumulated message — so a parked viewer asks its owner to stop
+sending them at all.
+
+An upgraded runtime advertises `event-mute-v1`. The viewer sends **`event_mute`**
+when its controller parks and **`event_unmute`** on reveal; the owner then skips
+exactly `EVENT_MUTE_DROP_TYPES` (`message_update`, `tool_execution_update`,
+`subagent_progress`) for that one connection, and nothing else: turn boundaries,
+gates, notices, tool start/end, compaction and model changes keep flowing, since
+a parked source's state must still be right when it is revealed. The mute is per
+connection, idempotent, and re-asserted on reconnect (a fresh socket starts
+unmuted); a viewer whose owner does not advertise the capability sends nothing
+and reads the record's capability list as the pre-dial gate instead. Reveal is
+unchanged: the presentation rebuilds from history plus the canonical live seed
+and the remaining deltas resume, with the settled row's authoritative text
+healing anything that streamed during the parked window.
+
 ## Local workflows and compatibility
 
 The invoking TUI schedules `/loop`, while each iteration prompts its captured

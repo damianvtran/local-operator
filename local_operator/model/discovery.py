@@ -50,6 +50,7 @@ from local_operator.model.catalogue import (
     MISS_REFETCH_MIN_AGE_S,
     SOFT_TTL_S,
     Listing,
+    default_cache_dir,
     invalidate,
     invalidate_documents,
     peek_listing,
@@ -264,6 +265,10 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: the only transports that quote a price at all.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     "anthropic": 2,
+    # Version 1 could normalize malformed nonempty /models data to []. The
+    # original payload is gone, so it cannot safely authorize an empty native
+    # inventory. Only DeepSeek pays the refetch; other caches stay valid.
+    "deepseek": 2,
     "openai": 2,
     "openrouter": 6,
     "radient": 6,
@@ -385,6 +390,9 @@ class DiscoveredModel:
     #: the point of use when its own listing declines to price it.
     routed: bool = False
     supports_images: bool | None = None
+    # Valid fields explicitly supplied by a native endpoint. This distinguishes
+    # zero prices/false flags from omissions through a JSON cache round-trip.
+    authoritative_fields: tuple[str, ...] = ()
     supports_tools: bool | None = None
     reasoning: bool | None = None
     active_context_window: int | None = None
@@ -404,6 +412,16 @@ class DiscoveredModel:
     #: by ``shift+tab``, so seeding it would strand the band on a level the
     #: cycle can never return to.
     reasoning_default_effort: str | None = None
+    #: The time-of-use schedule NAME the row's prices are quoted at
+    #: (``ModelInfo.time_of_use``), inherited from the registry twin this row was
+    #: merged with and never stated by a listing — no provider publishes its
+    #: peak/off-peak structure as a per-model field. Carried here because the
+    #: DeepSeek and aggregator branches build the picker's entries from a
+    #: ``DiscoveredModel`` rather than from the registry row, so a schedule that
+    #: stopped at ``ModelInfo`` would never reach the row a user actually reads.
+    #: ``None`` (every live-only id, and every provider that has no tariff) means
+    #: the row's prices do not vary by time of day.
+    time_of_use: str | None = None
 
 
 class _ListingUnavailable(RuntimeError):
@@ -595,7 +613,7 @@ def _stated_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _effort_ladder(value: object) -> tuple[str, ...] | None:
+def _effort_ladder(value: object, *, preserve_empty: bool = False) -> tuple[str, ...] | None:
     """A listing's effort list as an ASCENDING ladder, or ``None`` when unstated.
 
     Sorted HERE, at ingest, rather than at each reader. ``EFFORT_ORDER`` is the
@@ -632,6 +650,11 @@ def _effort_ladder(value: object) -> tuple[str, ...] | None:
     """
     if not isinstance(value, (list, tuple)):
         return None
+    # An explicitly empty allowlist is a denial, unlike an unrecognised ladder.
+    # Preserve it through disk serialization instead of silently restoring a
+    # static effort knob the provider did not offer.
+    if not value:
+        return () if preserve_empty else None
     known = {
         word.lower() for word in value if isinstance(word, str) and word.lower() in EFFORT_ORDER
     }
@@ -710,13 +733,21 @@ def _entry_list(body: object, *keys: str) -> list[Mapping[str, object]] | None:
     dropped instead of failing the page, so one junk entry cannot hide a
     provider's entire catalogue.
     """
+    entries = _raw_entry_list(body, *keys)
+    return (
+        [entry for entry in entries if isinstance(entry, Mapping)] if entries is not None else None
+    )
+
+
+def _raw_entry_list(body: object, *keys: str) -> list[object] | None:
+    """Retain array provenance before row filtering can turn junk into []."""
     if isinstance(body, list):
-        return [entry for entry in body if isinstance(entry, Mapping)]
+        return body
     if isinstance(body, Mapping):
         for key in keys:
             value = body.get(key)
             if isinstance(value, list):
-                return [entry for entry in value if isinstance(entry, Mapping)]
+                return value
     return None
 
 
@@ -913,8 +944,10 @@ def _row_from_openai_entry(
     reasoning = _mapping(entry.get("reasoning"))
 
     cache_read_price = _per_million(pricing.get("input_cache_read"))
-    effort_ladder = _effort_ladder(reasoning.get("supported_efforts"))
-    return DiscoveredModel(
+    effort_ladder = _effort_ladder(
+        reasoning.get("supported_efforts"), preserve_empty=provider_id == "deepseek"
+    )
+    row = DiscoveredModel(
         id=model_id,
         name=_first_str(entry.get("name"), entry.get("display_name")),
         # OpenRouter also publishes ``input_cache_write_1h`` for the one-hour
@@ -955,7 +988,15 @@ def _row_from_openai_entry(
         ),
         routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
-        supports_images=_has_image_input(architecture),
+        supports_images=(
+            _stated_bool(entry.get("supports_images"))
+            if provider_id == "deepseek" and _stated_bool(entry.get("supports_images")) is not None
+            else _has_image_input(architecture)
+        ),
+        supports_tools=(
+            _stated_bool(entry.get("supports_tools")) if provider_id == "deepseek" else None
+        ),
+        reasoning=(_stated_bool(entry.get("reasoning")) if provider_id == "deepseek" else None),
         # A priced cache-read leg is the only machine-readable evidence of prompt
         # caching in these listings; there is no capability flag for it.
         supports_prompt_cache=cache_read_price > 0,
@@ -970,6 +1011,24 @@ def _row_from_openai_entry(
         reasoning_efforts=effort_ladder,
         reasoning_default_effort=_effort_default(reasoning.get("default_effort"), effort_ladder),
     )
+    if provider_id != "deepseek":
+        return row
+    # DeepSeek's live /models currently omits all of these. Only PRESENT,
+    # valid fields in the established compatibility schema can replace docs.
+    fields = [name for name in ("context_window", "max_tokens") if getattr(row, name) > 0]
+    for wire, name in (
+        ("prompt", "input_price"),
+        ("completion", "output_price"),
+        ("input_cache_read", "cache_read_price"),
+        ("input_cache_write", "cache_write_price"),
+    ):
+        if _per_million(pricing.get(wire)) > 0 or _stated_zero_price(pricing.get(wire)):
+            fields.append(name)
+    cache_support = _stated_bool(entry.get("supports_prompt_cache"))
+    if cache_support is not None:
+        fields.append("supports_prompt_cache")
+        row = dataclasses.replace(row, supports_prompt_cache=cache_support)
+    return dataclasses.replace(row, authoritative_fields=tuple(fields))
 
 
 def _serves_account_scoped_catalogue(
@@ -1112,8 +1171,14 @@ def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     # ``_is_meta_route`` is only valid for an aggregator: this same parser
     # serves every ``openai-compat`` provider, and on Ollama the listing is the
     # user's own filesystem (see R1).
-    rows = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
-    return [row for row in rows if row is not None]
+    parsed = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
+    rows = [row for row in parsed if row is not None]
+    # A native listing may remove models, but filtering [null] or [{}] must
+    # not authorize an empty inventory. Preserve the established envelope and
+    # partial-row tolerance: usable rows still count, only ALL-junk is outage.
+    if ctx.provider_id == "deepseek" and not rows and _raw_entry_list(body, "data", "models"):
+        return None
+    return rows
 
 
 def _anthropic_models_url(base_url: str) -> str:
@@ -1513,6 +1578,9 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         cache_read_price=_positive_float(info.cache_reads_price),
         cache_write_price=_positive_float(info.cache_writes_price),
         supports_images=_stated_bool(info.supports_images),
+        supports_tools=info.supports_tools,
+        reasoning=info.reasoning,
+        time_of_use=info.time_of_use,
         supports_prompt_cache=bool(info.supports_prompt_cache),
     )
 
@@ -1559,8 +1627,9 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     else:
         max_tokens = live_max or static_max
 
-    return DiscoveredModel(
+    merged = DiscoveredModel(
         id=row.id,
+        authoritative_fields=row.authoritative_fields,
         name=_merge_name(row.name, info.name, row.id),
         # Only a positive live window beats the registry. A listing that omits the
         # field (a lean OpenAI-compatible gateway, or an Anthropic proxy on an API
@@ -1625,7 +1694,27 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # of what the wire said and exactly one function owns the fallback.
         reasoning_efforts=row.reasoning_efforts,
         reasoning_default_effort=row.reasoning_default_effort,
+        supports_tools=(
+            row.supports_tools if row.supports_tools is not None else info.supports_tools
+        ),
+        reasoning=row.reasoning if row.reasoning is not None else info.reasoning,
+        # From the REGISTRY, never from the listing: no provider publishes its
+        # peak/off-peak structure as a per-model field, so a live row cannot state
+        # a schedule and must not have one invented for it. This keeps the
+        # schedule attached while the price is the bundled one — and it stays
+        # attached even if a future listing starts quoting a price, which is the
+        # assumption `test_a_live_priced_deepseek_listing_keeps_its_schedule`
+        # pins so the day it stops holding the failure is a red test rather than
+        # a quiet 2x error (``time_of_use`` describes the PUBLISHED PEAK TABLE the
+        # registry prices came from; a live quote's relationship to that table is
+        # unknown).
+        time_of_use=info.time_of_use,
     )
+    # Native facts beat gateway heuristics (including a real 4096 output cap).
+    overrides = {field: getattr(row, field) for field in row.authoritative_fields}
+    if "input_price" in overrides and "output_price" in overrides:
+        overrides["free"] = row.free
+    return dataclasses.replace(merged, **overrides)
 
 
 def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
@@ -1723,11 +1812,25 @@ def _rows_from_payload(
             continue
         # Computed ONCE and handed to both fields: the default is only valid
         # against its own ladder, so re-deriving it would let the two disagree.
-        stored_ladder = _effort_ladder(entry.get("reasoning_efforts"))
+        stored_ladder = _effort_ladder(entry.get("reasoning_efforts"), preserve_empty=True)
         rows.append(
             DiscoveredModel(
                 id=model_id,
                 name=_first_str(entry.get("name")),
+                authoritative_fields=tuple(
+                    field
+                    for field in (entry.get("authoritative_fields") or [])
+                    if field
+                    in {
+                        "context_window",
+                        "max_tokens",
+                        "input_price",
+                        "output_price",
+                        "cache_read_price",
+                        "cache_write_price",
+                        "supports_prompt_cache",
+                    }
+                ),
                 context_window=_positive_int(entry.get("context_window")),
                 default_context_window=_positive_int(entry.get("default_context_window")) or None,
                 max_context_window=_positive_int(entry.get("max_context_window")) or None,
@@ -1795,6 +1898,18 @@ def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> in
     return invalidate_documents(storage_id, cache_dir=cache_dir)
 
 
+def _listing_replaces_static(
+    provider_id: str, rows: list[DiscoveredModel] | None, *, account_scoped: bool = False
+) -> bool:
+    """One inventory policy for live, stale and first-frame cache reads.
+
+    Native DeepSeek publishes the complete set, including a genuine empty
+    inventory. Preserve other providers' established union/account semantics.
+    An unavailable or invalid payload never gets deletion authority.
+    """
+    return rows is not None and (provider_id == "deepseek" or (account_scoped and bool(rows)))
+
+
 def cached_available_models(
     provider_id: str,
     *,
@@ -1827,10 +1942,72 @@ def cached_available_models(
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)
-    if not live_rows:
+    authoritative = _listing_replaces_static(storage_id, live_rows)
+    if live_rows is None or (not live_rows and not authoritative):
         return merge_models(rows, None), "static"
 
-    return merge_models(rows, live_rows, include_static_only=True), "cached"
+    return merge_models(rows, live_rows, include_static_only=not authoritative), "cached"
+
+
+def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set[str] | None:
+    """The model ids ``provider_id``'s catalogue offers, or ``None`` when that
+    question cannot be answered without the network.
+
+    One authority for one question. A caller that is about to REFUSE a
+    ``provider``/``model`` pair (a hand-edited record, a typed id, a stale
+    picker row) needs the same set the picker painted from, or the two disagree
+    in the direction that hurts: a chip the UI offered and the backend refuses.
+
+    ``None`` is a real answer and callers must accept the pair rather than
+    refuse it. Two provider shapes cannot be enumerated offline at all: an
+    aggregator (OpenRouter, Radient) publishes no static rows, and a local
+    endpoint's ids live behind a configured server. For those, "not in the
+    set" would mean "we have not looked", and refusing on it kills working
+    selections.
+
+    The scope sweep is load-bearing rather than thoroughness. A listing
+    document is keyed by CREDENTIAL scope (``credential_provider_id`` plus, for
+    an account-scoped catalogue, a per-account hash), so a ChatGPT-login
+    OpenAI catalogue is written under a key the plain cache reader does not
+    look at -- and a set built only from ``cached_available_models`` would
+    refuse exactly the ids that login had just offered. Enumerating the
+    provider's own documents is the same sweep ``invalidate_documents``
+    documents, for the same reason: one credential identity owns several
+    documents and the caller cannot know which one the next read will pick.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None:
+        return None
+    from local_operator.model.defaults import default_model_for
+
+    storage_id = credential_provider_id(definition.id)
+    # The CATALOGUE half: what the shipped registry describes for this provider
+    # plus every listing document on disk for it. A DEFAULT model is added below
+    # but deliberately does not count toward enumerability -- a provider with one
+    # known default and no catalogue is not a provider whose catalogue we have
+    # read, and treating it as one would refuse every other id it serves.
+    primary_key = _cache_key(storage_id)
+    catalogue_ids = set(_static_rows(definition.id))
+    directory = cache_dir or default_cache_dir()
+    try:
+        keys = {primary_key} | {
+            document.name[: -len(".json")]
+            for document in directory.glob(f"{storage_id}.*listing.json")
+        }
+    except OSError:  # pragma: no cover - unreadable cache dir
+        keys = {primary_key}
+    capture = listing_capture_version(storage_id)
+    for key in sorted(keys):
+        try:
+            rows = _rows_from_payload(peek_listing(key, cache_dir=directory).payload, capture)
+        except Exception:  # noqa: BLE001 — an unreadable document is not an answer
+            continue
+        if rows:
+            catalogue_ids |= {row.id for row in rows}
+    if not catalogue_ids:
+        return None
+    default = default_model_for(definition.id)
+    return catalogue_ids | ({default} if default else set())
 
 
 def available_models(
@@ -2075,7 +2252,12 @@ def _available_models(
     # all and no request issued to recover. Before this path existed the same
     # answer still offered every bundled id, which is the behaviour to keep:
     # upstream schema drift should cost "no new models", never "no models".
-    authoritative_live = account_scoped and bool(live_rows)
+    # DeepSeek documents /models as its complete current inventory, not a partial
+    # entitlement snapshot. Keep legacy aliases only for offline fallback/manual
+    # selectors; unioning them here resurrects retired models after a good fetch.
+    authoritative_live = _listing_replaces_static(
+        provider_id, live_rows, account_scoped=account_scoped
+    )
     merged = merge_models(
         rows,
         live_rows,

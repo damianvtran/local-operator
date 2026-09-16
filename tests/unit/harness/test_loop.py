@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from collections import Counter
@@ -16,15 +17,26 @@ import pytest
 import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
+    LENGTH_ENDED_CALL_RESULT_TEXT,
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
+    TRUNCATED_RESULT_TEXT,
     AgentLoop,
     LoopContext,
     _consume_claim,
     _get_before_timeout,
     validate_tool_arguments,
 )
+from local_operator.harness.rows import (
+    assistant_stop_notice,
+    is_harness_chrome,
+    output_limit_call_receipt,
+)
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
+    OUTPUT_LIMIT_ARGUMENTS,
+    OUTPUT_LIMIT_KEY,
+    OUTPUT_LIMIT_TURN,
     AbortSignal,
     AgentEndEvent,
     AgentTool,
@@ -39,10 +51,12 @@ from local_operator.harness.types import (
     NoticeEvent,
     StreamEndEvent,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
@@ -51,10 +65,12 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    turn_output_budget,
 )
 from local_operator.providers.failover import (
     ProviderError,
     _mark_mid_stream_connectivity,
+    stream_with_failover,
     wrap_transport_error,
 )
 
@@ -219,6 +235,46 @@ async def test_full_turn_text_tool_text():
 
 
 @pytest.mark.asyncio
+async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
+    """The reasoning channel reaches no surface, and that claim is load-bearing.
+
+    ``stream_with_failover`` carves ``StreamReasoningDelta`` out of its "the
+    caller has seen output" gate on the strength of this property, and the
+    harness claims a consumer that ignores the event renders the old turn
+    unchanged. The loop is the one consumer that could regress silently, so the
+    same turn is run twice -- with and without a leading reasoning fragment --
+    and the two runs are compared: identical event types, identical assembled
+    text, and no emitted event (serialized in full) carrying the fragment.
+    """
+
+    def turn(with_reasoning: bool) -> list[StreamEvent]:
+        leading: list[StreamEvent] = (
+            [StreamReasoningDelta(delta="weighing the options")] if with_reasoning else []
+        )
+        return [*leading, StreamTextDelta(delta="Done"), StreamEndEvent(stop_reason="stop")]
+
+    async def run(with_reasoning: bool) -> list[Any]:
+        stream = ScriptedStream([turn(with_reasoning)])
+        context = LoopContext(system_blocks=["sys"], tools=[])
+        return [
+            event
+            async for event in AgentLoop().run(
+                [Message.user("go")], context, make_config(stream), None
+            )
+        ]
+
+    with_reasoning = await run(True)
+    without = await run(False)
+
+    assert [event.type for event in with_reasoning] == [event.type for event in without]
+    assert with_reasoning[-1].messages[0].text == "Done"
+    assert without[-1].messages[0].text == "Done"
+    assert not any(
+        "weighing" in json.dumps(event.model_dump(mode="json")) for event in with_reasoning
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_tool_only_turn_carries_no_empty_text_block() -> None:
     """A turn that calls a tool and says nothing must keep ``content == []``.
 
@@ -355,6 +411,17 @@ async def test_abort_pairs_dangling_tool_calls():
         # appeared.
         "tool_call_compose",
         "tool_call_compose",
+        # ...and so does each call's TERMINAL dictation frame, which is new: the
+        # old flush here was gated on the argument size having moved, so a call
+        # whose size stopped changing (every call in this script — name and
+        # arguments arrive in one delta) had no ending at all on the wire. An
+        # interrupted turn is exactly where that matters, because the rows left
+        # on screen are the ones the user reads afterwards. `dictation_complete`
+        # says the model is no longer writing; the ABORT itself is the turn's
+        # verdict and stays where the taxonomy puts it (turn-end retirement,
+        # design round 1 D2), not on this frame.
+        "tool_call_compose",
+        "tool_call_compose",
         "message_end",
         "turn_end",
         "agent_end",
@@ -397,6 +464,220 @@ async def test_length_pairs_but_does_not_execute():
     assert end.aborted is False
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert len(tool_messages) == 1 and tool_messages[0].is_error
+    # The model is told WHY the call did not run, not just that something ended.
+    # A bare "aborted" read as an unexplained failure and a model that had just
+    # emitted a large `write` declined to retry it, so the file was never written
+    # (QA round 1, Q2).
+    #
+    # Which text is the COMPLETE-arguments arm of the limit, and that is the arm
+    # this stream is in: `args="{}"` is a two-character argument object that
+    # parses, so nothing about this call was cut. The size framing belongs to
+    # ``TRUNCATED_RESULT_TEXT`` and to calls that were actually cut -- see
+    # ``test_length_arms_are_distinguished`` -- because telling a call whose
+    # arguments arrived complete that they were oversize sent the model after a
+    # problem it did not have while the identical arguments ran fine on the next
+    # turn (review round 1, F1 == QA Q1).
+    assert tool_messages[0].text == LENGTH_ENDED_CALL_RESULT_TEXT
+    # And the user is told the limit was hit, on the surface that renders the
+    # loop's own events — with the arm this turn is actually in. `args="{}"`
+    # PARSES, so nothing here was cut, and the line used to claim otherwise: it
+    # read "mid tool call … re-emit the call in smaller pieces" over a model
+    # whose own result said "Its arguments arrived complete, so there is nothing
+    # here to shrink. Re-issue this call as it is." — one event described two
+    # ways, the false-cause class this PR removes (design round 1, D1; QA
+    # Q-R2-1; review round 2, MINOR-2).
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit before the call ran "
+        "— nothing was executed; re-asking it to "
+        "re-issue the call as it is"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_length_arms_are_distinguished():
+    """ONE limit, TWO arms, and each call is told only what is true of it.
+
+    The length arm appends its placeholder to EVERY call in the turn, and not
+    every one of them was cut: a turn can finish dictating a call — or two — and
+    then spend whatever budget is left on a third. Telling a call whose
+    arguments arrived complete that they "were larger than the output limit
+    allows" and "will be cut again" asserts two things that are false there, and
+    measurably so: re-issuing such a call's identical arguments on the next turn
+    runs them and writes the file (review round 1, F1 == QA round 1, Q1).
+
+    Nothing pinned this before. Both the old wording and the new one were green
+    on this file, because every assertion compared the result against the
+    imported constant — so a revert, or the two arms collapsing back into one,
+    would pass CI (QA round 1, Q2). This test is that pin, and it asserts the
+    operator-facing RECEIPT as well as the model-facing text, because the two
+    are separate audiences with separate vocabularies (review F2): the row a
+    resume paints for a cut call must never be the prose addressed to the model.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                # Three calls in one turn that the cap ends, one per arm boundary:
+                #   1. NO argument deltas at all -- a zero-argument call, which
+                #      is complete by definition and must not be told to shrink;
+                #   2. arguments that finished arriving and PARSE -- the QA Q1
+                #      shape, where the size claim is measurably false;
+                #   3. arguments cut mid-dictation, left as a JSON fragment that
+                #      never parses -- the only arm the size claim is true of.
+                tool_call_delta(0, id="c_none", name="echo"),
+                tool_call_delta(1, id="c_full", name="echo", args='{"text": "hi"}'),
+                tool_call_delta(2, id="c_cut", name="echo", args='{"text": "'),
+                StreamEndEvent(stop_reason="length"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    # No arm executes: the batch is paired with placeholders either way.
+    assert executed == []
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["c_none", "c_full", "c_cut"]
+    assert all(m.is_error for m in tool_messages)
+
+    # The text follows the arm, and only the cut call gets the size claim.
+    assert [m.text for m in tool_messages] == [
+        LENGTH_ENDED_CALL_RESULT_TEXT,
+        LENGTH_ENDED_CALL_RESULT_TEXT,
+        TRUNCATED_RESULT_TEXT,
+    ]
+    assert "oversize" in tool_messages[2].text and "cut again" in tool_messages[2].text
+    assert all("oversize" not in m.text and "cut again" not in m.text for m in tool_messages[:2])
+
+    # The arm also rides in ``details``, because that MARKER -- not the wording
+    # -- is what a display surface reads. Keying a row on a string the loop is
+    # free to reword is a row whose text changes for a copy edit, and it cannot
+    # tell the two arms apart at all.
+    payloads = [m.provider_payload or {} for m in tool_messages]
+    # Indexed rather than `.get`: a placeholder is minted by ``_synthetic_result``,
+    # which always stamps ``details``, and a row that lost its marker must fail
+    # loudly here rather than read as "no limit" in the assertions below.
+    details = [p["details"] for p in payloads]
+    assert [d[OUTPUT_LIMIT_KEY] for d in details] == [
+        OUTPUT_LIMIT_TURN,
+        OUTPUT_LIMIT_TURN,
+        OUTPUT_LIMIT_ARGUMENTS,
+    ]
+
+    # And the RECEIPT the operator reads is neither of those model-facing
+    # strings: model-directed prose must not reach the row (review round 1, F2).
+    receipts = [output_limit_call_receipt(d) for d in details]
+    assert receipts == [
+        "turn cut off at the output limit before this call ran",
+        "turn cut off at the output limit before this call ran",
+        "tool call cut off at the output limit (nothing ran)",
+    ]
+    assert all(r not in (TRUNCATED_RESULT_TEXT, LENGTH_ENDED_CALL_RESULT_TEXT) for r in receipts)
+    # The RECEIPT belongs to the call's own row, and the turn's notice is a
+    # different sentence about a different subject -- not a second copy of it.
+    # Both used to be the same string, which put one sentence twice on one
+    # screen: the row two rows under the failed call card, byte-identical to it
+    # (design round 1, D2). The notice states the TURN; the row states the CALL.
+    cut_notice = assistant_stop_notice(
+        text="",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+        cut_tool_call=True,
+    )
+    complete_notice = assistant_stop_notice(
+        text="",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+        cut_tool_call=False,
+    )
+    assert cut_notice is not None and complete_notice is not None
+    assert cut_notice == ("turn cut off at the output limit mid tool call — nothing ran", "warning")
+    assert complete_notice == ("turn cut off at the output limit — nothing ran", "warning")
+    assert not {cut_notice[0], complete_notice[0]} & set(receipts)
+    # A MIXED turn takes the cut line, and takes it truthfully: a call in this
+    # turn really was cut mid-dictation, which is the whole of that clause's
+    # claim, and the complete calls' rows stay precise about themselves. It is
+    # also what the loop itself announced on this same turn, which is the point
+    # — the live notice and the fold now read one body of evidence.
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit mid tool call "
+        "— nothing was executed; re-asking it to "
+        "re-emit the call in smaller pieces"
+    ]
+
+    # Every other result keeps its own text: the substitution is keyed on the
+    # marker, not on the shape of an error row.
+    assert output_limit_call_receipt({"__synthetic": True}) is None
+    assert output_limit_call_receipt(None) is None
+
+
+@pytest.mark.asyncio
+async def test_length_with_prose_and_a_call_takes_the_answer_arm():
+    """Design round 2 (D7): prose and a cut call is ONE event, one description.
+
+    This turn -- the model streamed a partial answer and was still dictating a
+    call when the limit hit -- used to be described two ways: the live loop
+    checked ``tool_calls`` first and said "mid tool call — nothing was
+    executed", while ``rows.assistant_stop_notice`` checked ``text`` first and
+    folded the same turn as "answer cut off at the output limit". Prose wins on
+    both sides now, and it is the honest reading: there IS an answer on this
+    turn and it IS incomplete.
+
+    The call half is not lost by that. It is still not executed (the
+    placeholder below keeps Q2's fix), and the model still learns why from the
+    limit result -- which says the call did not run on its own row, where a
+    reader looks for that fact rather than in a notice about the answer.
+
+    The call here is COMPLETE (``args="{}"`` parses), so the arm is
+    ``LENGTH_ENDED_CALL_RESULT_TEXT``: a turn can stream prose and a finished
+    call and still hit the cap, and this call is not the thing that ran out of
+    room. Nothing about it needs shrinking, which is exactly what the other arm
+    would have told the model to do.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="here is the file"),
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="length"),
+            ],
+            # The placeholder result goes back to the model; it stops cleanly.
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert executed == []
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    ]
+    tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
+    assert len(tool_messages) == 1 and tool_messages[0].is_error
+    assert tool_messages[0].text == LENGTH_ENDED_CALL_RESULT_TEXT
+
+    # And the fold reads the same turn the same way: content, not "a call was
+    # cut". If this ever diverges, the live row and the replayed row disagree
+    # about one event -- which is what D7 caught.
+    assert assistant_stop_notice(
+        text="here is the file",
+        has_tool_calls=True,
+        stop_reason="length",
+        provider_payload=None,
+    ) == ("answer cut off at the output limit", "warning")
 
 
 @pytest.mark.asyncio
@@ -671,7 +952,7 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     user's screen. The real session renderer is pinned in
     ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
     """
-    from local_operator.tools.builtin import TODO_REMINDER_MESSAGE_TYPE
+    from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 
     reminder = CustomMessage(
         custom_type=TODO_REMINDER_MESSAGE_TYPE,
@@ -1504,6 +1785,69 @@ class TestTheContextHintIsStampedPerRequestByTheLoop:
         await self._run(stream, get_context_tokens_hint=lambda: None)
 
         assert self._hints(stream) == [None, 160_000, 160_000]
+
+
+class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
+    """Every ``ChatRequest`` the loop builds carries a ``max_tokens``.
+
+    The loop is where the TUI's turns go out, so it is the interface that
+    shared the benchmark's defect: no request named a bound of its own, so the
+    wire carried the model's advertised CAPABILITY (943,718 tokens on a 1M
+    window) and one measured decision returned ``output_tokens=97189`` with
+    ``reasoning_tokens=95098``. The bound is filled by the request contract
+    (``harness/types.DEFAULT_TURN_OUTPUT_TOKENS``) rather than set at this call
+    site, so this asserts the loop's requests ARE bounded by it -- including a
+    tool loop, where the second call is built by the same code path as the
+    first.
+    """
+
+    @staticmethod
+    async def _run(stream: ScriptedStream, **kwargs: Any) -> None:
+        context = LoopContext(system_blocks=["sys"], tools=[echo_tool([])])
+        async for _ in AgentLoop().run(
+            [Message.user("go")], context, make_config(stream, **kwargs), None
+        ):
+            pass
+
+    @staticmethod
+    def _two_calls() -> ScriptedStream:
+        return ScriptedStream(
+            [
+                [
+                    tool_call_delta(0, id="c", name="echo", args="{}"),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_no_cap_is_bounded_by_the_policy(self):
+        """The default ``ModelSpec`` advertises 8,192; the run must ask for
+        something, not nothing."""
+        stream = self._two_calls()
+
+        await self._run(stream)
+
+        assert [r.max_tokens for r in stream.requests] == [turn_output_budget(MODEL)] * 2
+        assert all(r.max_tokens and r.max_tokens > 0 for r in stream.requests)
+
+    @pytest.mark.asyncio
+    async def test_a_model_advertising_a_huge_cap_is_capped_at_the_policy(self):
+        """The muse-spark shape: 1M window, 943,718 advertised -- which is 90%
+        of that window. Before the bound rode the contract, this is the request
+        that asked for the advertised capability on every call."""
+        spec = ModelSpec(
+            provider="openrouter",
+            model_id="meta/muse-spark-1.3",
+            context_window=1_048_576,
+            max_output_tokens=943_718,
+        )
+        stream = self._two_calls()
+
+        await self._run(stream, model=spec)
+
+        assert [r.max_tokens for r in stream.requests] == [DEFAULT_TURN_OUTPUT_TOKENS] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -2741,6 +3085,48 @@ async def test_empty_length_truncation_retries_at_lower_effort():
 
 
 @pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_takes_the_silent_path_too():
+    """Review R2-n4, the behaviour half: whitespace is nothing, so a turn that
+    emitted only whitespace GETS the silent treatment — the same lower-rung retry
+    an empty turn gets.
+
+    This is the consequence of stripping on both sides, and it is stated rather
+    than discovered: ``not assistant.text`` read "   " as a spoken answer, so the
+    turn neither retried nor announced itself, and the reader was left holding an
+    answer the fold called "no answer". The retry exists precisely for a turn
+    with nothing visible on screen.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="   "),
+                StreamEndEvent(stop_reason="length"),
+            ],  # nothing a reader can see, then the limit
+            [StreamTextDelta(delta="here is the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=_laddered_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[1].model.reasoning_effort == "medium"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("retrying at effort medium" in n.text for n in notices)
+    # And the whitespace turn does not ride into the retry's history, for the
+    # same reason the empty one does not.
+    assert all(
+        not (m.role == "assistant" and not m.text.strip() and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
     """Retries are bounded; when they are spent the turn ends, but the user
     sees WHY instead of minutes of thinking followed by silence."""
@@ -2770,9 +3156,15 @@ async def test_empty_length_truncation_ends_with_a_notice_when_no_lower_rung():
 
 
 @pytest.mark.asyncio
-async def test_text_only_length_truncation_is_not_retried():
+async def test_text_only_length_truncation_is_announced_but_not_retried():
     """A truncation that DID produce visible text is an ordinary truncation:
-    the turn ends, no effort step, no retry."""
+    the turn ends, no effort step, no retry -- and it is ANNOUNCED.
+
+    The announcement is the half this test used to assert the absence of, and
+    that absence was the defect (agent review round 1, B1): the prose that
+    arrived reads as a complete short reply, so a cut answer was
+    indistinguishable from a finished one in the transcript and on the phone.
+    """
     stream = ScriptedStream(
         [
             [StreamTextDelta(delta="partial"), StreamEndEvent(stop_reason="length")],
@@ -2788,7 +3180,66 @@ async def test_text_only_length_truncation_is_not_retried():
         events.append(event)
 
     assert len(stream.requests) == 1
-    assert not [e for e in events if isinstance(e, NoticeEvent)]
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    assert "output limit" in notices[0].text
+    assert notices[0].kind == "warning"
+    # The copy is pinned here because it is the one row of the family the user
+    # can be left holding with no other move: a text truncation is NOT
+    # auto-continued below, and its sibling rows all name one, so this one must
+    # name a remedy too (design round 1, D4). It also uses the family's em dash,
+    # not the `--` it shipped with on the first pass (D2).
+    assert notices[0].text == (
+        "the model hit the output limit — this answer is cut off, and the rest "
+        "was never sent — ask again to continue, or narrow the request"
+    )
+    # The partial answer is still delivered as the turn's text -- the notice is
+    # added beside it, not instead of it.
+    assert "partial" in "".join(
+        getattr(m, "text", "") or "" for m in context.messages if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_length_stop_is_silent_to_both_surfaces():
+    """Review R2-n4: the live notice and the folded receipt must agree that a
+    whitespace-only answer is NO answer.
+
+    The loop tested ``not assistant.text`` while ``assistant_stop_notice``
+    strips, so a ``length`` stop whose whole answer was ``"   "`` had the live
+    row claim an answer was cut off over a fold that said no answer existed --
+    two voices for one event, which is the failure this family exists to
+    prevent. Both sides strip now.
+    """
+    stream = ScriptedStream(
+        [
+            # Whitespace, then the limit: no visible answer at all. The model
+            # has no ladder, so there is no lower rung to retreat to and the
+            # turn ends on the notice rather than retrying.
+            [StreamTextDelta(delta="   "), StreamEndEvent(stop_reason="length")],
+        ]
+    )
+    context = LoopContext()
+    loop = AgentLoop()
+    model = ModelSpec(provider="test", model_id="m")  # no ladder: no rung below
+    events = []
+    async for event in loop.run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert len(notices) == 1
+    # The SILENT arm, not the partial-answer arm: nothing was said.
+    assert "no visible output" in notices[0].text
+    assert "answer" not in notices[0].text
+
+    # And the fold reads the same turn the same way -- if this ever diverges,
+    # the live row and the replayed row disagree about one event.
+    assert assistant_stop_notice(
+        text="   ", has_tool_calls=False, stop_reason="length", provider_payload=None
+    ) == ("no answer: the model spent its whole output budget", "warning")
 
 
 @pytest.mark.asyncio
@@ -3211,8 +3662,12 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     assert on_screen == "The answer is 42."
 
     # A visible notice explains the seam rather than the text silently jumping.
+    # Its wording names what the loop KNOWS (the stream stopped mid-answer and
+    # the turn is being resumed) rather than a cause: this one branch also serves
+    # an aggregator whose upstream host died, where the machine's network is
+    # fine.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert any("network connection lost" in text for text in notices)
+    assert any("response stream cut mid-answer" in text for text in notices)
 
     # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
     # partial answer as HISTORY, so the model writes the remainder instead of
@@ -3312,7 +3767,7 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     # its position, rather than three identical claims of a reconnection.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert notices == [
-        f"network connection lost mid-response — retrying ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
+        f"response stream cut mid-answer — resuming the turn ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
 
@@ -3360,6 +3815,273 @@ async def test_connectivity_continuation_drops_truncated_tool_calls() -> None:
         not m.tool_calls for m in messages if isinstance(m, Message) and m.role == "assistant"
     )
     assert any(isinstance(m, Message) and m.text == "done" for m in messages)
+
+
+#: The exact in-band failure OpenRouter served the reported sentinel pass when
+#: one of its upstream hosts (Together) died mid-body. Written here as the wire
+#: text rather than as a paraphrase, because the classifier reads the composed
+#: message and a paraphrase would test the wrong string.
+_AGGREGATOR_UPSTREAM_CUT = (
+    "provider_unavailable: Upstream error from Together: Stream error: "
+    "h2 protocol error: error reading a body from connection"
+)
+
+
+class _AggregatorAuth:
+    """Minimal ``FailoverAuthStore``: one bearer, no siblings to rotate to."""
+
+    def __init__(self, keys: dict[str, list[str]]) -> None:
+        self.keys = keys
+
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None, **kwargs: Any
+    ) -> str | None:
+        pool = self.keys.get(provider, [])
+        return pool[0] if pool else None
+
+    def rotate_sibling(
+        self,
+        provider: str,
+        session_id: str | None,
+        error: Any,
+        api_key: str | None = None,
+        *,
+        model_id: str = "",
+    ) -> bool:
+        return False
+
+
+class _AggregatorGateway:
+    """OpenRouter's behaviour on the wire: answer, stream, then die in band.
+
+    ``failures`` is indexed by call number; an entry of ``None`` (or an
+    exhausted list) means this call is served cleanly. Each failing call emits
+    the partial answer and the HALF-DICTATED call first, because that is the
+    only shape that reaches the driver's ``forwarded_any`` raise sites — with
+    nothing forwarded the driver retries in place and the loop never sees a
+    failure at all.
+    """
+
+    def __init__(self, failures: list[BaseException | None]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def stream(self, request: ChatRequest, api_key: str | None, oauth_access: Any = None):
+        index = self.calls
+        self.calls += 1
+        if index < len(self.failures) and self.failures[index] is not None:
+            yield StreamTextDelta(delta="Let me write that down. ")
+            yield tool_call_delta(
+                0, id="c1", name="write", args='{"path": "/tmp/notes", "content": "hel'
+            )
+            raise self.failures[index]  # type: ignore[misc]
+        yield StreamTextDelta(delta="done")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+def _aggregator_cut() -> ProviderError:
+    """The recorded in-band upstream failure, as OpenRouter delivers it."""
+    return ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True)
+
+
+def _aggregator_harness(
+    failures: list[BaseException | None],
+) -> tuple[Any, _AggregatorGateway, list[ChatRequest]]:
+    """A loop ``stream_fn`` wired to the REAL failover driver, plus its parts.
+
+    This is the shape ``create_stream_fn`` produces, minus the session plumbing
+    this test does not exercise, and driving the driver is the whole point: a
+    fake ``stream_fn`` would hand the loop an already-certified error, so the
+    test would only be asserting that the loop reads a flag rather than that the
+    incident is recovered end to end.
+
+    Returns the stream_fn, the gateway (for call counts) and the requests that
+    were actually sent (for history assertions).
+    """
+    gateway = _AggregatorGateway(failures)
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+    sent: list[ChatRequest] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        sent.append(request)
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    return stream_fn, gateway, sent
+
+
+#: The loop config the aggregator cases run under: the reported sentinel pass's
+#: own selector, so the provider half of the resumability decision is exercised.
+_AGGREGATOR_MODEL = ModelSpec(provider="openrouter", model_id="deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_aggregator_upstream_cut_mid_call_continues_the_turn() -> None:
+    """THE REPORTED BUG: 13 minutes of work died on a gateway's upstream blip.
+
+    Driven through the real failover driver, so the reproduction is the incident
+    itself: OpenRouter commits 200, streams prose and the beginning of a tool
+    call, and then one of its upstream hosts dies mid-body. Before the fix the
+    driver handed that raise up uncertified, the loop took it as an ordinary
+    stream error and the run ended with ``stop_reason="error"`` — discarding both
+    the partial answer and the half-composed call. Now the partial answer becomes
+    history and the continued turn finishes, so the user reads ONE answer.
+    """
+    executed: list[str] = []
+    stream_fn, gateway, _sent = _aggregator_harness([_aggregator_cut(), None])
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None, "a gateway upstream blip must not end the pass"
+    assert ends[0].aborted is False
+
+    # What the user read, exactly once: the partial answer and its continuation.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "Let me write that down. done"
+    # The gateway was asked a second time — the re-route the incident needed.
+    assert gateway.calls == 2
+    # The truncated call never ran: it is dropped rather than executed, which the
+    # sibling test above locks down. Here the point is that the turn lives.
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_aggregator_cut_mid_call_tells_the_model_the_call_was_aborted() -> None:
+    """The MID-TOOL-CALL half: a dropped call must not vanish silently.
+
+    The prose prompt tells the model to continue a sentence seamlessly. A call
+    still being dictated when the socket died is truncated JSON — unrunnable and
+    unreplayable — so the loop drops it, erasing the model's own record of having
+    chosen that action. Without an instruction shaped for that cut the model
+    continues the prose and the ``write`` it had already decided on is simply
+    lost, one of the two things the incident cost.
+
+    Asserted on the request that is actually re-sent, through the real Anthropic
+    serializer, so the instruction AND the wire shape are both covered.
+    """
+    executed: list[str] = []
+    stream_fn, _gateway, sent = _aggregator_harness([_aggregator_cut(), None])
+
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    )
+
+    retry_messages = sent[1].messages
+    # The partial answer survives as history — what makes the retry additive.
+    assert retry_messages[1].text == "Let me write that down. "
+    # The truncated call is gone from history (unrunnable, unreplayable)...
+    assert all(
+        not m.tool_calls for m in retry_messages if isinstance(m, Message) and m.role == "assistant"
+    )
+    # ...and the instruction carries what the drop erased, naming the tool so a
+    # multi-call turn is unambiguous.
+    instruction = retry_messages[-1].text
+    assert retry_messages[-1].role == "user"
+    assert "write" in instruction
+    assert "aborted" in instruction
+    assert "issue the call again from scratch" in instruction
+    # ...and replay must not paint it as the operator's own words: the composed
+    # shape the loop persists has to be recognised by the one shared chrome
+    # decision every surface folds through (round-1 M1).
+    assert is_harness_chrome(instruction)
+    # The prose half is still there, so a cut in BOTH places gets both rules.
+    assert loop_module.CONNECTIVITY_CONTINUATION_PROMPT in instruction
+    # Persisted too, so a resumed session can explain the seam.
+    assert any(isinstance(m, Message) and m.text == instruction for m in messages)
+
+    # WIRE LEGAL: it must serialize, not merely look right in the loop.
+    from local_operator.providers.clients import AnthropicClient
+
+    body = AnthropicClient("https://api.anthropic.com")._build_body(
+        ChatRequest(
+            model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+            messages=retry_messages,
+        )
+    )
+    roles = [entry["role"] for entry in body["messages"]]
+    assert roles[-1] == "user", "never a prefill"
+    # No unpaired tool_use/tool_result survives the drop.
+    assert roles.count("assistant") == 1
+
+
+@pytest.mark.asyncio
+async def test_aggregator_upstream_cut_budget_surfaces_a_bounded_error() -> None:
+    """An aggregator that keeps failing must END the pass, not loop forever.
+
+    The continuation budget is shared with the offline case on purpose: a gateway
+    whose every upstream host is down is exactly the case a bounded, named
+    failure is for, and the provider's own words must survive to the frame.
+    """
+    gateway = _AggregatorGateway([_aggregator_cut() for _ in range(20)])
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream_fn, model=_AGGREGATOR_MODEL), None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    # The gateway's own diagnosis survives, so the operator can see WHICH host died.
+    assert "provider_unavailable" in ends[0].error
+    assert "Upstream error from Together" in ends[0].error
+    # Bounded: the initial attempt plus exactly the continuation budget.
+    assert gateway.calls == MAX_CONNECTIVITY_CONTINUATIONS + 1
+
+
+@pytest.mark.asyncio
+async def test_aggregator_in_band_refusal_mid_stream_still_terminates() -> None:
+    """A REFUSAL is not a routing failure, even in band from a gateway.
+
+    Same channel and the same driver raise site — but a 400 is the provider
+    answering about OUR bytes, deterministic in them, so it must not spend the
+    continuation budget or hide itself behind a retry. This is the boundary the
+    provider-layer controls assert directly; here it is proven to survive the
+    whole loop, through the real driver.
+    """
+    refusal = ProviderError(400, "invalid_request_error: messages: field required", retryable=False)
+    gateway = _AggregatorGateway([refusal, None])
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream_fn, model=_AGGREGATOR_MODEL), None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is not None
+    assert "invalid_request_error" in ends[0].error
+    assert gateway.calls == 1, "a refusal must not be re-asked"
 
 
 @pytest.mark.asyncio
@@ -3947,3 +4669,508 @@ async def test_a_never_id_call_is_promoted_once_not_per_state():
     starts = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
     assert sorted(starts) == sorted(promotions.values())
     assert executed == ["echo", "echo", "echo"]
+
+
+# ---------------------------------------------------------------------------
+# The DeepSeek reasoning-echo refusal: bounded recovery
+# ---------------------------------------------------------------------------
+#
+# A thinking-mode request that does not carry reasoning back on every assistant
+# turn is refused with an HTTP 400, which the failover layer rightly treats as
+# non-retryable (the same body cannot succeed). It arrives here as a rendered
+# "invalid request (HTTP 400): ..." string on an ``error`` end, and the loop can
+# recover from it where the client cannot: the SAME conversation answers 200
+# with thinking turned off (measured live). One retry, then the failure surfaces.
+
+_REASONING_ECHO_ERROR = (
+    "invalid request (HTTP 400): The `reasoning_content` in the thinking mode "
+    "must be passed back to the API."
+)
+
+
+def _echo_model(effort: str = "high") -> ModelSpec:
+    return ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort=effort,
+        requires_reasoning_echo=True,
+    )
+
+
+def _unrecognised_thinking_route() -> ModelSpec:
+    """A thinking-mode route the family table has not learned yet.
+
+    The reachable shape for the echo-fill recovery: ``_DEEPSEEK_THINKING_MODELS``
+    covers ``deepseek-(flash|v4)``, so the NEXT generation id -- and any
+    rebranded or relayed endpoint serving these weights under another name --
+    derives ``requires_reasoning_echo`` False while running the same validator.
+    That is what the capability's own docstring calls a prediction, and a
+    prediction that is wrong must not turn a recoverable refusal into a dead
+    turn. (The other way in is a spec that STATES the flag off, which is what
+    the probe does; this one is what production can still do by accident.)
+
+    The ladder is set explicitly because that table has not learned this id
+    either, and the first test needs a retreat to be AVAILABLE while proving the
+    fill is chosen instead. The guard is not decoration: if the family rule ever
+    learns this id the helper stops representing what it says it does, and a
+    silent pass would hide that the recovery had stopped being exercised.
+    """
+    model = ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-v5-flash",
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort="high",
+    )
+    assert model.requires_reasoning_echo is False, "the family rule learned this id"
+    return model
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_refusal_retries_once_with_thinking_disabled():
+    """The refusal is recoverable: retry the turn with thinking off, and say so.
+
+    The user is losing the model's reasoning for the rest of the run, which is a
+    real degradation and must be visible rather than inferred from a quieter
+    answer.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.reasoning_effort == "high"
+    assert stream.requests[1].model.reasoning_effort == "none"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and not end.aborted and end.error is None
+    # The refused turn carried nothing the user read, so it must not reach the
+    # retry's history: the next request re-sends the conversation that failed.
+    assert all(
+        not (m.role == "assistant" and not m.text and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_refusal_is_retried_once_and_then_surfaces():
+    """Retries are bounded at one, and a second refusal ends with the provider's
+    own words rather than looping."""
+    stream = ScriptedStream(
+        [[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]] * 2
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_recovery_never_replays_output_the_user_read():
+    """Only a turn with nothing SHOWN may be replayed.
+
+    A provider that emitted content before failing has already been read; a
+    retry would show it twice, so the loop ends the run with the failure.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="partial answer"),
+                StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        # The echo is already in force, so the FILL has nothing to add and the
+        # only remaining lever is the retreat -- which this ladder lacks.
+        ModelSpec(
+            provider="test",
+            model_id="m",
+            reasoning_efforts=("low", "medium", "high"),
+            reasoning_effort="high",
+            requires_reasoning_echo=True,
+        ),
+        _echo_model("none"),  # already off: the retry could not change the body
+    ],
+)
+async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
+    """With no thinking-off rung there is nothing to retry, so the turn ends.
+
+    The rung is the precondition, not the capability: a model that cannot turn
+    thinking off would spend a call to be told the same thing.
+
+    Both cases pin the RETREAT's precondition on a spec whose echo is already
+    in force, which is what isolates it from the fill above: an echo-less spec
+    would spend its fill retry first (that ordering is pinned by its own test),
+    and the no-rung case would then never be reached.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "thinking disabled" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_an_echo_less_spec_fills_the_echo_before_giving_anything_up():
+    """The benign recovery is spent FIRST, and at the SAME effort.
+
+    A spec reaching the wire without the echo is what the provider refuses, and
+    the fill is the one recovery that costs the user nothing: same route, same
+    effort, same thinking mode, one short placeholder per blank assistant turn.
+    The retreat below costs the model its reasoning for the rest of the run, so
+    it must not be the first thing tried when a cheaper, measured answer exists.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.requires_reasoning_echo is False, "what was refused"
+    assert stream.requests[1].model.requires_reasoning_echo is True, "the fill"
+    assert stream.requests[1].model.reasoning_effort == "high", "same effort, not a retreat"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_fill_and_the_retreat_are_each_spent_once_and_then_it_surfaces():
+    """Two separate budgets, bounded, and the provider's own error is the end.
+
+    They are separate on purpose: the fill answers exactly one failure mode (a
+    request that went out without its echo) and the retreat answers the one that
+    is left (a route that refuses even with the echo, or refuses for a second
+    reason). Sharing one counter would spend the only retreat on the fill, and a
+    fresh budget per turn would re-buy the same diagnosis every turn.
+
+    Three calls and no fourth: the scripted stream has no fourth turn, so a
+    recovery that looped would raise rather than pass.
+    """
+    model = _unrecognised_thinking_route()
+    refusal = [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]
+    stream = ScriptedStream([list(refusal), list(refusal), list(refusal)])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 3
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == "high"
+    assert stream.requests[2].model.reasoning_effort == "none"
+    notices = [n.text for n in events if isinstance(n, NoticeEvent)]
+    assert any("echo" in text for text in notices)
+    assert any("thinking disabled" in text for text in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_the_echo_fill_is_not_spent_once_the_user_has_read_something():
+    """A turn the user has already seen may not be replayed, however cheap it is.
+
+    A 400 arrives before the first byte, so a refusal never reaches this state
+    in practice; the gate is what keeps the recovery from ever rewriting a turn
+    whose output is on screen.
+    """
+    model = _unrecognised_thinking_route()
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="half an answer"),
+                StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "echo" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is not None
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_own_words_fill_the_echo_on_a_route_the_capability_missed():
+    """A route whose spec lacks the capability is recovered by FILLING the echo.
+
+    The capability is a prediction about which routes run DeepSeek's
+    thinking-mode validator, and it CAN be wrong: an aggregator load-balances
+    one model across many endpoints, only one of which runs that validator, so
+    the refusal can arrive on a spec that never got the bit -- and a spec built
+    outside the derivation used to lose the bit outright. The provider's own
+    wording is the direct evidence that this request lost the echo; treating the
+    prediction as authoritative over it is what turned a recoverable refusal
+    into a dead turn recorded as an unclassified
+    ``unknown: invalid request (HTTP 400)`` incident.
+
+    What this buys over the retreat that used to be the only answer here: the
+    request goes back out at the SAME effort with the same thinking mode. The
+    user loses nothing but the extra call, where the retreat below costs the
+    model its reasoning for the rest of the run.
+
+    The spec is DERIVED, deliberately, so the test states the configuration
+    production actually builds rather than a hand-made one.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    missed_route = build_model_spec("openrouter", "openai/gpt-5.2")
+    assert missed_route.requires_reasoning_echo is False, "the missed bit this covers"
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=missed_route), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    # The fill, and ONLY the fill: the effort did not move.
+    assert stream.requests[1].model.requires_reasoning_echo is True
+    assert stream.requests[1].model.reasoning_effort == missed_route.reasoning_effort
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("echo" in n.text for n in notices)
+    assert not any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn():
+    """The honest reach of the recovery, on the spec production DERIVES.
+
+    ``openrouter/deepseek/deepseek-v4.1-flash`` is the route this change was
+    written for and ships ``('low','high','max')`` -- no ``none`` rung -- so the
+    retry cannot change the body and the turn ends after one request. What
+    protects that route is the echo DERIVATION, not this recovery. Pinned here
+    so the claim cannot drift back to "the recovery saves the aggregator": the
+    previous version of the test above asserted exactly that, on a hand-built
+    ladder production never builds.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    aggregator = build_model_spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert aggregator.requires_reasoning_echo is True, "the echo is what saves this route"
+    assert "none" not in aggregator.reasoning_efforts, "the missing rung this test pins"
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=aggregator), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "thinking disabled" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_only_half_the_wording_is_not_the_condition():
+    """``reasoning_content`` alone is a field name every DeepSeek-shaped error
+    mentions; matching it alone would disable thinking on unrelated failures."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamEndEvent(
+                    stop_reason="error",
+                    error="invalid request (HTTP 400): unsupported key reasoning_content",
+                )
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is not None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_continued_on_an_aggregator_route_echoes_reasoning():
+    """The failing path, end to end against a server that ENFORCES the rule.
+
+    This is the shape the operator's sessions died on: ``deepseek/deepseek-flash``
+    failed over (or was switched) onto the aggregator's route to the same
+    weights, where the capability used to be off, so a history carrying one
+    assistant turn with nothing recorded went out with a blank echo and came
+    back as ``unknown: invalid request (HTTP 400)``. The stub here implements the
+    refusal itself -- any assistant turn without a non-blank
+    ``reasoning_content`` draws the provider's own 400 -- so a regression is a
+    FAILED REQUEST rather than an assertion about a body nobody sent.
+
+    The spec is DERIVED (``build_model_spec``), not hand-built, because the
+    derivation is half of what this covers: a spec with the capability set by
+    hand would pass even if the registry had gone back to keying it on the
+    hosting.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import OpenAICompatClient
+
+    class _EnforcingServer:
+        def __init__(self) -> None:
+            self.bodies: list[dict[str, Any]] = []
+            self.refusals = 0
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            self.bodies.append(body)
+            blank = [
+                entry
+                for entry in body.get("messages", [])
+                if entry.get("role") == "assistant"
+                and not str(entry.get("reasoning_content") or "").strip()
+            ]
+            if blank:
+                # The provider's OWN words, verbatim: the sentence the
+                # operator's incidents carry.
+                self.refusals += 1
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                "The `reasoning_content` in the thinking mode must be "
+                                "passed back to the API."
+                            )
+                        }
+                    },
+                )
+            payloads: list[dict[str, Any] | str] = [
+                {"id": "cmpl", "choices": [{"delta": {"content": "summarised"}, "index": 0}]},
+                {
+                    "id": "cmpl",
+                    "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
+                },
+                {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 2}},
+            ]
+            lines = [
+                f"data: {payload if isinstance(payload, str) else json.dumps(payload)}\n\n"
+                for payload in payloads
+            ]
+            lines.append("data: [DONE]\n\n")
+            return httpx.Response(
+                200,
+                content="".join(lines).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+    server = _EnforcingServer()
+    spec = build_model_spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert spec.requires_reasoning_echo is True, "the derivation this test covers"
+    client = OpenAICompatClient(
+        spec.base_url or "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return client.stream(request, "sk-test")
+
+    # A history rebuilt from a transcript that carried no reasoning on one of
+    # its assistant turns -- the state every one of those sessions was in.
+    context = LoopContext(
+        system_blocks=["Stable"],
+        tools=[],
+        messages=[
+            Message.user("inspect a"),
+            Message.assistant("", tool_calls=[ToolCall(id="call_a", name="inspect", arguments={})]),
+            Message(role="tool", tool_call_id="call_a", content=[TextContent(text="found")]),
+        ],
+    )
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("now summarise")], context, make_config(stream_fn, model=spec), None
+    ):
+        events.append(event)
+
+    # The server refused nothing: every assistant turn it received echoed.
+    assert server.refusals == 0
+    assistants = [
+        entry for entry in server.bodies[0]["messages"] if entry.get("role") == "assistant"
+    ]
+    assert assistants
+    assert all(str(entry["reasoning_content"]).strip() for entry in assistants)
+    # And the turn finished on the stub's reply rather than surfacing a refusal.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None and not end.aborted
+    replies = [
+        event.message.text
+        for event in events
+        if isinstance(event, TurnEndEvent) and isinstance(event.message, Message)
+    ]
+    assert "summarised" in replies

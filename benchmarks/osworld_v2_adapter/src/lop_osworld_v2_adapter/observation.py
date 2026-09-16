@@ -82,6 +82,49 @@ class ObservationError(ValueError):
     """A frame could not be produced that the verifier will accept."""
 
 
+#: The fixed text every frameless observation fails with.
+#:
+#: Load-bearing as an EXACT string, not as a log line: it is what the harness
+#: journals (``observation-phase-retry``), what the docs name, and what every
+#: test that predates a provider-supplied cause matches on. A provider's cause
+#: therefore never rewrites it -- see ``ObservationCauseError``.
+NO_FRAME_MESSAGE = "environment returned no screenshot frame"
+
+#: Optional key in the raw observation dict: the PROVIDER's own bounded account
+#: of why it could not capture a frame.
+#:
+#: It rides the raw dict, and stops there, for two reasons. It must not reach
+#: ``Observation.metadata``: that mapping feeds ``observation_content_id``, and
+#: a content-addressed observation id has to be a function of what the model
+#: saw rather than of the guest's health (``docs/benchmarks/osworld_2/
+#: README.md``). And it is not a second exception type the harness would have to
+#: learn: the builder turns it into the CAUSE of the error it already raises.
+SCREENSHOT_CAUSE_KEY = "screenshot_unavailable_cause"
+
+
+class ObservationCauseError(RuntimeError):
+    """The provider's bounded account of a failed capture, as an exception CAUSE.
+
+    Chained as ``raise ObservationError(NO_FRAME_MESSAGE) from
+    ObservationCauseError(cause)`` rather than folded into the message, because
+    the two travel by different routes and only one of them is bounded:
+
+    * the MESSAGE is the fixed string above, and it is the ``message`` field of
+      the ``RpcErrorDetail`` the worker builds. Renaming it would break the
+      harness's own evidence vocabulary and every reader grepping a bundle.
+    * the CAUSE is variable text, so it rides the cause chain into
+      ``RpcErrorDetail.causes`` -- a field the worker bounds AND canary-checks
+      per entry (``worker._error_detail``), which is exactly the discipline a
+      variable string needs before it crosses the boundary.
+
+    The provider is the honest source of this fact (it is the code that spoke
+    to the guest), and it states it in a TEXT rather than a structured shape
+    because the harness has no field for benchmark-specific capacity facts and
+    must not grow one: ``docs/benchmarks/osworld_2/README.md`` explains why
+    environment capacity must not become part of an observation's identity.
+    """
+
+
 def _png_dimensions(data: bytes) -> tuple[int, int]:
     """Read IHDR width/height from a PNG without decoding pixels.
 
@@ -161,14 +204,21 @@ class ObservationBuilder:
 
         ``raw`` is OSWorld's shape: ``{"screenshot": bytes|None,
         "accessibility_tree": str|None, "terminal": str|None,
-        "instruction": str}``. A frameless observation is useless to a
+        "instruction": str}``, plus the optional provider cause under
+        ``SCREENSHOT_CAUSE_KEY``. A frameless observation is useless to a
         computer-use model, so a missing screenshot raises rather than
         producing an observation with no frames.
         """
 
         png = raw.get("screenshot")
         if png is None:
-            raise ObservationError("environment returned no screenshot frame")
+            cause = raw.get(SCREENSHOT_CAUSE_KEY)
+            if cause:
+                # A provider that knows WHY the frame is missing says so as the
+                # error's cause, leaving the message -- and so the whole
+                # downstream diagnostic -- byte-identical to the pre-cause case.
+                raise ObservationError(NO_FRAME_MESSAGE) from ObservationCauseError(str(cause))
+            raise ObservationError(NO_FRAME_MESSAGE)
         width, height = _png_dimensions(png)
         if (width, height) != (NATIVE_SCREEN.width, NATIVE_SCREEN.height):
             raise ObservationError(

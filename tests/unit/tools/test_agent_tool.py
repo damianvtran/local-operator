@@ -20,17 +20,26 @@ def registry(tmp_path) -> AgentRegistry:
 
 @pytest.fixture(autouse=True)
 def configured_tiers(tmp_path, monkeypatch) -> dict[str, str]:
-    """``lo`` and ``hi`` configured, ``med`` not.
+    """``lo`` and ``hi`` configured, ``med`` not — and the model may pick.
 
     ``effort`` is validated against the live ``subagents.models`` mapping and
     the schema advertises only what is configured, so the tests that pin a
     role to ``lo`` need it to exist. Autouse so the default state of this file
     is "an operator who configured two tiers"; the schema tests that need the
     zero-tier state clear the config themselves.
+
+    ``model_choice: "model"`` is written with them because this file's subject
+    is the TIER machinery — which tiers resolve, what the enum lists, how a pin
+    is validated — and since ``subagents.model_choice`` shipped, the shipped
+    default (``operator``) removes the field those assertions are about. The
+    policy itself has its own file (``test_effort_tier_schema.py``), so opting
+    in here keeps these tests testing what their names say.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     tiers = {"lo": "openai/gpt-5-mini", "hi": "anthropic/claude-opus-5"}
-    ConfigManager(tmp_path / "config").set_config_value("subagents", {"models": tiers})
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents", {"model_choice": "model", "models": tiers}
+    )
     return tiers
 
 
@@ -295,8 +304,14 @@ def test_agent_schema_exposes_inherit_without_an_empty_enum_member(context) -> N
 
 def test_agent_schema_with_no_tiers_offers_only_inherit(tmp_path, context) -> None:
     """Zero configured tiers: ``inherit`` alone keeps the property alive (never
-    ``enum: []`` — Gemini rejects it) and the description says no tier exists."""
-    ConfigManager(tmp_path / "config").set_config_value("subagents", {})
+    ``enum: []`` — Gemini rejects it) and the description says no tier exists.
+
+    ``model_choice: model`` because that is the arm this sentence belongs to:
+    under the shipped default the property survives on ``inherit`` for a
+    different reason (the choice is not the model's), and its description says
+    that instead.
+    """
+    ConfigManager(tmp_path / "config").set_config_value("subagents", {"model_choice": "model"})
 
     effort = _effort_schema(context)
 

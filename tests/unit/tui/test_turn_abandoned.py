@@ -800,7 +800,7 @@ class _NamedServers:
     def auth_recovery_hint(self, rendered_error: str) -> str | None:
         if "linear" not in rendered_error:
             return None
-        return "run /mcp reauth linear — authorization expired"
+        return "/mcp reauth linear — sign-in expired"
 
 
 class McpAuthRaisingSession(JobsSession):

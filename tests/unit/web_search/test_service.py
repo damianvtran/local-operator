@@ -158,3 +158,38 @@ def test_malformed_config_preserves_valid_provider_subset() -> None:
 
     assert settings.providers == ["tavily", "duckduckgo"]
     assert settings.timeout_seconds == 120
+
+
+@pytest.mark.asyncio
+async def test_provider_reported_failures_survive_a_successful_search(
+    tmp_path, monkeypatch
+) -> None:
+    """A provider's own failure note must reach the caller, not be overwritten.
+
+    The chain's failure list describes providers that were TRIED AND SKIPPED; a
+    provider's own list describes something that degraded INSIDE a successful
+    call (the DeepSeek evidence pass). Replacing the former with the latter lost
+    the degradation exactly when it needed explaining.
+    """
+
+    async def duck(*_args):
+        raise RuntimeError("upstream 429")
+
+    async def tavily(*_args):
+        response = _response("tavily")
+        response.failures = ["tavily evidence pass: truncated"]
+        return response
+
+    monkeypatch.setitem(PROVIDERS, "duckduckgo", replace(PROVIDERS["duckduckgo"], search=duck))
+    monkeypatch.setitem(PROVIDERS, "tavily", replace(PROVIDERS["tavily"], search=tavily))
+    service = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo", "tavily"], strategy="ordered"),
+        _credentials(tmp_path),
+    )
+
+    response = await service.search("query", limit=3)
+
+    assert response.provider == "tavily"
+    # Both the chain's skip and the provider's own degradation are reported.
+    assert any("duckduckgo" in note for note in response.failures)
+    assert any("evidence pass" in note for note in response.failures)

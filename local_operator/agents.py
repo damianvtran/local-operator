@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
@@ -150,6 +150,32 @@ class AgentData(BaseModel):
     )
     top_k: Optional[int] = Field(None, description="Limits tokens to sample from at each step")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _read_a_stored_max_tokens(cls, value: Any) -> Any:
+        """Read a persisted non-positive ``max_tokens`` as "no ask", not as a cap.
+
+        This field is STORED, and it was unbounded for the whole life of the
+        file, so a record written while ``0`` was accepted carries one. Every
+        read path hands it to ``ChatRequest`` -- ``server/utils/operator.py``
+        directly, ``server/routes/speech.py`` through ``configure_model`` -- and
+        that contract is ``ge=1``, so such a record raised ``ValidationError`` on
+        every call, where ``main`` asked the model's advertised capability (its
+        wire clamp used ``or``, for which ``0`` was falsy).
+
+        Normalising here keeps that legacy reading: ``0`` meant "no ask of my
+        own" then, and it means the same now -- the bound is the contract's.
+        Bounding the field instead would move the same record's failure to LOAD
+        time, because ``AgentRegistry._scan_agents_metadata`` validates every
+        stored agent, and that loses the agent rather than the ask. Nothing
+        re-creates a ``0``: new records are written through
+        :class:`AgentEditFields`, which rejects it (review R2-m2).
+        """
+        if isinstance(value, int) and not isinstance(value, bool) and value < 1:
+            return None
+        return value
+
     stop: Optional[List[str]] = Field(
         None, description="List of strings that will stop generation when encountered"
     )
@@ -209,7 +235,14 @@ class AgentEditFields(BaseModel):
         None, ge=0.0, le=1.0, description="Controls cumulative probability of tokens to sample from"
     )
     top_k: Optional[int] = Field(None, description="Limits tokens to sample from at each step")
-    max_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
+    # ``ge=1`` is the ingress half of the wire contract's own bound. ``0`` is
+    # not a value any request can hold (``ChatRequest.max_tokens`` is ``ge=1``)
+    # and it never meant "unlimited": the wire clamp read it as "nobody asked"
+    # and fell through to the model's published capability, which is the defect
+    # this PR bounds. Reject it where records are WRITTEN, and let
+    # :class:`AgentData` keep reading a legacy ``0`` as "no ask" for records
+    # that were written before that (review R2-m2).
+    max_tokens: Optional[int] = Field(None, ge=1, description="Maximum tokens to generate")
     stop: Optional[List[str]] = Field(
         None, description="List of strings that will stop generation when encountered"
     )

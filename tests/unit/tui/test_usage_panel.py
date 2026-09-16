@@ -29,6 +29,8 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    MARK_KNOWN,
+    MARK_UNKNOWN,
     PANEL_MAX_WIDTH,
     PANEL_MIN_WIDTH,
     PANEL_PADDING_ROWS,
@@ -115,6 +117,340 @@ def test_a_remaining_only_balance_renders_its_number() -> None:
     assert "12.50 USD left" in joined, lines
     assert "70 left" in joined, lines
     assert "voucher $2.50 + cash $10.00" in joined, lines
+
+
+def _balance(limit_id: str, label: str, remaining: float, **kwargs) -> UsageLimit:
+    """A balance-only row: a `remaining` with no denominator to derive from."""
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(remaining=remaining, unit="usd"),
+        window="lifetime",
+        **kwargs,
+    )
+
+
+def test_a_statused_balance_row_is_drawn_as_a_number_we_have() -> None:
+    """The mark said "not reported" for a balance the endpoint had just
+    reported: a balance-only amount has no fraction BY CONSTRUCTION, so keying
+    the mark on the fraction could only ever draw it hollow."""
+    lines = _lines([_report(_balance("deepseek:balance:usd", "Balance (USD)", 120.0, status="ok"))])
+    row = next(line for line in lines if "Balance (USD)" in line)
+    assert row.startswith(f"{MARK_KNOWN} "), row
+    # The BAR stays dotted: a proportion genuinely is unknown here.
+    assert BAR_UNKNOWN in row, row
+
+
+def test_a_row_with_no_status_at_all_is_still_drawn_as_unknown() -> None:
+    """The mark keys on knowledge, not on having a row: a provider that reports
+    neither a fraction nor a status has told us nothing."""
+    lines = _lines([_report(UsageLimit(id="a:?", label="Mystery", amount=UsageAmount(unit="usd")))])
+    row = next(line for line in lines if "Mystery" in line)
+    assert row.startswith(f"{MARK_UNKNOWN} "), row
+
+
+def test_the_footer_does_not_call_a_reported_balance_unreported() -> None:
+    """`2 not reported` for two balances the panel is printing was the footer
+    contradicting the rows directly above it."""
+    stats = collect_stats(
+        [
+            _report(
+                _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok"),
+                _balance("deepseek:balance:usd", "Balance (USD)", 120.0, status="ok"),
+                provider="deepseek",
+            )
+        ]
+    )
+    assert stats.unknown == 0
+    assert stats.describe() == "2 windows"
+
+
+def test_an_exhausted_balance_reads_as_exhausted_in_the_tally() -> None:
+    """A dead account and a funded one must not tally alike."""
+    stats = collect_stats(
+        [
+            _report(
+                _balance("deepseek:balance:usd", "Balance (USD)", 0.0, status="exhausted"),
+                provider="deepseek",
+            )
+        ]
+    )
+    assert (stats.exhausted, stats.unknown) == (1, 0)
+    assert stats.describe() == "1 window · 1 exhausted"
+
+
+def test_a_limit_detail_renders_directly_under_its_own_row() -> None:
+    """The split is an annotation on one meter, so it has to sit against that
+    meter rather than at the end of the block."""
+    lines = _lines(
+        [
+            _report(
+                _balance(
+                    "deepseek:balance:usd",
+                    "Balance (USD)",
+                    120.0,
+                    status="ok",
+                    detail="100.00 USD paid · 20.00 USD granted",
+                ),
+                _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok"),
+                provider="deepseek",
+            )
+        ]
+    )
+    index = next(i for i, line in enumerate(lines) if "Balance (USD)" in line)
+    assert lines[index + 1].strip() == "100.00 USD paid · 20.00 USD granted", lines
+    # And the row without a split gets no line of its own.
+    assert lines[index + 2].lstrip().startswith(MARK_KNOWN), lines
+
+
+def _detail_shapes() -> list[tuple[str, list[UsageReport], float, float | None]]:
+    """The shapes whose windows have to hold the annotation contract.
+
+    One per way a detail can land in a block: on every meter, on the last meter
+    only (the trailing row is the pair — the frame QA reproduced), on the first
+    only (the frame Q2 is about: a wasted row of allowance with no meter lost),
+    on a single-currency block, on a dead account, in a block that has to keep a
+    staleness note ahead of its meters, and in a report with a sibling provider
+    below it so a window can end at a block boundary.
+    """
+    funded = _report(
+        _balance(
+            "deepseek:balance:cny",
+            "Balance (CNY)",
+            863.0,
+            status="ok",
+            detail="800.00 CNY paid · 63.00 CNY granted",
+        ),
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            120.0,
+            status="ok",
+            detail="100.00 USD paid · 20.00 USD granted",
+        ),
+        provider="deepseek",
+    )
+    one_currency = _report(
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            120.0,
+            status="ok",
+            detail="100.00 USD paid · 20.00 USD granted",
+        ),
+        provider="deepseek",
+    )
+    split_last = _report(
+        _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok"),
+        _balance("deepseek:balance:eur", "Balance (EUR)", 42.0, status="ok"),
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            120.0,
+            status="ok",
+            detail="100.00 USD paid · 20.00 USD granted",
+        ),
+        provider="deepseek",
+    )
+    split_first = _report(
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            120.0,
+            status="ok",
+            detail="100.00 USD paid · 20.00 USD granted",
+        ),
+        _balance("deepseek:balance:eur", "Balance (EUR)", 42.0, status="ok"),
+        provider="deepseek",
+    )
+    dead = _report(
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            0.0,
+            status="exhausted",
+            detail="0.00 USD paid · 0.00 USD granted",
+        ),
+        provider="deepseek",
+    )
+    stale = _report(
+        _balance(
+            "deepseek:balance:usd",
+            "Balance (USD)",
+            120.0,
+            status="ok",
+            detail="100.00 USD paid · 20.00 USD granted",
+        ),
+        provider="deepseek",
+        identity="me@example.com",
+    )
+    # 10 minutes behind a `just now` header: past the TTL*1.25 threshold, so the
+    # block renders a note above its meters and the note has to survive the same
+    # compaction the meters do.
+    stale.fetched_at = 1
+    sibling = [
+        funded,
+        _report(_percent("anthropic:7d", "7 day", 41.0, shared=True), provider="anthropic"),
+    ]
+    return [
+        ("funded", [funded], 0.0, None),
+        ("one-currency", [one_currency], 0.0, None),
+        ("split-last", [split_last], 0.0, None),
+        ("split-first", [split_first], 0.0, None),
+        ("dead", [dead], 0.0, None),
+        ("stale", [stale], 600_000.0, 600_000.0),
+        ("siblings", sibling, 0.0, None),
+    ]
+
+
+def _row_indices(body, window) -> list[int]:
+    """Which of ``body``'s rows a window paints, by identity.
+
+    The window hands back the body's own ``Text`` objects, so identity — not
+    equality — is what says which row it is: two rows can legitimately carry the
+    same characters.
+    """
+    where = {id(line): index for index, line in enumerate(body.lines)}
+    return [where[id(row)] for row in window]
+
+
+def test_the_annotation_never_costs_a_meter_at_any_budget_or_offset() -> None:
+    """The window contract, swept over EVERY budget and EVERY offset.
+
+    A detail is droppable decoration attached to the meter above it. Two rules
+    must hold in every window, and the first version of this change (a meter and
+    its detail as one indivisible cut unit) broke the second in a way a
+    one-offset test could not see: with ``budget == 2`` the pair did not fit, so
+    the loop kept *nothing* and 100x18 painted a provider heading with no
+    numbers under it where the base tree painted one.
+
+    * no window paints a detail whose meter is not in the SAME window — not as
+      its first row, not at any scroll offset, not under compaction;
+    * the meters win every tie: at the same budget and the same position, the
+      window paints every detail-free row the tree without annotations painted
+      (and so never fewer rows than it used, or a row of the allowance would be
+      going to a split while a meter went unshown).
+
+    The bare body is the tree those rules were written against: derived from the
+    same rows with the details taken out, so the comparison needs no second
+    checkout and no invented baseline.
+    """
+    panel = UsagePanel()
+    for name, reports, now, header in _detail_shapes():
+        body = build_usage_body(reports, WIDTH, now, header)
+        bare = body.skeleton()
+        assert body.details, f"{name}: the shape must carry an annotation to prove anything"
+        for budget in range(1, len(body.lines) + 3):
+            for offset in range(len(body.lines) + 1):
+                panel._offset = offset
+                window, _ = panel._window_rows(body, budget)
+                rows = _row_indices(body, window)
+                for index in rows:
+                    if index in body.details:
+                        assert index - 1 in rows, (
+                            name,
+                            budget,
+                            offset,
+                            [body.lines[shown].plain for shown in rows],
+                        )
+                # Same budget, same content position — the bare tree is the floor.
+                panel._offset = body.content_at(offset)
+                bare_window, _ = panel._window_rows(bare, budget)
+                bare_rows = _row_indices(bare, bare_window)
+                assert [body.content_at(index) for index in rows if index not in body.details] == (
+                    bare_rows
+                ), (name, budget, offset)
+                assert len(rows) >= len(bare_rows), (name, budget, offset)
+
+
+def test_a_budget_that_holds_a_meter_shows_it() -> None:
+    """Q1/Q2 by witness: the metric the frames were measured on.
+
+    QA's frame is `budget == 2` with the split on the trailing balance and
+    ``showing 6 of 6`` over an empty block. The second half of the finding is
+    that ``budget == 4`` painted the same three rows as ``budget == 3``, one row
+    of allowance going nowhere. Both are arithmetic, so both are asserted as
+    numbers: every budget up to the block's own height paints a heading plus one
+    row per meter that fits, and never fewer rows than the last budget did.
+    """
+    panel = UsagePanel()
+    reports = _detail_shapes()[2][1]  # split-last: heading, blank, 3 balances
+    body = build_usage_body(reports, WIDTH, 0.0)
+    painted: list[int] = []
+    for budget in range(2, 6):
+        panel._offset = body.blocks[0][0]
+        window, _ = panel._window_rows(body, budget)
+        rows = [row.plain for row in window]
+        painted.append(len(rows))
+        assert any("Balance" in row for row in rows), (budget, rows)
+    # From budget 2 up, the allowance buys a meter at every step: 3 and 4 must not
+    # be the same three rows, and 4 spends its spare row on the last meter.
+    # (Budget 1 paints the heading alone, which the base tree did too.)
+    assert painted == [2, 3, 4, 5], painted
+    # And the annotation is not lost to the fix: given a card that fits the whole
+    # block, every row is painted, the split included.
+    panel._offset = body.blocks[0][0]
+    full, _ = panel._window_rows(body, len(body.lines))
+    assert _row_indices(body, full) == list(range(len(body.lines))), [row.plain for row in full]
+
+
+def _scrolling_reports() -> list[UsageReport]:
+    """The funded block plus enough providers below it that the card scrolls.
+
+    Reaching the clamp is the point: the R1 frame came from scrolling INTO the
+    deepseek block, which only happens when there is somewhere below it to go.
+    """
+    return [
+        _detail_shapes()[0][1][0],
+        *(
+            _report(_percent(f"a{index}:7d", "7 day", 41.0, shared=True), provider=f"p-{index}")
+            for index in range(6)
+        ),
+    ]
+
+
+def _width_reports() -> list[UsageReport]:
+    """The funded block plus the percentage window that squeezes its bar.
+
+    This is the shape D3 was measured on: the sibling's countdown and percentage
+    take the measured columns, so at 60 columns the balance rows collapse to a
+    single bar dot and their right edge — where the NUMBER ends — stops well
+    inside the card, leaving the row's tail as padding.
+    """
+    return [
+        _detail_shapes()[0][1][0],
+        _report(
+            _percent("anthropic:7d", "7 day", 41.0, shared=True, resets_at_ms=96 * 3600_000),
+            provider="anthropic",
+            identity="me@example.com",
+        ),
+    ]
+
+
+def test_an_annotation_never_paints_wider_than_its_meter() -> None:
+    """D3: at 60 columns the balance row's right edge is 35 cells while a split
+    is a fixed 37-cell string, so measuring the annotation against the card let
+    it protrude two cells past the numbers column and break the block's edge.
+
+    Asserted against the METER'S INK (trailing padding is not something a reader
+    can see): every width the panel can be asked for, the annotation fits inside
+    the row it annotates, and where it has to be cut it says so.
+    """
+    for width in (120, 100, 89, 80, 74, 69, 49, 40):
+        lines = build_usage_body(_width_reports(), width, 0.0).lines
+        meter = next(line for line in lines if "Balance (USD)" in line.plain)
+        detail = lines[lines.index(meter) + 1]
+        assert cell_len(detail.plain.rstrip()) <= cell_len(meter.plain.rstrip()), (
+            width,
+            meter.plain.rstrip(),
+            detail.plain.rstrip(),
+        )
+    # At the width the defect was measured on, the split is CUT — not wrapped,
+    # not allowed to spill — and the ellipsis is the only thing dropped from it.
+    narrow = build_usage_body(_width_reports(), 49, 0.0).lines
+    row = next(line for line in narrow if "USD paid" in line.plain)
+    assert row.plain.rstrip().endswith("…"), row.plain
+    assert cell_len(row.plain.rstrip()) <= 35, row.plain
 
 
 def test_amounts_print_the_unit_label_not_the_raw_key() -> None:
@@ -2288,3 +2624,74 @@ async def test_a_scoped_panel_keeps_the_stale_count_over_the_provider_name() -> 
     # Where both fit, the target is still shown — it is only dropped under
     # pressure, not removed from the design.
     assert "anthropic" in wide and "1 stale" in wide, wide
+
+
+def _single_currency_split() -> list[UsageReport]:
+    """One balance carrying a split — the smallest body an annotation can grow."""
+    return [
+        _report(
+            _balance(
+                "deepseek:balance:usd",
+                "Balance (USD)",
+                120.0,
+                status="ok",
+                detail="100.00 USD paid · 20.00 USD granted",
+            ),
+            provider="deepseek",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 34), (100, 19), (100, 18), (80, 14), (60, 12)])
+async def test_the_scroll_chrome_is_keyed_to_the_meters_not_the_annotations(size) -> None:
+    """The scroll chrome is a statement about the NUMBERS.
+
+    An annotation is decoration the window may drop, so a card whose meters all
+    fit is not a scrolled card — and must not raise a marker, a bar or an
+    `↑↓ scroll` hint that cannot move, which is chrome the detail-free tree did
+    not have and which the hint's own rule (a key that does nothing teaches the
+    user to distrust the others) exists to prevent.
+    """
+    async with _panel_app(size=size) as panel:
+        panel.show_reports(_single_currency_split())
+        body = panel._body()
+        framed = "\n".join(panel.render_lines_for_test())
+    chrome = "showing" in framed or "↑↓" in framed
+    assert chrome == (len(body.skeleton().lines) > panel._body_budget()), (size, framed)
+    assert ("█" in framed) == chrome, (size, framed)
+
+
+@pytest.mark.asyncio
+async def test_the_scrolled_panel_never_leads_with_an_annotation() -> None:
+    """R1 by witness, on the REAL panel and its real budget.
+
+    Three `Down` presses used to put the CNY split directly above the USD meter —
+    a credit split read as belonging to the balance under it. `_max_offset` and
+    the window both measure over the meters now, so this walks every offset the
+    clamp actually reaches at a size that cuts mid-block and asserts, per frame,
+    that the first row is not an annotation and that no annotation is painted
+    without the meter directly above it.
+    """
+    async with _panel_app(size=(100, 22)) as panel:
+        panel.show_reports(_scrolling_reports())
+        body = panel._body()
+        assert body.details, "premise: the deepseek block carries annotations"
+        frames = 0
+        while True:
+            frames += 1
+            window, _ = panel._window_rows(body, panel._body_budget())
+            rows = _row_indices(body, window)
+            assert rows and rows[0] not in body.details, (
+                panel.view_offset,
+                [body.lines[index].plain for index in rows],
+            )
+            assert any(index not in body.details for index in rows), panel.view_offset
+            for index in rows:
+                if index in body.details:
+                    assert index - 1 in rows, (panel.view_offset, index)
+            before = panel.view_offset
+            panel.action_scroll_rows(1)
+            if panel.view_offset == before:
+                break
+    assert frames > 8, f"premise: this size scrolls far enough to cut mid-block ({frames})"

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -40,6 +41,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.registry import ModelInfo
 from local_operator.session.session import Session
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import RESTORED_COST_PREFIX, OperatorApp
 from local_operator.tui.events import ContextUsageReported, TurnEnded
@@ -64,13 +66,21 @@ def _spec() -> ModelSpec:
     return ModelSpec(provider="anthropic", model_id="sonnet", context_window=1_000_000)
 
 
-def _assistant(*, output: int, context: int) -> Message:
-    """One settled assistant turn carrying the provider's own usage."""
+def _assistant(*, output: int, context: int, identity: tuple[str, str] | None = None) -> Message:
+    """One settled assistant turn carrying the provider's own usage.
+
+    ``identity`` names the serving provider/model ON THE USAGE ROW, which is what
+    a rebuild needs to price the row at all: 97.5% of the real store's usage rows
+    carry it, and the 2.5% that do not are a different case with a different
+    honest answer (see the floor test below).
+    """
     return Message(
         role="assistant",
         content=[TextContent(text="answer")],
         stop_reason="stop",
         usage=Usage(
+            provider=identity[0] if identity else None,
+            model_id=identity[1] if identity else None,
             input_tokens=20,
             output_tokens=output,
             cache_read_tokens=max(context - 20, 0),
@@ -727,3 +737,328 @@ async def test_every_writer_of_the_cost_cell_keeps_the_floor_mark(tmp_path: Path
             assert settled.startswith(RESTORED_COST_PREFIX), settled
             # And it did move: the mark is not standing in for a frozen figure.
             assert settled != restored
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_paints_the_newer_money_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q2 and Q1, on the surface the operator complained about.
+
+    The band is what a cold open shows before any runtime exists, and it used to
+    prefer the turn-end checkpoint's money unconditionally — so a session whose
+    ledger record was NEWER (per-call writes outlive the last turn end on every
+    crash/repair path) painted the checkpoint's ``$1.00`` unmarked and EXACT one
+    screen away from a ``/session`` row reading the record's ``$5.00``. Ordering
+    the two artifacts by their own position in the journal is what fixes it, and
+    only the REAL app can show that the ordering reaches the cell.
+
+    The second case is Q1: a record whose every call was unpriceable has no
+    figure, so the cell must say ``$—`` (as ``/analytics`` already did) rather
+    than dropping the segment, which is what a ``0.0`` total made it do.
+    """
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+    )
+    from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    async def never_take_over(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the cold open reached for a runtime")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    def checkpoint(sid: str, cost: float) -> dict[str, Any]:
+        raw = FrontendSessionState(session_id=sid, epoch="e1").model_dump(mode="json")
+        raw.update({"cumulative_parent_cost": cost, "cost_knowledge": "exact"})
+        return {"checkpoint_id": "cp", "state": raw}
+
+    async def journal(sid: str, writes: list[tuple[str, dict[str, Any]]]) -> None:
+        directory = tmp_path / "sessions" / sid
+        directory.mkdir(parents=True, exist_ok=True)
+        transcript = Transcript(directory)
+        await transcript.append_message(Message.user("hello"))
+        # A signed reading with tokens and no price: the call the pricing could
+        # not size, which is what makes the band's `$—` branch reachable at all.
+        await transcript.append_message(_assistant(output=1_000, context=12_000))
+        for custom_type, details in writes:
+            await transcript.append_custom(custom_type, details)
+
+    async def band_of(sid: str) -> str:
+        async def factory() -> Any:
+            return await AttachedSession.cold(
+                sid, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never_take_over
+            )
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(120, 18)) as pilot:
+            for _ in range(200):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            for _ in range(40):
+                await pilot.pause()
+            assert app._status is not None
+            return app._status._cost
+
+    # The record is NEWER than the checkpoint, and it is the one that speaks.
+    newer = "coldbandnewer1"
+    await journal(
+        newer,
+        [
+            (FRONTEND_CHECKPOINT_CUSTOM_TYPE, checkpoint(newer, 1.0)),
+            (
+                SESSION_SPEND_CUSTOM_TYPE,
+                SessionSpend(
+                    micro=5_000_000, calls=3, priced_calls=3, writer="qa:probe"
+                ).to_details(),
+            ),
+        ],
+    )
+    assert await band_of(newer) == "$5.00", "the newer record decides the cold band"
+
+    # Nothing priceable: `$—`, not a dropped segment and not `$0.00`.
+    unpriceable = "coldbandunknown"
+    await journal(
+        unpriceable,
+        [
+            (
+                SESSION_SPEND_CUSTOM_TYPE,
+                SessionSpend(
+                    micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="qa:probe"
+                ).to_details(),
+            )
+        ],
+    )
+    assert await band_of(unpriceable) == "$—", "an unknown sum is a dash, not a zero"
+
+
+async def _journal_with_record(directory: Path, details: dict[str, Any]) -> None:
+    """One journal: a conversation and the durable spend record beside it.
+
+    The reading carries TOKENS and no price, which is what makes the band's
+    ``$—`` branch reachable for a record that states nothing.
+    """
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(_assistant(output=1_000, context=12_000))
+    await transcript.append_custom(SESSION_SPEND_CUSTOM_TYPE, details)
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_record_keeps_the_cost_field_arithmetic_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1: the field the app adds to must never hold the "cannot state" answer.
+
+    ``published_usd()`` answers ``None`` for a record whose money cannot be
+    stated, and ``_restore_reported_usage`` — the path a host takes whose session
+    offers no ``subscribe_frontend`` — was assigning that ``None`` into
+    ``_total_cost``, a plain ``float`` every reader does arithmetic on. The app's
+    own 1 Hz poll then raised ``TypeError: unsupported operand type(s) for +:
+    'NoneType' and 'int'`` from ``_spend_total``. The unknown is expressed by the
+    CELL (``$—``), never by this field, so a host that takes this path stays safe
+    whether or not any session class today can reach it.
+    """
+    from local_operator.session.spend import SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    directory = tmp_path / "sessions" / "unknown-arm"
+    directory.mkdir(parents=True, exist_ok=True)
+    await _journal_with_record(
+        directory,
+        SessionSpend(micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="w:4").to_details(),
+    )
+    session = await _session_over(directory, [])
+    # The branch under test: a host whose session cannot take a frontend
+    # subscription restores its money through `_restore_reported_usage`.
+    monkeypatch.setattr(session, "subscribe_frontend", None, raising=False)
+
+    async def factory() -> Any:
+        return session
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 18)) as pilot:
+        await _settled(app, pilot)
+        assert app._status is not None
+        assert app._status._cost == "$—", "nothing priceable is a dash"
+        assert app._total_cost == 0.0, "the cost field is a float, not the unknown"
+        # The reader the reviewer reproduced this through: arithmetic on the
+        # field, reached from the 1 Hz poll.
+        assert isinstance(app._spend_total(), float)
+
+
+@pytest.mark.asyncio
+async def test_one_journal_spells_the_same_cold_and_in_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, policy 3: one journal, two paths, ONE spelling.
+
+    QA round 2's Q1 (in-process only) and Q3 both came from the same divergence —
+    the cold seed, the store's publish path and the live band each decided a
+    record's visibility for themselves. This asserts the property directly rather
+    than the three symptoms: the same journal opened COLD and with a RUNTIME,
+    byte-identical money spelling, for the three states a record can be in.
+
+    - a turn-end remainder — money with ``calls == 0`` (``adjust_spend``, what the
+      store calls at turn end): both must show ``$0.50``, and the live band must
+      not fall through to the one-receipt floor that used to paint ``≥$2.10``
+      ABOVE the record (Q3);
+    - a store-adopted total — ``micro > 0, priced_calls == 0`` (review R3-1):
+      money we can state, so both show the figure rather than hiding it;
+    - an unpriceable sum — ``micro == 0`` with an unpriced call: both show
+      ``$—``, which is the one state where "cannot state" is the truth (Q1).
+    """
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.spend import SessionSpend
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    async def parked(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(3600)
+
+    async def never_take_over(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the cold open reached for a runtime")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", parked)
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+    async def band_of(sid: str, *, warm: bool) -> str:
+        directory = tmp_path / "sessions" / sid
+
+        async def factory() -> Any:
+            if warm:
+                # A runtime session over the SAME journal: the ordinary open path,
+                # which paints through `_restore_reported_usage` and the store.
+                return await _session_over(directory, [])
+            return await AttachedSession.cold(
+                sid, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never_take_over
+            )
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(120, 18)) as pilot:
+            if warm:
+                await _settled(app, pilot)
+            else:
+                for _ in range(200):
+                    await pilot.pause()
+                    if app._session is not None:
+                        break
+                for _ in range(40):
+                    await pilot.pause()
+            assert app._status is not None, sid
+            return app._status._cost
+
+    cases = [
+        # The ladder's own rung for a sub-dollar EXACT figure is 3dp (§8.2), so
+        # the spelling under test is `$0.500` — the point is that both paths use
+        # the SAME one, not that it is the one a first guess expects.
+        ("remainder", SessionSpend(micro=500_000, calls=0, writer="w:1"), "$0.500"),
+        ("adopted", SessionSpend(micro=2_000_000, calls=0, priced_calls=0, writer="w:2"), "$2.00"),
+        (
+            "unpriceable",
+            SessionSpend(micro=0, calls=1, priced_calls=0, unpriced_calls=1, writer="w:3"),
+            "$—",
+        ),
+    ]
+    for name, spend, expected in cases:
+        directory = tmp_path / "sessions" / f"same-{name}"
+        directory.mkdir(parents=True, exist_ok=True)
+        await _journal_with_record(directory, spend.to_details())
+        cold = await band_of(f"same-{name}", warm=False)
+        warm = await band_of(f"same-{name}", warm=True)
+        assert cold == expected, f"{name}: cold band {cold!r}"
+        assert warm == expected, f"{name}: in-process band {warm!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D1a: the frame the design round could not capture.
+
+    A pre-ledger conversation whose rows CARRY serving identity (97.5% of the
+    real store's rows do) and which has no ``session_spend.v1`` record: the band
+    opens on the newest reading, marked as a lower bound — today's behaviour,
+    unchanged — and the one-time rebuild then replaces it with the accumulated
+    figure. That move is the operator's complaint, fixed, on the surface they
+    read it from.
+
+    The identity is the whole difference between this test and the floor test
+    beside it: without it the rebuild cannot price a row, correctly refuses to
+    publish, and the mark and the floor figure stay.
+    """
+    from local_operator.session import session as session_module
+    from local_operator.session.spend import price_rows
+
+    session = await _session_over(
+        tmp_path / "sess",
+        [
+            Message.user("q1"),
+            _assistant(output=1_000, context=200_000, identity=("anthropic", "sonnet")),
+            Message.user("q2"),
+            _assistant(output=1_000, context=200_000, identity=("anthropic", "sonnet")),
+        ],
+    )
+    assert session.restored_spend() is None, "a pre-ledger session has no record"
+
+    async def factory() -> Session:
+        return session
+
+    # The pair of frames is captured from ONE run by holding the rebuild inside
+    # its worker until the floor has been read. Without the gate the rebuild
+    # lands before the first assertion (two rows price in microseconds) and the
+    # frame the design round asked for is never on screen — a test that races
+    # the thing it is about. The gate is released by the test, so the wait is on
+    # an event rather than on a budget.
+    release = threading.Event()
+    gated = threading.Event()
+
+    def gated_price(rows: list[dict[str, Any]]) -> list[tuple[int, bool]]:
+        gated.set()
+        release.wait(20)
+        return price_rows(rows)
+
+    monkeypatch.setattr(session_module, "price_rows", gated_price)
+
+    app = OperatorApp(factory)
+    with _resolving():
+        async with app.run_test(size=(150, 18)) as pilot:
+            await _settled(app, pilot)
+            assert gated.wait(10), "the rebuild never reached its pricer"
+            assert app._status is not None
+            before = app._status._cost
+            release.set()
+            # Wait on the PUBLICATION (the rebuild marks itself rebuilt), with a
+            # deadline only so a genuine hang fails the run instead of blocking.
+            async with asyncio.timeout(30):
+                while not session.spend.rebuilt:
+                    await pilot.pause()
+                    await asyncio.sleep(0.01)
+            await pilot.pause()
+            after = app._status._cost
+    print(f"BEFORE (newest reading, floor): {before!r}   AFTER (accumulated): {after!r}")
+
+    # Two identical $2.10 turns: the band opens on one of them, marked.
+    assert before == "\u2265$2.10", before
+    # ...and ends on the accumulated figure, unmarked because every row priced.
+    assert after == "$4.20", after
+    assert session.spend.micro == 4_200_000
+    assert session.spend.floor is False

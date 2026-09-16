@@ -8,11 +8,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
+from local_operator.mobile.daemon import (
+    MobileDaemon,
+    SessionEntry,
+    SessionTable,
+    _dial,
+    build_app,
+)
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     SessionProjection,
@@ -268,7 +275,10 @@ def test_http_gate_and_login_flow() -> None:
 
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
-    assert authed.json() == {"sessions": []}
+    # The listing carries the durable-read marker beside the rows (present on
+    # every frame, empty when everything was read). Asserted in full rather than
+    # by key so a field appearing here is a decision this test sees.
+    assert authed.json() == {"sessions": [], "degraded": []}
 
     logout = client.get("/logout")
     assert logout.status_code == 303
@@ -339,6 +349,104 @@ def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkey
     assert [entry["id"] for entry in history.json()["entries"]] == ["child-row"]
     assert "root-row" not in str(history.json())
     assert client.get("/api/sessions/root-session/agents/not-related").status_code == 404
+
+
+def test_runtime_hosted_roster_routes_the_child_history_end_to_end(tmp_path, monkeypatch) -> None:
+    """A runtime-hosted session must publish its children's session dirs.
+
+    ``/agents/{job}/history`` resolves a child through the folded roster's
+    ``session_id``, and the ONLY writer of that field is
+    ``ProjectionFold.set_subagent_details``. Since the viewer/runtime split the
+    phone's sessions are hosted by ``ServingSessionHandle``, which mirrored the
+    TUI handle's state push but not its roster push -- and the event path can
+    never learn a child's session dir (``SubagentStartEvent`` carries no session
+    id), so every runtime-hosted session published ``session_id: null`` for
+    every child and the route 404'd for all of them. The summary/detail test
+    above HAND-BUILDS that row, which is why nothing caught it; this drives the
+    real producer and walks it out to the HTTP route.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from local_operator.harness.types import Message, SubagentStartEvent
+    from local_operator.mobile.daemon import _projection_frame
+    from local_operator.mobile.types import _projection_from_json
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.transcript import Transcript
+    from tests.unit.harness.test_comms import FakeChild, FakeJobs, FakeParent
+    from tests.unit.session.runtime.test_serving import FakeSession
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    child_dir = cfg / "sessions" / "child-session"
+    grandchild_dir = cfg / "sessions" / "grandchild-session"
+    for directory, text, row_id in (
+        (child_dir, "child-only", "child-row"),
+        (grandchild_dir, "grandchild-only", "grandchild-row"),
+    ):
+        directory.mkdir(parents=True)
+        asyncio.run(Transcript(directory).append_message(Message.user(text, id=row_id)))
+
+    jobs = FakeJobs()
+    jobs.add("child-job", status="running")
+    jobs.add("grandchild-job", status="running")
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    comms.record_launch("child-job", "child", prompt="Inspect it.")
+    comms.attach("child-job", FakeChild(), child_dir)  # type: ignore[arg-type]
+    comms.record_launch("grandchild-job", "grandchild", parent_job_id="child-job")
+    comms.attach("grandchild-job", FakeChild(), grandchild_dir)  # type: ignore[arg-type]
+
+    async def build() -> tuple[SessionProjection, FakeSession]:
+        session = FakeSession()
+        session.session_id = "root-session"
+        session._subagent_comms = comms  # type: ignore[attr-defined]
+        handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+        handle.subscribe(lambda: None)
+        # The attach seed alone must publish the roster: a settled child sends
+        # no further event, so an event-only push leaves it unroutable for as
+        # long as the session stays quiet.
+        return handle.session_projection_seed, session
+
+    projection, session = asyncio.run(build())
+    rows = {row.job_id: row.session_id for row in projection.subagents}
+    # Nested children live only in the shared registry, so the walk must reach
+    # them too -- the phone opens a grandchild from the roster's Children.
+    assert rows == {"child-job": "child-session", "grandchild-job": "grandchild-session"}
+
+    record = SessionRecord(
+        pid=9,
+        kind="daemon",
+        session_id="root-session",
+        conversation_name="root",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=1,
+        control_key="k",
+        started_at=0.0,
+        heartbeat_at=0.0,
+    )
+    # The same boundary the daemon's dial loop crosses: the registrant
+    # serializes the frame and the daemon rebuilds it before capturing.
+    incoming = _projection_from_json(json.loads(json.dumps(_projection_frame(projection))), record)
+    daemon = MobileDaemon(port=0, password="pw123")
+    daemon.capture_subagent_details(incoming, record=record)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [entry["text"] for entry in history.json()["entries"]] == ["child-only"]
+    nested = client.get(
+        "/api/sessions/root-session/agents/grandchild-job/history", params={"limit": 10}
+    )
+    assert nested.status_code == 200
+    assert [entry["text"] for entry in nested.json()["entries"]] == ["grandchild-only"]
+
+    # A live child announcing itself through the root event stream must keep
+    # the same row (the event path rebuilds it without a session id).
+    session.emit(SubagentStartEvent(job_id="child-job", label="child"))
+    assert {row.job_id: row.session_id for row in projection.subagents} == rows
 
 
 def test_retained_summary_recapture_preserves_rich_detail_and_monotonic_version() -> None:
@@ -1371,3 +1479,384 @@ def test_slash_catalogue_excludes_terminal_chrome() -> None:
     assert "exit" not in names
     assert "quit" not in names
     assert "clear" not in names
+
+
+def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeypatch) -> None:
+    """One line per skipped frame buried the relay log; the RATE is the signal.
+
+    Field measurement on the operator's machine: 6,104,351
+    ``oversized control frame`` records were 78% of a 420 MB ``mobile.log``, and
+    the records that mattered (a stalled runtime, the MCP client, the schedule)
+    were unreadable past them. Every skipped frame does cost a session its live
+    projection, so the count must not be lost — only its per-frame line.
+
+    A single frame is still reported on its own, because a one-off is a real
+    event and a reader should see it immediately. A flood collapses to one line
+    per window carrying the window count and a monotonic total, so a producer
+    that regresses and then stops is still accounted for by the next line.
+    """
+    import logging
+
+    from local_operator.mobile import daemon as daemon_module
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(daemon_module.time, "monotonic", lambda: clock["now"])
+    counter = daemon_module._OversizedControlFrames()
+
+    with caplog.at_level(logging.WARNING, logger=daemon_module.logger.name):
+        counter.note(7742)
+        assert "first oversized control frame from pid 7742" in caplog.text
+
+        caplog.clear()
+        for _ in range(5_000):
+            counter.note(7742)
+        assert caplog.text == "", "a flood must not be one log line per frame"
+
+        clock["now"] += daemon_module.OVERSIZED_CONTROL_WINDOW_S + 0.1
+        counter.note(7742)
+        assert caplog.text.count("oversized control frame") == 1, caplog.text
+        assert "5001 oversized control frames from pid 7742" in caplog.text
+        assert "5002 this process" in caplog.text
+
+        # A different session's flood is accounted for separately, so one noisy
+        # child cannot hide another's count.
+        caplog.clear()
+        counter.note(9911)
+        assert "first oversized control frame from pid 9911" in caplog.text
+
+
+def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
+    """UX round 2, U8: a signalled runtime also STREAMS, so the list said "busy".
+
+    The phone's row ladder is driven by ``streaming``, which is true of a
+    draining runtime exactly as it is of an ordinary working one — so the list
+    the operator reads on a phone could not tell "finishing a turn somebody
+    asked it to finish" from "working". The record's phrase is carried as its
+    own additive field; a client that does not know it renders exactly as
+    before, which is what makes this safe to ship before the card's own
+    treatment of it.
+    """
+    from local_operator.session.runtime.types import LEAVING_ON_SIGNAL, SessionRecord
+
+    def record(session_id: str = "s-drain", pid: int = 4321, **extra: Any) -> SessionRecord:
+        return SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name="draining",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+            **extra,
+        )
+
+    daemon = MobileDaemon(port=0, password="pw")
+    draining = record(leaving=LEAVING_ON_SIGNAL, busy=True)
+    daemon.table.entries[draining.pid] = SessionEntry(draining)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == LEAVING_ON_SIGNAL, rows[0]
+
+    # An ordinary busy session carries nothing, so the field means something.
+    plain = record("s-plain", pid=4322, busy=True)
+    daemon.table.entries[plain.pid] = SessionEntry(plain)
+    daemon.table.entries.pop(draining.pid)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == "", rows[0]
+
+    # And a record written by an OLDER runtime (no such field) is empty rather
+    # than missing: this list is served on a host mid-upgrade.
+    old = record("s-old", pid=4323)
+    del old.leaving  # type: ignore[attr-defined]
+    daemon.table.entries.pop(plain.pid)
+    daemon.table.entries[old.pid] = SessionEntry(old)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["leaving"] == "", rows[0]
+
+
+# --- the phone's listing: membership, so an unreadable store is not an empty one --
+
+
+def _listing_rows(cfg, *session_ids: str):
+    """One user-visible session per id, with the activity the scan requires.
+
+    Built through the catalogue suite's own helpers so this file and that one
+    agree about what a listable session IS, rather than this one growing a
+    second opinion about it.
+    """
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    return _store(cfg, *session_ids)
+
+
+@pytest.mark.asyncio
+async def test_a_phone_listing_keeps_the_rows_it_read_when_the_store_goes_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    """The wipe this repairs, on the surface whose client replaces the whole list.
+
+    The phone's home screen does ``sessions = payload.sessions`` — MEMBERSHIP,
+    not a merge — so a durable half that answers "zero conversations" for a
+    store it could not read empties the operator's history with nothing to say
+    why. The rows it already had are the true answer; they are what this serves.
+
+    The failure is injected at the REAL seam (``os.scandir`` of the store), and
+    the second read is forced through ``invalidate_summaries_cache`` — the path
+    a structural change takes — because that is the state where the fresh cache
+    is gone and only the last listing that was actually read can answer.
+    """
+    import errno
+    import os
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    real_scandir = os.scandir
+
+    table = SessionTable()
+    first = await table.summaries()
+    assert {row["session_id"] for row in first} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert table.listing_degraded() == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EIO, "Input/output error"))
+    table.invalidate_summaries_cache()
+    second = await table.summaries()
+
+    assert {row["session_id"] for row in second} == {
+        "aaaaaaaaaaaa",
+        "bbbbbbbbbbbb",
+    }, "an unreadable store must not be published as an empty conversation list"
+    assert table.listing_degraded() == ["sessions"]
+
+    # And the healing is real: once the read works again the marker clears, so a
+    # client keyed on it cannot latch a stale "couldn't refresh".
+    #
+    # The seam is healed by hand rather than with ``monkeypatch.undo()``: undo
+    # drops EVERY patch on this fixture, including the config-dir isolation this
+    # suite runs under, and the next read would then walk the operator's real
+    # store.
+    monkeypatch.setattr(os, "scandir", real_scandir)
+    table.invalidate_summaries_cache()
+    third = await table.summaries()
+    assert {row["session_id"] for row in third} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert table.listing_degraded() == []
+
+
+@pytest.mark.asyncio
+async def test_a_cold_listing_against_an_unreadable_store_says_so(tmp_path, monkeypatch) -> None:
+    """Nothing to serve is still not a verdict about the operator's conversations.
+
+    A daemon that has never read the store has no rows to keep, so the frame is
+    empty — but the marker rides with it, which is what lets a client say
+    "couldn't read" instead of rendering "no conversations" over a read that
+    never happened.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+
+    table = SessionTable()
+    rows = await table.summaries()
+
+    assert rows == []
+    assert table.listing_degraded() == ["sessions"]
+
+
+@pytest.mark.asyncio
+async def test_the_store_failure_is_a_ttl_paced_retry_not_a_rescan_per_repaint(
+    tmp_path, monkeypatch
+) -> None:
+    """A store that stays unreadable must not be rescanned on every repaint.
+
+    The live-projection push path repaints the list ~30x/s. If a FAILED attempt
+    left the timestamp unset, every one of those would re-walk a store that
+    just failed to walk, on the single daemon loop — the starvation the TTL
+    cache exists to prevent, reintroduced by the error path.
+    """
+    import errno
+
+    from local_operator import resume as resume_module
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    _failing_open(monkeypatch, store, OSError(errno.EIO, "Input/output error"))
+
+    calls = {"n": 0}
+    real_rows = resume_module.recent_session_rows
+
+    def counting_rows(directory, limit=None, *, strict=False):
+        calls["n"] += 1
+        return real_rows(directory, limit, strict=strict)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
+
+    table = SessionTable()
+    await table.summaries()
+    assert calls["n"] == 1
+    calls["n"] = 0
+    for _ in range(30):
+        table.notify_list_changed()
+        await table.summaries()
+    assert calls["n"] == 0, "a failed read must back off for the TTL, not retry per repaint"
+
+
+def test_the_listing_route_publishes_the_marker_beside_the_rows(tmp_path, monkeypatch) -> None:
+    """The wire half: the marker and the rows travel together, on both transports.
+
+    ``/api/sessions`` and the ``sessions`` event frame are built by ONE function
+    (``_list_frame``) because the phone's home screen reads the SSE one, and a
+    marker present on only one of two spellings of the same answer is a marker
+    that screen never sees. Pinned on the JSON route, which is the same payload.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions").json()
+    assert {row["session_id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EMFILE, "Too many open files"))
+    daemon.table.invalidate_summaries_cache()
+    broken = client.get("/api/sessions").json()
+
+    assert {row["session_id"] for row in broken["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert broken["degraded"] == ["sessions"]
+
+
+def test_the_history_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
+    """The phone's other conversation list, and the same rule.
+
+    ``/api/sessions/past`` is a second listing of the operator's conversations,
+    so a store it cannot walk may not reach it as "there are none" either. Its
+    previous shape was worse than the home listing's: ``except Exception:
+    return []`` laundered EVERY failure into an empty history, bugs included.
+
+    Whose list this is, stated correctly because the first draft of this
+    docstring was not: the shipped history screen is ``mobile/web/src/screens/
+    past-sessions.tsx`` and it renders ``searchSessions(query)``, i.e.
+    ``/api/sessions/search`` — pinned separately below. ``api.ts``'s
+    ``getPastSessions`` helper has no call site anywhere in the tree, so this
+    route is a listing with no shipped renderer of its own; it is still a
+    listing, and the rule is about the wire, not about who reads it today.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions/past").json()
+    assert {row["id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+    broken = client.get("/api/sessions/past").json()
+
+    assert broken["sessions"] == []
+    assert broken["degraded"] == ["sessions"]
+
+
+def test_a_non_store_failure_on_the_history_route_is_not_laundered(tmp_path, monkeypatch) -> None:
+    """The half of the removal that the store test above cannot pin.
+
+    ``_past_sessions`` dropped its ``except Exception: return []`` because it
+    swallowed defects along with ``EACCES``, and the test above asserts only the
+    GRACEFUL half (``[], ["sessions"]``). Without this pin a future refactor can
+    put the broad catch back and stay green, which is how the laundering
+    returned the first time. A failure that is not the store read reaches the
+    request as a failure.
+    """
+    cfg = tmp_path / "config"
+    _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    class _NotAStoreRead(Exception):
+        """A defect in the row builder: exactly what may not be laundered."""
+
+    def exploding_recent_session_rows(config_dir, limit=None, **kwargs):
+        raise _NotAStoreRead("row builder bug")
+
+    # Patched at the module the route imports FROM at call time, so the real
+    # store never has to be broken to reach this arm.
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", exploding_recent_session_rows)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    with pytest.raises(_NotAStoreRead):
+        client.get("/api/sessions/past")
+
+
+def test_the_search_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
+    """The listing the shipped history screen ACTUALLY renders, and the marker.
+
+    ``mobile/web/src/screens/past-sessions.tsx`` runs ``searchSessions("")`` on
+    mount and then replaces its whole list with ``r.sessions`` — membership, not
+    a merge — so this route's empty answer is the same claim the two listing
+    routes had to stop making. Round 2 found it answering ``200`` with
+    ``keys=['query', 'sessions']`` and no marker at all for a store it could not
+    read, which is how the screen came to say "no past sessions yet" about a
+    history nobody had read.
+
+    The marker is the phone's own ``DEGRADED_DURABLE_LISTING`` word, the same
+    one the home listing and the history route use, so a renderer keys on one
+    vocabulary. Recording what the SCREEN should do with it (a "couldn't load"
+    state instead of that empty text) is a user-visible design round of its own
+    and is deferred on the PR rather than guessed at here.
+    """
+    import errno
+
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions/search", params={"q": ""}).json()
+    assert {row["id"] for row in healthy["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert healthy["degraded"] == []
+
+    # A store that READS, queried for something absent: still no marker. Or the
+    # marker would mean "this search found nothing", and every miss on a healthy
+    # phone would render as a failed read.
+    miss = client.get("/api/sessions/search", params={"q": "zzzz-no-such-session"}).json()
+    assert miss["sessions"] == []
+    assert miss["degraded"] == []
+
+    _failing_open(monkeypatch, store, OSError(errno.EACCES, "Permission denied"))
+    broken = client.get("/api/sessions/search", params={"q": ""}).json()
+
+    assert broken["sessions"] == []
+    assert broken["degraded"] == ["sessions"], (
+        "the screen the operator actually looks at must be able to tell an "
+        "unreadable store from an empty one"
+    )

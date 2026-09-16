@@ -26,10 +26,65 @@ on `tests/unit/server` measured `-n 4` at 5.3-5.9s against `-n 14` at
 7.8-11.3s, because the suite waits on the event loop rather than on CPU. The
 cap is the smaller of a CPU share and a memory budget, so a machine already
 under pressure from sibling worktrees backs off on its own. The budget divides
-by 600 MB per worker, which is a deliberate ~2.5x safety envelope rather than
-the measured figure: cleanly measured workers sit at 226-262 MB, but a worker's
-RSS depends on which tests it draws (worst observed ~1,090 MB) and some tests
-fork their own subprocesses the budget must still cover.
+by **600 MB per worker** — a deliberately conservative envelope, not the measured
+per-worker RSS: cleanly measured workers sit at 226-262 MB, but a worker's RSS
+depends on which tests it draws, and the suite's known heavy corner
+(`tests/unit/tools/test_eval_tool.py`, which spawns real kernel subprocesses,
+`tests/unit/evaluation/adapters/osworld`, which builds the shipped adapter wheel
+and a real copied interpreter, and the boot-bound
+`tests/unit/tui/test_slash_echo.py`) measured a peak worker **process tree** of
+**441.5 MB** at `-n 6` on 2026-09-14 with a peak aggregate of 1,647.3 MB across
+the six — so the charge is 1.36x over the heaviest draw *observed*, and the
+corner it comes from is 3.4% of the tree, sampled every 1.5 s: that refutes a
+400 MB charge but does not calibrate the suite. The worst single worker ever
+observed is ~1,090 MB and is NOT covered by the charge; what bounds that case is
+the aggregate, because a count of N is only ever produced on a host
+with at least 1,200 x N MB of available memory (the budget is the smaller of
+half of available and available minus the reserve) — an inequality over what the
+host had *free* when it chose N, not over what N workers then claim.
+
+**The cap was titrated on 2026-09-13/14 — it had been too tight, not too loose.**
+Before this, at this host's chronic 4,500-5,500 MB of *available* memory, the
+reserve below was binding on every run and resolved **3 workers** at
+4,964-5,313 MB (**2** at 4,500-4,848 MB and **4** above ~5,472 MB) on 14 cores
+that were 0-2.5% busy. Interleaved A/B waves of 3 concurrent instances of the
+same boot-bound slice, at real fleet depth (11-13 sibling suites live),
+per-instance wall time: **cap 3 → 313.3 s / 225.2 s; cap 6 → 188.9 s / 161.6 s /
+188.7 s; cap 8 → 171.3 s** — 6 beat 3 in that run, and 8 beat 6 by only 9%. An
+independent A/B (review round 1) reproduced the ordering but not the magnitude
+(15-16%, with a different baseline), so quote the direction and never a headline
+speedup percentage — the **cap-6-over-cap-3** percentage the waves above produced
+is withdrawn as a claim, while their CPU deltas and the 9% for cap 8 over cap 6
+are measured figures and stay. What ships is the reserve CAP moving
+(`min(3072, total / 8)` → `min(2048, total / 8)` — the 1/8 fraction, and so every
+small-host floor and the proportional protection a CI container gets, is
+unchanged), which takes this host from the released constants' 2 / 2 / 3 / 3 / 3 / 4
+to 3 / 4 / 4 / 4 / 4 / 4 at 4,522 / 4,848 / 4,964 / 5,140 / 5,313 / 5,555 MB
+available: **two** workers at
+4,848 MB, **one** at 4,522 MB and at 4,964-5,313 MB, none at 5,555 MB. The
+**per-worker charge did NOT move**: an earlier revision halved it to 400 MB, and
+the 441.5 MB peak tree above refused it. `_CPU_SHARE` and the 2..8 clamp did not
+move, and the four documented CI runner shapes resolve exactly as they did
+before.
+
+**The hook says why it chose N, and does not divide by the fleet.** One stderr
+line at startup names every term that produced the count:
+
+```
+pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4, available 5,313 MB, reserve 2,048 MB, siblings 11)
+```
+
+Silence it with `PYTEST_QUIET_WORKER_CAP=1` (`=0`/`false`/`no`/`off` leave it on).
+An operator override (`PYTEST_XDIST_AUTO_NUM_WORKERS`) gets its own one-line
+report naming the override as the term that bound, because that is the path where
+the count is least explicable otherwise. Neither line ever writes to stdout, which
+`-q` output is parsed from. The `siblings` field is a read-only count of the
+other live pytest suites (one `ps`, no lock file) and it is REPORTED ONLY:
+dividing both arms by it was implemented and measured on 2026-09-13 and rejected
+- on this host it floors every suite at 2 workers and took a boot-bound TUI
+slice from 219.8/216.3/209.8 s to 338.4/314.5/308.1 s per instance at identical
+CPU, i.e. it buys nothing and costs wall time. `conftest.py` carries the numbers
+so it is not re-tried without them.
 
 The memory probe reads *current* pressure, which is subtler than it sounds:
 `psutil` is deliberately not a dependency, so macOS is read from `vm_stat`
@@ -69,16 +124,21 @@ halve parallelism on every provider nobody remembered to add, which is the
 regression above. If you are adding a new non-interactive variable to
 `NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
 
-**A memory reserve is also held back**, scaled per host (`min(3072, total / 8)`
+**A memory reserve is also held back**, scaled per host (`min(2048, total / 8)`
 MB), because the budget otherwise claims a fraction of what *remains* and
 sibling suites converge toward zero free memory instead of toward a floor. Know
 its actual reach before tuning it: the shape is `min(share, available -
-reserve)`, so it binds only below **twice** itself (~6 GB free on a 36 GB box)
-and is invisible above that. It is a floor under one suite's appetite, not a
-cap on the fleet — six *simultaneous* suites are still not bounded by it, and
-the durable lever for that would be a cross-process budget, deliberately not
-built (see `harness/group_reaper.py` on wedged `flock` holders propagating a
-freeze between sessions).
+reserve)`, so it binds only below **twice** itself (~4 GB free on a 36 GB box)
+and is invisible above that — and this host spends hours at a time BELOW that
+boundary, so here the reserve is the ordinary binding term rather than a rarely
+armed safety net. That is exactly how 5 GB of free memory used to buy 3 workers,
+and why the titration above lowered the reserve's cap (only its cap: the 1/8
+fraction is unchanged, so the floors on small hosts are exactly what they were).
+It is a floor under one suite's appetite, not a cap on the fleet: a cross-process
+budget would be a truer lever for the fleet total, and is deliberately not built
+(see `harness/group_reaper.py` on wedged `flock` holders propagating a freeze
+between sessions). A fleet divisor was also measured and rejected — see
+`conftest.py`'s module docstring before proposing one.
 
 `--dist worksteal` is also in `addopts` — per-test
 durations here vary by orders of magnitude, and the default `load` scheduler
@@ -136,11 +196,18 @@ stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
   watchdog would kill a worker carrying unrelated tests and report them as an
   infrastructure error rather than as the freeze they are.
 
-It is fully headless (Textual's `run_test()` pilot, no window, no display, no
-TTY) and uses no API key, so its CI job carries **no fork gate** — unlike
-`cli-sanity`/`server-sanity`, whose live-LLM secrets force one. That is
-deliberate: the resume-liveness assertion is the regression guard, so it has to
-run on every PR including forks.
+Most of it is headless (Textual's `run_test()` pilot, no window, no display),
+but not all of it, and the exception is load-bearing: a few members drive the
+real console script in a real **pty** — `test_terminal_close_survives_e2e.py`,
+and `test_tui_boot_e2e.py`, which feeds the raw bytes a legacy X10 mouse
+terminal sends. The pilot paints into an in-memory compositor and never reads
+stdin, so a failure in the terminal INPUT path is invisible to a pilot-only
+test; 0.54.37's production crash was exactly that (a strict UTF-8 decode on the
+driver's input thread, raised by three raw coordinate bytes), and those pty
+members are what makes it observable. It uses no API key, so its CI job
+carries **no fork gate** — unlike `cli-sanity`/`server-sanity`, whose live-LLM
+secrets force one. That is deliberate: the resume-liveness assertion is the
+regression guard, so it has to run on every PR including forks.
 
 **It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
 one that makes it a regression guard.** The deadlock is a macOS/BSD property —
@@ -294,6 +361,22 @@ agree:
 ```sh
 env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
 ```
+
+**And strip what a `lop` parent exports, because two of its prefixes are read by
+the child product rather than only by a terminal.** `CMUX_*` is the one already
+known here (a headless TUI that inherits `CMUX_WORKSPACE_ID` renames the
+operator's real cmux workspaces). `LOP_*` is the other, and it is quieter:
+
+`session/runtime/process.py` reads `LOP_MOBILE_CHILD_PROVIDER`, `_MODEL`, `_CWD`
+and `_RESUME` to decide what a child runtime is, and sets
+`LOP_RUNTIME_ADOPT_SESSION` for it; `session_factory` then reads that flag and
+`LOP_RUNTIME_DEFER_MATERIALISE` to decide whether the session is adopted as-is or
+materialised first. A cell run from inside
+another session therefore inherits *that* session's provider and model (so it
+silently runs on a provider the fixture never chose) and, with a deferral flag
+inherited, a child can idle-exit with no work at all — a plausible-looking cell
+that proves nothing. QA round 1 lost a cell to exactly this. Strip both prefixes,
+then set the names the cell means to set.
 
 This is worth spelling out because the failure is silent and it produces a
 *plausible* wrong answer rather than an error. It has now cost two separate QA
@@ -615,8 +698,9 @@ The bump branch lives in a throwaway worktree so the root checkout's branch
 is untouched, but `lop-update` itself runs against `~/local-operator`: it
 gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
 `LOCAL_OPERATOR_REPO` at a worktree fails with `local-operator repository not
-found` (reproduced). The owner fetches and advances the root checkout's `main`
-ref, then runs `lop-update` there. The order matters: the bump PR is opened
+found` (reproduced). The owner fetches and advances the root checkout's
+`main` ref, then runs the drained install there (see "Installing over a live
+fleet"). The order matters: the bump PR is opened
 first as the lock, merged only after every PR in the window has merged, and
 nothing is installed until the tag exists. The claim and the bump are ONE
 commit on ONE branch: the owner amends and force-pushes with
@@ -664,10 +748,16 @@ $EDITOR /tmp/lop-release-X.Y.Z-notes.md   # headline, ## Major/Minor/Fixes, ## I
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
   --title 'X.Y.Z: <theme>' --notes-file /tmp/lop-release-X.Y.Z-notes.md
 
-# 5. Install and verify.
-lop-update
+# 5. Install and verify — with the fleet DRAINED: wait until no session
+#    reports `busy`, install, then re-engage what the swap displaced.
+#    See "Installing over a live fleet" below; a plain `lop-update` is only
+#    safe when nothing is running.
+<install>
 cat ~/.local/share/uv/tools/local-operator/.lop-source
-cd /tmp && lop --version
+# Smoke the built command from outside the repository, naming the uv-tool build
+# by path where the host has more than one `lop`: a bare `lop` can resolve to a
+# different install and report a version that is not this one.
+cd /tmp && ~/.local/bin/lop --version
 
 # 6. Reclaim the worktree.
 git -C ~/local-operator worktree remove /tmp/lop-release-next
@@ -688,6 +778,44 @@ checked out", and "if `main` is the checked-out branch, use
 `git -C ~/local-operator merge --ff-only origin/main` instead" — `update-ref`
 under a checked-out `main` moves the branch without touching the index, so
 `git status` would then show every merged change as a local modification.
+
+### Installing over a live fleet
+
+**The install must not run against a busy fleet.** That is the rule; the command
+that carries it out is the host's business. An install replaces site-packages
+inside the shared uv-tool environment **under whatever runtimes are running**,
+and a runtime that is mid-turn never checks for a newer build — by design, only
+an idle runtime notices one — so it goes on importing from a tree that is being
+deleted beneath it, dies torn, and writes no exit record. Measured on
+2026-09-15 at 19:23, installing 0.55.8 took every running session on the fleet
+down mid-turn; and because only sessions **watched** by a frontend re-engage
+eagerly, the unwatched half — the `daemon`-kind sessions, woken by `lop send`
+or a wake, as against the `attach` viewers a frontend is holding open — stayed
+down until they were resumed by hand.
+
+So the step is: **wait until no session reports `busy`, install, then re-engage
+whatever the swap displaced** — turns that were in flight when it landed, and
+the sessions no frontend is holding open. A host that has a drain wrapper for
+exactly this may use it, and it is the convenient way to do those three things
+in order; the wrapper is a host-local convenience, not part of the protocol,
+and the release owner owes the behaviour above whether or not one exists.
+
+Two cautions that hold wherever the install runs:
+
+- **Never force an install past a busy fleet to save time.** Displacing
+someone's turn is a real cost, and an expired drain budget means waiting and
+running it again, not forcing it.
+- **Verify the build; do not read it off an installer's own summary.** A
+summary that resolves `lop` on `PATH` can describe a different install than
+the one it just wrote: measured on 2026-09-15, such a summary printed
+`v0.55.9` after installing `0.55.10`, because a bare `lop` had resolved to a
+desktop app's managed environment. Read
+`~/.local/share/uv/tools/local-operator/.lop-source` and smoke the built
+command from outside the repository for the answer.
+
+It is still `lop-update` underneath, so the mechanics above about the committed
+`main` ref, the source revision record and the remote-check gate apply
+unchanged.
 
 Warnings that still hold, each of which has already cost a release:
 
@@ -800,8 +928,9 @@ Warnings that still hold, each of which has already cost a release:
   for a release.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
-  step: merge, bump, tag, `lop-update`, verify `.lop-source`, then smoke test
-  `lop` from outside the repository.
+  step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke
+  the built command from outside the repository — naming the uv-tool build by
+  path, because a bare `lop` can resolve to a different install.
 
 Every agent asked to "update local-operator" or make a change available through
 `lop` follows this protocol: merge the tested change when its rounds are clean,
@@ -868,6 +997,74 @@ refuses unless the submitted revision is STAGED at 100% for exactly that
 version, then calls `publish` and polls until `PUBLISHED`. It is the automated
 equivalent of the dashboard's Publish button, behind the same environment
 guards and main-only ancestry check as a stage upload.
+
+### Several extension installs paired at once, and the dev manifest key
+
+The store build and a locally loaded (`Load unpacked`) build are DIFFERENT
+identities, and the daemon accepts an allow-list of them rather than one pinned
+id (`browser/pairing.json`: the legacy `{extension_id, token_sha256, paired_at}`
+trio kept verbatim as the driver's record, plus an `identities` list with **one
+token per identity**). Two installs may therefore be connected at once, and only
+one of them DRIVES at a time — the other is a **standby** that receives no
+command, holds no tab, and is promoted if the driver goes away. Everything that
+changed here is described in `docs/design/browser-multi-identity-pairing.md`.
+
+**The one rollout cost, stated rather than discovered.** Two installs can be
+paired at once and exactly one drives; the other is told `standby` with a
+`{event: "role"}` frame. A build that PREDATES this change (the released 0.1.10
+store build, which cannot be side-loaded and will be on real profiles for
+weeks) does not know that event: told to stand by, it keeps its
+`chrome.debugger` attachments and its surface map, so it leaves "Local Operator
+is debugging this browser" banners on tabs only it can release, and its popup
+still reads as connected while the daemon routes commands to the other install.
+No daemon-side fix exists for a build that cannot hear the frame. So: the
+disclosure is in `lop browser status` (printed whenever a standby is listed),
+in the PR body, and here. If an operator sees banners on tabs after loading a
+second build, removing that build (or closing those tabs) releases them.
+
+What that means when you are working on the extension:
+
+- **`lop browser pair`** shows one line per WAITING install, named by the label
+the daemon derived from its `hello` (browser + extension version), because a
+user staring at two popups cannot otherwise tell which code is which.
+- **`lop browser pair --list`** shows the authorised installs and which one is
+driving; **`--revoke <id-or-label>`** removes exactly one and severs only its
+socket; **`lop browser drive <id-or-label>`** moves the wheel by hand (the
+incumbency rule is self-stable, so the install already driving keeps it).
+- **`unpair`** in the options page is per-identity for the same reason.
+- **`PROTO_VERSION` stays 1.** It must not be bumped for any of this: a bump
+closes the released store build with 4001, whose popup reads as an unfixable
+"update needed" card. Capability travels in ADDITIVE `HelloAck` fields (`role`,
+`authorized_count`) plus one new daemon→extension `role` event. **Never add a
+field to `Hello`** — it is validated with `extra="forbid"`, so every already
+released daemon would close a new extension that did. An absent `role` must
+always be read as "driver".
+
+**A dev-only manifest `key` gives local builds a stable id.** A Chromium
+unpacked extension's id is derived from its DIRECTORY PATH, so the same build is
+a different identity in every worktree and the operator re-pairs on every
+switch. `extension/manifest.dev.json` holds an RSA **public** key which
+`build.mjs` merges into the manifest of every NON-store build (`--zip` never
+gets it: the store assigns the published identity, and that file must stay
+exactly as submitted).
+
+Why committing it is fine, and precisely what it does not buy:
+
+- `key` is the base64 of a **public** key. It is an identity, not a credential.
+  The private half is not in this repository (it was generated once and
+deliberately discarded — it is only needed to sign a `.crx`, which this project
+  never distributes) and is not needed to Load unpacked.
+- Anyone can copy it and build an extension claiming the dev id. That buys them
+  nothing: pairing still requires the 6-digit code that only the operator's
+  terminal prints (`docs/design/browser-extension.md` §6.2), and the daemon
+  needs a code from the DEV INSTALL for that id.
+- Therefore **never auto-trust it**: a well-known id the daemon accepts without
+  pairing is exactly what would turn a public identity into a credential. The
+  dev key changes the ID a local build gets; it changes no authorisation rule.
+- The dev id currently derived from that key is
+  `ijokelchmpajpdekmanpbhnnccbpoopl`. Verify it before relying on it:
+  `node build.mjs`, load `extension/dist` unpacked, and read the id off
+  `chrome://extensions` — the derivation is Chrome's, not ours.
 
 ### What to record
 
@@ -2051,6 +2248,21 @@ Things that will bite you if you forget them:
   scope where some calls were unpriced is a LOWER BOUND (rendered `$12.30+`).
   Cost is an ESTIMATE (list price × tokens; it cannot see a plan, discount, or
   free tier) and is labelled as one, same discipline as the component split.
+
+- **Cost is priced at RECORD time under the tariff in force at the CALL's own
+  moment, and a stored figure is final.** A row whose prices vary by time of day
+  names its schedule (`ModelInfo.time_of_use` → `model/tariff.py`), the price
+  fields hold the PEAK list rates, and `price_snapshot` evaluates the schedule at
+  the call's own `ts_ms` rather than at read time — so a historical row is never
+  repriced when the window (or a later tariff change) moves, and the same row
+  reads the same on every replay. `Usage.at_ms` carries that moment for the
+  surfaces that price a REHYDRATED call (a restored session, an attached
+  receipt), where "now" would otherwise be off by up to 2x in either direction.
+  An AGGREGATE carries a stamp only while every call it folds agrees on one; a
+  fold across a window boundary leaves it unset and is priced at the clock, so a
+  row never claims a window that only some of its calls ran in. A
+  provider-reported dollar (`usd_cost`) is never scaled by any schedule: it is
+  the provider's own final figure.
 
 - **Adding a component OR a stored column is a schema migration.**
   `COMPONENT_KEYS` maps to one `c_<key>` column each in `store._SCHEMA`. A

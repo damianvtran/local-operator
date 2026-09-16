@@ -413,8 +413,13 @@ def _host_browser_backend_available() -> bool:
 
     Distinct from "the browser tool is in my list": a restricted-role subagent
     on a fully browser-capable host has no ``browser`` tool but must not be
-    told the host lacks a backend. Reads the same two probes the createIf
-    builder uses, so the answer cannot disagree with why the tool was withheld.
+    told the host lacks a backend. Reads the same probes the createIf builder
+    uses, ALL THREE of them: a predicate naming fewer hosts than the gate it
+    mirrors tells a restricted child "no browser host is connected" on a host
+    that withheld nothing but this tool — the false diagnosis this note exists
+    to prevent, and one that became reachable as soon as the surface gained the
+    app's browser host, which is the only host that answers on an app-only
+    machine.
 
     Imported lazily and defensively: this is prompt rendering, which must never
     fail because a capability probe raised. A probe failure degrades to "no
@@ -425,9 +430,12 @@ def _host_browser_backend_available() -> bool:
         from local_operator.tools.builtin import (
             bridge_browser_advertisable,
             cmux_browser_available,
+            ui_browser_advertisable,
         )
 
-        return bool(cmux_browser_available() or bridge_browser_advertisable())
+        return bool(
+            cmux_browser_available() or bridge_browser_advertisable() or ui_browser_advertisable()
+        )
     except Exception:  # noqa: BLE001 — prompt rendering must never break
         return False
 

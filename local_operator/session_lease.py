@@ -4,6 +4,12 @@ The compatibility ``.session.pid`` marker is useful for old readers but cannot
 be authoritative because replacing a text file is not acquisition.  This
 module stays stdlib-only so resume discovery can consult it without importing
 the engine or mobile stack.
+
+Liveness is asked through :func:`local_operator.procstate.is_zombie` rather
+than signal 0 alone, because the claim this module arbitrates is only ever
+taken over from a holder that is PROVEN dead, and a zombie is exactly the
+holder that looks alive forever.  The probe stays a leaf module so this one
+keeps its stdlib-only contract.
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
+
+from local_operator.procstate import is_zombie
 
 LEASE_NAME = ".execution-lease"
 MIRROR_NAME = ".session.pid"
@@ -34,8 +42,34 @@ class SessionLeaseHeldError(RuntimeError):
         self.pid = pid
 
 
-def _pid_state(pid: int) -> Literal["live", "dead", "uncertain"]:
-    """Probe only what the platform can prove; uncertainty never permits theft."""
+def _pid_state(pid: int, *, check_zombie: bool = True) -> Literal["live", "dead", "uncertain"]:
+    """Probe only what the platform can prove; uncertainty never permits theft.
+
+    **An exited-but-unreaped process is DEAD here, not live.** Signal 0
+    succeeds against a zombie, so a probe built on it alone reports the corpse
+    of a SIGKILLed runtime as a working owner — forever, because the pid is not
+    reused while it lingers and nothing may reap it on the owner's behalf. Both
+    readers of this verdict require a holder to be *proven dead* before they
+    move its claim, so the wrong answer here is not a misleading log line: it
+    is a transcript whose sole-writer claim can never be acquired. The operator
+    sees a session that no interface will open (`live_runtime_pid` refuses with
+    "already open in pid N", where N is the corpse) and no mechanism will
+    recover. :func:`local_operator.procstate.is_zombie` documents the incident.
+
+    **The zombie probe is not free, so the caller decides how often it is
+    worth spending.** Signal 0 costs ~1 µs and settles two of the three
+    answers (a live owner, a pid that is simply gone); the proof costs a `ps`
+    fork (2.4-4.6 ms across runs on this host, tracking load) and is therefore
+    spent
+    only after the cheap probe has already said "live". ``check_zombie=False``
+    skips it,
+    which is what the engage loop passes while it is polling every 10 ms
+    against a claim it believes is mid-construction (`launch._lease_holder`).
+    That choice is a LATENCY trade, never a safety one: the verdict it produces
+    can be "live" for a corpse only where the caller has already decided to
+    wait, and every acquisition still requires the proof before it may take a
+    claim.
+    """
     if pid <= 0:
         return "uncertain"
     if os.name == "nt":
@@ -58,10 +92,16 @@ def _pid_state(pid: int) -> Literal["live", "dead", "uncertain"]:
     except ProcessLookupError:
         return "dead"
     except PermissionError:
+        # Another account's process. It cannot be a zombie of ours, and an
+        # unverifiable holder must never lose its claim: fail closed.
         return "live"
     except OSError:
         return "uncertain"
-    return "live"
+    if not check_zombie:
+        # The caller is on a dense poll cadence and has already accepted that
+        # it will wait; see the docstring. A zombie reads as live here.
+        return "live"
+    return "dead" if is_zombie(pid) else "live"
 
 
 def _read_claim(path: Path) -> tuple[str | None, int | None]:

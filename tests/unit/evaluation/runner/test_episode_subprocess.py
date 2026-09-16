@@ -183,6 +183,24 @@ def _consume_observation_failure():
     return True
 
 
+# Text this run writes to the WORKER's stderr, armed the same adapter-owned way
+# as the cutpoint. The parent drains the worker's stderr into a bounded tail
+# (``AdapterSupervisor.stderr_tail``); asserting that drain exists proves
+# nothing, so the test that uses this reads the text back out of the SEALED
+# bundle. Written at reset_start rather than at the failure so the parent's
+# drainer thread has several RPC round trips to pick it up before the worker
+# dies -- a tail read is a snapshot, not a join.
+def _stderr_marker():
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiny_stderr_marker")
+    try:
+        with open(path) as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
 # Whether reset_start should import a task module from the WORKSPACE (the
 # worker's cwd), the way upstream OSWorld's ``instantiate_task`` does. Armed
 # through a file beside the module like the cutpoint. This is the import that
@@ -331,6 +349,11 @@ class TinyAdapter:
     async def reset_start(self, params):
         self._maybe_die("reset_start")
         _maybe_import_workspace_task()
+        marker = _stderr_marker()
+        if marker:
+            import sys
+
+            print(marker, file=sys.stderr, flush=True)
         self.task_id = params.task_id
         self.episode_id = params.episode_id
         self.artifact_root = params.artifact_root
@@ -587,6 +610,21 @@ def _arm_workspace_import(site: Path, enabled: bool) -> None:
         marker.unlink(missing_ok=True)
 
 
+def _arm_stderr_marker(site: Path, marker: str | None) -> None:
+    """Tell the installed adapter to write ``marker`` to the worker's stderr.
+
+    The supervisor builds the worker's environment from a closed allowlist, so
+    this cannot ride in as an env var; the adapter reads it from a file beside
+    its own module, exactly like the cutpoint.
+    """
+
+    path = site / "tiny_stderr_marker"
+    if marker is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(marker)
+
+
 def _arm_frames(site: Path, mode: str | None) -> None:
     """Tell the installed adapter how to publish observation frames.
 
@@ -750,6 +788,67 @@ async def test_exhausted_observation_retries_still_fail_and_seal_the_bundle(
     # The step never completed, so no step event was written for it.
     assert report.counters is not None
     assert report.counters.environment_step_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_failure_path_reads_the_workers_stderr_tail(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """The worker's stderr must be READ on the failure path, out of the bundle.
+
+    The supervisor drains the worker's stderr into a bounded 64 KiB tail on
+    every launch and nothing consumed it, so upstream's own explanation for a
+    failed capture -- "Failed to get screenshot. Status code: %d", the raised
+    exception, a traceback -- arrived in the parent and was discarded. Two
+    canary episodes then died with a bundle that could name only a fixed
+    string. This drives a REAL worker, makes it write to stderr, exhausts the
+    observation retries, and reads the marker back out of the SEALED bundle.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, "honest")
+    # One more failure than the runner has attempts, so the episode fails.
+    _arm_observation_failures(adapter_site, 5)
+    marker = "desktopenv.pycontroller: Failed to get screenshot. Status code: 502"
+    _arm_stderr_marker(adapter_site, marker + "\n")
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        _subprocess_config(tmp_path, observation_retry_delay=0.0),
+        selector=real_selector,
+        model=ScriptedModel(["step", "step", "finish"]),
+        launch=AdapterSupervisor.launch,
+        rescue=_accepting_rescue,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed", outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+
+    events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines() if line]
+    errors = [event for event in events if event["kind"] == "error"]
+    retries = [
+        event
+        for event in errors
+        if event["payload"]["diagnostic_code"] == "observation-phase-retry"
+    ]
+    fatal = [event for event in errors if not event["payload"]["retryable"]]
+    assert len(retries) == 3 and len(fatal) == 1
+    # Both call sites: the retry record (written BEFORE the backoff, so it is
+    # the one a session that dies while waiting still leaves behind) and the
+    # fatal record.
+    for event in retries + fatal:
+        detail = event["payload"]["detail_artifact"]
+        assert detail is not None, event["payload"]["diagnostic_code"]
+        text = (root / "artifacts" / detail["sha256"]).read_bytes().decode()
+        assert "--- adapter stderr tail ---" in text, event["payload"]["diagnostic_code"]
+        assert marker in text, event["payload"]["diagnostic_code"]
 
 
 @pytest.mark.asyncio

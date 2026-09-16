@@ -98,6 +98,43 @@ PARSER.add_argument(
 PARSER.add_argument("--tracemalloc", action="store_true")
 PARSER.add_argument("--profile", action="store_true")
 PARSER.add_argument(
+    "--sidebar",
+    choices=("open", "closed"),
+    default="open",
+    help="A/B control: 'closed' mirrors a user closing the sidebar (poll timer paused, "
+    "spinner timer paused, no prewarm), which is the state the report says is fast.",
+)
+PARSER.add_argument(
+    "--profile-idle",
+    action="store_true",
+    help="cProfile the idle window at each checkpoint and dump idle-<label>.prof, so the "
+    "steady-state loop CPU can be attributed to callers rather than guessed at.",
+)
+PARSER.add_argument(
+    "--stream",
+    type=int,
+    default=0,
+    help="How many parked sidebar owners emit live message_update deltas during the run "
+    "(0 = quiet). The operator's report names 'live streaming activity' at ~19 sessions; "
+    "--stream 12 --stream-rate 19 models #894's measured 229 ev/s across 12 sessions.",
+)
+PARSER.add_argument(
+    "--stream-rate",
+    type=float,
+    default=19.0,
+    help="Deltas per second per streaming session.",
+)
+PARSER.add_argument(
+    "--stream-chars",
+    type=int,
+    default=0,
+    help="Accumulated characters each streamed message carries. Real message_update "
+    "frames carry the FULL accumulated message (server.py: 'the expensive part of a "
+    "message_update is the accumulated message — hundreds of KB'), so 0 measures "
+    "only the per-frame overhead and 65536+ measures the delivery cost that grows "
+    "with answer length.",
+)
+PARSER.add_argument(
     "--no-cleanup-timer",
     action="store_true",
     help="stub OperatorApp._report_startup_cleanup (experiment: is the per-adopt timer chain "
@@ -255,6 +292,46 @@ def instrument() -> None:
         return await original_connect(cls, *args, **kwargs)
 
     AttachedSession.connect = classmethod(connect)  # type: ignore[method-assign]
+
+    # Sidebar paint traffic by kind, so "renders per tick/poll" is a counted
+    # number rather than inferred from CPU: a full refresh repaints the widget,
+    # a spinner tick may repaint one cell, and render_line is what the
+    # compositor actually asks for per visible row.
+    from local_operator.tui.events import EventController
+    from local_operator.tui.widgets.session_sidebar import SessionSidebar
+
+    wrap(SessionSidebar, "refresh", "sidebar.refresh")
+    wrap(SessionSidebar, "_advance_spinner", "sidebar.tick")
+    wrap(SessionSidebar, "render_line", "sidebar.render_line")
+
+    # Viewer-side event seam: what the app actually pays to receive, and how
+    # much of it a PARKED controller discards (the work #894 exists to drop).
+    original_on_event = EventController._on_event
+
+    def counted_on_event(self: Any, event: Any) -> None:
+        COUNTS["event_controller.on_event"] += 1
+        if (
+            self._parked
+            and not self._restoring_projection
+            and event.type in self._PARKED_DROP_TYPES
+        ):
+            COUNTS["event_controller.parked_drop"] += 1
+        return original_on_event(self, event)
+
+    EventController._on_event = counted_on_event  # type: ignore[method-assign]
+
+    # Frontend channel: per-update viewer-side handling. ``apply_update``
+    # rebuilds the whole canonical state, so its count per second is the
+    # quantity that decides whether the parked-source frontend channel is
+    # cheap or the dominant cost.
+    from local_operator.session.attached import AttachedSession as _AttachedSession
+    from local_operator.session.frontend_state import (
+        FrontendStateStore as _FrontendStateStore,
+    )
+
+    wrap(_AttachedSession, "_on_frontend_update", "attached._on_frontend_update")
+    wrap(_AttachedSession, "_apply_frontend_facades", "attached._apply_frontend_facades")
+    wrap(_FrontendStateStore, "apply_update", "frontend_store.apply_update")
 
 
 def rss_mb() -> float:
@@ -442,6 +519,7 @@ class Fixture:
         self.history = history
         self.busy = busy
         self.servers: dict[str, RuntimeServer] = {}
+        self.sessions: dict[str, Any] = {}
         self.ids: list[str] = []
 
     async def start(self) -> None:
@@ -464,6 +542,10 @@ class Fixture:
                 server._busy = True
                 server._republish()
             self.servers[sid] = server
+            # Kept alongside the server: the streaming generator needs to EMIT
+            # on the owner, and ``SessionHandle`` deliberately does not expose
+            # the private session (pyright declines the reach-through).
+            self.sessions[sid] = owner
 
     def find(self, _directory: Path, sid: str) -> tuple[Any, Any]:
         server = self.servers.get(sid)
@@ -577,27 +659,64 @@ async def checkpoint(
     return record
 
 
-async def idle_cost(app: OperatorApp, pilot: Any) -> dict[str, float]:
+async def idle_cost(app: OperatorApp, pilot: Any, label: str = "") -> dict[str, float]:
     """What the app burns doing NOTHING — the honest measure of "it feels slow".
 
     Loop-thread CPU over a fixed idle window (AGENTS.md "measure CPU, not wall
     time"): timers, polls and background tasks are the only things that can
     consume it, so a number that rises with switch count is background work
     the app acquired and never released.
+
+    DO NOT wait with ``pilot.pause`` here. ``Pilot._wait_for_screen`` posts a
+    ``call_later`` message to EVERY widget (and walks the tree to do it), so a
+    pause-driven window measures the HARNESS at ~7k messages/s across ~140
+    widgets — twice the signal, and it scales with widget count rather than
+    with anything the user runs. Plain ``asyncio.sleep`` leaves only the app's
+    own timers and socket work on the loop, which is what production idles on.
+
+    ``lag`` samples ``call_soon`` scheduling delay every 20 ms: the per-window
+    answer to "would a keystroke have waited behind background work".
     """
     seconds = ARGS.idle_seconds
     if seconds <= 0:
         return {}
+    loop = asyncio.get_running_loop()
+    lag_ms: list[float] = []
+    stopped = False
+
+    def poke(due: float) -> None:
+        if stopped:
+            return
+        lag_ms.append((loop.time() - due) * 1000)
+        loop.call_later(0.02, poke, loop.time() + 0.02)
+
+    poke(loop.time())
+    profiler = cProfile.Profile() if ARGS.profile_idle else None
     cpu0, wall0 = time.thread_time(), time.monotonic()
+    if profiler is not None:
+        profiler.enable()
     while time.monotonic() - wall0 < seconds:
-        await pilot.pause(0.02)
+        await asyncio.sleep(0.01)
     elapsed = time.monotonic() - wall0
     cpu = time.thread_time() - cpu0
+    stopped = True
+    if profiler is not None:
+        profiler.disable()
+        suffix = "-" + label.replace("=", "") if label else ""
+        profiler.dump_stats(str(ARGS.output / f"idle{suffix}.prof"))
+    lag_ms = lag_ms[1:]
+    lag_ms.sort()
     result = {
         "idle_cpu_ms_per_s": round(cpu / elapsed * 1000, 1),
         "idle_window_s": round(elapsed, 2),
     }
+    if lag_ms:
+        result["idle_lag_mean_ms"] = round(sum(lag_ms) / len(lag_ms), 2)
+        result["idle_lag_p90_ms"] = round(lag_ms[int(len(lag_ms) * 0.9)], 2)
+        result["idle_lag_max_ms"] = round(lag_ms[-1], 2)
     SERIES.setdefault("idle_cpu_ms_per_s", []).append(result["idle_cpu_ms_per_s"])
+    if lag_ms:
+        SERIES.setdefault("idle_lag_p90_ms", []).append(result["idle_lag_p90_ms"])
     return result
 
 
@@ -670,7 +789,10 @@ async def one_poll(app: OperatorApp, pilot: Any) -> dict[str, float]:
             await asyncio.wait_for(asyncio.shield(prefetch.wait()), 30)
         except Exception:
             pass
-    app._session_sidebar._advance_spinner()
+    if app._session_sidebar.display:
+        # Mirrors production: a closed sidebar pauses its spinner timer, so a
+        # closed-cell poll must not paint a frame a real user would never see.
+        app._session_sidebar._advance_spinner()
     await pilot.pause()
     result = {
         "poll_wall_ms": round((time.monotonic() - wall0) * 1000, 1),
@@ -870,13 +992,20 @@ async def run_uptime(fixture: Fixture) -> list[dict[str, Any]]:
             if ARGS.approve_all:
                 app._approvals_default_auto = True
                 app._set_approve_all(True)
-            app._set_sidebar_open(True)
+            sidebar_open = ARGS.sidebar == "open"
+            app._set_sidebar_open(sidebar_open)
             assert app._sidebar_timer is not None
             # The harness drives polls explicitly so cycles are countable.
             app._sidebar_timer.pause()
             await one_poll(app, pilot)
             for _ in range(20):
                 await pilot.pause()
+            stream_task = None
+            if ARGS.stream:
+                current = str(getattr(app._session, "session_id", ""))
+                parked = [sid for sid in fixture.ids if sid != current]
+                stream_ids = parked[: ARGS.stream]
+                stream_task = asyncio.create_task(stream_owners(fixture, stream_ids))
             if ARGS.tracemalloc:
                 tracemalloc.start(25)
             base_gc = gc_snapshot()
@@ -888,12 +1017,13 @@ async def run_uptime(fixture: Fixture) -> list[dict[str, Any]]:
             for p in range(1, ARGS.polls + 1):
                 timing = await one_poll(app, pilot)
                 # Extra spinner ticks between polls: the 2 s poll sees ~16
-                # spinner frames at 120 ms.
-                for _ in range(15):
+                # spinner frames at 120 ms. A closed sidebar has no spinner
+                # timer, so the closed control cell drives none of them.
+                for _ in range(15 if sidebar_open else 0):
                     app._session_sidebar._advance_spinner()
                     await pilot.pause()
                 if p % ARGS.checkpoint_every == 0 or p == ARGS.polls:
-                    idle = await idle_cost(app, pilot)
+                    idle = await idle_cost(app, pilot, label=f"P{p}")
                     keys = await keystroke_cost(app, pilot)
                     records.append(
                         await checkpoint(app, f"P={p}", base_gc, {**timing, **idle, **keys})
@@ -907,7 +1037,50 @@ async def run_uptime(fixture: Fixture) -> list[dict[str, Any]]:
                     out.extend("    " + line for line in stat.traceback.format()[-6:])
                 (ARGS.output / "tracemalloc.txt").write_text("\n".join(out) + "\n")
                 tracemalloc.stop()
+            if stream_task is not None:
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except asyncio.CancelledError:
+                    pass
     return records
+
+
+async def stream_owners(fixture: Fixture, session_ids: list[str]) -> None:
+    """Emit live ``message_update`` deltas from parked owners at a real cadence.
+
+    The FULL production path, not a shortcut: ``session._emit`` -> the handle's
+    ``subscribe_events`` (JSON serialise) -> ``RuntimeServer`` relay -> viewer
+    socket -> ``AttachedSession`` -> ``EventController._on_event``, where a
+    PARKED controller must discard delta-grade events. This is the traffic the
+    operator's "live streaming activity" is made of, and the one the sidebar's
+    parked viewers subscribe to (the fan-in #894 exists to mute).
+
+    The fixture's owners are in-process, so the serialise/broadcast leg runs on
+    this loop as well; in production it lives in the owner's process. That
+    makes the absolute figure an overstatement of the TUI's own share by a
+    constant, which is why the quiet/streaming and open/closed DELTAS are the
+    numbers that mean something.
+    """
+    from local_operator.harness.types import Message, MessageUpdateEvent
+
+    # One round emits one event per streaming session; a round must therefore
+    # take 1/rate seconds for each session to sustain `rate` events/s.
+    gap = max(0.001, 1.0 / ARGS.stream_rate)
+    # Real frames carry the accumulated message. Grow it a little per delta so
+    # each frame is bigger than the last, like a real stream; the base size is
+    # what makes the parse cost visible at all.
+    base = max(0, ARGS.stream_chars)
+    counters: dict[str, int] = {sid: 0 for sid in session_ids}
+    while True:
+        for sid in session_ids:
+            owner = fixture.sessions[sid]
+            index = counters[sid]
+            counters[sid] = index + 1
+            message = Message.assistant("x" * (base + index % 64))
+            message.id = f"growth-stream-{sid}"
+            await owner._emit(MessageUpdateEvent(message=message, delta="x" * (index % 7 + 1)))
+        await asyncio.sleep(gap)
 
 
 FIXTURE: Fixture

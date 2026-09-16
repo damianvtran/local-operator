@@ -47,6 +47,23 @@ logger = logging.getLogger(__name__)
 #: The spool file inside ``sessions/<id>/``.
 INBOX_NAME = "inbox.jsonl"
 
+#: The two sender-facing receipts for a spooled message, ONE definition each for
+#: the two writers (``serving._spool_for_successor`` for a draining runtime, and
+#: ``peer_send._spool_quiet_note`` for a cold session). They led with the
+#: mechanism verb ("spooled …") in both, which told the sender about our
+#: plumbing before telling them what they had bought; the effect leads now and
+#: the clause after the dash — a wake WILL be run by the next runtime, a quiet
+#: note is only read — is the part they can act on (design round 1, D4).
+#:
+#: KEPT SHORT ON PURPOSE, and this is the constraint a future edit must respect:
+#: design round 1 measured the receipts they replace at 54 and 50 characters and
+#: verified each still fits ONE line at both 60 and 100 columns. The rewrite
+#: above is 38 and 51 — inside that measured budget — because a longer receipt
+#: buys precision the sender does not need at the cost of the one property that
+#: was checked. A frame is not the place to discover a wrap.
+SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
+SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
+
 #: Non-blocking lock retries, and the pause between them. Deliberately small:
 #: the critical section is one ``write()`` of a few hundred bytes, so a
 #: contender that cannot get in within ~50 ms is not merely slow, and waiting
@@ -63,12 +80,22 @@ MAX_INBOX_ROWS = 500
 
 @dataclass(frozen=True, slots=True)
 class InboxLine:
-    """One spooled message, in the order it was written."""
+    """One spooled message, in the order it was written.
+
+    ``wake`` is what the sender ASKED FOR, carried across the handover rather
+    than decided by the reader. A row spooled because the receiving runtime was
+    leaving a replaced build may have been a wake — a scheduled alarm the
+    session owes a turn for, or a peer ``send --wake`` — and a successor that
+    delivered it as a quiet note would keep the reminder and never do the work
+    (review round 1, MINOR 3). Absent in rows written before this field
+    existed, which reads as the old quiet-note behaviour: False.
+    """
 
     text: str
     sender: dict[str, Any]
     mode: str = "mailbox"
     written_at: float = 0.0
+    wake: bool = False
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -78,6 +105,7 @@ class InboxLine:
             sender=dict(sender) if isinstance(sender, dict) else {},
             mode=str(payload.get("mode", "mailbox") or "mailbox"),
             written_at=float(payload.get("written_at", 0.0) or 0.0),
+            wake=bool(payload.get("wake", False)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -86,6 +114,7 @@ class InboxLine:
             "sender": self.sender,
             "mode": self.mode,
             "written_at": self.written_at,
+            "wake": self.wake,
         }
 
 
