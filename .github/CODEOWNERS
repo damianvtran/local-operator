@@ -38,15 +38,19 @@
 #
 # When a human review IS wanted it is now a deliberate act rather than a side
 # effect of opening a PR: add the reviewer by hand at the point the PR is
-# actually ready to be read, `gh pr edit <n> --add-reviewer <handle>`. Who may
-# be asked -- the handles that carry the authority to approve on behalf of the
-# project: `damianvtran` (admin), `bbqben`, `olafagbemi`, `sherman-tsui`,
-# `SanaKetabchi` (write). Verify before relying on any of them with
-# `gh api repos/damianvtran/local-operator/collaborators`, since a handle
-# without write access is silently ignored by GitHub. `sebkow` and `jcobhams`
-# hold write access but are deliberately NOT in that set: ownership here means
-# "can approve on behalf of the project", which is narrower than commit access.
+# actually ready to be read, `gh pr edit <n> --add-reviewer <handle>`. Who to ask
+# -- the handles whose judgement stands in for the project's: `damianvtran`
+# (admin), `bbqben`, `olafagbemi`, `sherman-tsui`, `SanaKetabchi`. One mechanical
+# difference since 2026-09-16: the ruleset's `required_approving_review_count: 1`
+# is satisfied by an approving review from *any* collaborator with write access,
+# not only from those five, because no code owners are declared any more. Ask the
+# five by preference. `sebkow` and `jcobhams` also hold write access but are
+# deliberately NOT in that set: ownership here means "can approve on behalf of
+# the project", which is narrower than commit access. Verify a handle before
+# relying on it with `gh api repos/damianvtran/local-operator/collaborators`,
+# since a handle without write access is silently ignored by GitHub.
 #
-# Validate any future edit with GitHub's own parser rather than by eye:
-# `gh api repos/damianvtran/local-operator/codeowners/errors` (it validates the
-# default branch; an empty list means the file parsed).
+# Validate any future edit with GitHub's own parser rather than by eye, and pin
+# the ref or it silently validates the default branch instead of your branch:
+# `gh api 'repos/damianvtran/local-operator/codeowners/errors?ref=<branch>'` (an
+# empty error list means the file parsed).
