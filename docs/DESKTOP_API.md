@@ -176,9 +176,22 @@ alone is not an inference credential.
 
 - `GET /v1/settings`: `result.sections` has `name`, `title`, `scope`, `description`;
   `result.settings` has every registered key, label, help, kind, choices/members,
-  bounds, current/default values, `is_default`, `empty_unsets`, and `redacted`.
+  bounds, current/default values, `is_default`, `empty_unsets`, `redacted`, and the
+  three registry-authored annotations `warning`, `placeholder` and `gated_by`.
   Search this complete projection by label/help/key. Scope comes from its section.
   Desktop theme and terminal `tui.theme` are different scopes, not synonyms.
+  The annotations are registry copy and a registry fact, not renderer inference:
+  `warning` is a consequence stated for one key (the desktop draws it in danger ink,
+  always visible, never behind a reveal), `placeholder` is an example for a field
+  whose label cannot show its shape, and `gated_by` names the key whose value decides
+  whether this one may be edited at all (the desktop disables the row and names its
+  gate). They are additive and optional - `""`, `""` and `null` for a key that
+  carries none - so a client that ignores them sees the response it saw before, and
+  an older server leaves a newer desktop at its previous behaviour. They ride on the
+  `PATCH` and `reset` responses as well, because those return the same row through
+  `_view`: a client never has to re-read the collection to learn one row's
+  annotations. `features.settings` stays `1` - these are added fields, and nothing is
+  withheld or moved behind a new bit.
 - `PATCH /v1/settings/{key}` with `{value}` writes one typed value. Integers are
   actual integers (not booleans/fractions), numbers are finite, enum choices
   preserve type identity, lists use declared string members. Unknown keys are

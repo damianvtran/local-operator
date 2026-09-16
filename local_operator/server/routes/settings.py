@@ -48,6 +48,31 @@ class SettingView(BaseModel):
     choices: list[dict[str, Any]]
     empty_unsets: bool
     redacted: bool = False
+    # The three fields the registry AUTHORS and only this projection can serve.
+    #
+    # Why they belong on the wire rather than in the renderer: a warning is a
+    # consequence the registry wrote for a specific key ("disables sticky
+    # routing - prompt cache goes cold"), and a gate is the key whose value
+    # decides whether another key may be edited at all. A desktop renderer can
+    # neither invent nor infer either one - `kind` says how a value is edited and
+    # `is_default` is a value comparison - so without these fields the surface
+    # can only render a gated child as enabled and saveable, which is how it
+    # shipped.
+    #
+    # ADDITIVE AND OPTIONAL. A client that ignores them sees the response it saw
+    # before this field existed - byte-identical for a key that carries none of
+    # the three, and for every other key the change is the addition of these
+    # three keys and nothing else. That matters because the desktop app and this
+    # server release independently: an older app must keep working against this
+    # server and a newer app must keep working against an older one. The app
+    # reads all three only when present (`BackendSetting` in the desktop
+    # contract), so a server that predates them degrades to the previous
+    # behaviour rather than failing. Nothing is withheld and no existing field
+    # changes meaning, which is why the capability stays `features.settings: 1`
+    # rather than moving behind a new bit.
+    warning: str = ""
+    placeholder: str = ""
+    gated_by: str | None = None
 
 
 class SettingsView(BaseModel):
@@ -91,6 +116,9 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
             for c in setting.resolved_choices
         ],
         empty_unsets=setting.empty_unsets,
+        warning=setting.warning,
+        placeholder=setting.placeholder,
+        gated_by=setting.gated_by,
     )
 
 
