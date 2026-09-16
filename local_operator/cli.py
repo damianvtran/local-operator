@@ -6920,10 +6920,14 @@ def main() -> int:
                         # the row landed under a suffix (contract §3.6). Saying so
                         # is what stops the pull reading as "it did nothing", and
                         # the name is echoed here because the alternative is
-                        # grepping the registry for where it went.
+                        # grepping the registry for where it went. "with that
+                        # name", not "called X": the row the user already holds
+                        # may carry a different spelling (``Coder`` arriving over
+                        # a local ``coder``), and naming the wrong one sends them
+                        # looking for a row that is not there.
                         print(
                             f"\033[1;33m  Renamed from '{renamed_from}': you already have an "
-                            f"agent called '{renamed_from}'.\033[0m"
+                            f"agent with that name.\033[0m"
                         )
                     return 0
                 except Exception as e:

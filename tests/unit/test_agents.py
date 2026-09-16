@@ -1670,7 +1670,7 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     assert registry.get_agent(agent.id) == agent
     # The registry already holds this agent's name, so the roundtrip lands under
     # the contract's suffix rather than beside it (contract §3.6).
-    assert imported_agent.name == f"{agent.name} (2)"
+    assert imported_agent.name == f"{agent.name}-2"
     assert renamed_from == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
     assert imported_agent.model == ""
@@ -2114,7 +2114,7 @@ def test_download_agent_from_radient(tmp_path: Path):
     # The pulled profile is the one exported from THIS registry, so its name is
     # already held here: the pull lands under the contract's suffix and reports
     # what it was renamed from (contract §3.6).
-    assert imported_agent.name == "DownloadAgent (2)"
+    assert imported_agent.name == "DownloadAgent-2"
     assert renamed_from == "DownloadAgent"
     original = registry.get_agent_by_name("DownloadAgent")
     assert original is not None and original.id == agent.id
