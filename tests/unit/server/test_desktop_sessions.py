@@ -32,6 +32,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     SubagentChildUnavailable,
 )
+from local_operator.session.errors import SessionStoreUnavailable
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -5990,9 +5991,51 @@ async def test_the_list_route_refuses_rather_than_answering_an_empty_catalogue(
     answer = await client.get("/v1/desktop/sessions?limit=500")
 
     assert answer.status_code == 503, answer.text
-    assert "Conversations could not be read right now" in answer.json()["detail"]
+    # The body is the ladder's NAMED-CONDITION shape, not a bare sentence: the
+    # code is what lets a client tell this apart from "your credential was
+    # refused", which is the distinction the app's identity probe needs.
+    assert answer.json()["detail"] == {
+        "code": "session_store_unavailable",
+        "message": (
+            "Conversations could not be read right now. "
+            "This recovers on its own; retry in a moment."
+        ),
+    }
     # Nothing about the store's own contents leaked into the sentence.
     assert str(root) not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_carries_a_code_no_status_could_express(draft_api, monkeypatch) -> None:
+    """The probe cannot be answered by the status alone, so the code rides along.
+
+    ``GET /v1/desktop/sessions?limit=1`` is the desktop app's identity probe,
+    and the app's attach path treats any non-2xx as "this daemon refused my
+    credential" — a capability 403 about a credential that was never in
+    question, answered by declining a live daemon and spawning a second one
+    over it. Nothing in the status can separate the two, so the body has to.
+
+    Pinned as the CONTRACT rather than as the current spelling: the code is a
+    stable token a client keys on, so renaming it is a wire break and this test
+    is where that shows up. Its usefulness is not testable from here — it is
+    inert until the app reads it.
+    """
+    from tests.unit.session.test_catalog_read_failures import _failing_open, _store
+
+    client, root = draft_api
+    store = _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    for error in (
+        OSError(errno.EMFILE, "Too many open files"),
+        OSError(errno.EACCES, "Permission denied"),
+        OSError(errno.EIO, "Input/output error"),
+    ):
+        _failing_open(monkeypatch, store, error)
+        answer = await client.get("/v1/desktop/sessions?limit=1")
+        assert answer.status_code == 503, (error.errno, answer.text)
+        detail = answer.json()["detail"]
+        assert detail["code"] == "session_store_unavailable"
+        assert detail["code"] == SessionStoreUnavailable.code
+        assert isinstance(detail["message"], str) and detail["message"]
 
 
 @pytest.mark.asyncio

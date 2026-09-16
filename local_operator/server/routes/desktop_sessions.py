@@ -877,28 +877,57 @@ async def errors() -> AsyncIterator[None]:
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
         raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
-    except SessionStoreUnavailable:
+    except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
         # ``sessions/`` directory could not be walked at all (descriptor
         # exhaustion, an I/O error, a permissions change).
         #
-        # FIRST IN THE LADDER, and 503 rather than 500, because neither the code
-        # nor the operator can act on it: it is transient by construction and
-        # the correct client behaviour is to keep the rows it already has and
-        # retry the poll. The alternative this replaces was not an error at all
-        # — the route answered ``200 {"sessions": []}`` and the sidebar, which
-        # adopts that answer as MEMBERSHIP, wiped its visible catalogue until
-        # the next poll succeeded. An empty list is a statement about the
-        # operator's conversations; this sentence is a statement about the
-        # read, which is the only true one available here.
+        # 503 rather than 500, because neither the code nor the operator can
+        # act on it: it is transient by construction and the correct client
+        # behaviour is to keep the rows it already has and retry the poll. The
+        # alternative this replaces was not an error at all — the route
+        # answered ``200 {"sessions": []}`` and the sidebar, which adopts that
+        # answer as MEMBERSHIP, wiped its visible catalogue until the next poll
+        # succeeded. An empty list is a statement about the operator's
+        # conversations; this sentence is a statement about the read, which is
+        # the only true one available here.
         #
-        # Not the OSError's own text: a store error can name the operator's
-        # home directory, which is the rule this ladder applies to every other
-        # category (see the ConnectionError arm below).
+        # WHICH ARM THIS SITS AMONG is the only ordering constraint, and it is
+        # satisfied by sitting above the catch-alls: no arm above matches an
+        # ``OSError``, and the generic arms BELOW would report a store it could
+        # not walk as a missing session. It is the third arm, not the first.
+        #
+        # THE BODY IS AN OBJECT BECAUSE THE STATUS ALONE MISLEADS ON THE ONE
+        # ROUTE THAT IS ALSO A PROBE. ``GET /v1/desktop/sessions?limit=1`` is
+        # what the desktop app asks to decide whether the daemon at an address
+        # is usable with its credential, and a client that reads every non-2xx
+        # as "refused" turns this transient store failure into a capability 403
+        # on a daemon whose credential was never in question — which its attach
+        # path answers by declining the live daemon and spawning a second one
+        # over it. ``code`` is what removes the guess: 401/403 mean the
+        # credential was refused, any other ANSWERED status means a daemon
+        # answered. Same named-condition shape as ``DaemonRetiring`` and
+        # ``MoveIndeterminate`` above, for the same reason.
+        #
+        # THE CODE IS INERT UNTIL A CLIENT READS IT, and that half is not in
+        # this repository: the classification lands in the app (the change that
+        # makes only 401/403 mean "credential refused"). Nothing here depends
+        # on it — an older client ignores the object's extra structure exactly
+        # as it ignored nothing before, since it read ``detail`` as a string.
+        #
+        # The sentence is composed HERE rather than taken from the exception:
+        # a store error's own text can name the operator's home directory, the
+        # rule this ladder applies to every other category (see the
+        # ConnectionError arm below).
         raise HTTPException(
             503,
-            "Conversations could not be read right now. "
-            "This recovers on its own; retry in a moment.",
+            {
+                "code": error.code,
+                "message": (
+                    "Conversations could not be read right now. "
+                    "This recovers on its own; retry in a moment."
+                ),
+            },
         ) from None
     except KeyError:
         raise HTTPException(
