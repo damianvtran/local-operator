@@ -548,17 +548,15 @@ class TestInstallIntoGeneration:
         replaces the caller's real error with a traceback about a tree it was
         merely tidying.
 
-        ``rmtree`` is stubbed because a looping path ALSO trips this repo's root
-        conftest guard inside rmtree's fd walk (``TypeError: open() missing
-        required argument 'flags'``), which is a harness defect unrelated to the
-        contract under test and recorded as such on the PR. What R5-2 is about is
-        that the function ANSWERS rather than raises, and that is what this
-        pins — with the fix reverted, the failure is a ``RuntimeError`` from
-        ``Path.exists()`` before ``rmtree`` is ever called.
+        THE REAL `rmtree` HERE, not a stub, and that is the correction of round 5's
+        account of the ``TypeError``: it came from this function re-issuing
+        ``os.open`` — the callable rmtree's fd walk reports an ``ELOOP`` with —
+        against a single path, not from the test harness (QA round 3, Q3). Only
+        ``os.unlink``/``os.rmdir`` are retried now and the retry cannot raise, so a
+        loop reaches the end of the function and answers ``False``.
         """
         loop = tmp_path / "loop"
         os.symlink(loop, loop)
-        monkeypatch.setattr(update_mod.shutil, "rmtree", lambda *_a, **_k: None)
         assert update_mod._remove_tree(loop) is False
         assert loop.is_symlink()
 
@@ -710,6 +708,50 @@ class TestInstallIntoGeneration:
         assert not update_mod.pointer_path().is_symlink(), "the flip must be undone"
         assert not update_mod.daemon_image_path().exists(), "the shim must be undone"
         assert not list(update_mod.generations_dir().glob("*")), "the copy must be gone"
+
+    def test_a_failed_migration_puts_back_the_pointer_it_replaced(
+        self, home: Path, tmp_path: Path
+    ) -> None:
+        """R6-1: the undo must not delete a pointer this run did not create.
+
+        On a machine that has ALREADY adopted the layout, ``~/.local/bin`` can be
+        unwritable for a launcher the migration wants to ADD (a new entry point
+        between releases, a launcher deleted by hand) while the existing ones are
+        satisfied — ``_atomic_symlink`` short-circuits when the target already
+        matches. The old undo unlinked ``current`` anyway, because after the flip
+        it names this generation either way: `lop` on PATH then dangled and the
+        generation that had been current became unreferenced, while the refusal
+        said the machine was as it was.
+        """
+        _skip_as_root()
+        adopted = _install("0.52.0")
+        assert update_mod.current_generation() == adopted.resolve()
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+        # One entry point the adopted launcher set does not have: that is how a
+        # refusal is reached without disturbing the two launchers that match.
+        dist_info = next(legacy.glob("lib/python*/site-packages/local_operator-*.dist-info"))
+        entry_points = dist_info / "entry_points.txt"
+        entry_points.write_text(
+            entry_points.read_text(encoding="utf-8") + "lop-doctor = local_operator.cli:main\n",
+            encoding="utf-8",
+        )
+        extra = legacy / "bin" / "lop-doctor"
+        extra.write_text(f"#!{legacy}/bin/python3\n", encoding="utf-8")
+        extra.chmod(0o755)
+        bin_dir = Path.home() / ".local" / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(bin_dir, 0o500)
+        try:
+            with pytest.raises(UpdateError) as refused:
+                update_mod.clone_into_generation(legacy)
+        finally:
+            os.chmod(bin_dir, 0o700)
+        assert "lop-doctor" in str(refused.value), refused.value
+        assert update_mod.pointer_path().is_symlink(), "the pointer must survive"
+        assert (
+            update_mod.current_generation() == adopted.resolve()
+        ), "a failed migration must leave the machine on the generation it was on"
 
     def test_a_symlinked_install_path_still_re_points_the_copy(
         self, home: Path, tmp_path: Path
@@ -1137,7 +1179,11 @@ class TestMigration:
             update_mod, "install_kind", lambda **_k: update_mod.InstallKind.EDITABLE
         )
         assert update_mod.install_migrate_command() == 1
-        assert "refusing to migrate" in capsys.readouterr().out
+        # STDERR, with every sibling refusal on this surface (design review round 2,
+        # D12): a refusal on stdout is filed as output by `lop install migrate | tee`.
+        captured = capsys.readouterr()
+        assert "refusing to migrate" in captured.err
+        assert captured.out == ""
         assert not update_mod.generations_dir().exists()
         assert not update_mod.pointer_path().exists()
 

@@ -937,6 +937,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # review D5).
     from local_operator.update import DEFAULT_KEEP_GENERATIONS
 
+    def _generation_count(value: str) -> int:
+        """``--keep``'s value: a non-negative count, or a clean argparse refusal.
+
+        REFUSING A NEGATIVE IS THE POINT (design review round 2, D15): ``-1`` is a
+        plausible typo for ``1``, and the old code silently read it as "keep
+        nothing" — the reading that deletes the most whole venvs, on the one
+        command whose entire job is deleting them. argparse renders this as exit 2
+        with a usage line, the same shape as any other bad option.
+        """
+        count = int(value)
+        if count < 0:
+            raise argparse.ArgumentTypeError(f"expected 0 or more, got {count}")
+        return count
+
     install_parser = subparsers.add_parser(
         "install",
         help="Manage the local install generations (layout for the stable `lop` runtime)",
@@ -950,13 +964,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     prune_parser.add_argument(
         "--keep",
-        type=int,
+        type=_generation_count,
         default=DEFAULT_KEEP_GENERATIONS,
         metavar="N",
         help=(
-            "How many unreferenced generations to keep (default: %(default)s). A "
-            "generation named by a live or saved session, and the one `current` "
-            "points at, are never removed"
+            "How many unreferenced generations to keep (default: %(default)s; 0 or "
+            "more). A generation named by a live or saved session, and the one "
+            "`current` points at, are never removed"
         ),
     )
     install_subparsers.add_parser(
@@ -7002,12 +7016,12 @@ def main() -> int:
 
             action = getattr(args, "install_command", None)
             if action == "prune":
-                # The parser's default IS the policy default, so an explicit
-                # ``--keep`` is the only thing that changes it (D5).
-                keep = getattr(args, "keep", DEFAULT_KEEP_GENERATIONS)
-                return install_prune_command(
-                    keep=DEFAULT_KEEP_GENERATIONS if keep is None else max(0, int(keep))
-                )
+                # The parser's default IS the policy default and its type check
+                # refuses a negative, so this is only ever a non-negative int
+                # (design review D5/D15; review round 6 R6-4: the ``None`` arm this
+                # used to carry became unreachable when D5 landed).
+                keep = int(getattr(args, "keep", DEFAULT_KEEP_GENERATIONS))
+                return install_prune_command(keep=keep)
             if action == "migrate":
                 return install_migrate_command()
             if action == "status":

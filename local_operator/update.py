@@ -37,7 +37,6 @@ import shutil
 import sys
 import tempfile
 import time
-from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import (
@@ -1486,22 +1485,29 @@ def _remove_tree(path: Path) -> bool:
                 # ``exc_info=True``, not the exception that triggered the handler:
                 # that traceback is about a different call (review round 4, R4-2).
                 logger.debug("could not make %s writable", candidate, exc_info=True)
-        if function is os.path.islink:
-            # rmtree's TOP-LEVEL notification form: the path it was handed is a
-            # symlink, it refused to touch it, and there is nothing to retry.
+        if function not in (os.unlink, os.rmdir):
+            # ONLY THE TWO ONE-PATH REMOVALS ARE RETRIED, which is a different
+            # test from the one this had. ``rmtree`` reports two other shapes:
             #
-            # THE TEST IS ON THE CALLABLE, NOT ON THE TARGET. The INNER form —
-            # unlinking a symlink ENTRY inside the tree — arrives with
-            # ``os.unlink`` and a target that is also a symlink, and that retry
-            # is both needed and safe: ``unlink`` removes the link itself, never
-            # its target. Gating on ``Path(target).is_symlink()`` instead made a
-            # read-only ``bin/`` containing a venv's symlinks unremovable — the
-            # R3-2 shape, reintroduced by its own fix, on exactly the tree where
-            # those links live (review round 5, R5-1).
+            # * ``os.path.islink`` — the TOP-LEVEL notification, where the path it
+            #   was handed is a symlink and it refused to touch it;
+            # * ``os.open`` — its own ``ELOOP`` from the fd walk, which re-issued
+            #   with a single path is a ``TypeError``, not a retry (measured:
+            #   ``open() missing required argument 'flags'``; QA round 3, Q3 — the
+            #   function's "never raises" contract was still broken on a loop).
+            #
+            # The INNER form — unlinking a symlink ENTRY inside the tree — arrives
+            # as ``os.unlink`` with a target that is also a symlink, and that retry
+            # is both needed and safe: ``unlink`` removes the link itself, never its
+            # target. Gating on ``Path(target).is_symlink()`` instead made a
+            # read-only ``bin/`` holding a venv's symlinks unremovable — the R3-2
+            # shape, reintroduced by its own fix (review round 5, R5-1).
             return
         try:
             function(target)
-        except OSError:
+        except (OSError, TypeError):
+            # TypeError for the same reason: a callable this code cannot re-issue
+            # with a path must not take the caller down with it.
             logger.debug("could not remove %s", target, exc_info=True)
 
     try:
@@ -2117,6 +2123,9 @@ def clone_into_generation(
     # before anything points through it (see ``_link_generation_bin``).
     _link_generation_bin(generation)
     shim_was_absent = not daemon_image_path().exists()
+    # Captured BEFORE the flip, because after it the pointer names our generation
+    # whether or not this run created it (review round 6, R6-1).
+    previous = current_generation()
     flip_pointer(generation)
     _written, not_written = write_stable_launchers(generation)
     if not_written:
@@ -2125,7 +2134,7 @@ def clone_into_generation(
         # the legacy tree while the shim planted a moment later would have the
         # supervised units on the new layout. Half a layout is harder to reason
         # about than none (design review round 1, D1).
-        _undo_migration(generation, remove_shim=shim_was_absent)
+        _undo_migration(generation, remove_shim=shim_was_absent, previous=previous)
         raise UpdateError(
             "could not write "
             + ", ".join(str(path) for path in not_written)
@@ -2266,25 +2275,36 @@ def _real(path: Path) -> Path:
     return Path(os.path.realpath(path))
 
 
-def _undo_migration(generation: Path, *, remove_shim: bool) -> None:
-    """Put the machine back when a migration fails after the flip (D1).
+def _undo_migration(generation: Path, *, remove_shim: bool, previous: Path | None = None) -> None:
+    """Put the machine back when a migration fails after the flip (D1, R6-1).
 
     Best-effort and never raising, for the same reason ``_remove_tree`` is: the
     caller is about to report the real error, and cleanup that raises would
     replace it. Each step is narrow on purpose:
 
-    * the pointer is unlinked only when it names THIS generation, so a machine
-      that already had one cannot lose it to a failed migration;
+    * the pointer is put back to whatever it named BEFORE this run (``previous``),
+      and unlinked only when this run created it. "It names our generation" cannot
+      tell those two apart — after ``flip_pointer`` it is true either way — and
+      unlinking an already-adopted machine's pointer leaves ``lop`` on PATH
+      DANGLING while the refusal claims the machine is as it was (review round 6,
+      R6-1: measured, `lop` on PATH stopped resolving and the generation that had
+      been current became unreferenced);
     * the shim is removed only when this run planted it (``remove_shim``);
     * the copy goes through ``_remove_tree``, which reports what it could not
       remove instead of claiming it.
     """
     target = current_generation()
     if target is not None and _real(target) == _real(generation):
-        try:
-            pointer_path().unlink(missing_ok=True)
-        except OSError:  # pragma: no cover — nothing further to do about it
-            logger.warning("could not undo %s", pointer_path(), exc_info=True)
+        if previous is not None:
+            try:
+                flip_pointer(previous)
+            except OSError:  # pragma: no cover — nothing further to do about it
+                logger.warning("could not put %s back", pointer_path(), exc_info=True)
+        else:
+            try:
+                pointer_path().unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — same
+                logger.warning("could not undo %s", pointer_path(), exc_info=True)
     if remove_shim:
         try:
             daemon_image_path().unlink(missing_ok=True)
@@ -2481,9 +2501,10 @@ _PRUNE_LABEL_WIDTH = 21
 def _field(label: str, value: str) -> str:
     """``label`` in the group's column, ``value`` after it.
 
-    A label as long as the column itself — ``a new lop would load:`` — keeps its
-    single separating space rather than running into its value, which is what the
-    first cut of this did.
+    A label as long as the column itself keeps its single separating space rather
+    than running into its value, which is what the first cut of this did; nothing
+    in the ``install`` group is that long now (design review round 2, D16 shortened
+    ``a new lop would load:`` to ``next lop would load:`` so it fits).
     """
     if len(label) < _PRUNE_LABEL_WIDTH:
         return f"{label:<{_PRUNE_LABEL_WIDTH}}{value}"
@@ -2507,14 +2528,12 @@ def prune_lines(plan: PrunePlan) -> list[str]:
     """
     lines: list[str] = []
     if not plan.removed:
-        counts = Counter(decision.reason for decision in plan.kept)
-        summary = ", ".join(f"{count} {reason}" for reason, count in counts.items())
-        lines.append(
-            _field(
-                "generations:",
-                f"{len(plan.decisions)}, nothing to remove" + (f" ({summary})" if summary else ""),
-            )
-        )
+        # NO PARENTHETICAL. Round 1's text for this case was a short single line
+        # that REPLACED the block; the implementation kept the block and added a
+        # summary, which for four reasons became a 146-character run-on restating
+        # the rows beneath it in a grammar they do not use (design review round 2,
+        # D13). The rows answer "why" already.
+        lines.append(_field("generations:", f"{len(plan.decisions)}, nothing to remove"))
     else:
         lines.append(_field("generations:", str(len(plan.decisions))))
     for decision in plan.decisions:
@@ -2534,7 +2553,19 @@ def prune_notice_lines(plan: PrunePlan) -> list[str]:
     prune`` is answering a question about the retention decision, which needs the
     keeps and their reasons (design review D3/D4).
     """
-    return [f"pruned superseded generation {path.name}" for path in plan.removed]
+    lines: list[str] = []
+    for decision in plan.decisions:
+        if not decision.removed:
+            continue
+        if decision.reason == "superseded, unreferenced":
+            lines.append(f"pruned superseded generation {decision.path.name}")
+        else:
+            # NOT "superseded": a marker-less tree never completed an install, and
+            # calling crash debris a superseded build is the one claim in this
+            # sentence an operator could act on wrongly (design review round 2,
+            # D14). The wording is the prune command's own reason string.
+            lines.append(f"pruned unfinished generation {decision.path.name} ({decision.reason})")
+    return lines
 
 
 def install_migrate_command() -> int:
@@ -2563,23 +2594,30 @@ def install_migrate_command() -> int:
         print(f"pointer: {pointer_path()} -> {current_generation() or '(unresolved)'}")
         return 0
     kind = install_kind()
+    # EVERY REFUSAL ON THIS SURFACE GOES TO STDERR, which is what its siblings on
+    # ``lop update`` already do and what round 1's remediation wrongly claimed of
+    # this command: on stdout, `lop install migrate | tee log` files a refusal as
+    # output and anything grepping stdout for success reads a failure as one
+    # (design review round 2, D12). The success block below stays on stdout.
     if kind == InstallKind.EDITABLE:
         print(
             "refusing to migrate: this interpreter is a source checkout's venv, not an "
             "installed distribution, so the tree it imports from is one it is still "
-            "being edited in. run `lop install migrate` from an installed `lop`."
+            "being edited in. run `lop install migrate` from an installed `lop`.",
+            file=sys.stderr,
         )
         return 1
     if kind == InstallKind.UNKNOWN:
         print(
             "refusing to migrate: this interpreter has no install this command can "
-            "identify (no dist-info, no venv of its own), so there is no tree to copy"
+            "identify (no dist-info, no venv of its own), so there is no tree to copy",
+            file=sys.stderr,
         )
         return 1
     try:
         generation = clone_into_generation()
     except UpdateError as exc:
-        print(f"could not migrate: {exc}")
+        print(f"could not migrate: {exc}", file=sys.stderr)
         return 1
     print(f"copied {Path(sys.prefix)} into {generation}")
     print(f"pointer {pointer_path()} -> {generation}")
@@ -2795,16 +2833,29 @@ def install_status_command() -> int:
     pointer = pointer_path()
     generation = current_generation()
     if generation is None:
-        print(_field("pointer:", "(no generation layout on this machine)"))
+        # TWO STATES, not one (review round 6, R6-2): "no layout at all" and "a
+        # pointer that resolves to nothing" printed identically — including while
+        # the very next line listed the generations that DO exist. Both are
+        # reachable (a hand-deleted pointer; the migration's undo used to produce
+        # the dangling one), and the surface whose whole job is to make the pointer
+        # legible is the one place that must not blur them. The layout question is
+        # answered by the LAYOUT, not by the pointer: the D7 sentence is for a
+        # machine that has none.
+        if pointer.is_symlink():
+            print(_field("pointer:", f"{pointer} -> (unresolved)"))
+        elif generations_dir().is_dir() and any(generations_dir().iterdir()):
+            print(_field("pointer:", f"{pointer} -> (absent)"))
+        else:
+            print(_field("pointer:", "(no generation layout on this machine)"))
     else:
         print(_field("pointer:", f"{pointer} -> {generation}"))
     print(_field("this process:", process_install_root()))
     root = current_install_root()
     fresh = _stamp_at(root) if root is not None else None
     if fresh is None:
-        print(_field("a new lop would load:", "(unknown — nothing resolves behind the pointer)"))
+        print(_field("next lop would load:", "(unknown — nothing resolves behind the pointer)"))
     else:
-        print(_field("a new lop would load:", fresh.label()))
+        print(_field("next lop would load:", fresh.label()))
     generations = (
         sorted(path for path in generations_dir().iterdir() if path.is_dir())
         if generations_dir().is_dir()
@@ -2823,7 +2874,15 @@ def install_status_command() -> int:
         # Indented under the list deliberately: the label column above is for
         # this command's own fields, and a record-named tree is a property of one
         # of the generations rather than a fifth field (design review D6).
-        print(f"  held by a live session: {held}")
+        #
+        # Named by GENERATION ID, the vocabulary of the lines above it (design
+        # review round 2, D17). A record names the venv (``<gen>/tools/
+        # local-operator``), so the id is two levels up; the absolute path stays the
+        # fallback for a record whose root is not under this layout.
+        root = Path(held)
+        nested = root.parent.parent
+        named = nested.name if nested.parent == generations_dir() else str(held)
+        print(f"  held by a live session: {named}")
     return 0
 
 
