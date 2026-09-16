@@ -178,6 +178,24 @@ async def capabilities():
                 # `focus_policy` routing field, which the client already
                 # special-cases) and a renderer that ignores the new frame
                 # types keeps working.
+                #
+                # NOR does the `session_status` frame on this same stream need a
+                # key of its own, on the rule `session_search` states above: a
+                # key exists so an EXISTING surface keeps working against a
+                # backend that lacks the new one, and nothing here is gated. The
+                # frame is a LATENCY OPTIMISATION on a path every client already
+                # has — the list — and the two list keys it pairs with
+                # (`status_epoch`/`status_revision`) are additive fields on a
+                # model that is `extra="allow"` by design. A renderer that does
+                # not branch on `session_status` ignores it and keeps its 30 s
+                # safety poll; a renderer against an older backend sees a list
+                # with no stamps, reads "no comparison available", and takes the
+                # list's value, which is exactly what happens today. What WOULD
+                # force a key is any client behaviour that depends on the
+                # backend supporting the frame (relaxing a poll, dropping a
+                # refetch, rendering an "unavailable" hint); the design that
+                # added it does none of those, and this comment is where that
+                # condition gets re-checked rather than rediscovered.
                 "desktop_feed": 1,
                 "desktop_presence": 1,
                 # Stopping a session's CURRENT WORK without ending the session:

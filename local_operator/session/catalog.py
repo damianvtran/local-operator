@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -405,6 +405,96 @@ class CatalogEntry:
         return f"{base} — {sentence}"
 
 
+def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:
+    """Build one row's :class:`CatalogEntry` from the attention state beside it.
+
+    THE ONE CONSTRUCTION SITE, and that is the point of the function. Every
+    feature of the entry above ``status_code`` — the precedence itself, the
+    ``shows_completion_mark`` predicate, the reason sentences, the ranking — is
+    derived state, and a second place that assembled an entry from the same two
+    inputs would be free to derive it differently while every existing test
+    stayed green. So the list (``load_catalog``) and the desktop feed (which
+    publishes the derived pair as a frame) both come through here.
+
+    ``attention`` is ONE session's state as ``AttentionStore.state_many``
+    returns it (``unseen``/``kind``/``completion_token``/``anchor_id``/
+    ``reason``), or ``None``/``{}`` for a session with no state yet. Read
+    defensively by key: an absent store contributes the empty state, which is
+    exactly what ``state_many`` hands back for an unknown conversation.
+    """
+    state = attention or {}
+    return CatalogEntry(
+        row,
+        bool(state.get("unseen", False)),
+        str(state.get("kind") or ""),
+        str(state.get("completion_token") or ""),
+        str(state.get("anchor_id") or ""),
+        str(state.get("reason") or ""),
+    )
+
+
+def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``status_of``'s pair with the CLOCK term removed — the edge channel's key.
+
+    WHY THE PAIR IS NOT ENOUGH (review round 1, MINOR 2). One label carries a
+    live clock: the ``wedged`` arm embeds ``format_duration(heartbeat_age_s)``
+    (``46s`` -> ``47s`` -> ``1m``), so a wedged session's pair changes with the
+    clock alone, with no write and no event behind it — roughly one change per
+    second for the 45-59 s window after the beat crosses
+    ``HEARTBEAT_TIMEOUT_S``, then one a minute, for every wedged session. A
+    channel whose whole promise is "a frame per EVENT" cannot treat that as an
+    edge, so it dedupes on this key and still PUBLISHES the pair.
+
+    The key is the same derivation on the same row with the age cleared, which
+    is a no-op for every arm but ``wedged`` (that arm is the only reader of
+    ``heartbeat_age_s``). So it rides :func:`status_of` rather than restating the
+    precedence, and the dedupe cannot drift from what the row says.
+
+    The cost of the rule, stated because it is real: a client that keeps a
+    wedged row's frame therefore keeps the label it was published with, and the
+    age in that sentence stops advancing until the row's next real edge (or the
+    client's own 30 s safety poll) refreshes it. A tooltip's age is not worth a
+    frame a second per wedged session, which is the same trade the 15 s
+    heartbeat rewrite already makes.
+    """
+    if row.heartbeat_age_s is None:
+        return status_of(row, attention)
+    return status_of(row._replace(heartbeat_age_s=None), attention)
+
+
+def active_of(row: SessionRow, attention: Mapping[str, Any] | None) -> bool:
+    """``CatalogEntry.active`` for one row — which SECTION the sidebar files it in.
+
+    A second CALLER of the same home, for the same reason :func:`status_of` is
+    one: section membership is derived state (``pending or unseen or
+    live_state``), and a caller that restated it would be free to move a row the
+    list does not move. The desktop feed asks this beside ``status_of`` because a
+    row can need to change section while its pair changes too — a background
+    session that finishes goes from "Previous chats" to "Active chats", and
+    placement is carried by a LIST read, so the feed owes its client an
+    invalidation when that happens (finding 8).
+    """
+    return entry_for(row, attention).active
+
+
+def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``(status_code, status)`` for one row — the transport spelling and the label.
+
+    A second CALLER of the precedence, never a second home: it builds the same
+    :class:`CatalogEntry` :func:`entry_for` builds — the same one
+    ``load_catalog`` builds — and returns the same two properties from it. The
+    desktop feed publishes this pair as a ``session_status`` frame; the list
+    ships it on every row. If the two ever disagree, one of them is not calling
+    this function.
+
+    Present because the feed has a ``SessionRow`` and an attention state and
+    nothing else: it must not read ``CatalogEntry``, re-order the branches, or
+    name a code itself. See :func:`entry_for`.
+    """
+    entry = entry_for(row, attention)
+    return entry.status_code, entry.status
+
+
 def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
     """Stable identities survive refreshes, including deterministic recency ties."""
     return tuple(sorted(entries, key=lambda entry: entry.rank))
@@ -461,7 +551,20 @@ def decorate_rows(
     live: dict[str, tuple[Any, str]] = {}
     for record, state in scanned:
         session_id = getattr(record, "session_id", "")
-        if session_id:
+        # A ``stale`` VERDICT IS NO RECORD (review round 1, MINOR 1). The pid is
+        # gone, so nothing the record says about work in progress is true any
+        # more — which is the rule the desktop feed already applies
+        # (``DesktopFeed._row_for``) and the reason a dead record's row must not
+        # read as busy/attached. Without this the two surfaces disagreed for
+        # exactly the poll that reaps the record, and they disagreed on the
+        # feed's OWN verdict: the list painted the corpse's ``busy`` while the
+        # frame said ``complete``, and because both writers read the same
+        # revision counter the client's strictly-greater guard kept the list's
+        # wrong value until the next 30 s poll. Taking the rule at BOTH readers
+        # removes the divergence rather than documenting it, and the sweep this
+        # function's own ``scan`` performs is unaffected: the record is still
+        # moved aside, and the row simply stops describing it.
+        if session_id and state != "stale":
             live[session_id] = (record, state)
 
     if include_live:
@@ -755,19 +858,7 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     except (sqlite3.Error, OSError):
         logger.debug("catalog attention unavailable", exc_info=True)
     entries = list(
-        rank_entries(
-            [
-                CatalogEntry(
-                    row,
-                    bool(attention.get(identities[row.id], {}).get("unseen", False)),
-                    str(attention.get(identities[row.id], {}).get("kind") or ""),
-                    str(attention.get(identities[row.id], {}).get("completion_token") or ""),
-                    str(attention.get(identities[row.id], {}).get("anchor_id") or ""),
-                    str(attention.get(identities[row.id], {}).get("reason") or ""),
-                )
-                for row in rows
-            ]
-        )
+        rank_entries([entry_for(row, attention.get(identities[row.id])) for row in rows])
     )[:limit]
     named = {
         row.id: row

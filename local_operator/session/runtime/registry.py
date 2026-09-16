@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
 from local_operator.paths import config_dir
-from local_operator.procstate import is_zombie
+from local_operator.procstate import is_zombie, zombie_states
 from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     HEARTBEAT_TIMEOUT_S,
@@ -313,11 +313,28 @@ class Liveness(NamedTuple):
     heartbeat_age_s: float
 
 
+def zombie_probe_due(record: Any, now: float) -> bool:
+    """Whether the DERIVED zombie-probe policy spends a probe on this record.
+
+    ONE HOME for the gate, because two callers need the same answer: the
+    classifier below decides whether to ask, and :func:`scan` needs the same
+    decision UP FRONT so it can ask for the whole quiet set in one probe (see
+    :func:`local_operator.procstate.zombie_states`). A second copy of the
+    ``HEARTBEAT_INTERVAL_S * 1.5`` rule would be exactly the drift this module's
+    single-owner contract exists to prevent.
+
+    The age is clamped the way :func:`classify` clamps it: a stamp dated in the
+    future is clock skew, never evidence against the process.
+    """
+    return max(0.0, now - record.heartbeat_at) > HEARTBEAT_INTERVAL_S * 1.5
+
+
 def classify(
     record: DiscoveryRecord,
     *,
     now: float | None = None,
     check_zombie: bool | None = None,
+    zombie: bool | None = None,
 ) -> Liveness:
     """The single owner of the ``live`` / ``wedged`` / ``stale`` vocabulary.
 
@@ -350,13 +367,28 @@ def classify(
     answer changes what a user is told): probe when the heartbeat has already
     gone quiet, which is either an owner that stopped reporting or a process
     that died without being reaped. Pass a bool to force it.
+
+    ``zombie`` is the ANSWER to that same question, for a caller that has already
+    asked it: :func:`scan` asks ONCE for a whole quiet population, and a caller
+    holding the answer must not be sent back for it one pid at a time. That is
+    not a nicety — QA round 2 (Q5) measured the batch's ``True`` ("this pid is a
+    zombie") arriving here as the POLICY ``check_zombie=True``, so every corpse in
+    the population was re-probed with its own ``ps``: 201 forks per probe at 200
+    zombie records and a 0.5 Hz doorbell, i.e. round 1's Q1 symptom on the
+    sub-population whose owner is already gone. Pass the answer INSTEAD of the
+    policy, never both. The signal-0 read below stays this function's own, so
+    existence is always freshly checked; only the ``ps`` question the caller has
+    already answered is skipped.
     """
     moment = time.time() if now is None else now
     # Clamped: a stamp dated in the future is clock skew, never evidence
     # against the process, so it can only make this register quieter.
     age = max(0.0, moment - record.heartbeat_at)
-    zombie_probe = age > HEARTBEAT_INTERVAL_S * 1.5 if check_zombie is None else check_zombie
-    alive = pid_alive(record.pid, check_zombie=zombie_probe)
+    if zombie is not None:
+        alive = pid_alive(record.pid, check_zombie=False) and not zombie
+    else:
+        zombie_probe = zombie_probe_due(record, moment) if check_zombie is None else check_zombie
+        alive = pid_alive(record.pid, check_zombie=zombie_probe)
     if not alive:
         state: Literal["live", "wedged", "stale"] = "stale"
     elif age > HEARTBEAT_TIMEOUT_S:
@@ -370,6 +402,9 @@ def scan(
     root: Path | None = None,
     dirname: str = RUN_DIRNAME,
     parse: Callable[[dict[str, Any]], T] = SessionRecord.from_json,
+    *,
+    check_zombie: bool | None = None,
+    reap: bool = True,
 ) -> list[tuple[T, str]]:
     """Read every record in one namespace, classifying each as ``live`` /
     ``wedged`` / ``stale``.
@@ -381,8 +416,9 @@ def scan(
       claim that the process is dead.
     - ``live``: pid alive and heartbeating.
 
-    Unparseable records are deleted, not moved: a torn file has no pid to key
-    a sidecar on and nothing an "why did this die" reader could use.
+    Unparseable records are deleted, not moved, when this call sweeps: a torn
+    file has no pid to key a sidecar on and nothing an "why did this die"
+    reader could use. ``reap=False`` leaves it alone too (see below).
 
     It stays the one implementation of the state rule — the tuple shape is
     deliberate, because ~15 call sites read it positionally and most want
@@ -402,31 +438,103 @@ def scan(
     cause was on disk a moment earlier. The move is a rename within the run
     directory, so it costs the same unlink it replaced; see
     :data:`REAPED_DIRNAME` for why the sidecar is invisible to discovery.
+
+    TWO ADDITIVE SWITCHES, both keyword-only and both defaulting to what this
+    function has always done, because one reader cannot pay for them and must
+    not inherit them by accident:
+
+    * ``check_zombie`` is handed straight to :func:`classify`. ``None`` keeps
+      the classifier's DERIVED policy (probe only where the answer changes
+      what a user is told), which is what every existing caller means; a
+      caller that already knows its verdicts must match another reader's — the
+      desktop feed's, which shares its rows with ``decorate_rows`` — passes it
+      through rather than re-deciding it here. On the DERIVED path the probe is
+      spent ONCE FOR THE WHOLE QUIET SET (:func:`local_operator.procstate.
+      zombie_states`): the policy is per record but the answer is per pid, and
+      this function is the one place that has the population in hand, so a
+      1 Hz reader over a hundred quiet records costs one fork rather than a
+      hundred. The verdicts are the same ones the per-record probe returned,
+      which is what keeps the batch an optimisation rather than a second rule.
+    * ``reap=False`` is READER MODE: this function removes nothing at all.
+      The default is the reaping behaviour every discovery caller wants; the
+      desktop feed passes ``False`` because it is a READER that must leave
+      ``run/mobile`` byte-identical, and a sweep running at 1 Hz on the feed's
+      poller would unlink another process's evidence behind its back (see
+      :data:`REAPED_DIRNAME` for why that evidence matters). It covers the
+      proven-dead record — whose verdict comes back either way, because
+      reaping is a SIDE EFFECT of the classification and never an input to it
+      — and the unparseable file above, which is deleted only when this
+      function was called to sweep. A record that is skipped is simply absent
+      from the return value; the caller sees the same state it would have seen
+      one sweep later, with nothing removed in between.
     """
     directory = run_dir(root, dirname)
     out: list[tuple[T, str]] = []
     now = time.time()
+    # PARSE FIRST, CLASSIFY AFTER, so the derived policy can ask about every
+    # quiet pid in ONE probe (see the ``check_zombie`` note above). The order a
+    # caller sees is unchanged — records come back in the same sorted order, and
+    # a reaping scan still removes what it proves dead — because the two loops
+    # walk the same sorted list.
+    parsed: list[tuple[Path, T]] = []
     for path in sorted(directory.glob("*.json")):
         try:
             record = parse(json.loads(path.read_text()))
         except (OSError, ValueError, TypeError):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            # READER MODE REMOVES NOTHING (see ``reap`` below), including a file
+            # it could not parse: a reader that deleted what it could not read
+            # would be the only mutator on this path, and the record is the one
+            # artifact a later "why did this die" question is answered from.
+            if reap:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             continue
-        # The zombie probe is the CLASSIFIER's policy now, not this
-        # function's: it costs a `ps` fork on macOS, so it is spent only on
-        # records whose heartbeat has already gone quiet — a healthy runtime
-        # beats every 15 s, so a quiet stamp means either an owner that stopped
-        # reporting or a process that died without being reaped. That is exactly
-        # the case that used to report `live` with 0B RSS for 45 s (round 3,
-        # U10), and it keeps the common path (every session, every `lop`
-        # invocation) fork-free. The reaping stays HERE, because it is this
-        # function's contract with its callers rather than a fact about the
-        # record.
-        verdict = classify(record, now=now)
-        if not verdict.pid_alive:
+        parsed.append((path, record))
+    # The zombie probe is the CLASSIFIER's policy, not this function's: it costs
+    # a `ps` fork on macOS, so it is spent only on records whose heartbeat has
+    # already gone quiet — a healthy runtime beats every 15 s, so a quiet stamp
+    # means either an owner that stopped reporting or a process that died
+    # without being reaped. That is exactly the case that used to report `live`
+    # with 0B RSS for 45 s (round 3, U10), and it keeps the common path (every
+    # session, every `lop` invocation) fork-free. The reaping stays HERE, because
+    # it is this function's contract with its callers rather than a fact about
+    # the record.
+    #
+    # ``answers`` holds the VERDICT per pid, not a policy flag: a pid the batch
+    # does not name is answered per record below.
+    answers: dict[int, bool] = {}
+    if check_zombie is None:
+        # Signal-0 first: a pid that is not there is `stale` whatever `ps` would
+        # have said, so it is not worth a place in the batch.
+        answers = zombie_states(
+            [
+                record.pid
+                for _path, record in parsed
+                if zombie_probe_due(record, now) and pid_alive(record.pid)
+            ]
+        )
+    for path, record in parsed:
+        if check_zombie is not None:
+            verdict = classify(record, now=now, check_zombie=check_zombie)
+        elif record.pid in answers:
+            # The batch's ANSWER. Handing it on as the policy flag would send a
+            # proven zombie back for its own `ps` fork — one per corpse per
+            # probe, which is what QA round 2 measured as Q5 (201 forks and a
+            # 0.5 Hz doorbell at 200 zombie records).
+            verdict = classify(record, now=now, zombie=answers[record.pid])
+        else:
+            # NO ANSWER FROM THE BATCH — it failed, or `ps` did not report this
+            # pid — so the derived policy asks per record. COST OVER WRONGNESS
+            # (QA round 2, Q6): the batch's failure mode is population-wide, and
+            # reading a missing answer as "not a zombie" would paint "process
+            # alive" over a corpse right across the quiet set. The per-record
+            # probe is the pre-batch cost for the records the batch could not
+            # answer, and it is affordable because a failure is rare (the batch
+            # answers 200 pids in ~13 ms against its own 1.0 s timeout).
+            verdict = classify(record, now=now)
+        if not verdict.pid_alive and reap:
             _reap_dead_record(directory, path, record.pid)
         out.append((record, verdict.state))
     return out
