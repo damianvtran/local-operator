@@ -46,12 +46,14 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
+from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     delivery_dir,
     delivery_path,
     desktop_delivery_present,
     reset_cache,
 )
+from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.runtime.viewers import ViewerRecord
 
 pytestmark = pytest.mark.e2e
@@ -280,6 +282,86 @@ async def test_a_background_completion_reaches_the_feed_with_no_bridge(
     assert finished not in pool.bridges
     assert displayed in pool.bridges
     assert subscription  # the presence route binds to this id, asserted below
+
+
+def _publish_record(root: Path, session_id: str, **fields: Any) -> Path:
+    """The runtime's OWN record write — the only trace a gate edge leaves.
+
+    Written through ``registry.publish`` rather than by hand so the staged write
+    + rename really happens: that rename is what moves ``run/mobile``'s mtime,
+    which is the signal the feed's doorbell is built on. This process's pid
+    stands in for the runtime's, which is all ``classify`` reads.
+    """
+    return registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=session_id,
+            conversation_name="a conversation",
+            cwd=str(root),
+            model_label="mock",
+            control_port=1,
+            control_key="0" * 64,
+            **fields,
+        ),
+        root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
+    desktop_server, workspace: Path
+):
+    """THE REPORTED SYMPTOM, end to end, with both writers compared.
+
+    The row's status could only ever be refreshed by re-reading the whole list, so
+    an answered gate on a row the user was not looking at took up to 30 s to
+    appear. This drives the real uvicorn app, the real SSE stream and the real
+    discovery-record write a runtime makes, and asserts the two halves of the
+    contract: the frame arrives within the doorbell's own clock, and
+    ``GET /v1/desktop/sessions`` carries the same counter the last frame did —
+    which is what lets a client discard a list computed before a frame it has
+    already applied.
+    """
+    root, client = desktop_server
+    session_id = await _create(client, workspace, "33333333-3333-4333-8333-333333333301")
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        await _next_frame(lines, lambda f: f["type"] == "open")
+
+        # The gate is PARKED: the runtime rewrites its discovery record, and that
+        # write is the entire trace the edge leaves anywhere. No bridge holds this
+        # session and nothing is watching it.
+        parked_path = await asyncio.to_thread(_publish_record, root, session_id, pending="approval")
+        assert len(list(parked_path.parent.glob("*.json"))) == 1, "a second record exists"
+        parked = await _next_frame(lines, lambda f: f["type"] == "session_status")
+        assert parked["session_id"] == session_id
+        assert parked["epoch"]
+        assert parked["payload"] == {"code": "approval", "label": "Approval needed", "revision": 1}
+
+        # ...and the answer reaches the row, which is the half the operator
+        # reported as 5-10 s late.
+        await asyncio.to_thread(_publish_record, root, session_id)
+        resumed = await _next_frame(lines, lambda f: f["type"] == "session_status")
+        assert resumed["session_id"] == session_id
+        assert resumed["payload"]["code"] != parked["payload"]["code"]
+        assert resumed["payload"]["revision"] > parked["payload"]["revision"]
+
+    listed = await client.get("/v1/desktop/sessions", params={"limit": 50})
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()["result"]["sessions"]
+    row = next((entry for entry in rows if entry["id"] == session_id), None)
+    assert row is not None, rows
+    assert row["status_epoch"] == resumed["epoch"]
+    assert row["status_revision"] == resumed["payload"]["revision"]
+    # The list derives the pair itself (``load_catalog``), so agreeing here is
+    # the parity claim over HTTP rather than inside one process's caches.
+    assert (row["status"]["code"], row["status"]["label"]) == (
+        resumed["payload"]["code"],
+        resumed["payload"]["label"],
+    )
 
 
 @pytest.mark.asyncio

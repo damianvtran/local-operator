@@ -807,8 +807,10 @@ had one to attribute a catalogue event to.
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
-{"epoch":"…","seq":16,"type":"heartbeat","payload":{"ts":1699999999.5}}
-{"epoch":"…","seq":17,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
+{"epoch":"…","seq":16,"type":"session_status","session_id":"<12 hex>",
+ "payload":{"code":"approval","label":"Approval needed","revision":3}}
+{"epoch":"…","seq":17,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":18,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
 - **`notification.payload` is the per-session payload**, built by the SAME
@@ -834,6 +836,50 @@ had one to attribute a catalogue event to.
   renderer's merge preserves the value it already holds rather than letting a
   catalogue-shaped frame clear it (otherwise a frame arriving for the session on
   screen disables its read receipt).
+- **`session_status` patches ONE row without a refetch.** `payload.code` and
+  `payload.label` are the backend's DERIVED status — the exact precedence
+  `sessions.list` ships on `row.status`, from one implementation
+  (`local_operator.session.catalog.status_of`) that both callers go through, so
+  a client must NOT re-derive either from read state or live flags; `payload`
+  deliberately carries no inputs to derive them from. `payload.revision` is a
+  per-session counter that increments only when a frame is actually published.
+
+  The emission rule is the whole of it: a frame is published iff the session is a
+  user session AND its `(code, label)` pair differs from the last pair this
+  process published for it. A runtime rewrites its discovery record every 15 s
+  (heartbeat) and on every state edge, and only the edges move the pair — a
+  heartbeat, a title change or any other no-op republish publishes NOTHING.
+  `revision` is monotone per session within an `epoch`, and `epoch` changes when
+  the backend restarts, which is the guard's reset term.
+
+  It **is not a notification**: main's fan-out routes only `notification` frames
+  to the banner path, and a `session_status` frame with `code: "approval"` paints
+  a row and raises nothing (gate BANNERS remain out of scope for this feed).
+  Like `attention` and `notification` it is live-only — a status that predates the
+  connection is not announced; the `open` snapshot's list read is what the client
+  sees it on.
+
+  **ORDERING: the mark precedes the code.** For a completed turn the `attention`
+  frame carrying the unseen mark is published in the SAME tick and BEFORE this
+  frame, so a row never paints the label while its ring is still resting —
+  `_emit_delta` publishes the tick's attention frames first and only then hands
+  the same read to `_publish_status_changes`, which derives the pair from it. The
+  order is structural rather than incidental, and
+  `test_the_completion_mark_reaches_the_wire_before_the_status_that_names_it`
+  asserts it on the wire. This matters because `complete`/`Unseen completion`
+  cannot exist as a pair until the mark does: the pair is derived from the
+  attention state, so a client that paints the code without the mark shows a
+  resting ring labelled as unread for however long the gap lasts.
+
+  **The guard for the other writer.** `GET /v1/desktop/sessions` rows carry
+  `status_epoch` and `status_revision` when this backend's feed has published for
+  that session, and NEITHER key when it has not (no feed has ever been opened on
+  this backend, a session the feed has never published for, or an older backend).
+  A client that already applied a frame for a row must keep the frame's `status`
+  when the list's `status_epoch` equals the frame's `epoch` AND the list's
+  `status_revision` is LOWER — the in-app marker effect triggers exactly the list
+  refetch this frame speeds up, so without the guard that response clobbers the
+  fresher frame. Differing epochs, or no stamp at all, means take the list's row.
 - **Neither `notification` nor `attention` is replayed.** The connection's first
   read is a BASELINE: it records the store's current revision and announces
   nothing that predates the connection. A reconnect therefore does not flood,
@@ -842,25 +888,87 @@ had one to attribute a catalogue event to.
 - **The snapshot excludes the catalogue's rows.** Those carry a preview read per
   row; the client already has them, and putting that scan on the feed would move
   the sidebar's cost rather than remove it.
-- **`catalogue`** is a cheap invalidation token over the sessions directory (its
-  `(inode, mtime_ns)` plus the directory-name set, on a 1 s cadence), so the
+- **A `wedged` label carries a LIVE AGE, and the age is not an edge.**
+  `CatalogEntry.status`'s wedged arm embeds `format_duration(heartbeat_age_s)`, so
+  a wedged row's pair changes with the clock alone — about once a second for the
+  45-59 s window after the beat crosses `HEARTBEAT_TIMEOUT_S`, then once a minute,
+  per wedged session, with no write and no event behind it. The channel therefore
+  dedupes on `catalog.status_dedupe_key` (the same derivation with its clock term
+  removed, which is a no-op for every other arm) and still PUBLISHES the pair, age
+  and all. The consequence a client can see: a wedged row keeps the sentence it
+  was published with, and its age stops advancing until the row's next real edge
+  or the 30 s safety poll refreshes it.
+- **`catalogue`** is a cheap invalidation over the sessions directory — its
+  `(inode, mtime_ns)` plus the directory-name set, on a 1 s cadence — so the
   sidebar stops polling `sessions.list` on a 5 s clock. The 30 s safety poll and
   a refetch on window focus remain as drift insurance. An in-place transcript
   append does not move the token — deliberately, since noticing that would mean
   walking the store on every tick, which is the cost the poll was retired for.
+
+  **`revision` is a MONOTONE COUNTER, not that token.** Two causes invalidate the
+  rows, and both bump it: the row SET moving (a session created or removed) and a
+  row's derived ACTIVITY changing (`local_operator.session.catalog.active_of`,
+  i.e. which SECTION it is filed in — a background session that finishes leaves
+  "Previous chats" for "Active chats"). The client's refetch effect re-runs on a
+  dependency VALUE, so the revision it is given must be one it has never seen: a
+  token that can repeat, or a number that only expresses one of the two causes,
+  would leave a row in the wrong section until the 30 s poll — measured at
+  7.5-8.9 s on the paired UI PR before this, and with "Previous chats" collapsed
+  by default the row was not visible at all for that time. The `open` snapshot's
+  `catalogue_revision` is that same counter, so a connecting client's view is
+  expressed in the currency the frames use.
+
+  **At most ONE invalidation per tick.** A burst of simultaneous transitions — a
+  fleet starting, a batch finishing — costs one refetch, not N: the causes
+  collapse into a single bump per tick and anything arriving later in the same
+  tick is carried by the next one (~100 ms).
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is TWO `os.stat` calls — `attention.db` and its journal, the
-doorbell `config_watch` already uses for `config.yml` — with a SQLite read only
-when the store actually moved. That is what takes background detection from the
-1 s poll's floor to a p50 of roughly one tick. The revision gate stays the
+last. Each tick is FOUR `os.stat` calls — `attention.db` with its two journal
+sidecars, plus `run/mobile`, the discovery-record directory, which is where the
+status channel's edges come from — the doorbell `config_watch` already uses for
+`config.yml` — with a SQLite read only when the store actually moved, and a
+record read only for a record whose own file moved. That is what takes background
+detection from the 1 s poll's floor to a p50 of roughly one tick. A quiet tick
+makes no SQL and no record read at all. The revision gate stays the
 AUTHORITY and the delta read is only an optimisation: a heal moves neither
 `MAX(sequence)` nor `SUM(acknowledged)`, only the `mutations` counter, so a tick
 that trusted the delta alone would miss it.
+
+The status channel adds reads on two conditions, neither of them per-tick. A
+record write (a gate armed or answered, a turn started or finished, a 15 s
+heartbeat) moves the record directory, and that tick re-stats the records it
+already knows about and re-reads the ones that moved. And one 1 s probe covers
+the transitions NO file write announces: `live -> wedged` is an age crossing, and
+`scheduled`/`dormant` live in the wake index, outside `run/mobile`. The probe is
+`registry.scan(..., reap=False)` — the same read `sessions.list` makes, minus the
+sweep, because a reaper running once a second on the feed's own poller would move
+another runtime's evidence aside behind its back. Its cost is O(live records) and
+never O(store): the sessions directory is not walked by this path.
+
+Two cost properties of that probe are worth stating, because both were measured
+as defects first. It **forks at most once**, whatever the record population: the
+zombie probe is per pid but `ps` answers for a pid LIST, and the derived policy
+asks it for the whole quiet set in one call, so a population of quiet-but-alive
+records costs one fork a probe rather than one fork per record per second (88
+forks on every probe, a 1.7 s probe and a 0.5 Hz doorbell, before). A zombie
+population costs one fork too: the batch's verdict travels as the ANSWER into the
+classification rather than as a policy flag that would re-probe each corpse (200
+zombie records cost 201 forks a probe and a 0.5 Hz doorbell while it did not),
+and a batch that answers nothing falls back to the per-record probe — cost over
+wrongness, since one failed `ps` covers the whole set. And it **creates
+nothing**: `registry.scan` opens with `run_dir()`, which mkdirs and chmods, so
+both the probe and the connection baseline decline to scan while `run/mobile` is
+absent. Scope that claim precisely: **the FEED** creates nothing. A LIST read
+does — `load_catalog` → `decorate_rows` → `registry.scan` → `run_dir()` — so the
+app's first `GET /v1/desktop/sessions` creates `run/mobile` 0700 on a machine that
+has never run a session. That is pre-existing at the base commit and unchanged
+here, and it is why an absent run directory is not a statement that no runtime has
+ever published.
 
 ### The burst ceiling
 
