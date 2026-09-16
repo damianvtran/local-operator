@@ -2961,8 +2961,11 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        rows = await asyncio.to_thread(_past_sessions)
-        return JSONResponse({"sessions": rows})
+        rows, degraded = await asyncio.to_thread(_past_sessions)
+        # The same marker the home listing carries, for the same reason: this is
+        # another list of the operator's conversations, and a read that failed
+        # must not reach it as "there are none".
+        return JSONResponse({"sessions": rows, "degraded": degraded})
 
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
@@ -3033,7 +3036,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
+def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     """Resumable past sessions for the phone's history list.
 
     ``forked`` rides along for the same reason the TUI picker draws it: a fork
@@ -3042,17 +3045,32 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
     12-hex id. The row builder already knows the fact (it is derived from the
     ``origin.json`` the scan parsed), and dropping it here is what would make
     the phone the one surface still showing the twin rows.
-    """
-    try:
-        from local_operator.paths import config_dir
-        from local_operator.resume import recent_session_rows
 
-        return [
-            {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked}
-            for row in recent_session_rows(config_dir(), limit=limit)
-        ]
-    except Exception:  # noqa: BLE001
-        return []
+    STRICT, and the marker comes back with the rows for the reason the home
+    listing is strict: this is a list of the operator's conversations, so a
+    store that cannot be walked may not be answered as "there are none" — and
+    the caller has to be able to tell the two apart, which is what the returned
+    marker is for.
+
+    The broad ``except Exception: return []`` this replaces is gone rather than
+    narrowed. Swallowing everything made every failure look like an empty
+    history, including the ones that are bugs — the same laundering the search
+    path next door refuses in its own docstring. The one failure this function
+    can actually answer for is the store read, and that is the one it catches;
+    anything else is a defect and must reach the log as one.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.errors import SessionStoreUnavailable
+
+    try:
+        rows = recent_session_rows(config_dir(), limit=limit, strict=True)
+    except SessionStoreUnavailable:
+        logger.warning("phone history listing could not read the session store", exc_info=True)
+        return [], [DEGRADED_DURABLE_LISTING]
+    return [
+        {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked} for row in rows
+    ], []
 
 
 def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
