@@ -1705,6 +1705,68 @@ def _local_bin_dir() -> Path:
     return Path(_LOCAL_BIN).expanduser()
 
 
+def _interpreter_dir() -> str:
+    """``bin``, or ``Scripts`` on Windows: the venv directory scripts live in.
+
+    Spelled once because two readers must agree about the path a launcher names:
+    :func:`write_stable_launchers` writes it, and :func:`_pointer_consumers` looks
+    for it. Two spellings would make the probe blind on one platform only, which is
+    the failure mode nobody reproduces.
+    """
+    return "Scripts" if os.name == "nt" else "bin"
+
+
+def _pointer_consumers() -> tuple[Path, ...]:
+    """What currently resolves THROUGH ``current``: the PATH launchers and the shim.
+
+    RESOLUTION, not authorship (QA round 2, Q-R2-3). ``write_stable_launchers``
+    reports what it (re)wrote, and ``_atomic_symlink`` short-circuits only for a
+    byte-identical link — so a launcher that names the pointer under another
+    spelling (``/tmp`` against ``/private/tmp`` is the everyday one here), one
+    written by an older build, or one in a different ``UV_TOOL_BIN_DIR`` is
+    load-bearing without being in that list. The question the undo has to answer is
+    "does anything resolve through this pointer", and the way to answer it is to
+    look rather than to trust this run's return value.
+
+    Both sides are resolved, so the comparison also holds for a DANGLING pointer:
+    ``realpath`` substitutes a link's target text for the link, on the launcher and
+    on the pointer's own ``bin`` alike, and the two still meet.
+
+    The shim counts because a supervised unit names it and it resolves the pointer
+    at exec: while it exists, the pointer is load-bearing for the daemon even with
+    no launcher in sight.
+    """
+    found: list[Path] = []
+    shim = daemon_image_path()
+    try:
+        if shim.exists():
+            found.append(shim)
+    except (OSError, RuntimeError):  # pragma: no cover — unreadable is not "absent"
+        found.append(shim)
+    pointer_bin = _real(pointer_path() / _interpreter_dir())
+    try:
+        entries = list(_local_bin_dir().iterdir())
+    except OSError:
+        return tuple(found)
+    for entry in entries:
+        try:
+            if not entry.is_symlink():
+                continue
+            target = Path(os.readlink(entry))
+        except OSError:  # pragma: no cover — vanished under us, nothing to blame it for
+            continue
+        if not target.is_absolute():
+            target = entry.parent / target
+        # THE DIRECTORY, not the resolved file: ``<gen>/bin/<name>`` is itself a link
+        # into ``<gen>/tools/local-operator/bin/<name>`` (``_link_generation_bin``), so
+        # resolving the whole path lands one level deeper and matches nothing. What the
+        # launcher names is ``<stable>/current/bin``, and that is the directory to
+        # resolve and compare.
+        if _real(target.parent) == pointer_bin:
+            found.append(entry)
+    return tuple(found)
+
+
 def _atomic_symlink(link: Path, target: Path) -> bool:
     """Point ``link`` at ``target`` with a rename, so no reader sees a gap."""
     try:
@@ -1926,7 +1988,7 @@ def write_stable_launchers(generation: Path) -> tuple[list[Path], list[Path]]:
     """
     install_root = _generation_install_root(generation)
     names = _console_script_names(install_root) or (DISTRIBUTION_NAME, "lop")
-    interpreter_dir = "Scripts" if os.name == "nt" else "bin"
+    interpreter_dir = _interpreter_dir()
     written: list[Path] = []
     failed: list[Path] = []
     for name in names:
@@ -2149,7 +2211,7 @@ def clone_into_generation(
     # whether or not this run created it (review round 6, R6-1).
     previous = current_generation()
     flip_pointer(generation)
-    written, not_written = write_stable_launchers(generation)
+    _written, not_written = write_stable_launchers(generation)
     if not_written:
         # THE MIGRATION REFUSES AND ROLLS BACK, because a migration that cannot
         # write ``~/.local/bin/lop`` has adopted nothing: `lop` on PATH still runs
@@ -2157,19 +2219,10 @@ def clone_into_generation(
         # supervised units on the new layout. Half a layout is harder to reason
         # about than none (design review round 1, D1).
         #
-        # ``written`` and ``origin`` go to the undo because BOTH are what decides
-        # whether the pointer may be removed: a launcher in ``written`` names
-        # ``<stable>/current/bin/<name>``, so while one exists the pointer is the
-        # only thing keeping `lop` runnable, and ``origin`` (the tree this run
-        # copied from) is where such a launcher pointed before this run (review
-        # round 1, Q1).
-        undone = _undo_migration(
-            generation,
-            remove_shim=shim_was_absent,
-            previous=previous,
-            source=origin,
-            relinked=written,
-        )
+        # The undo is told nothing about what this run wrote: what it needs to know is
+        # what RESOLVES through the pointer, and it asks the filesystem for that (see
+        # ``_pointer_consumers`` — review round 2, Q-R2-3).
+        undone = _undo_migration(generation, remove_shim=shim_was_absent, previous=previous)
         raise UpdateError(
             "could not write "
             + ", ".join(str(path) for path in not_written)
@@ -2330,12 +2383,7 @@ class UndoOutcome:
 
 
 def _undo_migration(
-    generation: Path,
-    *,
-    remove_shim: bool,
-    previous: Path | None = None,
-    source: Path | None = None,
-    relinked: Sequence[Path] = (),
+    generation: Path, *, remove_shim: bool, previous: Path | None = None
 ) -> UndoOutcome:
     """Put the machine back when a migration fails after the flip (D1, R6-1).
 
@@ -2367,28 +2415,38 @@ def _undo_migration(
     disk. That is the half-layout state D1 exists to prevent, reached by the race
     this layout makes reachable, and it was measured rather than argued.
 
-    THE POINTER MUST KEEP RESOLVING SOMETHING. ``~/.local/bin/<name>`` names
-    ``<stable>/current/bin/<name>``, and ``relinked`` is the list
-    :func:`write_stable_launchers` reports it (re)pointed there: while that list is
-    non-empty the pointer is load-bearing for the operator's own command, so an
-    un-restorable pointer is MOVED to ``source`` — the install this run copied FROM,
-    which is where those launchers pointed before the migration — rather than
-    removed. Removing it is what review round 1 measured (Q1): ``lop`` on PATH had
-    no code left to run (*No such file or directory*), the supervised shim died with
-    *no current install generation*, and the refusal read as a clean rollback while
-    mentioning neither. With nothing resolving through the pointer, unlinking it is
-    the pre-migration state itself, which is what a machine that had not adopted the
-    layout wants back (design review round 1, D1; review round 1, R1-1).
+    THE COPY IS WHERE AN UN-RESTORABLE POINTER GOES, because both consumers of
+    ``current`` insist on the layout's SHAPE. ``~/.local/bin/<name>`` names
+    ``<stable>/current/bin/<name>``, and the supervised shim resolves the pointer
+    once and execs ``<current>/tools/local-operator/bin/python3``. That rules out
+    the two obvious answers, both measured: REMOVING the pointer leaves the launcher
+    with no code to run (review round 1, Q1: ``lop --version`` answered *No such file
+    or directory*), and MOVING it to the install this run copied FROM aims the shim
+    at a venv whose install sits at its own root, so ``<target>/tools/local-operator/
+    bin/python3`` cannot exist, ``/bin/sh`` exits 126 before the shim's own legible
+    ``exit 78`` can fire, and the refusal still read as if the supervised path lived
+    (review round 2, R2-1/Q-R2-1). The refused COPY is the one tree here that is
+    generation-shaped by construction — ``copytree`` put the legacy venv at
+    ``<copy>/tools/local-operator`` and ``_link_generation_bin`` gave the root its
+    own ``bin`` — so the copy is KEPT and the pointer is aimed at it. That is the
+    pair ``flip_pointer`` had already made when the failure happened, which is why
+    the sentence now says the copy was kept rather than claiming a clean rollback.
 
-    The copy is removed whenever the pointer no longer names it. When the pointer
-    cannot be moved AND still names the copy, the copy STAYS: deleting it is exactly
-    what would leave the launcher with nothing to resolve through.
+    WHAT DECIDES WHETHER THE COPY MUST STAY IS RESOLUTION, not authorship: whether
+    anything resolves through the pointer right now (:func:`_pointer_consumers`,
+    asked of the filesystem rather than of the return value of the call that wrote
+    the launchers — a launcher spelled differently, or written by an older build, is
+    load-bearing without being in that list; QA round 2, Q-R2-3). With nothing
+    resolving through the pointer there is no consumer to keep alive, so unlinking
+    it IS the pre-migration state — which is what a machine that had not adopted the
+    layout wants back, and what the refreshed D1 test pins (review round 1, R1-1).
     """
     parts: list[str] = []
     complete = True
     keep_copy = False
     target = current_generation()
     names_our_copy = target is not None and _real(target) == _real(generation)
+    consumers = _pointer_consumers()
 
     # The path the pointer was actually put back to, or ``None``. Held separately
     # from ``previous`` so the clauses below can say what HAPPENED rather than what
@@ -2424,37 +2482,41 @@ def _undo_migration(
         # run's copy nor what it named before this run.
         parts.append("the pointer left naming another generation")
         complete = False
-    elif relinked:
-        moved_to: Path | None = None
-        if source is not None:
-            try:
-                flip_pointer(source)
-                moved_to = source
-            except (OSError, UpdateError) as exc:
-                logger.warning("could not point %s at %s: %s", pointer_path(), source, exc)
-        if moved_to is not None:
-            parts.append(f"the pointer moved to the install this run came from ({moved_to})")
-            complete = False
-        elif names_our_copy:
-            # Last resort: the pointer cannot be moved and the copy is the only tree
-            # it can resolve to, so the copy stays and the launcher keeps working.
+    elif consumers:
+        # KEEP THE COPY AND PUT THE POINTER ON IT. It is the only generation-shaped
+        # tree in this scenario, and both consumers resolve through the shape.
+        if names_our_copy:
             parts.append(
-                f"the copy kept at {generation}, because {pointer_path()} still resolves through it"
+                f"the copy {generation.name} kept, with {pointer_path()} left on it — the only "
+                "generation root left, and the daemon image and `lop` on your PATH both "
+                "resolve through it"
             )
             keep_copy = True
-            complete = False
         else:
-            # A pointer whose target a prune already took (review round 1, R1-1): it
-            # resolves nothing, and the same prune is what makes it unmovable. A dead
-            # link is worse than none — every reader of the layout reads it as a
-            # machine that has a current generation.
-            unlink_reason = "it named a generation that was pruned"
+            try:
+                flip_pointer(generation)
+                parts.append(
+                    f"the copy {generation.name} kept, with {pointer_path()} moved onto it — the "
+                    "only generation root left, and the daemon image and `lop` on your PATH both "
+                    "resolve through it"
+                )
+            except (OSError, UpdateError) as exc:
+                # Nothing better exists to point at, and a pointer on a tree that is
+                # not there is the state this whole layout exists to avoid — so the
+                # copy stays and the sentence says the pointer did not move.
+                logger.warning("could not point %s at %s: %s", pointer_path(), generation, exc)
+                parts.append(
+                    f"the copy {generation.name} kept, but {pointer_path()} could not be moved "
+                    f"onto it: {exc}"
+                )
+            keep_copy = True
+        complete = False
     else:
-        # Nothing on PATH resolves through the pointer, so unlinking it IS the
-        # pre-migration state: it is what this run created, and removing it puts the
-        # machine back exactly as D1 asked. With a ``previous`` that could not be
-        # restored, the machine is not as it was either way, and the clause says
-        # which of the two happened.
+        # Nothing resolves through the pointer, so unlinking it IS the pre-migration
+        # state: it is what this run created, and removing it puts the machine back
+        # exactly as D1 asked. With a ``previous`` that could not be restored, the
+        # machine is not as it was either way, and the clause says which of the two
+        # happened.
         unlink_reason = "the generation it named is gone" if previous is not None else ""
         if previous is not None:
             complete = False
@@ -2486,14 +2548,18 @@ def _undo_migration(
             complete = False
     else:
         parts.append("the daemon shim that was already there kept")
-    if keep_copy:
-        pass
-    elif _remove_tree(generation):
-        parts.append(f"the copy {generation.name} removed")
-    else:
-        logger.warning("the refused migration's copy is still at %s", generation)
-        parts.append(f"the copy still at {generation}")
-        complete = False
+    if not keep_copy:
+        # The pointer names something else (or names nothing, with nothing resolving
+        # through it), so this copy is nobody's and removing it is the whole of the
+        # cleanup. When the pointer DOES name it, the copy was kept above and there
+        # is nothing to do here — deleting it is the one thing that would leave the
+        # launcher and the shim with nothing to resolve through.
+        if _remove_tree(generation):
+            parts.append(f"the copy {generation.name} removed")
+        else:
+            logger.warning("the refused migration's copy is still at %s", generation)
+            parts.append(f"the copy still at {generation}")
+            complete = False
     return UndoOutcome(parts=tuple(parts), complete=complete)
 
 
@@ -3068,11 +3134,10 @@ def install_status_command() -> int:
         # ``<- current``, so the reader is told both that the pointer names nothing and
         # that it names that tree, with no way to tell which line is lying.
         #
-        # AND IT IS ABOUT THE INSTALL ROOT, not about the tree: the pointer is moved
-        # to the install a refused migration came from (review round 1 remediation),
-        # which is a uv-tool tree holding an install at its OWN root — "holds no
-        # install" would be false about it while at the same time ``lop`` on PATH
-        # demonstrably ran it.
+        # AND IT NAMES THE INSTALL ROOT, which is what is missing: a generation whose
+        # ``tools/local-operator`` was never completed has a tree, a ``.lop-source``
+        # and a row of its own, and what it has not got is an install for ``lop`` to
+        # load — said about the root so the line cannot be read as "this tree is empty".
         detail = (
             "nothing resolves behind the pointer"
             if generation is None
