@@ -38,6 +38,21 @@ Local Operator implements several layers of security, including:
 - **Continuous Integration Security Checks:**  
   Our CI pipeline includes linting, type checking, and testing to catch issues early and to enforce secure coding practices.  Security features should always be included in the test suites.
 
+## Endpoint Protection
+
+Local Operator installs per-user services, so behaviour-based endpoint
+protection (EDR) can quarantine an install under a persistence heuristic. If
+your organisation runs an EDR, or an install has already been quarantined,
+start with [`docs/ENDPOINT_PROTECTION.md`](docs/ENDPOINT_PROTECTION.md): it
+inventories what an install creates and persists (with paths), states how the
+shipped artefacts are signed today, maps the behaviour pattern that matches a
+persistence heuristic, and gives the path-scoped allow-list that resolves it
+without weakening detection generally — a **`Suppress Alerts` exclusion on all
+engines**, which is the mode that silences the alert while leaving the agent's
+monitoring in place. (The `Interoperability` and `Performance Focus` modes are
+*not* equivalent: they reduce or disable monitoring of the excluded paths, and on
+macOS agents 4.6+ `Interoperability` is not supported.)
+
 ## Reporting a Vulnerability
 
 If you identify a security-related vulnerability or security incident in Local Operator, we invite you to [report the vulnerability privately](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability) and create a GitHub Security Advisory on our repository. Your advisory helps us quickly address potential risks and informs the community about the issue. When creating the advisory, please include:
