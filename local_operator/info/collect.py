@@ -17,10 +17,14 @@ before the screen yields. :func:`collect_snapshot` does every blocking probe and
 runs in a worker thread. The reason is the same rule
 ``SessionDiagnostics.capture`` states at ``session_panel.py``: a ``/new`` or
 ``/resume`` landing during the disk read must not put a NEW subagent tree under
-an OLD header. The blocking half is genuinely slow —
-``session_resource_usage`` measured **879.5 ms** for 12 pids on this host,
-because on macOS it shells ``top -l1`` for the whole system — which is 26
-dropped frames at 30 fps, so it cannot be anywhere near the paint path.
+an OLD header. The blocking half is disk- and process-bound work that a cold
+process measures in hundreds of milliseconds — ``session_resource_usage``
+measured **879.5 ms** for 12 pids on this host while its macOS path shelled
+``top -l1`` for the whole system, and reads 11-28 ms over the same pids now
+that the footprint comes from a direct per-pid ``proc_pid_rusage`` call (see
+``mobile/resources.py``, and ``bench/README.md`` for the read's own
+before/after) — which is far past a frame, so it cannot be anywhere near the
+paint path.
 
 **No probe here may reach the network.** ``update.check_latest()`` is banned on
 this path and :func:`collect_install` calls ``update.cached_latest()`` instead;
@@ -1256,10 +1260,14 @@ def _attr(obj: Any, name: str, default: T) -> T:
 def collect_snapshot(live: LiveState, *, root: Path | None = None) -> InfoSnapshot:
     """Every blocking probe, on a worker thread. Never call this on the loop.
 
-    Blocking is the point: ``session_resource_usage`` alone measured 879.5 ms
-    for 12 pids (it shells ``top -l1`` for the whole system on macOS, a trade
-    documented in ``mobile/resources.py``). Each block is guarded independently
-    so one wedged filesystem costs its own section and nothing else.
+    Blocking is the point: this half forks ``ps``, walks the session registry
+    and scans agent/config metadata. ``session_resource_usage`` alone measured
+    879.5 ms for 12 pids while its macOS path shelled ``top -l1`` for the whole
+    system; the same pids read 11-28 ms now that the footprint is a direct
+    per-pid ``proc_pid_rusage`` read, with that dump kept as the fallback only
+    for pids the direct read cannot cover (``mobile/resources.py``). Each block
+    is guarded independently so one wedged filesystem costs its own section and
+    nothing else.
     """
     # Seeded with the LIVE pass's failures rather than starting empty: those
     # probes ran on the event loop where this function cannot reach them, and
