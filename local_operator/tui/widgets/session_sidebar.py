@@ -319,13 +319,6 @@ class SessionSidebar(Widget, can_focus=True):
         if not self.entries:
             return 0
         tiers = {self._section_of(entry) for entry in self.entries}
-        # Per section: its heading and the blank BENEATH it. There is no blank
-        # above a heading any more — that was a doubled separator, and at four
-        # sections it cost three lines of a list that has to fit in a terminal.
-        # Going two sections to four took chrome from 5 lines to 11 and flipped
-        # a 30-row terminal from "everything fits" to paged, which displaced
-        # the `f9 focus` hint for the footer's pager. The heading owns the
-        # space beneath it and its muted treatment is its own separation.
         # Per section: its heading, the blank beneath it, and a blank above
         # every heading after the first. The leading blank is load-bearing:
         # without it a heading sits flush against the previous group's last
@@ -479,14 +472,18 @@ class SessionSidebar(Widget, can_focus=True):
         # return `None` for it, so it is not a click target.
         missing = self._pinned_overflow([entry for _kind, entry in rows if entry is not None])
         if missing:
-            insert_at = next(
-                (
-                    index
-                    for index, (kind, entry) in enumerate(rows)
-                    if entry is not None and self._section_of(entry) != 0
-                ),
-                len(rows),
-            )
+            # Directly after the LAST PINNED ENTRY, and before anything else —
+            # including the next section's header and its blank. Matching on
+            # "the first non-pinned entry" instead skipped straight past that
+            # header (headers carry `entry=None`), so the note landed under
+            # `Active Sessions` and read as "+1 more active session", the
+            # opposite of what it says. A note about a section has to sit
+            # inside it.
+            last_pinned = -1
+            for index, (_kind, entry) in enumerate(rows):
+                if entry is not None and self._section_of(entry) == 0:
+                    last_pinned = index
+            insert_at = last_pinned + 1 if last_pinned >= 0 else len(rows)
             rows.insert(insert_at, ("note:pinned-overflow", None))
         return tuple(rows)
 
@@ -1047,8 +1044,15 @@ class SessionSidebar(Widget, can_focus=True):
                 # below the page. Same muted treatment as a heading and no new
                 # palette entry; it is chrome, so it is never a click target.
                 missing = self._pinned_overflow([row for _k, row in rows if row is not None])
+                # "— scroll" says what to DO about it; the count alone states a
+                # fact and leaves the user to guess the remedy. The tail is
+                # deliberately short of the designer's "— scroll to see": that
+                # phrasing measures 30 cells against a 29-cell content width
+                # and cropped to "scroll to s…" at N=1, and past N=9 the count
+                # widens and crops it further. This form is 24 cells at its
+                # worst (N=99) and never truncates.
                 result.append(
-                    truncate_cells(f"+{missing} more pinned", width).ljust(width),
+                    truncate_cells(f"+{missing} more pinned — scroll", width).ljust(width),
                     style=theme_mod.semantic_color("muted"),
                 )
                 continue
