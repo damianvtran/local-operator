@@ -75,7 +75,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
 from local_operator.tui.widgets import _copy_markdown
-from local_operator.tui.widgets.assistant import AssistantBlock, flatten
+from local_operator.tui.widgets.assistant import RAIL_COLS, AssistantBlock, flatten
 from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ROW_INDENT, ToolCard
@@ -887,6 +887,21 @@ def _rendered_rows(block: AssistantBlock) -> list[str]:
     return visual.plain.split("\n")
 
 
+def _bare_rows(block: AssistantBlock) -> list[str]:
+    """The frame's rows with the block's RAIL stripped — alignment coordinates.
+
+    The same discipline ``AssistantBlock.get_selection`` follows internally, and
+    it is here for the same two reasons. ``▌`` is the blockquote bar to
+    ``_copy_markdown``, so aligning painted rows places them on the wrong source
+    lines; and a railed row is never ``.strip()``-blank, so a blankness test
+    over painted rows silently stops filtering anything.
+
+    A harness that re-derives the mapping or scans for blank rows must therefore
+    do it in these coordinates, or it measures the rail rather than the frame.
+    """
+    return [row[RAIL_COLS:] for row in _rendered_rows(block)]
+
+
 def _find(rows: list[str], word: str) -> tuple[int, int, int]:
     """``(row, start, end)`` of ``word`` in the RENDERED frame.
 
@@ -1164,8 +1179,14 @@ async def test_a_quote_dragged_from_column_zero_drops_the_bar() -> None:
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        row = next(i for i, text in enumerate(rows) if text.startswith("▌"))
-        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=16, y=row))
+        # Found by the quoted CONTENT, not by the leading glyph: every row now
+        # opens with the block's own rail, so a glyph test matches the intro
+        # paragraph's row and this test would drag the wrong line entirely.
+        row = next(i for i, text in enumerate(rows) if "Thanks" in text)
+        # The prose sits RAIL_COLS further right than it did, so the reader's
+        # same gesture ends that many cells later. Against the constant, so a
+        # change to the gutter width moves this with it.
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=16 + RAIL_COLS, y=row))
         copied = block.get_selection(selection)
 
         assert copied is not None
@@ -1198,10 +1219,15 @@ async def test_a_sub_line_take_across_a_wrapped_quote_never_copies_the_bar() -> 
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        bars = [i for i, row in enumerate(rows) if row.startswith("▌")]
+        # The quote's OWN bars, which are the second glyph on the row now that
+        # the block paints a rail as the first. Counting rows that merely start
+        # with the glyph would count every row in the message.
+        bars = [i for i, row in enumerate(rows) if row.count("▌") >= 2]
         assert len(bars) >= 2, f"the quote must actually wrap, or this proves nothing: {rows!r}"
 
-        selection = Selection.from_offsets(Offset(x=10, y=bars[0]), Offset(x=12, y=bars[1]))
+        selection = Selection.from_offsets(
+            Offset(x=10 + RAIL_COLS, y=bars[0]), Offset(x=12 + RAIL_COLS, y=bars[1])
+        )
         copied = block.get_selection(selection)
 
         assert copied is not None
@@ -1230,7 +1256,9 @@ async def test_a_column_zero_drag_inside_a_bullet_drops_the_marker() -> None:
 
         rows = _rendered_rows(block)
         row, _, _ = _find(rows, "Transient")
-        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=36, y=row))
+        # Shifted by the rail: the item's text starts RAIL_COLS further right,
+        # so an unshifted end column stops one character short of "ingest".
+        selection = Selection.from_offsets(Offset(x=0, y=row), Offset(x=36 + RAIL_COLS, y=row))
         copied = block.get_selection(selection)
 
         assert copied is not None
@@ -1533,9 +1561,17 @@ async def test_frame_is_unchanged_by_the_flatten() -> None:
         # highlighted as disconnected slabs while `get_selection` returned one
         # continuous string (design round 12, D2). Right-stripping keeps the
         # real invariant: every painted glyph in the same place on the same row.
-        assert [strip.text.rstrip() for strip in flat._render_cache.lines] == [
+        # Compared PAST the rail. The gutter is a deliberate addition this
+        # block makes on top of the flatten, not a cell the flatten moved, so
+        # it is stripped before the comparison rather than allowed to weaken it:
+        # every glyph after it must still land in the same place on the same
+        # row as the raw ``Markdown`` painted it, which is the claim.
+        assert [strip.text[RAIL_COLS:].rstrip() for strip in flat._render_cache.lines] == [
             strip.text.rstrip() for strip in raw._render_cache.lines
         ]
+        # ...and the gutter really is on every row, or the strip above is
+        # quietly removing two cells of prose instead.
+        assert all(strip.text.startswith("▌") for strip in flat._render_cache.lines)
 
 
 @pytest.mark.asyncio
@@ -1565,7 +1601,11 @@ async def test_the_highlight_over_a_blank_row_is_not_a_hole() -> None:
         rendered = block.renderable
         assert isinstance(rendered, Text), "the flatten did not produce a Text"
         rows = rendered.plain.split("\n")
-        blanks = [row for row in rows if not row.strip()]
+        # Blankness asked of the row WITHOUT the block's rail: the gutter is
+        # painted on every row including the paragraph separators, so a
+        # ``.strip()`` over the painted row reports no blank rows at all and
+        # this test would pass by finding nothing to check.
+        blanks = [row for row in rows if not row[RAIL_COLS:].strip()]
         assert blanks, "no blank row between the paragraphs, so this proves nothing"
         assert all(
             cell_len(row) == cell_len(rows[0]) for row in rows
@@ -1807,6 +1847,12 @@ async def _seeded(app: OperatorApp, pilot: Any) -> AssistantBlock:
       the first layout is folded at the wrong width and only ``on_resize``
       puts it right. Asserted rather than waited out: a test that drags a
       half-settled frame does not fail, it counts a different number of rows.
+
+      The block's build width is its box LESS the rail: the prose is folded
+      into the body the gutter leaves, so ``_built_width`` trails ``size.width``
+      by exactly ``RAIL_COLS``. Written against the constant rather than the
+      measured difference, so this still fails if the block stops folding at
+      its real width — which is the property the assertion is here for.
     """
     app._append_block(UserBlock("summarise the ingest path"))
     block = AssistantBlock()
@@ -1817,7 +1863,7 @@ async def _seeded(app: OperatorApp, pilot: Any) -> AssistantBlock:
     await pilot.pause()
     await pilot.pause()
     assert not app.query_one(WelcomeView).display
-    assert block.size.width and block._built_width == block.size.width
+    assert block.size.width and block._built_width == block.size.width - RAIL_COLS
     return block
 
 
@@ -4005,10 +4051,15 @@ async def test_a_mis_mapped_quoted_continuation_still_measures_its_furniture() -
             await pilot.pause()
 
             rows = _rendered_rows(block)
-            mapping = _copy_markdown.align(block._full_text, rows)
+            # Alignment and furniture in BARE coordinates, the way
+            # ``get_selection`` does it: the block's rail would otherwise be
+            # read as a quote bar by ``align`` and would make every separator
+            # row non-blank to the filter below.
+            bare = _bare_rows(block)
+            mapping = _copy_markdown.align(block._full_text, bare)
             widths = {
-                index: block._furniture_width(rows, mapping, index)
-                for index, row in enumerate(rows)
+                index: block._furniture_width(bare, mapping, index)
+                for index, row in enumerate(bare)
                 if row.strip()
             }
             assert len(set(widths.values())) == 1, (
@@ -4019,10 +4070,14 @@ async def test_a_mis_mapped_quoted_continuation_still_measures_its_furniture() -
             # And the gesture itself: a whole-row take must not leak the bar or
             # the bullet, nor change answer with the drag's start cell.
             for index, row in enumerate(rows):
-                if not row.strip():
+                if not bare[index].strip():
                     continue
                 answers = {}
-                for column in range(0, widths[index] + 1):
+                # Swept from column 0 through the rail AND the construct's own
+                # furniture: every start inside the painted chrome must give the
+                # one answer, which is the D2-4 property. The rail widens that
+                # chrome by RAIL_COLS, so the sweep has to cover it too.
+                for column in range(0, RAIL_COLS + widths[index] + 1):
                     selection = Selection.from_offsets(
                         Offset(x=column, y=index), Offset(x=len(row.rstrip()), y=index)
                     )
@@ -4092,8 +4147,11 @@ async def test_a_quote_opening_with_a_bar_keeps_the_bar_it_wrote() -> None:
 
             rows = _rendered_rows(block)
             index, _, _ = _find(rows, "literal bar")
-            # The frame really does paint two bars, or this proves nothing.
-            assert rows[index].count("▌") == 2, f"width {width}: {rows[index]!r}"
+            # The frame really does paint two bars, or this proves nothing:
+            # the quote's own bar and the model's literal one. The block's rail
+            # is a third glyph on the row and is not one of them, so it is
+            # discounted explicitly rather than by raising the number.
+            assert rows[index].count("▌") - 1 == 2, f"width {width}: {rows[index]!r}"
 
             selection = Selection.from_offsets(
                 Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
@@ -4125,7 +4183,12 @@ async def test_a_nested_quote_opening_with_a_bar_strips_only_painted_bars() -> N
 
         rows = _rendered_rows(block)
         index, _, _ = _find(rows, "literal bar")
-        assert rows[index].count("▌") == 3, f"the fixture must paint three bars: {rows[index]!r}"
+        # Three bars of the QUOTE's own — two levels of furniture plus the
+        # model's literal one. The block's rail is discounted: it is chrome on
+        # every row, not part of the construct this test is about.
+        assert (
+            rows[index].count("▌") - 1 == 3
+        ), f"the fixture must paint three bars: {rows[index]!r}"
 
         selection = Selection.from_offsets(
             Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
@@ -4275,7 +4338,9 @@ async def test_a_reflowed_quote_paragraph_still_copies_both_its_lines() -> None:
             await pilot.pause()
 
             rows = _rendered_rows(block)
-            mapping = _copy_markdown.align(block._full_text, rows)
+            # Bare coordinates for the mapping: the rail reads as a quote bar to
+            # ``align`` and would place these rows on the wrong source lines.
+            mapping = _copy_markdown.align(block._full_text, _bare_rows(block))
             placed = {source for source in mapping if source is not None}
             assert 1 not in placed, (
                 f"width {width}: the second quote line got its own row, so this "
@@ -4441,11 +4506,14 @@ async def test_a_wrapped_table_rows_continuation_never_maps_to_the_next_row() ->
             block.finalize_text()
             await pilot.pause()
 
-            rows = _rendered_rows(block)
-            mapping = _copy_markdown.align(block._full_text, rows)
+            # Bare coordinates for the mapping AND for the blankness test: the
+            # rail would otherwise be aligned as a quote bar and would make
+            # every row non-blank to the filter.
+            bare = _bare_rows(block)
+            mapping = _copy_markdown.align(block._full_text, bare)
             lines = block._full_text.split("\n")
 
-            for index, row in enumerate(rows):
+            for index, row in enumerate(bare):
                 source = mapping[index]
                 if not row.strip() or source is None:
                     continue
@@ -4494,15 +4562,21 @@ async def test_a_table_row_whose_first_cell_is_a_number_still_copies_as_markdown
             block.finalize_text()
             await pilot.pause()
 
-            for index, row in enumerate(_rendered_rows(block)):
+            # Row identity read WITHOUT the block's rail: the gutter is the
+            # first glyph of every painted row, so both the leading-number test
+            # and the "indented past the id column" test would answer about the
+            # rail rather than about the table.
+            for index, row in enumerate(_bare_rows(block)):
                 stripped = row.strip()
                 # Only the rows that OPEN a numeric body row; a continuation is
                 # indented past the id column and carries no leading number.
                 head = stripped.split()[0] if stripped.split() else ""
                 if head not in expected or not row[:1].isspace():
                     continue
+                # ``row`` is bare, so its end column is converted back into the
+                # PAINTED coordinates the reader's drag is expressed in.
                 selection = Selection.from_offsets(
-                    Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
+                    Offset(x=0, y=index), Offset(x=RAIL_COLS + len(row.rstrip()), y=index)
                 )
                 copied = block.get_selection(selection)
                 assert copied is not None and copied[0] == expected[head], (
@@ -5048,12 +5122,19 @@ async def test_a_fully_covered_row_is_never_replaced_by_a_different_line(name: s
             await pilot.pause()
 
             rows = _rendered_rows(block)
+            # The LIT GLYPHS are the row's own, not the block's gutter: the
+            # needle cut from them below is searched in copy text that
+            # correctly carries no rail, so a needle including the rail could
+            # never match and would report a substitution that never happened.
+            bare = _bare_rows(block)
             for index, row in enumerate(rows):
-                lit = row.strip()
+                lit = bare[index].strip()
                 # Short rows carry too little to identify; a fence marker row is
                 # furniture whose own text is legitimately re-emitted elsewhere.
                 if len(lit) < 12 or lit.startswith("```"):
                     continue
+                # The drag still spans the PAINTED row, rail included — that is
+                # the gesture a reader makes over a fully covered row.
                 selection = Selection.from_offsets(
                     Offset(x=0, y=index), Offset(x=len(row.rstrip()), y=index)
                 )
@@ -5120,7 +5201,7 @@ async def test_widening_over_unplaced_rows_needs_a_placed_row_to_rescue() -> Non
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        mapping = _copy_markdown.align(block._full_text, rows)
+        mapping = _copy_markdown.align(block._full_text, _bare_rows(block))
         target = next(i for i, row in enumerate(rows) if "a.beta_id;" in row)
         assert mapping[target] is None, "fixture no longer reproduces an unplaced row"
 
@@ -5150,7 +5231,7 @@ async def test_widening_over_unplaced_rows_needs_a_placed_row_to_rescue() -> Non
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        mapping = _copy_markdown.align(block._full_text, rows)
+        mapping = _copy_markdown.align(block._full_text, _bare_rows(block))
         first = next(i for i, row in enumerate(rows) if "psql" in row)
         last = next(i for i in range(first + 1, len(mapping)) if mapping[i] is not None)
         assert mapping[first] is None, "fixture no longer reproduces an unplaced edge row"

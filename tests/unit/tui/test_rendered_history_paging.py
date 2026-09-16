@@ -21,7 +21,11 @@ from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
-from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
+from local_operator.tui.widgets.assistant import (
+    FALLBACK_WIDTH,
+    RAIL_COLS,
+    AssistantBlock,
+)
 from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, UserBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
@@ -1804,7 +1808,17 @@ async def test_a_paged_block_is_folded_at_its_destination_width_not_the_fallback
         f"{len(at_fallback)} of {len(folds)} folds during paging were at the "
         f"{FALLBACK_WIDTH}-column fallback while the pane was wide: {sorted(set(folds))}"
     )
-    assert all(width == pane for _, width in folds), sorted(set(folds))
+    # Per block kind, because they no longer fold at ONE number: an
+    # ``AssistantBlock`` paints a ``RAIL_COLS``-cell gutter and folds its prose
+    # into the pane LESS that gutter, while a ``UserBlock`` reports the lane it
+    # was handed. Both are still "the width this block is about to be given",
+    # which is what this assertion is about; collapsing them to ``== pane``
+    # would demand the assistant overhang its own box by two cells.
+    expected = {"AssistantBlock": pane - RAIL_COLS, "UserBlock": pane}
+    assert all(width == expected[kind] for kind, width in folds), (
+        sorted(set(folds)),
+        expected,
+    )
 
 
 @pytest.mark.asyncio
