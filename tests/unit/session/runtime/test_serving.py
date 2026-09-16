@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.session.frontend_state import SlashResult as _SlashResult
+from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
@@ -73,6 +74,14 @@ class FakeSession:
         #: double. Declared here rather than attached per-test so the shape is
         #: part of the double's contract.
         self.mcp_manager: Any = None
+        #: The boot record the listing consults when there is NO manager, since
+        #: discovery that raised never assigns one and records itself here
+        #: instead. ``None`` is the not-yet-wired state; a test wanting the
+        #: failure state sets a real :class:`McpStartupOutcome` with failures.
+        #: Declared for the same reason as ``mcp_manager``: the shape is part
+        #: of the double's contract, and an undeclared attribute is invisible
+        #: to the type checker every gate runs.
+        self.mcp_startup: Any = None
         #: The session's event-emission seam. The runtime reports a settled
         #: MCP grant through it, since the grant outlives the request that
         #: started it. Tests replace it to capture what viewers would see.
@@ -2172,3 +2181,229 @@ async def test_the_abort_op_really_terminates_live_children(tmp_path) -> None:
     assert session.running_subagents() == 0
     assert "stopped 3 subagents" in receipt
     await session.dispose()
+
+
+# --- /mcp LISTING on a routed session -----------------------------------------
+#
+# The regression these cover: the listing test read `manager.servers`, an
+# attribute `McpManager` has never had, so its emptiness branch was taken on
+# every session whose slash command routes to the owner. An explicit
+# `/mcp list` therefore answered "no MCP servers configured." — every fresh
+# viewer, and the phone projection, which shares this handler — while the same
+# session's transcript was listing its configured servers failing to start by
+# name. The sibling producers in the TUI never had the bug, which is why the
+# bare `/mcp` typed locally rendered the right listing and `/mcp list` did not.
+
+
+class _NameManager:
+    """A manager exposing the REAL roster accessor, and nothing else.
+
+    Deliberately without ``servers``: that phantom attribute is what the
+    listing test used to read, and a double that carried it would keep the
+    old bug green.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._names = list(names)
+
+    def get_all_server_names(self) -> list[str]:
+        return list(self._names)
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager(["alpha-stdio", "beta-oauth"])
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    # A BLOCK is the instruction to render the listing; the notice below is the
+    # refusal to. Which one comes back is the whole defect.
+    assert result.kind == "block", result
+    assert result.data == {"type": "mcp"}
+
+
+@pytest.mark.parametrize(
+    ("manager", "startup"),
+    [
+        (None, None),
+        (_NameManager([]), None),
+        # A record that coexists with a manager and names NO failure — the
+        # ordinary arm at ``session_factory.py:2462-2469``, which a host with no
+        # MCP config reaches as ``configured=()`` / ``failures={}``. (The
+        # import-gap arm at ``2377`` records an empty outcome too, but it returns
+        # BEFORE any manager exists, so it cannot produce this pair.) Pinned so a
+        # later predicate change cannot drop the arm (review round 2, R2-NIT-2;
+        # citation corrected in review round 3, NIT-1).
+        (_NameManager([]), McpStartupOutcome()),
+    ],
+    ids=["no-manager", "zero-name-manager", "deliberate-empty-outcome"],
+)
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(
+    manager: Any, startup: Any
+) -> None:
+    """The states that MAY say this, none of them with a failure recorded.
+
+    Three shapes reach here and all are genuinely empty: a session whose wiring
+    has not run yet (no boot record at all), a host that really asked for
+    nothing — including the zero-name manager, which is the same answer the real
+    one gives when no config file names a server (QA round 1, row 3) — and the
+    recorded-but-empty outcome the ordinary wiring arm produces. An empty roster
+    with a failure on the boot record is a different answer entirely; see the
+    three tests below.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = manager
+    session.mcp_startup = startup
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+    assert result.style == "info"
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_but_empty_discovery_message_is_still_a_failure() -> None:
+    """MEMBERSHIP decides, not the value (review round 3, MINOR-1).
+
+    ``session_factory`` stores ``str(entry.get("error", ...))`` with no falsy
+    filter, and ``str(exc)`` is ``""`` for an exception raised with no args — so
+    a record can carry the discovery key with an empty message. Testing the
+    VALUE fell through to the empty-state sentence and had `/mcp list` deny a
+    failure it was holding; the fallback keeps that arm non-empty and says what
+    is missing rather than inventing a cause.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: ""})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "MCP discovery failed" in result.text
+    assert "no error detail was recorded" in result.text
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_does_not_blame_a_server_the_roster_lost() -> None:
+    """A STALE per-server entry must not be spoken for an EMPTY roster.
+
+    The boot record is written at boot and by its settle sink only, and that
+    sink fires only when a round DEFERRED something — so `/mcp remove` reloads
+    the manager into an empty roster while the record still names the server it
+    just removed (``mcp/manager.py:2032`` assigns ``_configs`` before
+    validating, so a fresh boot cannot produce this pair, but a config change
+    can). Speaking that entry would have `/mcp list` announce "MCP server
+    github failed: …" on a session that configures nothing, where the empty
+    sentence is the true answer (review round 2, R2-MINOR-1).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={"github": "command not found: gh"})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+    assert "github" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_failure_when_the_roster_is_empty() -> None:
+    """The REACHABLE hard-failure shape — empty roster, manager present.
+
+    ``discover_and_load_mcp_tools`` never raises for a discovery failure: it
+    catches, logs, and returns the manager alongside a synthetic
+    ``{"path": ".mcp.json"}`` error entry, which ``session_factory`` keys as
+    ``discovery`` (``mcp/__init__.py:145-149``). So the state a user actually
+    reaches is a MANAGER whose roster came back empty plus a boot record that
+    says why, and keying the honest answer on ``manager is None`` missed it
+    (QA round 1, Q2 — where this branch probe returned the old sentence).
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "the config layer could not be read"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "the config layer could not be read" in result.text
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_discovery_failure_instead_of_denying_it() -> None:
+    """A discovery RAISE is the other shape that reaches the failure answer.
+
+    ``wire_mcp_into_session`` never assigns ``mcp_manager`` when its own call
+    raises, and records the exception on the boot record instead; that session
+    is a machine which HAS an MCP setup that could not be read. The old guard
+    answered "no MCP servers configured." there — the operator's reported
+    sentence in the state where it is least true. The band refuses to say it
+    (``_mcp_status`` reads ``startup.failed`` for exactly this reason), so the
+    slash answer must not either. The reachable sibling of this state keeps the
+    same answer: see the zero-name-manager test above.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    assert session.mcp_manager is None
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "no such file or directory: mcp.json"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "no such file or directory: mcp.json" in result.text
+    # A failure is not an empty state, and it is not styled as one either.
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command() -> None:
+    """A slash surface has no error page to render an exception on.
+
+    Reading one attribute too far takes the whole app down with it, so a
+    manager that cannot answer has to degrade. It must NOT degrade to "none
+    configured" though: a roster we could not READ is not an empty roster, and
+    borrowing the empty state's sentence is the same lie in a quieter place
+    (review round 1, MAJOR-1, second half).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+
+    class _Mute:
+        def get_all_server_names(self) -> list[str]:
+            raise RuntimeError("no roster")
+
+    session.mcp_manager = _Mute()
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text != "no MCP servers configured."
+    assert "could not read" in result.text
+    assert result.style == "warning"

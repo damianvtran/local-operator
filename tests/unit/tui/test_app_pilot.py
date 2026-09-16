@@ -6816,6 +6816,179 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
 
 
+@pytest.mark.asyncio
+async def test_mcp_logout_rows_build_on_a_followers_read_only_facade() -> None:
+    """The `/mcp logout ` list must survive the PRODUCTION follower facade.
+
+    An attached viewer's session carries ``SnapshotMcpManager``, which is
+    read-only by design: it holds the roster accessors the status surfaces need
+    and no config at all. The logout branch reached into it for
+    ``get_server_config`` anyway, so every keystroke that refilled the list
+    raised ``AttributeError`` out of ``on_refresh_argument_choices`` and killed
+    the TUI — the operator's "/mcp logout seems to cause a crash" report.
+
+    The existing grant tests could not see it: they drive
+    ``_run_slash_command``, which ROUTES the verb to the owner, and never the
+    PICKER, which the TUI builds locally either way. The rows are asserted too,
+    not merely "it did not raise": a filter that cannot read a facade's config
+    empties the list silently, which is the same bug wearing a quieter face.
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+    from local_operator.session.frontend_state import SnapshotMcpManager
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    # The follower's real shape: the roster, and no config lookup to offer.
+    session = McpSession(manager=SnapshotMcpManager(), startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.notion.com/mcp"},
+            ),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert [name for name, _ in editor.picker.suggestions()] == ["logout notion"]
+            # The verb-context line is what a NON-empty list carries: it must
+            # survive the rows fix (design review D1's other half). It is set
+            # whether or not rows paint, so it is asserted directly.
+            assert editor.picker._notice == "choose a credential to forget"
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_why_its_list_is_empty() -> None:
+    """An empty list must state the reason, not invite a choice from nothing.
+
+    `/mcp logout ` with an OAuth server configured and NO stored grant filters
+    every row away — a row survives only when its URL holds a credential — and
+    the verb-context notice ("choose a credential to forget") then reads as a
+    broken picker: the user is asked to choose from an empty list and is never
+    told that nothing is stored. The sibling `/logout` picker sets its empty
+    REASON instead ("no stored credentials — nothing to log out of."), and this
+    is the same state one command over. Design review D1, and the same fix
+    answers the row the filter drops in silence (review round 1, MINOR-1).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "no stored credential" in editor.picker._notice, editor.picker._notice
+            assert "choose a credential to forget" not in editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_empty_state_distinguishes_no_oauth_server_from_none_stored() -> None:
+    """Two ways to an empty logout list, and they need different sentences.
+
+    `oauth_server_names` returns OAuth-CAPABLE servers, so a host whose servers
+    are all stdio reaches the empty list too — and there, "no stored credential
+    — /mcp login <name> authorizes a server" misframes the state: there is no
+    OAuth server to log in to, so the suggested command cannot apply. That
+    state's sentence names `/mcp add` instead, while the designer-signed
+    sentence stays for OAuth servers that simply hold no grant (review round 2,
+    R2-MINOR-2).
+    """
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    configs = {"filesystem": MCPStdioServerConfig(command="npx")}
+    manager = FakeMcpManager(["filesystem"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            # The command that actually WRITES the auth block, per design round
+            # 3's D7: `/mcp add <name> <url>` cannot, so it is not the step this
+            # names.
+            assert "lop mcp add --oauth" in editor.picker._notice, editor.picker._notice
+            assert "no stored credential" not in editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_when_the_config_layer_is_unreadable() -> None:
+    """The third empty reason, and it must not borrow either of the other two.
+
+    `_mcp_configured_urls` returning `None` means the layer could not be READ,
+    not that no server has a URL — the distinction the `dict | None` return
+    exists for. A bare empty list there would report a machine's setup as empty
+    when it was merely unreadable (review round 2, R2-NIT-2).
+
+    The loader is called twice on this path — once by `oauth_server_names` and
+    once by the URL mapping — so the failure is staged on the SECOND call, which
+    is the only shape that reaches the branch at all. A FIRST-call failure never
+    gets here: the names guard above turns it into an empty list with no notice
+    whatsoever, which the design round recorded as its own follow-up (review
+    round 3, NIT-2 — the earlier wording said "answered", which overstated it).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                side_effect=[(configs, {}), RuntimeError("config layer raised")],
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "unreadable" in editor.picker._notice, editor.picker._notice
+
+
 async def _type_into_editor(pilot, app, text: str) -> None:
     """Type ``text`` one REAL keystroke at a time, leaving it in the buffer.
 
