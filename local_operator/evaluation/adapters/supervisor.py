@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -1011,8 +1012,76 @@ class VerifiedAdapterSession:
         return result
 
 
+def _errno_detail(error: OSError) -> str:
+    """Name an OSError's cause so a bundle reader can act on it.
+
+    BOTH HALVES ARE CARRIED, because they answer different questions: the
+    symbol (``ENOENT``/``ELOOP``/``ENOTDIR``) is what an operator greps for
+    across episodes and is stable across locales, while ``strerror`` is the
+    system's own sentence for a reader who does not have the symbol to hand.
+    ``errno`` is stdlib, so the import widens no dependency of this layer.
+    """
+
+    if error.errno is None:
+        return "no errno"
+    symbol = errno.errorcode.get(error.errno, f"errno {error.errno}")
+    return f"{symbol}: {error.strerror}" if error.strerror else symbol
+
+
+def _file_kind(mode: int) -> str:
+    """What kind of filesystem object a stat mode describes.
+
+    ``verify_artifact`` refuses everything that is not a regular file, and the
+    kind is the half of that fact an operator cannot guess from the digest
+    name: a FIFO is a worker attacking the parent's LIVENESS, while a directory
+    or a short zero-filled file is usually a publication whose bytes never
+    landed.
+    """
+
+    kind = stat.S_IFMT(mode)
+    for flag, name in (
+        (stat.S_IFIFO, "fifo"),
+        (stat.S_IFSOCK, "socket"),
+        (stat.S_IFCHR, "character device"),
+        (stat.S_IFBLK, "block device"),
+        (stat.S_IFDIR, "directory"),
+        (stat.S_IFLNK, "symlink"),
+    ):
+        if kind == flag:
+            return name
+    return f"filesystem object of mode 0o{kind:o}"
+
+
 def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
-    """Read one content-addressed artifact without following attacker links."""
+    """Read one content-addressed artifact without following attacker links.
+
+    EVERY REFUSAL NAMES ITS OWN CAUSE AND THE VALUES THAT DECIDED IT. One
+    sentence used to cover both halves of the file check below -- the wrong
+    file TYPE and the wrong SIZE -- and that cost a real episode its diagnosis:
+    task_012 of the deepseek-flash canary batch died as ``ep-455d62d3cc35``
+    after 88 steps of genuine work with only "artifact is not a matching
+    regular file" in the bundle, and nothing in the evidence could separate a
+    truncated publication from a FIFO a hostile worker had published. A bundle
+    reader has no live process to interrogate, no ``ls`` to run, and no second
+    attempt, so for a fatal refusal the message IS the diagnosis and each
+    branch has to carry it. What each refusal means:
+
+    * ``artifact root is unsafe or unavailable`` -- the parent's own directory,
+      not the artifact, could not be opened (a wrong or unmounted root).
+    * ``artifact path is unsafe or unavailable`` -- the name could not be
+      opened inside that directory: never published (``ENOENT``), a symlink
+      refused by ``O_NOFOLLOW`` (``ELOOP``), or not a directory in the path.
+    * ``artifact is not a regular file`` -- SOMETHING is there, and its kind is
+      named: a FIFO, a socket, a device, or a directory.
+    * ``artifact byte count differs`` -- a regular file whose size is not the
+      declared ``byte_count``. A 0-byte file at a digest name is the signature
+      of a publication interrupted after the file was created but before its
+      bytes landed, which is exactly what a full disk produces.
+    * ``artifact exceeds its declared size`` -- the file grew past the declared
+      size while it was being read.
+    * ``artifact digest differs`` / ``artifact media differs`` -- the bytes are
+      the declared length but not the declared content.
+    """
 
     name = reference.sha256
     # O_NONBLOCK is a LIVENESS guard, not a performance hint. The S_ISREG check
@@ -1024,39 +1093,75 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     # and AFTER the mutating call's wait_for has already closed, so no timeout,
     # poison, rescue, or process-group teardown can fire. On a regular file
     # O_NONBLOCK is a POSIX no-op -- same S_ISREG, size, and bytes -- so the
-    # FIFO simply returns immediately and falls into the existing
-    # "artifact is not a matching regular file" refusal.
+    # FIFO simply returns immediately and falls into the "artifact is not a
+    # regular file" refusal below.
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
-    root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        fd = os.open(name, flags, dir_fd=root_fd)
+        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError as error:
+        raise SupervisionError(
+            f"artifact root is unsafe or unavailable: {root} ({_errno_detail(error)})"
+        ) from error
+    try:
+        try:
+            fd = os.open(name, flags, dir_fd=root_fd)
+        except OSError as error:
+            raise SupervisionError(
+                f"artifact path is unsafe or unavailable: {name} could not be opened in the "
+                f"artifact root ({_errno_detail(error)})"
+            ) from error
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size != reference.byte_count:
-                raise SupervisionError("artifact is not a matching regular file")
+            if not stat.S_ISREG(info.st_mode):
+                raise SupervisionError(
+                    f"artifact is not a regular file: {name} is a "
+                    f"{_file_kind(info.st_mode)} (size={info.st_size}, declared "
+                    f"{reference.byte_count} bytes of {reference.media_type})"
+                )
+            if info.st_size != reference.byte_count:
+                raise SupervisionError(
+                    f"artifact byte count differs: {name} declares "
+                    f"{reference.byte_count} bytes of {reference.media_type} but the file "
+                    f"holds {info.st_size} bytes"
+                )
             data = bytearray()
             while chunk := os.read(fd, min(65536, reference.byte_count + 1 - len(data))):
                 data.extend(chunk)
                 if len(data) > reference.byte_count:
-                    raise SupervisionError("artifact exceeds its declared size")
+                    raise SupervisionError(
+                        f"artifact exceeds its declared size: {name} declares "
+                        f"{reference.byte_count} bytes but the file read longer than that"
+                    )
         finally:
             os.close(fd)
     except OSError as error:
-        raise SupervisionError("artifact path is unsafe or unavailable") from error
+        # Reached by fstat/read/close on an artifact that OPENED successfully,
+        # which is a different fault from a name that would not open at all --
+        # so it does not borrow either of the two messages above.
+        raise SupervisionError(
+            f"artifact verification failed on I/O: {name} ({_errno_detail(error)})"
+        ) from error
     finally:
         os.close(root_fd)
     raw = bytes(data)
-    if hashlib.sha256(raw).hexdigest() != name:
-        raise SupervisionError("artifact digest differs")
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != name:
+        raise SupervisionError(
+            f"artifact digest differs: {name} declares {reference.byte_count} bytes of "
+            f"{reference.media_type} but the bytes hash to {actual}"
+        )
     try:
         validate_media(raw, reference.media_type)
     except MediaValidationError as error:
-        raise SupervisionError("artifact media differs") from error
+        raise SupervisionError(
+            f"artifact media differs: {name} declares {reference.media_type} but the bytes "
+            f"are not valid {reference.media_type}: {error}"
+        ) from error
     return raw
 
 

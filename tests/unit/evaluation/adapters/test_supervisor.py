@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
@@ -459,6 +460,164 @@ def test_artifact_verification_rejects_symlink_and_digest_attack(tmp_path: Path)
     (tmp_path / digest).symlink_to(outside)
     with pytest.raises(SupervisionError, match="unsafe"):
         verify_artifact(tmp_path, reference)
+
+
+def test_each_artifact_refusal_says_which_clause_fired(tmp_path: Path) -> None:
+    """Every refusal in ``verify_artifact`` is distinguishable from the others.
+
+    WHICH CLAUSE FIRED IS THE WHOLE DIAGNOSIS, and it used to be unreadable:
+    one sentence covered both the wrong-file-TYPE and the wrong-SIZE halves of
+    the first check, so a sealed bundle could not say whether a worker had
+    published a FIFO or a publication had landed short. That cost a real
+    episode its cause -- task_012 of the deepseek-flash canary batch died as
+    ``ep-455d62d3cc35`` after 88 steps, its only recorded fact the shared
+    string, and the evidence on disk could not separate the two. A fatal
+    artifact refusal has no second attempt, so the message has to carry both
+    the cause and the values that decided it: the digest name, the declared
+    ``byte_count``/``media_type``, the file's real kind and size.
+
+    Each case below is a DIFFERENT on-disk state, in the order the checks run.
+    """
+
+    data = b'{"ok":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    reference = ArtifactRef(sha256=digest, media_type="application/json", byte_count=len(data))
+
+    def refusal(root: Path, ref: ArtifactRef = reference) -> str:
+        with pytest.raises(SupervisionError) as caught:
+            verify_artifact(root, ref)
+        return str(caught.value)
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / digest).write_bytes(data)
+    assert verify_artifact(root, reference) == data
+
+    # The parent's OWN directory is the thing that cannot be opened. Named
+    # separately because it is not a failed publication and no amount of
+    # re-publication by a worker would fix it.
+    missing_root = tmp_path / "no-such-root"
+    assert refusal(missing_root) == (
+        f"artifact root is unsafe or unavailable: {missing_root}"
+        f" (ENOENT: {os.strerror(errno.ENOENT)})"
+    )
+
+    # Never published: the name is simply not there.
+    (root / digest).unlink()
+    assert refusal(root) == (
+        f"artifact path is unsafe or unavailable: {digest} could not be opened in the "
+        f"artifact root (ENOENT: {os.strerror(errno.ENOENT)})"
+    )
+
+    # A symlink at the name, refused by ``O_NOFOLLOW``: the escape attempt has
+    # to read differently from an absent file, or a confinement refusal looks
+    # like a publication race.
+    outside = tmp_path / "outside"
+    outside.write_bytes(data)
+    (root / digest).symlink_to(outside)
+    assert refusal(root) == (
+        f"artifact path is unsafe or unavailable: {digest} could not be opened in the "
+        f"artifact root (ELOOP: {os.strerror(errno.ELOOP)})"
+    )
+    (root / digest).unlink()
+
+    # A FIFO: an attack on the parent's liveness, and the case the old shared
+    # sentence hid behind.
+    os.mkfifo(root / digest)
+    assert refusal(root) == (
+        f"artifact is not a regular file: {digest} is a fifo"
+        f" (size=0, declared {len(data)} bytes of application/json)"
+    )
+    (root / digest).unlink()
+
+    # A directory: not an attack, usually a broken publication, and it must not
+    # read as the FIFO case. The size is filesystem-defined, so only the part
+    # that means something is pinned.
+    (root / digest).mkdir()
+    assert refusal(root).startswith(
+        f"artifact is not a regular file: {digest} is a directory (size="
+    )
+    (root / digest).rmdir()
+
+    # A regular file holding NOTHING at a name that declares bytes: the exact
+    # shape an interrupted publication leaves behind on a full disk, and the
+    # one ep-455d62d3cc35 needed to be legible.
+    (root / digest).write_bytes(b"")
+    assert refusal(root) == (
+        f"artifact byte count differs: {digest} declares {len(data)} bytes of "
+        "application/json but the file holds 0 bytes"
+    )
+
+    # A regular file holding MORE than it declares (the byte_count_mismatch
+    # shape, seen from the other side).
+    (root / digest).write_bytes(data + b"more")
+    assert refusal(root) == (
+        f"artifact byte count differs: {digest} declares {len(data)} bytes of "
+        f"application/json but the file holds {len(data) + 4} bytes"
+    )
+
+    # Right length, wrong bytes: the digest comparison, which a length check
+    # alone cannot reach.
+    tampered = data[:-1] + bytes([data[-1] ^ 0xFF])
+    (root / digest).write_bytes(tampered)
+    assert refusal(root) == (
+        f"artifact digest differs: {digest} declares {len(data)} bytes of application/json "
+        f"but the bytes hash to {hashlib.sha256(tampered).hexdigest()}"
+    )
+
+    # Right bytes at the right digest, but the DECLARED media type is not what
+    # those bytes are -- the one refusal that has to name the validator's own
+    # reason, because "media differs" alone does not say whether the bytes are
+    # a truncated PNG or a JSON document.
+    (root / digest).write_bytes(data)
+    as_png = ArtifactRef(sha256=digest, media_type="image/png", byte_count=len(data))
+    assert refusal(root, as_png) == (
+        f"artifact media differs: {digest} declares image/png but the bytes are not valid "
+        "image/png: invalid PNG"
+    )
+
+
+def test_artifact_grown_past_its_declared_size_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read loop's own bound, reachable only by a file that GROWS.
+
+    ``fstat`` runs before the read, so a file that is already longer than the
+    declared size is refused by the size comparison and never reaches this
+    clause -- which is why the refusal it produces is pinned with a frozen
+    ``fstat`` instead of an on-disk state: the patch makes the check see the
+    declared size while the file already holds more, which is precisely the
+    window (a resumed publication, or a writer that appends) the bound exists
+    for. Without the bound the read would happily return more bytes than the
+    reference declares and the caller would accept them as the artifact.
+    """
+
+    data = b'{"ok":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    reference = ArtifactRef(sha256=digest, media_type="application/json", byte_count=len(data))
+    grown = data + b"more"
+    (tmp_path / digest).write_bytes(grown)
+
+    real_fstat = os.fstat
+
+    def frozen(fd: int) -> os.stat_result:
+        info = real_fstat(fd)
+        if info.st_size != len(grown):
+            return info
+        # st_size is index 6 of the portable 10-field stat tuple; the fake
+        # delegates for every other descriptor so a background thread's stat is
+        # the real one.
+        fields = list(info)
+        fields[6] = len(data)
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", frozen)
+    with pytest.raises(SupervisionError) as caught:
+        verify_artifact(tmp_path, reference)
+    assert str(caught.value) == (
+        f"artifact exceeds its declared size: {digest} declares {len(data)} bytes but the "
+        "file read longer than that"
+    )
 
 
 def test_pid_mismatch_refuses_to_signal(monkeypatch: pytest.MonkeyPatch) -> None:

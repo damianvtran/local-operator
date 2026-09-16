@@ -19,6 +19,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +268,24 @@ def _frames(root, sequence):
     elif mode == "byte_count_mismatch":
         _publish(root, payload)
         byte_count = byte_count + 1
+    elif mode == "lost_bytes":
+        # The canary's own shape (ep-455d62d3cc35): a publication whose bytes
+        # never landed. Sequence 0 stays frameless so the poisoning lands on the
+        # EXECUTE path, which is where the canary met it.
+        #
+        # The first build creates the file at the digest name and gets none of
+        # its bytes to disk -- what a full disk does to a create-then-write --
+        # and fails the observation phase. The resumed build then finds the NAME
+        # already there and returns a reference to it WITHOUT rewriting, which
+        # is what a content-addressed publisher does when it treats an existing
+        # name as proof the bytes are present. That is the poison.
+        if sequence == 0:
+            return ()
+        path = os.path.join(root, digest)
+        if not os.path.lexists(path):
+            with open(path, "wb"):
+                pass
+            raise ObservationPhaseError("screenshot bytes could not be published")
     elif mode == "fifo":
         # A FIFO under an honest-looking digest name. Nothing ever writes to it,
         # so a parent that opens it without O_NONBLOCK blocks in the kernel
@@ -274,6 +293,14 @@ def _frames(root, sequence):
         path = os.path.join(root, digest)
         if not os.path.lexists(path):
             os.mkfifo(path)
+    elif mode == "directory":
+        # A DIRECTORY under the honest digest name. It is the non-regular case
+        # that is NOT an attack on liveness, so only the file-type clause can
+        # catch it -- and the refusal has to name the kind, or a reader cannot
+        # tell it from the FIFO above.
+        path = os.path.join(root, digest)
+        if not os.path.lexists(path):
+            os.mkdir(path)
     return (
         FrameRef(
             frame_id="frame-%%d" %% sequence,
@@ -1070,20 +1097,25 @@ async def test_real_worker_publishes_a_frame_the_parent_verifies_and_bundles(
 
 
 @pytest.mark.parametrize(
-    ("mode", "refusal"),
+    ("mode", "refusal", "kind"),
     [
         # Bytes exist, but only outside the one directory the parent opens.
-        ("outside_root", "artifact path is unsafe or unavailable"),
+        ("outside_root", "artifact path is unsafe or unavailable", None),
         # An in-root name that resolves outside it; O_NOFOLLOW is the guard.
-        ("symlink_escape", "artifact path is unsafe or unavailable"),
+        ("symlink_escape", "artifact path is unsafe or unavailable", None),
         # In-root bytes of the declared length whose content is not the digest.
-        ("digest_mismatch", "artifact digest differs"),
+        ("digest_mismatch", "artifact digest differs", None),
         # In-root bytes of the right content but a lied-about length.
-        ("byte_count_mismatch", "artifact is not a matching regular file"),
+        ("byte_count_mismatch", "artifact byte count differs", None),
         # A FIFO nobody writes to: the LIVENESS case. The S_ISREG check sits
         # behind the open, so only O_NONBLOCK stops this wedging the parent
-        # forever -- and it is refused by that same existing clause.
-        ("fifo", "artifact is not a matching regular file"),
+        # forever -- and it is refused by its own clause, which now names the
+        # kind it found.
+        ("fifo", "artifact is not a regular file", "fifo"),
+        # A directory at the same name: a non-regular object that poses no
+        # liveness threat, so the refusal itself is what has to separate the
+        # two -- the exact ambiguity that made a paid episode undiagnosable.
+        ("directory", "artifact is not a regular file", "directory"),
     ],
 )
 @pytest.mark.asyncio
@@ -1094,6 +1126,7 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
     adapter_site: Path,
     mode: str,
     refusal: str,
+    kind: str | None,
 ) -> None:
     """Being told the root grants no authority to read outside it, or to lie.
 
@@ -1105,12 +1138,18 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
     let ``symlink_escape`` reach ``completed``, and removing the digest
     comparison turned ``digest_mismatch`` red.
 
+    WHAT THE REFUSAL SAYS IS PART OF THE CONTRACT, not a nicety. The old text
+    covered a wrong file TYPE and a wrong SIZE with one sentence, so a sealed
+    bundle could not say which had happened: ``ep-455d62d3cc35`` (task_012 of
+    the deepseek-flash canary batch) died on it after 88 steps with nothing else
+    recorded. Every mode therefore also pins the VALUES its clause decided on --
+    the digest name, the kind, the declared ``byte_count`` and the real size.
+
     ``fifo`` is the odd one out and belongs here anyway: it attacks LIVENESS
-    rather than content. The refusal it lands on is shared with
-    ``byte_count_mismatch``, so the assertion that matters is that the episode
-    TERMINATES at all -- without ``O_NONBLOCK`` the open never returns, and
-    because ``verify_artifact`` runs on the event-loop thread after the mutating
-    call's ``wait_for`` has closed, nothing upstream can time it out.
+    rather than content. What matters for it is that the episode TERMINATES at
+    all -- without ``O_NONBLOCK`` the open never returns, and because
+    ``verify_artifact`` runs on the event-loop thread after the mutating call's
+    ``wait_for`` has closed, nothing upstream can time it out.
 
     The episode must not report success, and it must never seal a bundle that
     claims frames it could not verify.
@@ -1118,9 +1157,10 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
 
     _arm_cutpoint(adapter_site, None)
     _arm_frames(adapter_site, mode)
+    config = _subprocess_config(tmp_path)
     runner = EpisodeRunner(
         build_spec(episode_id),
-        _subprocess_config(tmp_path),
+        config,
         selector=real_selector,
         model=ScriptedModel(["step", "finish"]),
         launch=AdapterSupervisor.launch,
@@ -1134,6 +1174,25 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
     # it. Without this, length-changing tampering is rejected by the size check
     # and the digest comparison goes untested while the suite stays green.
     assert outcome.diagnostic is not None and refusal in outcome.diagnostic
+    if kind is not None:
+        # The non-regular modes have to say WHAT ARRIVED and how big it was, or
+        # the FIFO (an attack) and the directory (a broken publication) read
+        # identically -- which is the failure this pin exists to prevent.
+        (published,) = list(config.artifact_root.iterdir())
+        assert (
+            f"artifact is not a regular file: {published.name} is a {kind} (size="
+            in outcome.diagnostic
+        )
+    elif mode == "byte_count_mismatch":
+        # The declared count is the honest length + 1, so both numbers have to
+        # appear: a reader cannot tell a short file from a long one otherwise.
+        (published,) = list(config.artifact_root.iterdir())
+        payload_size = published.stat().st_size
+        assert (
+            f"artifact byte count differs: {published.name} declares "
+            f"{payload_size + 1} bytes of image/png but the file holds "
+            f"{payload_size} bytes"
+        ) in outcome.diagnostic
     assert outcome.score is None or outcome.score.status == "unscored"
     root = outcome.bundle_root
     if root is None:
@@ -1145,6 +1204,70 @@ async def test_worker_cannot_deliver_frames_from_outside_the_root(
         assert report.valid, [issue.code for issue in report.issues]
         assert report.outcome is not None
         assert report.outcome.reportable is False
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_bytes_never_landed_is_refused_for_its_size(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """The canary's crash, reproduced: a poisoned content address, refused on retry.
+
+    ``ep-455d62d3cc35`` (task_012 of the deepseek-flash canary batch) died on
+    the parent's artifact refusal after 88 steps, with the guest disk full. The
+    frame publish that failed with ``ENOSPC`` had CREATED the file at the
+    content address and got none of its bytes to disk; because a
+    content-addressed publisher treats an existing name as proof the bytes are
+    present, the resumed attempt returned a reference to that empty file. The
+    parent refused it CORRECTLY -- the file is not the declared artifact -- and
+    the bundle recorded only "artifact is not a matching regular file", the
+    same sentence a FIFO or a directory at that name produces. Nothing in the
+    evidence could say which of the four had happened, so the episode's cause
+    was lost with it.
+
+    What this test pins is the DIAGNOSIS, not the refusal: the empty leftover
+    must be reported as a byte-count mismatch that names the digest and both
+    sizes, on the RETRY path where the canary met it. The refusal itself stays
+    exactly as strict -- an artifact that does not match its reference can never
+    be admitted to a bundle, and the episode must not score.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    _arm_frames(adapter_site, "lost_bytes")
+    # No sleeping in a unit test; the bound under test is the ATTEMPT count.
+    config = _subprocess_config(tmp_path, observation_retry_delay=0.0)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=real_selector,
+        model=ScriptedModel(["step", "finish"]),
+        launch=AdapterSupervisor.launch,
+        rescue=_accepting_rescue,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status != "completed"
+    assert outcome.score is None or outcome.score.status == "unscored"
+    root = outcome.bundle_root
+    assert root is not None
+    # The retry really happened. Without it this would be the FIRST attempt's
+    # failure, not the poisoned address the second one found -- and the retry is
+    # the whole reason the leftover was reachable in the first place.
+    assert len(_retry_events(root)) == 1
+
+    # The leftover really is the empty file the publish left behind, at the
+    # content address of bytes that never landed.
+    (published,) = list(config.artifact_root.iterdir())
+    assert published.stat().st_size == 0
+    assert outcome.diagnostic is not None
+    assert re.search(
+        rf"artifact byte count differs: {published.name} declares \d+ bytes of image/png "
+        rf"but the file holds 0 bytes",
+        outcome.diagnostic,
+    ), outcome.diagnostic
 
 
 @pytest.mark.asyncio
