@@ -532,6 +532,44 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     assert fresh.config.values["private_secret"] == "never-serialize-me"
 
 
+async def test_settings_projection_serves_the_registry_authored_annotations(desktop):
+    """The three fields the registry authors and only the wire can carry.
+
+    A `warning` is a consequence written for one key, `placeholder` is an example
+    for a field whose shape its label cannot show, and `gated_by` names the key
+    whose value decides whether another key may be edited at all. A desktop
+    renderer cannot infer any of them (`kind` says how a value is edited and
+    `is_default` is a value comparison), so the projection is the only way the
+    surface can state a consequence, show an example, or render a gated child as
+    disabled instead of saveable.
+
+    Two properties are asserted, and the second is the one a later edit is most
+    likely to break: every row carries all three KEYS (so a client may read them
+    unconditionally) and their VALUES are the registry's own (so the route
+    cannot grow a second opinion about a key's consequence).
+    """
+    client, _app = desktop
+    rows = {
+        row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
+    }
+    assert rows, "the projection returned no rows"
+    for key, row in rows.items():
+        for field in ("warning", "placeholder", "gated_by"):
+            assert field in row, f"{key} is missing {field}"
+    for setting in settings_io.SETTINGS:
+        row = rows[setting.key]
+        assert row["warning"] == setting.warning, setting.key
+        assert row["placeholder"] == setting.placeholder, setting.key
+        assert row["gated_by"] == setting.gated_by, setting.key
+    # The assertions above are only evidence that the fields are PLUMBED while at
+    # least one key of each kind exists in the registry, so a registry that lost
+    # them all would not quietly turn this into a test of empty strings.
+    values = list(rows.values())
+    assert any(row["warning"] for row in values), "no registered key carries a warning"
+    assert any(row["placeholder"] for row in values), "no registered key carries a placeholder"
+    assert any(row["gated_by"] for row in values), "no registered key is gated"
+
+
 async def test_settings_cascade_preserves_concurrent_siblings(desktop):
     client, app = desktop
     manager = app.state.config_manager
