@@ -42,8 +42,9 @@
 # -- the handles whose judgement stands in for the project's: `damianvtran`
 # (admin), `bbqben`, `olafagbemi`, `sherman-tsui`, `SanaKetabchi`. One mechanical
 # difference since 2026-09-16: the ruleset's `required_approving_review_count: 1`
-# is satisfied by an approving review from *any* collaborator with write access,
-# not only from those five, because no code owners are declared any more. Ask the
+# is satisfied by an approving review from *any* collaborator with write access
+# other than the author — self-approval is refused — not only from those five,
+# because no code owners are declared any more. Ask the
 # five by preference. `sebkow` and `jcobhams` also hold write access but are
 # deliberately NOT in that set: ownership here means "can approve on behalf of
 # the project", which is narrower than commit access. Verify a handle before

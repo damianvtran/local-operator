@@ -1078,9 +1078,10 @@ successful publish call.
 
 ## Who may merge: two tiers
 
-`main` is governed by a ruleset that requires **one approving review** — plus one
-extra, explicit approval from GitHub's `require_extra_approval_for_unattributed_changes`
-when a pull request carries commits whose author is not a GitHub account — and
+`main` is governed by a ruleset that requires **one approving review**, plus the
+one extra approval GitHub's *Additional approval for unattributed Copilot pull
+requests* adds when a pull request is not attributed to a person (on by default:
+it raises the configured count, so an unattributed PR needs two approvals), and
 carries a configured **bypass for the admin repository role** (`bypass_actors`:
 `RepositoryRole` 5, `bypass_mode: always` — diff this sentence against
 `gh api repos/<owner>/<repo>/rulesets/<id>` rather than trusting it). It no
@@ -1162,7 +1163,8 @@ nobody when a PR opens — the four-handle ping that used to fire within a secon
 of every PR is gone, and PRs are opened **non-draft** again. (For an ordinary
 PR the draft flag existed only to suppress that request; the release-claim lock
 PR still opens as a draft for its own reason, see "Take the lock" above. A draft
-cannot be merged, so for every other PR it now only delays the merge.) Two rules replace the automatic routing:
+cannot be merged, so for every other PR it now only delays the merge.) Two rules
+replace the automatic routing:
 
 - **Do not add reviewers to a PR, or tag a person in a comment, unless the
   operator asks for reviewers on that PR.** A comment tag is what says a PR is
