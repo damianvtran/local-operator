@@ -1,0 +1,428 @@
+"""A desktop ROUTE answers a read without an answering owner (design D1-D4).
+
+The facade's own contract is pinned in
+``tests/unit/session/test_ownerless_read.py``; this file is the half the operator
+actually hit — the HTTP routes, the 200 instead of the 503, the latency against
+the budget, the ``cold_reason``/``attaching`` tokens on the wire, and the fact
+that no read path spawns.
+
+THE MEASUREMENT IT REPRODUCES. Isolated config root, synthetic session id, a
+live-but-silent owner (a socket that accepts the dial, sends the welcome and then
+answers nothing). Before this change ``GET /v1/desktop/sessions/{id}`` and
+``/history`` answered ``503 Session owner is unavailable. Reconnect and reconcile
+before retrying.`` after 15.1-15.2 s; the same durable rows were readable in
+0.02 s with no owner at all. After it: 200, cold, ``owner-silent``, inside the
+budget, with the same rows on ``/history``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import uuid
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from local_operator.server.routes import desktop_sessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
+    DesktopSessions,
+)
+from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
+from local_operator.session.runtime import launch, registry
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.e2e.harness import ScriptedStream, build_session
+from tests.unit.session.test_ownerless_read import _FakeOwner, _publish_live, _seed
+
+TOKEN = "synthetic-desktop-token"
+#: Upper bound on an awaited event, never a budget to sleep through.
+DEADLOCK_GUARD_S = 20.0
+
+
+class _Harness:
+    """One pool, one real router app, one synthetic session and its cwd."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.app = FastAPI()
+        self.app.include_router(desktop_sessions.router)
+        self.pool = DesktopSessions(root)
+        self.app.state.desktop_sessions = self.pool
+        self.inputs = root / "workspace"
+        self.inputs.mkdir(parents=True, exist_ok=True)
+        # The receipts journal behind the control routes resolves its store
+        # through app state; ``host()`` still prefers the pool above.
+        from local_operator.config import ConfigManager
+
+        self.app.state.config_manager = ConfigManager(config_dir=root)
+        self.session_id = ""
+        self.client: AsyncClient | None = None
+
+    async def __aenter__(self) -> "_Harness":
+        self.session_id = await self.pool.create(str(self.inputs))
+        await _seed(self.root, session_id=self.session_id, rows=2)
+        self.client = AsyncClient(
+            transport=ASGITransport(app=self.app),
+            base_url="http://localhost",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        if self.client is not None:
+            await self.client.aclose()
+
+
+@pytest.fixture(autouse=True)
+def _desktop_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+
+
+async def _get(client: AsyncClient, url: str) -> tuple[int, float, dict[str, Any]]:
+    started = time.monotonic()
+    response = await client.get(url)
+    elapsed = time.monotonic() - started
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    return response.status_code, elapsed, body
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_read_serves_a_silent_owner_cold_with_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE PROBE at the call the route makes, with no HTTP in the way.
+
+    ``DesktopSessionBridge.acquire`` is where the reported failure happened:
+    ``attach_existing`` -> ``_bind_to`` raised ``OwnerAckTimeout`` out of a dial
+    into a live-but-silent owner, and the route ladder turned that into the 503.
+    The read mode must return the cold facade, carry the reason it is cold, and
+    leave the durable rows readable — in the same process, from the same session
+    directory that had them all along.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        bridge = DesktopSessionBridge(tmp_path, harness.session_id, str(harness.inputs))
+
+        started = time.monotonic()
+        await bridge.acquire(read=True)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"a read waited {elapsed:.2f}s"
+        snapshot = await bridge.snapshot()
+        assert snapshot["payload"]["cold"] is True
+        assert snapshot["payload"]["cold_reason"] == "owner-silent"
+        assert snapshot["payload"]["attaching"] is True
+        history = await bridge.history(limit=10)
+        assert len(history["entries"]) == 4
+        await bridge.release()
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_read_routes_answer_200_for_a_silent_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's route, end to end: 200, cold, and the reason named."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+
+        status, elapsed, body = await _get(harness.client, base)
+        assert status == 200, body
+        assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"the snapshot waited {elapsed:.2f}s"
+        payload = body["result"]["payload"]
+        assert payload["cold"] is True
+        assert payload["cold_reason"] == "owner-silent"
+        assert payload["attaching"] is True
+
+        status, elapsed, body = await _get(harness.client, f"{base}/history")
+        assert status == 200, body
+        assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"the history read waited {elapsed:.2f}s"
+        assert len(body["result"]["entries"]) == 4
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_owner_at_all_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fast cold read stays fast, and now says WHY it was cold."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        assert registry.scan(tmp_path) == []
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+
+        status, elapsed, body = await _get(harness.client, base)
+
+        assert status == 200, body
+        assert elapsed < 1.0, f"a cold read with no owner waited {elapsed:.2f}s"
+        payload = body["result"]["payload"]
+        assert payload["cold"] is True
+        assert payload["cold_reason"] == "no-runtime"
+        assert payload["attaching"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_owner_is_still_a_live_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded attempt must not turn a working owner into a cold paint.
+
+    This is the half of the trade the design rejected a 0 s budget for: a healthy
+    owner's canonical state — a turn in flight, a pending gate — reaches the
+    panel's first frame exactly as it did before.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        directory = tmp_path / "sessions" / harness.session_id
+        owner_session = build_session(directory, ScriptedStream([]), cwd=harness.inputs)
+        handle = ServingSessionHandle(
+            owner_session, asyncio.get_running_loop(), cwd=str(harness.inputs)
+        )
+        server = RuntimeServer(handle, kind="daemon")
+        await server.start_in_process()
+        await asyncio.sleep(0.2)
+        (directory / ".session.pid").write_text(str(registry.scan(tmp_path)[0][0].pid))
+        try:
+            status, _elapsed, body = await _get(
+                harness.client, f"/v1/desktop/sessions/{harness.session_id}"
+            )
+        finally:
+            await server.aclose()
+
+        assert status == 200, body
+        payload = body["result"]["payload"]
+        assert payload["cold"] is False, "a healthy owner was served cold"
+        assert payload["cold_reason"] is None
+        assert payload["attaching"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_events_route_opens_for_a_silent_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/events`` is acquired BEFORE the headers are written.
+
+    So the old value failed the STREAM the same way, and the renderer then spent
+    its own 23.5 s of retry delays before painting a lost connection. The stream
+    must open; the generator's body is stubbed because ``ASGITransport`` buffers
+    until the app returns and the real one is an SSE loop.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        acquired: list[bool] = []
+        real_acquire = DesktopSessionBridge.acquire
+
+        async def spy(self: DesktopSessionBridge, *, read: bool = False) -> Any:
+            acquired.append(read)
+            return await real_acquire(self, read=read)
+
+        async def no_frames(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+            if False:  # pragma: no cover — keeps this an async generator
+                yield {}
+
+        monkeypatch.setattr(DesktopSessionBridge, "acquire", spy)
+        monkeypatch.setattr(DesktopSessionBridge, "events", no_frames)
+        url = f"/v1/desktop/sessions/{harness.session_id}/events"
+
+        status, _elapsed, body = await _get(harness.client, url)
+
+        assert status == 200, body
+        assert acquired == [True], "the stream did not take the read envelope"
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_rollover_reaches_the_stream_after_a_late_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2.2 on the wire: the frame the renderer consumes, on the stream it holds.
+
+    A cold paint that never becomes live is only half a fix. The read opens the
+    stream with ``cold``/``attaching``; the owner answers a moment later, and the
+    subscription must receive a ``frontend.update`` carrying the new epoch — the
+    rollover the renderer already handles for a canonical epoch change.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        frames: list[dict[str, Any]] = []
+
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            subscription = bridge.subscribe()
+            stream = bridge.events(subscription, epoch=None, after_seq=0)
+            try:
+                snapshot = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                while snapshot["type"] != "snapshot":
+                    snapshot = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                frames.append(snapshot)
+                assert snapshot["payload"]["cold_reason"] == "owner-silent"
+
+                await owner.send_sync()
+
+                deadline = time.monotonic() + DEADLOCK_GUARD_S
+                while time.monotonic() < deadline:
+                    frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                    frames.append(frame)
+                    if frame["type"] == "frontend.update" and frame["payload"]["epoch"] != (
+                        snapshot["payload"]["frontend"]["epoch"]
+                    ):
+                        break
+                else:  # pragma: no cover — the loop only exits by break
+                    raise AssertionError("no rollover frame arrived")
+            finally:
+                await stream.aclose()
+
+        rollover = frames[-1]
+        assert rollover["type"] == "frontend.update"
+        assert rollover["payload"]["epoch"] == "fake-owner"
+        assert rollover["payload"]["cold"] is False
+        assert bridge.remote is None or bridge.remote.cold_reason is None
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_control_route_names_the_runtime_unreachable_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D8, without a UI copy change.
+
+    A control request still refuses when it cannot reach the runtime, and the
+    refusal now carries the CODE the renderer branches on — while ``message``
+    keeps the exact sentence the shipped app matches by prefix, so the two
+    repositories never have to move in step for that paragraph to render.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        url = f"/v1/desktop/sessions/{harness.session_id}/messages"
+
+        response = await harness.client.post(
+            url, json={"request_id": str(uuid.uuid4()), "text": "hi"}
+        )
+
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "runtime_unreachable"
+        assert detail["message"].startswith("Session owner is unavailable.")
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_read_route_never_engages_a_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D4 over the real route: a GET is side-effect free.
+
+    Every route in this path is reachable from a sidebar sweep, so a read that
+    kicked a warm would spawn for rows nobody clicked. The patch is on the module
+    ``attached`` imports from, because that import happens inside the bind.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        spawned: list[Any] = []
+
+        async def _forbidden(*args: Any, **kwargs: Any) -> Any:
+            spawned.append((args, kwargs))
+            raise AssertionError("a read route spawned a runtime")
+
+        monkeypatch.setattr(launch, "engage_runtime", _forbidden)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+
+        for url in (base, f"{base}/history"):
+            status, _elapsed, body = await _get(harness.client, url)
+            assert status == 200, body
+
+        assert spawned == [], "a read route attempted to engage a runtime"
+
+
+@pytest.mark.asyncio
+async def test_a_read_route_declares_the_read_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which routes are reads is a decision, so it is asserted route by route.
+
+    The write paths keep the control envelope deliberately: a request that was
+    not admitted must be able to say so, and only a read has a durable answer to
+    fall back on.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        budgets: list[tuple[str, float | None]] = []
+        real = AttachedSession.attach_existing
+
+        async def spy(self: AttachedSession, *, budget: float | None = None) -> bool:
+            budgets.append(("call", budget))
+            return await real(self, budget=budget)
+
+        monkeypatch.setattr(AttachedSession, "attach_existing", spy)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+
+        await _get(harness.client, base)
+        await _get(harness.client, f"{base}/history")
+        # ``/interrupt`` is the control half, and it is safe to drive with no
+        # owner: the route answers ``idle`` without dialling (its own review
+        # round 1 MAJOR-1) — but it still ACQUIRES, which is what is under test.
+        await harness.client.post(f"{base}/interrupt", json={"request_id": str(uuid.uuid4())})
+
+        assert budgets == [
+            ("call", READ_ATTACH_BUDGET_S),
+            ("call", READ_ATTACH_BUDGET_S),
+            ("call", None),
+        ], f"the route envelopes are wrong: {budgets}"
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_payload_still_validates_for_an_older_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3's additive rule, asserted rather than promised.
+
+    A host that does not track the distinction (an in-process one, a test's
+    stand-in) builds the same payload without the two new keys, and it must still
+    validate — which is what makes the field safe for a renderer that predates it.
+    """
+    from local_operator.server.models.desktop_sessions import SnapshotPayload
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        response = await harness.client.get(f"/v1/desktop/sessions/{harness.session_id}")
+        payload = response.json()["result"]["payload"]
+
+        trimmed = {
+            key: value for key, value in payload.items() if key not in ("cold_reason", "attaching")
+        }
+        validated = SnapshotPayload.model_validate(trimmed)
+        assert validated.cold is True
+        # And the documented fallback for a reader that never saw the fields.
+        assert validated.cold_reason is None
+        assert validated.attaching is False

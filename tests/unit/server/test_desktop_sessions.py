@@ -490,6 +490,13 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     was not sent: ..." (review round 2, MAJOR-1).
 
     Vettedness cannot be recovered from message text, so it rides the type.
+
+    AND THE BODY IS CODED (design D8): ``{code, message}``, not a bare sentence.
+    The status alone cannot say whether a 503 is about THIS conversation or about
+    the server not answering at all, so the renderer branches on ``code`` -- while
+    ``message`` still carries the vetted sentence, because the shipped app matches
+    that text for its own copy and the two repositories must not have to move in
+    step.
     """
     from fastapi import HTTPException
 
@@ -498,12 +505,15 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
 
     generic = "Session owner is unavailable. Reconnect and reconcile before retrying."
 
-    async def relay(error: BaseException) -> str:
+    async def relay(error: BaseException) -> dict[str, str]:
         with pytest.raises(HTTPException) as raised:
             async with errors():
                 raise error
         assert raised.value.status_code == 503
-        return str(raised.value.detail)
+        detail = raised.value.detail
+        assert isinstance(detail, dict), detail
+        assert detail["code"] == "runtime_unreachable"
+        return detail
 
     leaky = [
         ConnectionError(
@@ -515,12 +525,12 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     ]
     for error in leaky:
         detail = await relay(error)
-        assert detail == generic, detail
+        assert detail["message"] == generic, detail
         # The specific values from the reproduction must be absent, not merely
         # reworded: these are an internal port and another session's identifier.
-        assert "54321" not in detail
-        assert "abc123secretsession" not in detail
-        assert "127.0.0.1" not in detail
+        assert "54321" not in detail["message"]
+        assert "abc123secretsession" not in detail["message"]
+        assert "127.0.0.1" not in detail["message"]
 
     # The vetted sentence still survives -- suppressing it would re-break the
     # "no model provider configured" case this relay exists to report (QA Q1).
@@ -528,7 +538,7 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
         "No model provider is configured yet. Connect one in Settings > Providers, "
         "then send the message again."
     )
-    assert await relay(ActionableConnectionError(vetted)) == vetted
+    assert (await relay(ActionableConnectionError(vetted)))["message"] == vetted
 
 
 @pytest.mark.asyncio
@@ -1492,12 +1502,13 @@ async def test_an_unreachable_owner_is_a_503_and_not_a_leak(tmp_path, monkeypatc
                 f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": rid}
             )
             assert response.status_code == 503, response.text
-            detail = str(response.json()["detail"])
-            assert detail == (
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable"
+            assert detail["message"] == (
                 "Session owner is unavailable. Reconnect and reconcile before retrying."
             ), detail
             for leaked in ("54321", "127.0.0.1"):
-                assert leaked not in detail, detail
+                assert leaked not in detail["message"], detail
             assert owner.ops == ["abort"], "the route never actually asked the owner"
             # The claim was left PENDING rather than recorded, so the SAME id can
             # be retried — which is the remedy the sentence above promises
@@ -4517,7 +4528,9 @@ async def test_a_move_during_owner_recovery_answers_503(move_api) -> None:
         )
 
         assert response.status_code == 503, response.text
-        assert response.json()["detail"] == (
+        detail = response.json()["detail"]
+        assert detail["code"] == "runtime_unreachable"
+        assert detail["message"] == (
             "Session owner is unavailable. Reconnect and reconcile before retrying."
         )
         assert bridge.remote.cwd == str(before)
