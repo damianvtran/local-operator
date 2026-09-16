@@ -311,10 +311,14 @@ async def info():
     No parameters, because ``/info`` has exactly one answer per host — the same
     reason the slash command takes no argument at all.
 
-    ``collect_snapshot`` BLOCKS (the macOS session probe measured ~880 ms,
-    because it shells ``top -l1`` for the whole system), so it runs on a worker
-    thread through ``asyncio.to_thread`` exactly as ``/analytics`` does; on the
-    loop it would stall every other request for the duration.
+    ``collect_snapshot`` BLOCKS — a first call in a cold process measures in the
+    hundreds of milliseconds (module imports and metadata scans; the macOS
+    session probe's own whole-system ``top -l1`` dump is no longer among them) —
+    so it runs on a worker thread through ``asyncio.to_thread`` exactly as
+    ``/analytics`` does; on the loop it would stall every other request for the
+    duration. Measured end to end over a real daemon: 535 ms for the first
+    request after boot, 131 ms median after it
+    (``scripts/bench_info_snapshot.py``, ``bench/info-snapshot-after.json``).
 
     ``LiveState()`` is deliberately EMPTY — no session is attached and the
     session bridge is not touched. The live half of the snapshot (the subagent
