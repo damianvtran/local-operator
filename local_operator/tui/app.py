@@ -13119,13 +13119,13 @@ class OperatorApp(App[None]):
     def _run_update(self) -> None:
         from local_operator.update import (
             InstallKind,
+            PrunePlan,
             UpdateError,
             check_latest,
             git_snapshot_notice,
             install_kind,
             is_git_snapshot,
             perform_upgrade,
-            PrunePlan,
             prune_notice_lines,
             refresh_mobile_after_upgrade,
             refresh_service_daemons_after_upgrade,
