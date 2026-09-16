@@ -6860,6 +6860,51 @@ async def test_mcp_logout_rows_build_on_a_followers_read_only_facade() -> None:
         ):
             await _type_into_editor(pilot, app, "/mcp logout ")
             assert [name for name, _ in editor.picker.suggestions()] == ["logout notion"]
+            # The verb-context line is what a NON-empty list carries: it must
+            # survive the rows fix (design review D1's other half). It is set
+            # whether or not rows paint, so it is asserted directly.
+            assert editor.picker._notice == "choose a credential to forget"
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_why_its_list_is_empty() -> None:
+    """An empty list must state the reason, not invite a choice from nothing.
+
+    `/mcp logout ` with an OAuth server configured and NO stored grant filters
+    every row away — a row survives only when its URL holds a credential — and
+    the verb-context notice ("choose a credential to forget") then reads as a
+    broken picker: the user is asked to choose from an empty list and is never
+    told that nothing is stored. The sibling `/logout` picker sets its empty
+    REASON instead ("no stored credentials — nothing to log out of."), and this
+    is the same state one command over. Design review D1, and the same fix
+    answers the row the filter drops in silence (review round 1, MINOR-1).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "no stored credential" in editor.picker._notice, editor.picker._notice
+            assert "choose a credential to forget" not in editor.picker._notice
 
 
 async def _type_into_editor(pilot, app, text: str) -> None:

@@ -10,11 +10,12 @@ unit suite and the sibling e2e stages were green while the TUI was wrong:
   never had, so its emptiness branch was taken on every session whose slash
   command routes to the owner — every fresh viewer, and the phone projection,
   which shares that handler.
-* Typing ``/mcp logout `` killed the app as the argument list refreshed:
-  ``_mcp_server_url`` asked the follower's read-only ``SnapshotMcpManager`` for
-  ``get_server_config``, which that facade does not have. The sibling grant
-  tests drive ``_run_slash_command`` — which ROUTES the verb to the owner — and
-  never the picker, which is built locally either way.
+* Typing ``/mcp logout `` killed the app as the argument list refreshed: the
+  URL mapping (then ``_mcp_server_url``, now ``_mcp_configured_urls``) asked
+  the follower's read-only ``SnapshotMcpManager`` for ``get_server_config``,
+  which that facade does not have. The sibling grant tests drive
+  ``_run_slash_command`` — which ROUTES the verb to the owner — and never the
+  picker, which is built locally either way.
 
 This stage drives app + production ``AttachedSession`` viewer + a real runtime
 child + the config layer + the credential store, so it fails if either defect
