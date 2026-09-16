@@ -207,15 +207,36 @@ def test_a_bound_without_a_repeat_is_refused(tmp_path: Path) -> None:
     assert _wake_create(_args(every="1h", limit=0)) == 1
 
 
-def test_the_listing_shows_a_time_bound(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_listing_shows_a_time_bound(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`--until` was carried in `--json` and dropped from the human listing, so
     a `--limit` wake advertised its bound while an `--until` one was
     indistinguishable from an unbounded repeat — the bound a user is most
-    likely to forget was the one not rendered (round 5, R6/U16)."""
+    likely to forget was the one not rendered (round 5, R6/U16).
+
+    The terminal width is PINNED because the listing budgets its message column
+    from the host's (`shutil.get_terminal_size` reads `COLUMNS`, then the real
+    stdout), and one run-to-run difference is enough to clamp the message out
+    of the row: a `--until` row's tail (` · every 30m, until in 6d`) is 25
+    characters against a message budget that shrinks by 7-8 characters whenever
+    the WHEN cell widens from the 11-12 a same-day one takes (`8:14 PM EDT`,
+    `12:39 AM UTC`) to the 18-19 of a next-day `Sep 15 12:04 AM UTC` -- which
+    is what a run starting just before midnight UTC gets, because its due
+    times land on the following day. At that width `room` is 8 against a
+    10-character message, so the clamp prints `time bo…` and this test's own
+    `next(...)` raises StopIteration. CI run 34910432097 (shard 3, started
+    23:48 UTC; its two wakes due at 00:04/00:05 the next day) failed exactly
+    that way, while the same file passed on the previous head at 21:06 UTC.
+    The listing is correct in both runs -- the assertion here is that the BOUND
+    is rendered, not how a narrow budget clamps a message -- so the width it
+    renders at is part of the fixture, not of the host.
+    """
     import argparse
 
     from local_operator.cli import _wake_create, wake_command
 
+    monkeypatch.setenv("COLUMNS", "100")
     _session(tmp_path, "wakecreate01")
     assert _wake_create(_args(when="in 5m", message="unbounded", every="1h")) == 0
     assert _wake_create(_args(when="in 6m", message="time bound", every="30m", until="in 7d")) == 0

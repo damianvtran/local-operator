@@ -517,3 +517,25 @@ def test_extract_id_filter_excludes_injected_user_role_content():
     to_summarize = [rendered_marker, genuine, Message.assistant("ok")]
     preserved = extract_preserved_user_turns(to_summarize, {genuine.id})
     assert [t["text"] for t in preserved] == ["NEVER touch billing.py"]
+
+
+def test_extract_refuses_a_legacy_harness_notice_as_a_user_turn():
+    """An unstamped notice is not a user turn, however it is shaped.
+
+    A notice written before the ``harness_injected`` stamp existed (a real
+    session carries eight switch-notice rows with no ``provider_payload`` at
+    all) is a plain ``role="user"`` message, and harvesting one re-seats the
+    harness's words as the operator's on every replay of the marker. The stamp
+    cannot see it, so the notice's own head decides — and the operator's real
+    turns are still lifted verbatim beside it.
+    """
+    notice = Message.user(
+        "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+        "Reason: provider failure"
+    )
+    genuine = Message.user("NEVER touch billing.py")
+    to_summarize = [notice, Message.assistant("ok"), genuine]
+
+    assert [t["text"] for t in extract_preserved_user_turns(to_summarize)] == [
+        "NEVER touch billing.py"
+    ]

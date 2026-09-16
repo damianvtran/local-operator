@@ -198,10 +198,19 @@ class TestStaleness:
     def test_unreadable_libpython_parent_does_not_raise(self, branded, tmp_path):
         """QA round 2, Q3: `_needs_replant` is contractually no-raise.
 
-        `Path.exists()` is not total — an unreadable parent directory makes it
-        raise `PermissionError` (reproduced), which escaped a function this
+        An unreadable parent directory made `Path.exists()` raise
+        `PermissionError` (reproduced on 3.12), which escaped a function this
         module documents as never raising. "Replant" is the safe answer: a
         libpython we cannot stat is not one to assume correct.
+
+        The wall is asserted with `os.stat` rather than `Path.exists` because
+        the stdlib changed underneath the original precondition: 3.14 routes
+        `exists()` through `os.path.exists`/`_stat(ignore_errors=True)`, so
+        EACCES becomes `False` instead of propagating (3.12 raises). The route
+        this test is named for is still exercised wherever the stdlib still has
+        it — `_needs_replant` calls `exists()` itself, so an unguarded raise
+        there fails this test on 3.12 — while the property being pinned, "must
+        not raise on a path it cannot stat", holds on every interpreter.
         """
         walled = tmp_path / "lib" / "sub"
         walled.mkdir(parents=True)
@@ -211,12 +220,12 @@ class TestStaleness:
         try:
             # PRECONDITION, not decoration. `True` is ALSO reachable through the
             # `resolve()` identity mismatch below, so asserting it alone would
-            # not prove this test exercised the `exists()` path it is named for
+            # not prove this test exercised the unreadable path it is named for
             # — and on a host where `chmod 0o000` does not block (root, some
             # container runtimes) it would stay green with the guard deleted.
             # Review round 3, M3-2: the R2-1 failure mode in embryo.
             with pytest.raises(PermissionError):
-                dylib.exists()
+                os.stat(dylib)
             assert (
                 procname._needs_replant(branded, Path(os.path.realpath(sys.executable)), dylib)
                 is True
@@ -558,10 +567,12 @@ class TestLaunchdPrograms:
 
         Each of these was the documented anti-pattern before this change; a
         revert would restore "python3 is running in the background" with no
-        test failing anywhere else.
+        test failing anywhere else. Both axes are asserted: ``Program`` is the
+        branded image, ``ProgramArguments[0]`` is that daemon's role label.
         """
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
         sentinel = tmp_path / "bin" / procname.BRAND
@@ -571,14 +582,179 @@ class TestLaunchdPrograms:
 
         # `render_plist` is typed `dict[str, object]`, so the element type is
         # narrowed here rather than indexed straight off an `object`.
-        for rendered in (
-            mobile_install.render_plist(1),
-            browser_install.render_plist(1),
-            wakes_install.render_plist(tmp_path),
-        ):
-            program = rendered["ProgramArguments"]
+        rendered = {
+            "mobile": mobile_install.render_plist(1),
+            "browser": browser_install.render_plist(1),
+            "wakes": wakes_install.render_plist(tmp_path),
+            "tunnel": tunnel_install.render_plist(),
+        }
+        first_rows = set()
+        for name, plist in rendered.items():
+            program = plist["ProgramArguments"]
+            assert plist["Program"] == str(sentinel), name
             assert isinstance(program, list)
-            assert program[0] == str(sentinel)
+            assert program[0].startswith(procname.BRAND), (name, program[0])
+            first_rows.add(program[0])
+        # The point of the change: four daemons, four distinguishable rows.
+        assert len(first_rows) == 4, first_rows
+
+
+class TestSpawnIdentity:
+    """``(argv[0], executable)`` — the pairing that makes every spawn named.
+
+    A PAIR, and only a pair: on POSIX ``Popen(argv=[…])`` with
+    ``executable=None`` EXECUTES ``argv[0]``, so a spawn site that decorated
+    ``argv[0]`` with a label on its own would ask the kernel to run a file named
+    ``Local Operator [eval] session=…``. The other half of the contract is the
+    one CI taught: the label is applied ONLY alongside a branded image, because
+    a labelled ``argv[0]`` empties the child's ``sys.executable`` on Linux (see
+    ``tests/unit/test_spawn_naming_fallback.py``).
+    """
+
+    def test_pairs_the_label_with_the_branded_image(self, branded):
+        argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id="abcd1234")
+        assert argv0 == "Local Operator [session] id=abcd1234"
+        assert executable == str(branded)
+
+    def test_without_an_image_the_label_is_withheld(self, monkeypatch):
+        """Rung 2, and the reason it is not "argv-only labelling".
+
+        The row stays ``python3.x`` here. Labelling it would look better in
+        ``ps`` and cost the child its interpreter identity on Linux, which is a
+        trade this project does not make: see the module ladder and the
+        Linux-executed child test in ``test_spawn_naming_fallback.py``.
+        """
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+        assert argv0 == sys.executable
+        assert executable is None
+
+    def test_the_pair_actually_runs(self, monkeypatch):
+        """The pairing is EXECUTED, not merely returned — and the child is whole.
+
+        Both halves at once: the argv/``executable=`` pair starts the
+        interpreter, and the child that comes out of it can still say which
+        interpreter it is (the property Linux loses to a label).
+        """
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+        result = subprocess.run(
+            [argv0, "-c", "import sys; print(sys.executable or 'missing')"],
+            executable=executable,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        # realpath, not string equality: a platform is free to report the image
+        # it resolved, and the property under test is that the child HAS a
+        # working interpreter rather than which spelling of it came back.
+        assert os.path.realpath(result.stdout.strip()) == os.path.realpath(sys.executable)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX execve semantics")
+    def test_a_label_without_an_image_cannot_be_executed(self):
+        """The hazard the pairing exists for, demonstrated rather than assumed."""
+        with pytest.raises(OSError):
+            subprocess.run(
+                [procname.branded_argv0(procname.LABEL_EVAL, id="deadbeef"), "-c", "pass"],
+                timeout=30,
+            )
+
+    def test_a_failing_probe_withholds_the_label_too(self, monkeypatch):
+        """No-raise applies to the probe too: a failed probe is rung 2, not a label."""
+
+        def explode():
+            raise RuntimeError("no stat")
+
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", explode)
+        argv0, executable = procname.spawn_identity(procname.LABEL_SERVE, port=1)
+        assert argv0 == sys.executable
+        assert executable is None
+
+
+class TestLaunchdJob:
+    """``Program`` + role label: the shape three daemons could not be told apart in."""
+
+    ROLES = (
+        (
+            "mobile",
+            "local_operator.mobile.service",
+            procname.LABEL_MOBILE,
+            {"port": 4098},
+            ["--port", "4098"],
+        ),
+        (
+            "browser",
+            "local_operator.browser_bridge.daemon",
+            procname.LABEL_BROWSER,
+            {"port": 4099},
+            ["--port", "4099"],
+        ),
+        ("tunnel", "local_operator.tunnels.service", procname.LABEL_TUNNEL, {}, []),
+        ("wakes", "local_operator.wakes.supervisor", procname.LABEL_WAKES, {}, []),
+    )
+
+    @pytest.mark.parametrize("role,module,template,fields,extra", ROLES)
+    def test_program_key_carries_the_image_and_argv_the_label(
+        self, role, module, template, fields, extra, branded
+    ):
+        label = procname.branded_argv0(template, **fields)
+        job = procname.launchd_job(module, *extra, label=label)
+        assert job["Program"] == str(branded), role
+        assert job["ProgramArguments"] == [label, "-m", module, *extra], role
+
+    def test_no_branded_image_means_the_pre_branding_plist(self, monkeypatch):
+        """Rung 3 is byte-for-byte what these installers wrote before."""
+        monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
+        job = procname.launchd_job(
+            "local_operator.wakes.supervisor", label="Local Operator [wakes]"
+        )
+        assert job == {
+            "ProgramArguments": [sys.executable, "-m", "local_operator.wakes.supervisor"]
+        }
+        assert "Program" not in job
+
+    def test_the_label_is_optional(self, branded):
+        job = procname.launchd_job("local_operator.wakes.supervisor")
+        assert isinstance(job["ProgramArguments"], list)
+        assert job["ProgramArguments"][0] == procname.BRAND
+
+    @pytest.mark.parametrize("role,module,template,fields,extra", ROLES)
+    def test_the_stable_shim_wins_over_the_per_venv_image(
+        self, role, module, template, fields, extra, branded, tmp_path, monkeypatch
+    ):
+        """A unit names a path that survives a flip and a prune.
+
+        The branded link lives inside ONE venv, with a libpython dylib pin
+        beside it, and a supervised unit re-executes its image on every restart:
+        naming that path is what made launchd respawn 113 processes into a tree
+        the installer had already emptied on 2026-09-15. When the machine has the
+        generation layout (``update.daemon_image()`` answers a path) the stable
+        shim is the image and the LABEL stays where it was — the two axes are
+        independent, which is the point of the branded shape.
+        """
+        shim = tmp_path / "bin" / "python3"
+        monkeypatch.setattr(procname, "supervised_image", lambda: shim)
+        label = procname.branded_argv0(template, **fields)
+        job = procname.launchd_job(module, *extra, label=label)
+        assert job == {
+            "Program": str(shim),
+            "ProgramArguments": [label, "-m", module, *extra],
+        }, role
+        assert procname.launchd_program(module, *extra) == [str(shim), "-m", module, *extra]
+
+    def test_no_generation_layout_keeps_the_branded_shape(self, monkeypatch, branded):
+        """A checkout or a pip install must render today's plist, unchanged.
+
+        ``update.daemon_image()`` answers ``None`` there by design, and this
+        pins that the fallback is the branded image rather than something new.
+        """
+        monkeypatch.setattr(procname, "supervised_image", lambda: None)
+        job = procname.launchd_job(
+            "local_operator.wakes.supervisor", label="Local Operator [wakes]"
+        )
+        assert job["Program"] == str(branded)
+        assert procname.launchd_program("local_operator.wakes.supervisor")[0] == str(branded)
 
 
 class TestResumeExecutableRegression:

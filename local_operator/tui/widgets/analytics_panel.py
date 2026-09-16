@@ -45,6 +45,7 @@ see :func:`_session_row_line` for why that is load-bearing rather than tidy.
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, NamedTuple, Protocol, Sequence
 
@@ -67,6 +68,15 @@ from local_operator.analytics.model import (
     session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.costs import (
+    MoneyFigure,
+    SearchSpendSnapshot,
+    combined_spend,
+    cost_label,
+    cost_note_rungs,
+    format_usd,
+    micro_from_usd,
+)
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -132,7 +142,7 @@ def format_percent(fraction: float | None) -> str:
 
 
 def format_cost(aggregate: "_CostLike") -> str:
-    """A dollar figure for one scope: ``$12.34`` / ``$1.2k`` / ``$0.0042`` / ``$—``.
+    """A dollar figure for one scope: ``$12.34`` / ``$0.0042`` / ``<$0.0001`` / ``$—``.
 
     Reads three states off the aggregate, because "how much did this cost" has
     three honest answers and collapsing them lies:
@@ -146,21 +156,28 @@ def format_cost(aggregate: "_CostLike") -> str:
     - **Complete**: the plain figure.
 
     Small sums keep more precision (``$0.0042``) because a fresh install's spend
-    is fractions of a cent and rounding it to ``$0.00`` would read as free;
-    large sums abbreviate (``$1.2k``) for the same glanceability as the tokens.
+    is fractions of a cent and rounding it to ``$0.00`` would read as free. The
+    ladder itself lives in :func:`local_operator.tui.costs.format_usd` so every
+    money surface (this panel, the status band, ``/session``) spells the same
+    amount identically, and a nonzero figure below the ladder's resolution
+    renders ``<$0.0001`` rather than a confident ``$0.0000``.
     """
     if not aggregate.cost_is_known:
         return "$—"
-    usd = aggregate.cost_usd
-    if usd >= 1000:
-        body = f"${usd / 1000:.1f}k".replace(".0k", "k")
-    elif usd >= 1:
-        body = f"${usd:.2f}"
-    elif usd >= 0.01:
-        body = f"${usd:.3f}"
+    # The digits come from the ONE ladder (``tui.costs.format_usd``), so the
+    # figure here and the band's cannot be different magnitudes for the same
+    # money. The ``$1.2k`` abbreviation that used to live in this function is
+    # gone: it made ``/analytics`` print ``$1.2k`` where ``/session`` printed
+    # ``$1234.56``, and the panel has no chart axis to move it to — a table
+    # cell and a headline are exactly where a rounded magnitude lies most.
+    micro = getattr(aggregate, "cost_micro", None)
+    if isinstance(micro, int):
+        body = format_usd(micro)
     else:
-        # Sub-cent: show enough digits that a real spend is not rounded to $0.
-        body = f"${usd:.4f}"
+        maybe = micro_from_usd(aggregate.cost_usd)
+        # ``None`` = a figure the ladder cannot take (non-finite); print what the
+        # accounting holds rather than raising mid-render (review R1-7).
+        body = format_usd(maybe) if maybe is not None else f"${aggregate.cost_usd:.2f}"
     return body + ("+" if aggregate.cost_is_partial else "")
 
 
@@ -230,6 +247,9 @@ def _needs_cost_legend(
         *aggregate.by_session.values(),
         *(node.total for node in _iter_nodes(forest)),
     ]
+    # The search block's marks are not covered here on purpose: that block draws
+    # its own footnote beside itself (see ``search_spend_section``), so listing
+    # its scopes here would print the same legend twice on one screen.
     return any(scope_needs_cost_legend(s) for s in scopes)
 
 
@@ -238,6 +258,456 @@ def _iter_nodes(forest: list["SessionNode"]):
     for node in forest:
         yield node
         yield from _iter_nodes(list(node.children))
+
+
+#: Name/value geometry of the search-spend block, matching the Totals ``kv``
+#: rows on both diagnostics screens (``_VALUE_CELL``) so search dollars line up
+#: with the model dollars above them instead of starting a second gutter.
+_SEARCH_NAME_COL = 22
+_SEARCH_VALUE_CELL = 11
+
+
+def _money_run(scope: "_CostLike", cell: int) -> Text:
+    """A left-aligned cost cell, with the lower-bound ``+`` dimmed.
+
+    ``append_cost`` cannot be reused directly: it RIGHT-aligns into a table
+    column, while every row this block draws is a Totals ``kv`` row whose value
+    sits at a fixed left offset. The honesty vocabulary is still the one
+    ``format_cost`` owns -- ``$—`` unknown, ``+`` lower bound, sub-cent
+    precision -- and the ``+`` is dimmed here for the reason ``append_cost``
+    dims it: a status flag must not read as a digit.
+    """
+    text = format_cost(scope)
+    run = Text()
+    if text.endswith("+"):
+        run.append(text[:-1], style=semantic_style("fg"))
+        run.append("+", style=semantic_style("dim"))
+        run.append(" " * max(0, cell - len(text)))
+    else:
+        run.append(text, style=semantic_style("fg"))
+        run.append(" " * max(0, cell - len(text)))
+    return run
+
+
+def search_block_needs_legend(snapshot: "SearchSpendSnapshot | None") -> bool:
+    """Whether the search block will draw the money legend for its own marks.
+
+    Shared by the block itself and by ``build_report``'s foot-legend decision
+    (design round 3, D12): the two must agree, or the screen either prints the
+    identical footnote twice or loses it entirely — which is exactly the
+    disagreement this helper exists to make impossible.
+    """
+    if snapshot is None:
+        return False
+    return any(scope_needs_cost_legend(scope) for scope in (snapshot, *snapshot.rows))
+
+
+def _counted_kinds(snapshot: SearchSpendSnapshot) -> str:
+    """``5 searches · 3 reads``, or just the kind this scope actually has.
+
+    The noun follows the KIND (a read-only conversation says ``1 read``, not
+    ``0 searches · 1 read``) and a mixed scope names both counts, because the
+    share it is printed beside covers both kinds' money -- ``5 searches`` next to
+    a share that includes a read's dollars reads as if the read were not part of
+    it. Extracted from the row that needed it so the bar policy can MEASURE the
+    same ladder it renders (round-3 MAJOR-2).
+    """
+    if snapshot.searches:
+        word = "search" if snapshot.searches == 1 else "searches"
+        counted = f"{snapshot.searches} {word}"
+        if snapshot.reads:
+            read_word = "read" if snapshot.reads == 1 else "reads"
+            counted = f"{counted} · {snapshot.reads} {read_word}"
+        return counted
+    word = "read" if snapshot.reads == 1 else "reads"
+    return f"{snapshot.reads} {word}"
+
+
+def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
+    """How a headline names its search half: money when there is any, else volume.
+
+    Lives here rather than in ``costs.py`` because it needs ``format_cost``,
+    which this module owns -- and the alternative, a second money formatter in
+    the shared module, is the defect the panels' one-formatter rule exists for.
+
+    Design review D8: a free-only session printed ``incl. $0.0000 search`` on a
+    $0.393 figure. A zero names nothing, while the thing that happened was three
+    free searches -- and the volume form is the one the 80-column crop keeps.
+    """
+    if snapshot is None or not snapshot.count:
+        return ""
+    # Word by KIND (round-2 review R2-MINOR-2): a session whose only retrieval is
+    # a page read was described as having searched, while the block below kept the
+    # two apart -- which is the whole reason reads are recorded as ``<p>``:read.
+    reads_only = bool(snapshot.reads) and not snapshot.searches
+    noun, plural = ("read", "reads") if reads_only else ("search", "searches")
+    if snapshot.usd > 0:
+        # ``format_cost(snapshot)``, not a bare ``MoneyFigure``: the snapshot
+        # carries the search money's own honesty marks, so a session with any
+        # unpriced operation renders ``$0.0069+`` here as well as in the block
+        # below -- passing a plain figure dropped the ``+`` and let the headline
+        # state a total the block two rows down contradicts (round-3 MAJOR-3).
+        return f"incl. {format_cost(snapshot)} {noun}"
+    # Branch on the COUNTERS, never on the money (round-2 review R2-MAJOR-1):
+    # ``usd`` is zero for an unpriced operation too, so a money test called
+    # unpriced searches "free" -- the same render-time inference the ledger's
+    # free/paid/unpriced counters exist to prevent.
+    if snapshot.unpriced_searches:
+        # The unpriced tally spans both kinds, so it is split before it is named:
+        # a session with searches plus an unpriced READ said "1 unpriced search"
+        # while the block below said "1 read · no published price" (round-3
+        # MINOR-1).
+        unpriced_reads = max(0, snapshot.unpriced_reads)
+        unpriced_searches = max(0, snapshot.unpriced_searches - unpriced_reads)
+        if unpriced_searches:
+            n, word = unpriced_searches, ("search" if unpriced_searches == 1 else "searches")
+        else:
+            n, word = unpriced_reads, ("read" if unpriced_reads == 1 else "reads")
+        return f"incl. {n} unpriced {word}"
+    count = snapshot.reads if reads_only else snapshot.searches
+    word = noun if count == 1 else plural
+    return f"incl. {count} free {word}"
+
+
+def search_spend_section(
+    snapshot: SearchSpendSnapshot,
+    width: int,
+    *,
+    meta: str = "",
+    session: SearchSpendSnapshot | None = None,
+    note: str = "",
+) -> list[Text]:
+    """Search spend as its own block: total, per-provider rows, session share.
+
+    Shared by ``/session`` and ``/analytics`` on purpose, and on the rule
+    ``session_panel`` already states in its docstring: two diagnostics screens
+    with two money vocabularies or two bar styles would be a defect. Money goes
+    through ``format_cost`` -- the ONE cost formatter -- so a provider with no
+    published rate renders ``$—`` (unknown, never a confident ``$0.0000``), a
+    provider whose searches are only partly priced renders a lower-bound ``+``
+    with the count of unpriced searches beside it in words, and one session
+    cannot read as ``$0.0031`` on one screen and a bare ``$0.00`` on the other.
+
+    WHY ITS OWN SECTION RATHER THAN ROWS IN TOTALS: none of this money is in the
+    analytics ledger Totals is read from. ``web_search`` bills separately and
+    keeps its own process-wide ledger (see ``local_operator.web_search.cost``),
+    so a row spliced into the model totals would silently mix a persisted model
+    figure with an in-memory search one and there would be no way to say which
+    was which. ``meta`` carries that scope in words.
+
+    ``session`` is the CURRENT session's snapshot, passed only by ``/analytics``
+    (whose ``snapshot`` is the process-wide merge) to print the session's share.
+    ``/session`` passes its own total as ``snapshot`` and no ``session``: there
+    the two are the same number, and a row restating it is noise.
+
+    ``width`` is the measured content box the caller already computes; every row
+    is cropped to it here, for the same reason the bar tables are cropped at
+    build time (``_render_rows``). Empty input -- no searches -- returns no
+    lines at all, so a caller can splice the result in unconditionally and a
+    session that never searched carries no empty heading.
+    """
+    lines: list[Text] = []
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # READS has money to show and no searches at all, and guarding on searches
+    # dropped its section entirely while the band kept the figure.
+    if not snapshot.count:
+        return lines
+
+    #: Cells in the per-provider usage bar. Fixed rather than derived from the
+    #: frame, unlike the ledger tables that size theirs from the content box:
+    #: this block shares its line with a money gutter and a count, both of which
+    #: must survive a 60-column terminal, and a bar that grew with the frame
+    #: would push them off it.
+    #:
+    #: DROPPED in a narrow frame (design review D4, 60-column measurement): eight
+    #: cells plus their gutter took the count's ten, so every count fell to its
+    #: own line -- indented LEFT of the provider it belongs to -- and four
+    #: providers took nine lines. Shrinking to four was measured and still did
+    #: not restore the one-line row, because the name and money gutters already
+    #: take 44 of the 47 cells a 60-column body has. The count is the load-bearing
+    #: half of the row and the bar is the refinement, so the refinement is what
+    #: goes; at 80 columns and up, both fit.
+    #: A fixed threshold on the body width was wrong (round-2 review R2-MAJOR-2):
+    #: whether the bar pays for itself depends on the NOTE it shares the row with,
+    #: and for an unpriced-provider ledger the note is long enough that the bar
+    #: pushed the count onto its own line at terminal 77-81 -- the exact orphan the
+    #: policy was added to remove, at the canonical 80-column frame. So the
+    #: decision is taken from THIS ledger's own notes: the bar is drawn only when
+    #: every row it costs still fits beside it.
+    #:
+    #: The condition is each ladder's SHORTEST rung (issue #1073), not its widest:
+    #: ``row`` below only reaches its continuation line when NO rung fits, so a
+    #: rung that is too long for the row simply yields to a shorter one and the
+    #: row still paints one line. A widest-rung rule therefore suppresses the bar
+    #: in frames where every row would in fact have fitted -- and it does so
+    #: asymmetrically, because ``/analytics`` draws a reference row (``This
+    #: session ... of search spend``) whose long rungs ``/session`` never renders,
+    #: so one policy produced two thresholds on two screens.
+    #:
+    #: ``0`` means "no bar at all", and it must not reach ``proportion_bar``, whose
+    #: ``max(1, width)`` floor turns a zero into a one-cell bar, which says nothing
+    #: while still spending the two cells of its gutter.
+    def row(
+        name: str,
+        scope: "_CostLike",
+        notes: Sequence[str] = (),
+        *,
+        share: float | None = None,
+    ) -> None:
+        line = Text()
+        line.append(f"  {name:<{_SEARCH_NAME_COL}}", style=semantic_style("dim"))
+        line.append_text(_money_run(scope, _SEARCH_VALUE_CELL))
+        row_bar = bar_cells
+        if share is not None and bar_cells and notes:
+            # Belt-and-braces on the section threshold (round-3 MAJOR-2): no row
+            # may spend the bar's cells and then push its own count onto a
+            # continuation line. Measured with the SHORTEST rung (issue #1073),
+            # which is the one the wrap is actually conditioned on -- see the
+            # collection site at the foot of this function. It must be the same
+            # rung family as that threshold: measuring the widest here zeroed the
+            # bar on a row that would have rendered on one line, and on the
+            # reference rows that also removes the blank bar gutter their counts
+            # share with the providers' (round-2 design D11).
+            with_bar = width - (line.cell_len + 2 + bar_cells + 2)
+            if len(notes[-1]) > with_bar:
+                row_bar = 0
+        if share is None and row_bar:
+            # The reference rows have no share to draw, but they still SPEND the
+            # bar's cells so the block keeps one count column (round-2 design
+            # D11): without this the reference counts sat 10 cells left of the
+            # providers' and the grid split in exactly the frames with bars.
+            line.append(" " * (row_bar + 2))
+        if share is not None and row_bar:
+            # The USAGE half of the row: how much of this scope's work went to
+            # this provider. Money alone cannot answer it -- six free searches
+            # and no searches both total $0.0000 -- which is why the count and
+            # the bar are here beside the dollars rather than in prose.
+            line.append(f"  {proportion_bar(share, row_bar)}", style=semantic_style("accent"))
+        # Same ladder semantics as ``session_panel._Body.kv``: the first rung
+        # that fits uncropped wins, and none fitting means the qualifier sheds
+        # rather than being cut mid-word. Every rung here still carries the
+        # search COUNT, which is the part that must not be lost -- the unpriced
+        # tally is the refinement the narrow rungs trade away.
+        budget = width - line.cell_len - 2
+        chosen = next((candidate for candidate in notes if len(candidate) <= budget), None)
+        if chosen is not None:
+            line.append(f"  {chosen}", style=semantic_style("dim"))
+        line.truncate(width, overflow="crop")
+        lines.append(line)
+        if chosen is None and notes:
+            # Below the shortest rung, the qualifier WRAPS to its own indented
+            # line instead of being dropped: the ladder used to fall through to
+            # a bare crop, which at a 60-column terminal printed
+            # `Total spend  $0.015+` with no count at all and
+            # `└ future-engine  $—` with no words -- a money figure whose scope
+            # the reader cannot recover, the same defect the tool-error-rate row
+            # fixes by wrapping its scope below the shortest rung. Every rung
+            # leads with the count, so what survives a crop here is the part
+            # that matters.
+            # The continuation line has the whole width, so take the WIDEST rung
+            # that fits THERE rather than defaulting to the terse one: the
+            # shortest rung is only short because it shares a line with the name.
+            cont_budget = width - 4
+            cont_note = next(
+                (candidate for candidate in notes if len(candidate) <= cont_budget), notes[-1]
+            )
+            cont = Text()
+            cont.append(f"    {cont_note}", style=semantic_style("dim"))
+            cont.truncate(width, overflow="crop")
+            lines.append(cont)
+
+    def search_notes(n: int, unpriced: int, *, kind: str = "search") -> tuple[str, ...]:
+        # Widest first, and the COUNT is on every rung: it is the part that must
+        # not be lost. ``search``/``searches`` rather than an "s" suffix -- the
+        # plural of this word is not its singular with an s on the end -- and a
+        # READ says read, because a row recorded under ``<provider>:read`` exists
+        # precisely to keep reads out of the search count.
+        singular, plural = ("read", "reads") if kind == "read" else ("search", "searches")
+        word = singular if n == 1 else plural
+        if not unpriced:
+            return (f"{n} {word}",)
+        if unpriced == n:
+            return (
+                f"{n} {word} · no published price",
+                f"{n} {word} · unpriced",
+            )
+        # No nounless rung: ``5 · 1 unpriced`` reads as a fragment, and the
+        # wrap-and-continuation path already covers the widths that used to need
+        # it (the continuation line takes the widest rung that fits there).
+        return (
+            f"{n} {word} · {unpriced} unpriced",
+            f"{n} {word} · unpriced",
+        )
+
+    def total_notes() -> tuple[str, ...]:
+        """The total's own counts, in the kinds it actually has.
+
+        A read-only conversation says ``1 read`` rather than ``0 searches · 1
+        read``: the zero is noise, and leading with it buries the figure that
+        explains the money. A mixed total names both, because either number
+        alone would misstate what the dollar figure covers.
+        """
+        if not snapshot.searches:
+            return search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")
+        base = search_notes(snapshot.searches, snapshot.unpriced_searches - snapshot.unpriced_reads)
+        if not snapshot.reads:
+            return base
+        # The read half carries its OWN unpriced tally: pairing a search's count
+        # with a read's missing price put "no published price" on a search that
+        # has one, next to a row below saying the opposite about the read.
+        read_note = search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")[0]
+        return tuple(f"{note} · {read_note}" for note in base)
+
+    def session_notes(scope: SearchSpendSnapshot) -> tuple[str, ...]:
+        """This session's own counts and its share of the process total.
+
+        Built here rather than inline at the row so the bar policy can measure
+        it: the threshold has to cover every row the block DRAWS, and the
+        reference rows' notes -- the total's and this one -- are longer than any
+        provider's, which is how the bar came to be drawn where the Total row
+        still orphaned its count (round-3 MAJOR-2).
+        """
+        share = (
+            format_percent(scope.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
+        )
+        counted = _counted_kinds(scope)
+        return (
+            f"{counted} · {share} of search spend",
+            # The compact rung keeps a referent: a bare ``· 100%`` says a
+            # proportion of nothing, which is the failure the denominator
+            # rule above already calls out. ``of search`` is shorter than
+            # ``of search spend`` and still names what the share is OF.
+            f"{counted} · {share} of search",
+            f"{counted} · {share} share",
+            counted,
+        )
+
+    _base_cells = 2 + _SEARCH_NAME_COL + _SEARCH_VALUE_CELL
+    # Every note-ladder the block will render, not just the providers':
+    # ``default=0`` keeps an empty ledger (which returns before this point) out of
+    # the arithmetic, and ``session`` is measured only when its row is drawn.
+    #
+    # ``[-1]``, the SHORTEST rung, and not ``[0]`` (issue #1073): the ladders are
+    # widest-first, and the wrap the bar guards against happens when no rung fits
+    # at all, so the threshold has to clear the rung that would be drawn LAST. On
+    # ``/analytics`` the widest rung belonged to the ``This session ... of search
+    # spend`` reference row -- a row ``/session`` does not draw -- so for the
+    # frames' ledger the widest rule held the bar back to body 90 while
+    # ``/session`` drew it from 67. One policy producing two thresholds is the
+    # defect; one policy needs one condition.
+    _notes_to_fit = [
+        len(search_notes(row.count, row.unpriced_searches, kind=row.kind)[-1])
+        for row in snapshot.rows
+    ]
+    _notes_to_fit.append(len(total_notes()[-1]))
+    if session is not None and session.count:
+        _notes_to_fit.append(len(session_notes(session)[-1]))
+    bar_cells = 8 if width >= _base_cells + 2 + 8 + 2 + max(_notes_to_fit, default=0) else 0
+
+    lines.append(
+        section_header(
+            "Search spend",
+            # Advertised only when a bar is actually drawn (round-2 design D10):
+            # below the threshold the clause orphaned a line on /session and
+            # cropped mid-word on /analytics, naming a display the rows did not
+            # have.
+            f"{meta} · bars: operations" if bar_cells else meta,
+        )
+    )
+    total_operations = max(snapshot.count, 1)
+    # No bar on the total row (design review D6): it is the reference every other
+    # bar is measured against, so a full bar says only "100% of itself", and the
+    # provider bars below it -- each rounded independently -- could sum PAST its
+    # eight cells, which undercuts the share reading the bar exists to give.
+    row("Total spend", snapshot, total_notes())
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # reads has a share worth showing, and the guard dropped the row for it.
+    if session is not None and session.count:
+        row("This session", session, session_notes(session))
+    # A dim sub-label rather than a section header: the rows under it PARTITION
+    # the total above, which is the same relationship the Totals block's tree
+    # rows (`` ├ Fresh (uncached)``) already express with one level less chrome.
+    if snapshot.rows:
+        label = Text()
+        label.append("  By provider", style=semantic_style("dim"))
+        label.truncate(width, overflow="crop")
+        lines.append(label)
+        for index, entry in enumerate(snapshot.rows):
+            glyph = " └ " if index == len(snapshot.rows) - 1 else " ├ "
+            row(
+                glyph + entry.provider,
+                entry,
+                search_notes(entry.count, entry.unpriced_searches, kind=entry.kind),
+                share=entry.count / total_operations,
+            )
+    # Free versus paid, in counts AND money: the pair the dollars cannot carry,
+    # since six free searches and no searches at all both total $0.0000. A
+    # ladder, widest first, and every rung keeps both counts -- dropping one
+    # would make the line answer a different question than the row above it.
+    free_word = "free"
+    if snapshot.free_operations or snapshot.paid_operations:
+        # Round-1 MINOR-1: without the unpriced clause this line did not add up
+        # against "N searches · M unpriced" on the row above it -- three numbers
+        # that look like a breakdown have to BE one, or the reader is left
+        # recomputing by hand to find the missing operation.
+        unpriced_clause = (
+            f" · {snapshot.unpriced_searches} unpriced" if snapshot.unpriced_searches else ""
+        )
+        # ``N of M priced free`` (design review D5): the old form made the reader
+        # add the two numbers to answer "how much of this was free", printed a
+        # structurally-always-zero ``($0.0000)`` beside the free count, and did
+        # not reconcile with the count on the row above when unpriced operations
+        # were present. The denominator is the PRICED operations, which is what
+        # makes the third number add up instead of being a leftover.
+        priced = snapshot.free_operations + snapshot.paid_operations
+        money = format_cost(MoneyFigure(cost_usd=snapshot.paid_usd))
+        if snapshot.free_operations and snapshot.paid_operations:
+            summary = (
+                f"{snapshot.free_operations} of {priced} priced free · {money} paid"
+                f"{unpriced_clause}",
+                f"{snapshot.free_operations}/{priced} free · {money} paid",
+            )
+        elif snapshot.paid_operations:
+            summary = (
+                f"{snapshot.paid_operations} paid ({money}){unpriced_clause}",
+                f"{snapshot.paid_operations} paid",
+            )
+        else:
+            summary = (
+                # No ``· $0.0000`` (round-2 review NIT-4): it is structurally
+                # always zero on this rung, which is the argument D5 removed it
+                # from the both-halves case.
+                f"{snapshot.free_operations} {free_word}{unpriced_clause}",
+                f"{snapshot.free_operations} {free_word}",
+            )
+        budget = width - 2
+        chosen = next((candidate for candidate in summary if len(candidate) <= budget), summary[-1])
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(f"  {chosen}", style=semantic_style("dim"))
+        line.truncate(width, overflow="crop")
+        lines.append(line)
+
+    # The money footnote for THIS block, drawn here rather than with the model
+    # figures: these are the marks it explains (`+` lower bound, `$—` unknown),
+    # and the screens that draw the block are not always the screens that draw
+    # the totals -- `/session`'s loading frame draws the block with no totals at
+    # all, and `/analytics` puts the model legend at the foot of a body this
+    # block sits nowhere near. Beside the marks is the only placement that is
+    # always co-visible with them.
+    footnote = COST_LEGEND if search_block_needs_legend(snapshot) else ""
+    for paragraph in (note, footnote):
+        if not paragraph:
+            continue
+        # Wrapped with the continuation indented, for the reason
+        # ``session_panel._Body.note`` documents: handed to the container's
+        # ``fold`` instead, a continuation lands at column 0 and reads as a new
+        # record in the middle of the block (design D2).
+        for visual in textwrap.wrap(paragraph, max(1, width - 2)) or [""]:
+            para = Text(no_wrap=True, overflow="crop")
+            para.append(f"  {visual}", style=semantic_style("dim"))
+            lines.append(para)
+    lines.append(Text())
+    return lines
 
 
 def proportion_bar(fraction: float, width: int) -> str:
@@ -510,6 +980,8 @@ def build_report(
     hover: str | None = None,
     layout: ReportLayout | None = None,
     forest: list["SessionNode"] | None = None,
+    search_spend: SearchSpendSnapshot | None = None,
+    session_search_spend: SearchSpendSnapshot | None = None,
 ) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
@@ -554,6 +1026,18 @@ def build_report(
     cannot go stale; a caller that passes a forest built from a different
     aggregate would get a report describing neither, which is why this is not
     derived from a mutable field.
+
+    ``search_spend``/``session_search_spend`` are the web-search halves, and
+    they are INPUTS rather than something derived from ``aggregate`` because
+    they are not in it: ``web_search`` bills separately from the model and keeps
+    its own process-wide ledger (see ``local_operator.web_search.cost``), which
+    this pure function must not reach into. The first is the process-wide total
+    and is drawn as its own section (below Totals, or with the empty-state
+    message when no model call was recorded at all — a run can have retrieval
+    spend and an unreadable model ledger). The second is the CURRENT session's,
+    drawn inside that section as its share of the total. Both default to
+    ``None`` so a caller with no ledger — a test, the desktop route — gets
+    exactly the report it got before.
     """
     width = max(40, width)
     fg = semantic_style("fg")
@@ -561,6 +1045,24 @@ def build_report(
     accent = semantic_style("accent")
 
     lines: list[Text] = []
+    # Built once and spliced into BOTH branches below, because search spend is
+    # not in the ledger the ``calls == 0`` gate is a statement about.
+    search_legend_drawn = search_block_needs_legend(search_spend)
+    search_lines = (
+        search_spend_section(
+            search_spend,
+            width,
+            meta="process-wide · live",
+            session=session_search_spend,
+            note=(
+                "Read from this process's live search ledger, not from disk. A resumed "
+                "conversation restores its recorded searches into it; sessions that are "
+                "not open here are not counted."
+            ),
+        )
+        if search_spend is not None
+        else []
+    )
 
     if aggregate.calls == 0:
         line = Text()
@@ -574,6 +1076,9 @@ def build_report(
             style=dim,
         )
         lines.append(hint)
+        if search_lines:
+            lines.append(Text())
+            lines.extend(search_lines)
         return lines
 
     # -- headline totals -----------------------------------------------------
@@ -679,26 +1184,59 @@ def build_report(
     # discount, or free tier), so its note says so — the same measured-vs-modelled
     # honesty the WHERE-INPUT-WENT caveat carries. ``$—`` for a run with no
     # priceable model; a trailing ``+`` when some calls used an unpriced one.
-    if aggregate.cost_is_known:
-        # The trailing ``+`` on the figure already flags a partial (lower-bound)
-        # sum, so the note stays short enough to fit a narrow frame; the caveat
-        # it must always carry is that this is list price, not a billed invoice.
-        cost_note = "≈ list price × tokens"
-    else:
-        cost_note = "no published price"
+    # The figure is the session's WHOLE money: the model half from this ledger
+    # plus the search half from its own, combined in ONE place
+    # (``costs.combined_spend``) so the band, this screen and ``/session``
+    # cannot disagree about what a session cost. The note names the search
+    # component, which is what the header comment above asks for: a mixed figure
+    # is only a problem if it cannot say which half is which.
+    spend = combined_spend(
+        aggregate.cost_usd if aggregate.cost_is_known else None,
+        search_spend,
+        model_is_partial=aggregate.cost_is_partial,
+    )
+    search_component = search_component_text(search_spend)
+    # A LADDER, widest first, and the row is CROPPED to the frame. Round-1
+    # MAJOR-2: the single wide note was never cropped by the builder, so at 60-80
+    # columns it rendered "≈ list price × tokens · incl" -- the search component
+    # this row exists to name, destroyed by the row that names it.
+    # The trailing ``+`` on the figure flags a partial sum, and the ladder's
+    # narrow rungs keep the note short enough to fit a narrow frame; the caveat
+    # it must always carry is that this is list price, not a billed invoice.
+    cost_rungs = cost_note_rungs(spend, search_component=search_component)
+    # The note's budget is what the row leaves it: indent + name column + value
+    # cell + the two-cell gap before it.
+    note_budget = max(0, width - (2 + 22 + _VALUE_CELL + 2))
+    # NO rung fitting means NO note (round-2 review R2-MAJOR-3 / design D9).
+    # Emitting the shortest rung anyway and cropping the row painted a
+    # well-formed FALSE figure -- ``incl. $0.0``, two rows above a block showing
+    # ``Total spend $0.0069`` on the same frame. ``_Body.kv`` on the sibling
+    # screen records this exact experiment as tried and rejected, and two screens
+    # must not disagree about the same figure at the same width.
+    cost_note = next((rung for rung in cost_rungs if len(rung) <= note_budget), "")
     # Built directly (not via ``kv``) so the lower-bound ``+`` is dimmed like the
     # table cells (review D1) — the figure reads as a number, the ``+`` as a flag.
     # ``append_cost`` right-aligns (table cells); here we pass the figure's own
     # width so it left-aligns with the token values, then pad out to
     # ``_VALUE_CELL`` so the cost note shares the gutter (D2).
-    cost_text = format_cost(aggregate)
+    cost_text = format_cost(MoneyFigure.of(spend))
     cost_row = Text()
-    cost_row.append(f"  {'Est. cost':<22}", style=dim)
-    append_cost(cost_row, aggregate, len(cost_text), fg, dim)
+    cost_row.append(f"  {cost_label(bool(search_component)):<22}", style=dim)
+    append_cost(cost_row, MoneyFigure.of(spend), len(cost_text), fg, dim)
     cost_row.append(" " * max(0, _VALUE_CELL - len(cost_text)))
-    cost_row.append(f"  {cost_note}", style=dim)
+    if cost_note:
+        cost_row.append(f"  {cost_note}", style=dim)
+    cost_row.truncate(width, overflow="crop")
     lines.append(cost_row)
     lines.append(Text())
+
+    # -- search spend --------------------------------------------------------
+    # Beside the model money, in the same block's rhythm, because it answers the
+    # same question about the same session and a reader comparing the two should
+    # not have to hunt for the second half. It is NOT spliced into the Est. cost
+    # row above: no part of it came from this ledger, and a mixed figure could
+    # not say which half was measured.
+    lines.extend(search_lines)
 
     # -- historical time series (daily + monthly bars) ----------------------
     # Drawn only when the store handed the screen rollup rows. The metric label
@@ -948,7 +1486,13 @@ def build_report(
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    if _needs_cost_legend(aggregate, forest):
+    #
+    # Suppressed when the search block already printed it on this same screen:
+    # the string explains both vocabularies at once, so a frame can otherwise
+    # carry the identical footnote twice (design round 3, D12) -- once beside
+    # the marks it is about and once here for a model row's mark, with nothing
+    # telling the reader they are the same legend.
+    if _needs_cost_legend(aggregate, forest) and not search_legend_drawn:
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)
@@ -1691,6 +2235,21 @@ class AnalyticsScreen(ModalScreen[None]):
         # "one gesture owns the viewport" split: KEYS move the cursor and scroll
         # it into view, while the WHEEL and the scrollbar still move the viewport
         # alone and leave the cursor where it was.
+        #
+        # ``priority=True`` on the PAGINATION keys for the SAME reason, and it is
+        # what makes them unanimated rather than merely ours: the container has
+        # its own ``pageup``/``pagedown``/``home``/``end`` bindings
+        # (``ScrollableContainer.BINDINGS``, ``textual/containers.py:48-59`` —
+        # ``ScrollView`` extends it and defines none of its own) handing the key
+        # to ``Widget.action_page_down`` and friends, which call
+        # ``scroll_page_down()`` with the ``animate=True``
+        # default. Measured on this screen at 120x45: one ``pagedown`` handled by
+        # the container wrote 17-26 compositor frames of all 29 body rows (the
+        # count moves with frame scheduling, the order of magnitude does not). So
+        # a plain binding here left the operator's key press animated AND left
+        # the unanimated actions below unreachable on any report tall enough to
+        # scroll — two symptoms, one cause. See the actions for why the move must
+        # be unanimated.
         Binding("up", "move_up", "Up", show=False, priority=True),
         Binding("down", "move_down", "Down", show=False, priority=True),
         Binding("enter", "toggle_row", "Expand/collapse", show=False, priority=True),
@@ -1698,10 +2257,10 @@ class AnalyticsScreen(ModalScreen[None]):
         Binding("right", "expand_row", "Expand", show=False, priority=True),
         Binding("left", "collapse_row", "Collapse", show=False, priority=True),
         Binding("e", "toggle_all", "Expand/collapse all", show=False),
-        Binding("pageup", "page_up", "Page up", show=False),
-        Binding("pagedown", "page_down", "Page down", show=False),
-        Binding("home", "scroll_home", "Top", show=False),
-        Binding("end", "scroll_end", "Bottom", show=False),
+        Binding("pageup", "page_up", "Page up", show=False, priority=True),
+        Binding("pagedown", "page_down", "Page down", show=False, priority=True),
+        Binding("home", "scroll_home", "Top", show=False, priority=True),
+        Binding("end", "scroll_end", "Bottom", show=False, priority=True),
     ]
 
     def __init__(
@@ -1711,12 +2270,21 @@ class AnalyticsScreen(ModalScreen[None]):
         daily: list[UsagePeriod] | None = None,
         monthly: list[UsagePeriod] | None = None,
         window_totals: UsagePeriod | None = None,
+        search_spend: SearchSpendSnapshot | None = None,
+        session_search_spend: SearchSpendSnapshot | None = None,
     ) -> None:
         super().__init__()
         self._aggregate = aggregate
         # Grand total over the daily chart's window (``series_totals``), shown in
         # that chart's meta so the bars and their sum describe the same span.
         self._window_totals = window_totals
+        # The web-search halves, captured by the caller on the same pass that
+        # read this aggregate and held for the same reason: a repaint (every
+        # arrow key, every resize) must not re-read a moving ledger and show a
+        # search total from a different moment than the model figures beside
+        # it. None on both is the pre-search-spend report exactly.
+        self._search_spend = search_spend
+        self._session_search_spend = session_search_spend
         # The calendar rollup series the store handed us on open. Held so the
         # ``t`` toggle can re-render the SAME data with the other metric without
         # a second store read — the numbers do not change, only which of them
@@ -2062,6 +2630,9 @@ class AnalyticsScreen(ModalScreen[None]):
             # instant. Safe to share because the aggregate is a snapshot read on
             # a worker thread before the screen was pushed and never mutates.
             forest=self._forest(),
+            # Held snapshots, not ledger reads: see ``__init__``.
+            search_spend=self._search_spend,
+            session_search_spend=self._session_search_spend,
         )
 
     def _expandable_rows(self) -> bool:
@@ -2830,14 +3401,41 @@ class AnalyticsScreen(ModalScreen[None]):
             )
         return self._forest_cache
 
+    # ``animate=False`` on all four DESTINATION moves, deliberately, and it is
+    # the same rule ``_scroll_by_line`` states for the arrows.
+    #
+    # The body is a line-API ``ReportView`` whose ``render_line(y)`` serves
+    # ``scroll_offset.y + y``: shifting the offset by ONE line changes EVERY
+    # viewport row, so each eased step of the default animation is a
+    # full-viewport rewrite. Measured at 120x45 on the 40-root fixture (body
+    # region 102x29, ``max_scroll_y`` 31): one ``pagedown`` wrote 17-26
+    # compositor frames across runs — the count moves with frame scheduling, the
+    # order of magnitude does not — every one of them all 29 rows, with the
+    # offset walking 3 -> 5 -> 7 -> ... -> 29 one line at a time. That is the
+    # operator's report of an update passing down the TUI one line at a time.
+    # ``end`` and ``home`` travel the furthest and wrote up to 49. One frame is
+    # what the gesture needs; the easing bought only intermediate redraws of a
+    # page the reader had already asked to leave.
+    #
+    # These four actions only bind if the key reaches the SCREEN: with the
+    # container's own ``ScrollView`` bindings left unpinned, a real ``pagedown``
+    # went to ``Widget.action_page_down`` (which passes the ``animate=True``
+    # default) and the actions here were unreachable on any report tall enough to
+    # scroll — measured, and fixed by ``priority=True`` on the bindings above.
+    # Without that half, animating these methods would have changed nothing the
+    # operator could press.
+    #
+    # It is also why the coalesced hover re-resolve exists: ``_viewport_moved``
+    # watches ``scroll_y``, which was an animated value firing ~28 notifications
+    # per ``pagedown``. With no animation the burst is one notification.
     def action_page_up(self) -> None:
-        self._scroll.scroll_page_up()
+        self._scroll.scroll_page_up(animate=False)
 
     def action_page_down(self) -> None:
-        self._scroll.scroll_page_down()
+        self._scroll.scroll_page_down(animate=False)
 
     def action_scroll_home(self) -> None:
-        self._scroll.scroll_home()
+        self._scroll.scroll_home(animate=False)
 
     def action_scroll_end(self) -> None:
-        self._scroll.scroll_end()
+        self._scroll.scroll_end(animate=False)

@@ -393,6 +393,51 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
+    """A read deadline expiring is not a failed delivery, on the timeout arm.
+
+    ``peer_send._dial_or_explain`` attaches a sentence to the message-less
+    ``TimeoutError`` and re-raises the SAME class, so this lands on the
+    "no delivery confirmation" arm rather than the confident one — which is the
+    whole point of the class split. The reproduced case is a real child server
+    whose loop was blocked for 0.7 s: the sender's 0.2 s deadline expired, and
+    the receiver recorded the delivered steer the moment its loop came back.
+    Wrapping the timeout into a ``RuntimeError`` (an earlier draft did) moves
+    that case onto the arm that says nothing was delivered. R4's other half is
+    asserted below: the dial is attempted ONCE. A message that may already be
+    queued in the owner's buffer must not be re-submitted automatically, and a
+    tool result is the last place that could happen unnoticed.
+    """
+    registrant, _alias, _handle = await _start_peer()
+    dials: list[dict[str, Any]] = []
+    try:
+        import local_operator.mobile.peer_client as peer_client_mod
+
+        async def _timeout(*args, **kwargs):
+            dials.append(kwargs)
+            raise TimeoutError
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _timeout)
+        result = await execute_send(
+            "slow",
+            {"target": "peer-target", "message": "did this land?"},
+            None,
+            None,
+            _context(),
+        )
+        assert result.is_error is True
+        assert "no delivery confirmation" in result.text
+        assert "delivery is UNCONFIRMED" in result.text
+        assert "may still arrive" in result.text
+        # Neither confident claim: not "could not deliver", and nothing that
+        # invites an automatic retry of a steer that may already have landed.
+        assert "could not deliver" not in result.text
+        assert len(dials) == 1, dials
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_a_protocol_refusal_still_says_it_did_not_deliver(monkeypatch) -> None:
     """A RuntimeError is the peer ANSWERING no (an older registrant, a handle
     that cannot receive): nothing was delivered, so the confident wording is
@@ -558,7 +603,8 @@ async def test_a_wedged_unique_live_match_is_refused_not_stored_delivered(
         return (
             None,
             [],
-            "the only match for 'credential' is not responding (pid 4242); " "try again shortly",
+            "the only match for 'credential' has not reported for 4m (pid 4242), so a plain send "
+            "will not dial it; it may report again on its own",
         )
 
     monkeypatch.setattr(peer_send, "resolve_peer_target", _wedged)
@@ -570,5 +616,8 @@ async def test_a_wedged_unique_live_match_is_refused_not_stored_delivered(
         _context(),
     )
     assert result.is_error is True
-    assert "not responding" in result.text
+    # The shared refusal wording (`peer_send._not_dialable`): the measured age
+    # rather than the old "is not responding ... try again shortly", which
+    # asserted a cause and a timetable the record cannot support.
+    assert "has not reported for 4m" in result.text
     assert not (tmp_path / "sessions" / "wedge0000abc" / "inbox.jsonl").exists()

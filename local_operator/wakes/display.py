@@ -7,6 +7,26 @@ from datetime import UTC, datetime
 DEFAULT_TIME_FORMAT = "12h"
 
 
+def format_age(seconds: float) -> str:
+    """Approximate status age: the CLI's single-unit 45s/12m/3h/2d ladder.
+
+    Unlike schedule-duration serialization, a status slot should sacrifice
+    precision before width. Retaining only its largest unit stays readable as
+    poll ticks add seconds to multi-day ages, rather than falling back to an
+    exact but unreadable millisecond count. Scheduling timestamps stay exact.
+    """
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 def format_wake_time(epoch_ms: int, *, now: datetime | None = None) -> str:
     """Render in the OS local zone at the due instant, including its DST offset.
 

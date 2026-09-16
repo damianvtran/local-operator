@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Container, Sequence
 
+from local_operator.harness.rows import is_harness_injection, is_harness_notice_text
 from local_operator.harness.types import AgentMessage, CustomMessage, Message
 
 from .tokens import _encode_len, estimate_tokens
@@ -177,12 +178,12 @@ def is_rendered_injection(message: AgentMessage) -> bool:
     Used on both the write path (``Session._finish_compaction``) and the read
     path (``Transcript.build_llm_history``), so a live and a resumed context
     filter identically and stay byte-for-byte equal.
+
+    A thin alias for ``harness.rows.is_harness_injection``, which is where the
+    stamp and its key live: two implementations of one provenance decision is
+    exactly how the folds and compaction drift apart about a row.
     """
-    return (
-        isinstance(message, Message)
-        and bool(message.provider_payload)
-        and bool(message.provider_payload.get(RENDERED_INJECTION_KEY))
-    )
+    return is_harness_injection(message)
 
 
 def _message_tokens(message: AgentMessage) -> int:
@@ -574,6 +575,22 @@ def extract_preserved_user_turns(
         # via ``elision_counts_of`` and seeds the next block with them.
         if message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX):
             continue
+        # A notice the harness minted, carried in a block from before the stamp
+        # existed (see :func:`is_harness_notice_text`): a preserved copy of one
+        # is re-seated as a ``role="user"`` row on every replay, so it titles
+        # the conversation after itself and paints the harness's words as the
+        # operator's. Excluded at HARVEST so no new marker bakes one in; the
+        # blocks an older build already wrote are healed on the read path by
+        # :func:`cap_preserved_user_turns`.
+        #
+        # The cost of the text test here is bounded and worth naming: a genuine
+        # prompt that happens to OPEN with one of these heads is not preserved
+        # verbatim. It is still summarized like any other turn and never hidden
+        # (this function only decides what rides the marker), whereas a notice
+        # carried forward is re-painted as the user's own words on every
+        # surface — the asymmetry is what makes the trade right.
+        if is_harness_notice_text(message.text):
+            continue
         if genuine_user_ids is not None and message.id not in genuine_user_ids:
             continue
         text = message.text
@@ -846,10 +863,23 @@ def cap_preserved_user_turns(
 
     # Provenance first: shedding an injection costs the operator nothing, so it
     # must never compete with a genuine turn for the budget.
-    if injection_ids is not None:
-        kept_turns = [turn for turn in real_turns if str(turn.get("id", "")) not in injection_ids]
-        injections_dropped += len(real_turns) - len(kept_turns)
-        real_turns = kept_turns
+    #
+    # Two shapes count as one. ``injection_ids`` is the journal lookup, which is
+    # how every delivery a modern build wrote is identified. A stored turn whose
+    # TEXT is a harness notice head is the LEGACY shape — the copy exists
+    # because an older build harvested the notice as a user turn, before there
+    # was a stamp to refuse it — and it is shed for the same reason: replaying
+    # it re-seats the harness's words as a user row. Text is sound evidence at
+    # THIS site in a way it is not on a live fold: these are stored copies
+    # inside a compaction block, never a row the operator typed in this process.
+    def _is_injection_turn(turn: Mapping[str, object]) -> bool:
+        if injection_ids is not None and str(turn.get("id", "")) in injection_ids:
+            return True
+        return is_harness_notice_text(str(turn.get("text", "")))
+
+    kept_turns = [turn for turn in real_turns if not _is_injection_turn(turn)]
+    injections_dropped += len(real_turns) - len(kept_turns)
+    real_turns = kept_turns
 
     if cap <= 0:
         # Fails CLOSED. Returning the block unbounded here would restore the

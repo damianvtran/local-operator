@@ -74,6 +74,12 @@ if os.name != "posix":  # pragma: no cover - import itself is the explicit diagn
     raise RuntimeError("evaluation adapter supervision requires POSIX process groups")
 
 MAX_DIAGNOSTIC_TAIL = 64 * 1024
+# Backstops for reading that tail on a FAILURE path. ``QUIET`` is the idle
+# window that ends the wait; ``TIMEOUT`` bounds the cost when a worker is
+# logging continuously. Both are deliberately short: this runs while sealing a
+# failed episode, which must still terminate promptly.
+STDERR_SETTLE_QUIET_S = 0.25
+STDERR_SETTLE_TIMEOUT_S = 2.0
 TERM_GRACE_SECONDS = 5.0
 OWNER_FD_ENV = "LO_ADAPTER_OWNER_FD"
 LAUNCH_IDENTITY_ENV = "LO_ADAPTER_LAUNCH_IDENTITY"
@@ -126,14 +132,27 @@ def _mutation_committed(error: BaseException) -> bool:
 
 
 class _Tail:
+    """A bounded tail of one drained stream, with an idle signal.
+
+    ``bytes()`` is a snapshot taken from the CALLER's thread while the drainer
+    that fills this buffer runs in another one. On a failure path reached
+    milliseconds after the process wrote -- and a scripted episode is over in
+    milliseconds -- that snapshot can miss the very lines that explain the
+    failure. ``settled()`` waits on the drainer's own APPEND NOTIFICATION
+    instead of on a clock: every append restarts the idle window, so the wait
+    ends only after a genuinely quiet interval, and it ends on the first quiet
+    interval rather than after a fixed budget.
+    """
+
     def __init__(self, limit: int = MAX_DIAGNOSTIC_TAIL) -> None:
         self._limit = limit
         self._chunks: deque[bytes] = deque()
         self._size = 0
         self._lock = threading.Lock()
+        self._appended = threading.Condition(self._lock)
 
     def append(self, chunk: bytes) -> None:
-        with self._lock:
+        with self._appended:
             self._chunks.append(chunk)
             self._size += len(chunk)
             while self._size > self._limit and self._chunks:
@@ -145,9 +164,36 @@ class _Tail:
                 else:
                     self._chunks[0] = first[excess:]
                     self._size -= excess
+            self._appended.notify_all()
 
     def bytes(self) -> bytes:
         with self._lock:
+            return b"".join(self._chunks)
+
+    def settled(
+        self,
+        *,
+        quiet: float = STDERR_SETTLE_QUIET_S,
+        timeout: float = STDERR_SETTLE_TIMEOUT_S,
+    ) -> bytes:
+        """The tail, once no append has arrived for ``quiet`` seconds.
+
+        ``timeout`` is the backstop for a worker that logs continuously: the
+        window is reset by every append, so without it a busy stream would hold
+        the caller indefinitely. It is a backstop, not the assertion -- an
+        idle-by-default tail returns as soon as the quiet window passes.
+        """
+
+        deadline = time.monotonic() + timeout
+        with self._appended:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if not self._appended.wait(min(quiet, remaining)):
+                    # No append within a full idle window: the producer has
+                    # stopped, so what is here is what there is.
+                    break
             return b"".join(self._chunks)
 
 
@@ -440,8 +486,25 @@ class AdapterSupervisor:
 
 
 def _drain(stream: Any, tail: _Tail) -> None:
+    """Feed one drained stream into a tail, INCREMENTALLY.
+
+    ``read1`` rather than ``read``: a buffered reader over a pipe treats a
+    positive size as a FILL request and blocks until that many bytes arrive or
+    the stream ends, so ``stream.read(65536)`` on a live worker publishes
+    nothing at all until 64 KiB of chatter accumulates or the process dies.
+    That is the opposite of what this tail is for -- the failure path reads it
+    WHILE the worker is still running (an exhausted-retries artifact is written
+    between two of the worker's own RPC answers) and needs the bytes that are
+    there now. ``read1`` returns as soon as one raw read yields anything, so the
+    tail is bounded-but-live rather than complete-only-at-EOF.
+
+    Measured, not assumed: with a writer that wrote 6 bytes and stayed alive, a
+    reader thread blocked in ``read(65536)`` was still blocked after a second,
+    while ``read1(65536)`` returned the same bytes in ~30 ms.
+    """
+
     try:
-        while chunk := stream.read(65536):
+        while chunk := stream.read1(65536):
             tail.append(chunk)
     except OSError:
         pass

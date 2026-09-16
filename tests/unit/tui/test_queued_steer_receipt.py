@@ -34,6 +34,7 @@ from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
     SENT_STEER_NOTICE,
+    UNSENT_RUNTIME_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded, TurnStarted
@@ -42,6 +43,7 @@ from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     NoticeKind,
     TranscriptView,
+    UserBlock,
 )
 
 from .test_app_pilot import FakeSession, _factory
@@ -956,3 +958,93 @@ async def test_a_takeover_still_settles_the_rows_it_deliberately_kept() -> None:
             "a takeover keeps the conversation, so the receipt for a message "
             "that really went must still settle its row"
         )
+
+
+def _user_blocks(app: OperatorApp) -> list[UserBlock]:
+    """Every user row, in transcript order."""
+    return [
+        block for block in app.query_one(TranscriptView).blocks() if isinstance(block, UserBlock)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_steer_that_could_not_be_delivered_is_handed_back() -> None:
+    """QA round 2, Q-1: the row must not promise a ride-along that never comes.
+
+    The give-up releases a steer's waiter into a bind that cannot succeed, and a
+    steer has no sender to report its own failure — so the message used to be
+    lost while the transcript kept `still queued — sends with that next message`
+    on screen. The seam now hands it back: the row and the receipt leave, the
+    composer holds the text, and one row states what actually happened.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "are you there?")
+        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert len(app._held_steer_blocks) == 1
+        message = app._held_steer_blocks[0][0]
+
+        app._on_steer_undeliverable(app._session, str(message.id))
+        await pilot.pause()
+
+        editor = app.query_one(Editor)
+        assert editor.text == "are you there?", "the message did not come back to the user"
+        assert app._held_steer_blocks == []
+        assert _user_blocks(app) == [], "the row for a message nobody sent is still standing"
+        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_two_hand_backs_print_one_row_because_it_is_one_state() -> None:
+    """U6: the warning describes a STATE, so following it must not pile it up.
+
+    Measured before this: a user who did what the row said — send it again —
+    while the runtime was still unreachable watched one message become three
+    copies of itself and one warning become two. Each refusal is bounded at
+    ~0.4 s and nothing is lost, which is why the row may not lie about the
+    recovery; but a second identical row is not more information.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "first")
+        first = app._held_steer_blocks[0][0]
+        await _submit(pilot, app, "second")
+        second = app._held_steer_blocks[1][0]
+
+        app._on_steer_undeliverable(app._session, str(first.id))
+        await pilot.pause()
+        app._on_steer_undeliverable(app._session, str(second.id))
+        await pilot.pause()
+
+        assert _notice_texts(app).count(UNSENT_RUNTIME_NOTICE) == 1, _notice_texts(app)
+        # Both messages are still the user's: the first is back in the composer,
+        # the second rides the draft recovery rather than overwriting it.
+        assert app.query_one(Editor).text == "first"
+
+
+@pytest.mark.asyncio
+async def test_a_hand_back_for_another_session_touches_nothing() -> None:
+    """The report crosses a socket, so it can arrive after a swap.
+
+    Lifting a steer by id on a conversation the user is no longer looking at
+    would edit the wrong conversation — the same scoping `_on_recall_rejected`
+    carries, and it is the guard that has to hold, not the disarm.
+    """
+    session = _Streaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "keep me")
+        message = app._held_steer_blocks[0][0]
+
+        app._on_steer_undeliverable(object(), str(message.id))
+        await pilot.pause()
+
+        assert len(app._held_steer_blocks) == 1, "another session's report lifted this row"
+        assert _notice_texts(app) == [QUEUED_STEER_NOTICE]
+        assert app.query_one(Editor).text == ""

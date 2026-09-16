@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 #: How the body was turned into text. Surfaced in ``details`` and the card so a
 #: reader can tell a good markdown render from the degraded stdlib fallback or a
@@ -51,6 +51,27 @@ class FetchResult(BaseModel):
     low_quality: bool = False
     cache: Literal["hit", "miss"] = "miss"
 
+    # --- retry / block diagnostics (all defaulted: every existing construction
+    # site stays valid, and a cached entry written by an older lop reads back
+    # with these absent rather than failing validation).
+    #
+    # These exist because a failed fetch used to tell the agent only THAT it
+    # failed. `attempts` explains a longer duration, `failure_kind` says whether
+    # another try could help, and the block fields say who refused and what to
+    # quote to them. They ride in `details`, which never reaches the provider,
+    # so they cost no tokens.
+    attempts: int = 1  # network attempts spent; 0 on a cache hit (none were)
+    failure_kind: str | None = None  # FailureKind, absent on success
+    block_vendor: str | None = None  # None on an UNSIGNED refusal — never guessed
+    block_reference: str | None = None  # the origin's own reference / cf-ray
+    profile: str = "default"  # request identity that produced this outcome
+    # Identity used by each attempt, in order. Carried as a sequence rather than
+    # derived from `profile` + `attempts` because "three tries, all honest" and
+    # "two tries, the second wearing a browser's headers" are different facts and
+    # only the sequence distinguishes them.
+    profiles: list[str] = Field(default_factory=lambda: ["default"])
+    retry_after_s: float | None = None  # honoured or reported Retry-After
+
 
 class WebFetchSettings(BaseModel):
     """Validated view of the loose ``values.web_fetch`` YAML mapping."""
@@ -63,6 +84,17 @@ class WebFetchSettings(BaseModel):
     allow_private: bool = False  # SSRF: allow loopback/private/link-local targets
     render_backend: RenderBackend = "auto"  # auto = markdownify if [fetch] present
     enrich: bool = True  # try .md / llms.txt / content-negotiation before scraping HTML
+    # Network attempts per redirect hop, INCLUDING the first. 1 reproduces the
+    # pre-retry behaviour exactly. 3 is where added coverage stops paying for
+    # added wall-clock: the value of a retry is concentrated in the first one,
+    # and this tool runs inside a live turn the user is watching.
+    max_attempts: int = 3
+    # One browser-shaped attempt after the origin has already refused an honest,
+    # self-identifying request. Default on because the measured win is real
+    # (medium.com: 403 with the lop UA, 200 with the browser profile, 3/3) and
+    # the cost is one request on an already-failed fetch. Off is for an operator
+    # who wants the client to stay honest even in the face of a refusal.
+    blocked_retry: bool = True
 
 
 DEFAULT_WEB_FETCH_CONFIG: dict[str, object] = {
@@ -74,4 +106,6 @@ DEFAULT_WEB_FETCH_CONFIG: dict[str, object] = {
     "allow_private": False,
     "render_backend": "auto",
     "enrich": True,
+    "max_attempts": 3,
+    "blocked_retry": True,
 }

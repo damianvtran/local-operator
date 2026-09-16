@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
+from collections import deque
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,11 +21,14 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.tool_bridge import format_mcp_result
+from local_operator.session import transcript as transcript_module
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
+    TRANSCRIPT_FILENAME,
     Transcript,
     TranscriptEntry,
+    TranscriptPage,
     read_replay_suffix,
     read_transcript_page,
     replay_entries,
@@ -371,6 +377,348 @@ def test_backward_page_reports_missing_transcript_without_creating_it(tmp_path):
     assert not directory.exists()
 
 
+def test_backward_page_rejects_two_cursors_and_a_zero_limit(tmp_path):
+    directory, ids = _variant_journal(tmp_path, "one-row")
+    with pytest.raises(ValueError):
+        read_transcript_page(directory, before_id=ids[0], through_id=ids[0])
+    with pytest.raises(ValueError):
+        read_transcript_page(directory, limit=0)
+
+
+# --- The backward page read: differential equivalence and structural cost ----
+#
+# ``read_transcript_page`` reads BACKWARD from EOF so the desktop open path
+# costs a page instead of a journal. The window alignment is the whole risk of
+# that rewrite: which row a cursor includes or excludes, and whether rows
+# appended after a snapshot cursor are skipped. ``_forward_transcript_page``
+# below is the pre-rewrite implementation kept verbatim as the ORACLE — the
+# forward page is the contract — and these tests are what prove the two agree
+# on every shape a journal can take. Do not delete the oracle because the
+# forward reader is gone from the module: a differential test whose reference
+# was re-derived from the code under test proves nothing.
+
+
+def _forward_transcript_page(
+    directory: str | Path,
+    *,
+    before_id: str | None = None,
+    through_id: str | None = None,
+    limit: int = 100,
+) -> TranscriptPage:
+    """The pre-rewrite forward implementation, kept as the differential oracle."""
+    if before_id is not None and through_id is not None:
+        raise ValueError("choose before_id or through_id, not both")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(path)
+    retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
+    found = before_id is None and through_id is None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            entry = TranscriptEntry.from_json(line)
+            if entry is None:
+                continue
+            if before_id is not None and entry.id == before_id:
+                found = True
+                break
+            retained.append(entry)
+            if through_id is not None and entry.id == through_id:
+                found = True
+                break
+    if through_id is not None and not found:
+        return TranscriptPage((), False, True)
+    if before_id is not None and not found:
+        tail = _forward_transcript_page(directory, limit=limit)
+        return TranscriptPage(tail.entries, tail.has_more, True)
+    rows = tuple(retained)
+    return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
+
+
+def _page_signature(page: TranscriptPage) -> tuple[Any, ...]:
+    """Everything the contract promises, exactly as a caller can observe it."""
+    return (
+        tuple(entry.id for entry in page.entries),
+        tuple(entry.to_json() for entry in page.entries),
+        page.has_more,
+        page.reconciled,
+    )
+
+
+def _row_line(index: int, *, pad: int = 0) -> str:
+    return TranscriptEntry(
+        f"row-{index:05d}",
+        1.0 + index,
+        ENTRY_MESSAGE,
+        {"role": "user", "content": f"row {index}" + "x" * pad},
+    ).to_json()
+
+
+def _variant_journal(
+    tmp_path: Path, variant: str, *, rows: int = 2400, pad: int = 1024
+) -> tuple[Path, list[str]]:
+    """A session dir for ``variant``, plus the ids of its VALID rows in order.
+
+    One builder for every shape the backward reader must agree with the forward
+    one on: a clean tail, a cursor mid-journal, a cursor on the last row, a
+    cursor that is absent, rows appended after a cursor, malformed rows, a
+    blank line, a torn trailing line, a file without a trailing newline, a row
+    larger than one 1 MiB chunk, a single row, and an empty journal.
+    """
+    directory = tmp_path / variant
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / TRANSCRIPT_FILENAME
+    ids = [f"row-{index:05d}" for index in range(rows)]
+    lines = [_row_line(index, pad=pad) for index in range(rows)]
+    if variant == "huge-row":
+        # Larger than _BACKWARD_CHUNK_BYTES on purpose: the walker must join the
+        # carried tail once, not re-split it per chunk (that is how the first
+        # version of the replay reader went quadratic).
+        huge = TranscriptEntry(
+            "row-huge",
+            5.0,
+            "custom",
+            {"custom_type": "bulk", "pad": "x" * (1 << 21)},
+        ).to_json()
+        lines = lines[: rows // 2] + [huge] + lines[rows // 2 :]
+    if variant == "dirty":
+        lines = lines[:6] + ["", "{ not json at all", "   "] + lines[6:]
+    if variant == "torn":
+        # A row cut off mid-flight by a crash: no terminating newline, so the
+        # walker's leading fragment is not a row a replay could ever use.
+        lines = lines + ['{"id": "row-torn"']
+    if variant == "one-row":
+        lines, ids = lines[:1], ids[:1]
+    if variant == "empty":
+        lines = []
+    trailing_newline = variant not in ("no-newline", "torn")
+    body = "\n".join(lines)
+    path.write_text(body + ("\n" if lines and trailing_newline else ""), encoding="utf-8")
+    return directory, ids
+
+
+def _page_cases(ids: list[str]) -> list[dict[str, Any]]:
+    """Cursor shapes, including both "row appended after the snapshot" halves."""
+    if not ids:
+        return [{}, {"limit": 3}, {"before_id": "row-00000"}, {"through_id": "row-00000"}]
+    middle = ids[len(ids) // 2]
+    return [
+        {},  # bare tail
+        {"limit": 1},
+        {"limit": 3},
+        {"limit": 500},
+        {"before_id": ids[-1]},  # cursor on the newest row
+        {"before_id": middle},
+        {"before_id": ids[0]},  # cursor on the oldest row
+        {"before_id": ids[0], "limit": 1},
+        {"before_id": "no-such-row"},  # evicted cursor -> reconciled tail
+        {"through_id": ids[-1]},  # inclusive cut on the newest row
+        {"through_id": middle},  # AND rows newer than the cut must be skipped
+        {"through_id": ids[0]},
+        {"through_id": ids[0], "limit": 3},
+        {"through_id": "no-such-row"},  # missing cut -> empty + reconciled
+        {"through_id": "row-huge"},  # cursor inside a larger-than-chunk row
+        {"before_id": "row-huge"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "variant", ["plain", "dirty", "torn", "no-newline", "huge-row", "one-row", "empty"]
+)
+def test_backward_page_read_matches_the_forward_oracle(tmp_path, variant):
+    """Same rows, same order, same JSON, same flags — for every cursor shape."""
+    directory, ids = _variant_journal(tmp_path, variant)
+    for kwargs in _page_cases(ids):
+        reference = _forward_transcript_page(directory, **kwargs)
+        page = read_transcript_page(directory, **kwargs)
+        assert _page_signature(page) == _page_signature(reference), (variant, kwargs)
+
+
+class _CountingHandle:
+    """Delegating file wrapper that counts every byte handed to the reader.
+
+    Counting on the way OUT is what makes the measurement implementation-
+    agnostic: the forward reader iterates lines (``__next__``) and the backward
+    reader pulls chunks (``read``), and both land in the same counter. A text
+    handle reports characters, which equal bytes on these ASCII fixtures.
+    """
+
+    def __init__(self, handle: Any, counter: list[int]) -> None:
+        self._handle = handle
+        self._counter = counter
+
+    def read(self, size: int = -1) -> Any:
+        data = self._handle.read(size)
+        self._counter[0] += len(data)
+        return data
+
+    def __next__(self) -> Any:
+        line = next(self._handle)
+        self._counter[0] += len(line)
+        return line
+
+    def __iter__(self) -> "_CountingHandle":
+        return self
+
+    def __enter__(self) -> "_CountingHandle":
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._handle.__exit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+
+@contextlib.contextmanager
+def _counted_reads(monkeypatch, path: Path):
+    """Count the bytes ``read_transcript_page`` pulls out of exactly ``path``."""
+    counter = [0]
+    real_open = Path.open
+
+    def counting_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, *args, **kwargs)
+        return _CountingHandle(handle, counter) if self == path else handle
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    yield counter
+
+
+def test_tail_page_read_cost_is_the_page_not_the_journal(tmp_path, monkeypatch):
+    """The open path's cost must be the page, and NOT a function of the journal.
+
+    STRUCTURAL, not a clock: what is asserted is bytes handed to the reader on
+    its way out of ``Path.open``, which no amount of machine load can move. A
+    9.4 MB journal whose tail page is ~1% of the file must be read for a page
+    plus the chunk that carries it, and the SAME instrument pointed at the
+    forward implementation — below, in this test — reads the whole journal and
+    breaks the bound. That is what makes this a guard rather than a description
+    of whatever the current code happens to do.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=10000, pad=900)
+    path = directory / TRANSCRIPT_FILENAME
+    size = path.stat().st_size
+    with _counted_reads(monkeypatch, path) as counted:
+        page = read_transcript_page(directory, limit=100)
+    page_bytes = sum(len(entry.to_json().encode("utf-8")) for entry in page.entries)
+    assert [entry.id for entry in page.entries] == ids[-100:]
+    # A page, the chunk that carries it, and at most one chunk of boundary
+    # slack: ``_iter_complete_lines_backward`` reads whole chunks backward.
+    assert counted[0] <= page_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+    # ... and never anything like the journal, however long the journal is.
+    assert counted[0] * 4 < size
+
+    with _counted_reads(monkeypatch, path) as oracle_counted:
+        reference = _forward_transcript_page(directory, limit=100)
+    assert _page_signature(reference) == _page_signature(page)
+    # The old read IS the journal: it needs the whole file to answer the same
+    # question, so it fails the bound above by a factor of ~2.5 on this file.
+    assert oracle_counted[0] * 4 >= size
+
+
+def test_cursor_page_read_cost_is_the_page_plus_the_walk_to_it(tmp_path, monkeypatch):
+    """The OTHER page shape this change moves: a ``before_id`` page mid-journal.
+
+    Same structural instrument as the tail case, bounded the other way round.
+    Reading backward to a cursor must cost the page, the bytes AFTER that cursor
+    (which the walk has to pass through on its way down), and one chunk of
+    boundary slack — and must not touch the history BEFORE the cursor at all,
+    which is most of this file and is exactly what the forward reader paid for.
+    Both halves are asserted, and the forward implementation is measured here
+    too so the bound cannot rot into a description.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=10000, pad=900)
+    path = directory / TRANSCRIPT_FILENAME
+    size = path.stat().st_size
+    cursor = ids[9000]  # ~1000 rows from the tail: one long scroll back
+    rows = [raw for raw in path.read_bytes().split(b"\n") if raw.strip()]
+    row_ids = [json.loads(raw)["id"] for raw in rows]
+    cursor_index = row_ids.index(cursor)
+    tail_bytes = sum(len(raw) + 1 for raw in rows[cursor_index:])  # cursor row + newer
+    head_bytes = size - tail_bytes
+
+    with _counted_reads(monkeypatch, path) as counted:
+        page = read_transcript_page(directory, before_id=cursor, limit=100)
+    page_bytes = sum(len(entry.to_json().encode("utf-8")) for entry in page.entries)
+    assert [entry.id for entry in page.entries] == ids[8900:9000]
+    assert counted[0] <= page_bytes + tail_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+    # The prefix before the cursor — ~90% of this journal — is never read.
+    assert counted[0] < head_bytes
+
+    with _counted_reads(monkeypatch, path) as oracle_counted:
+        reference = _forward_transcript_page(directory, before_id=cursor, limit=100)
+    assert _page_signature(reference) == _page_signature(page)
+    # ... while the forward read has to walk that prefix, so it exceeds the same
+    # bound this test asserts: that is the guard's teeth for this shape.
+    assert oracle_counted[0] >= head_bytes
+    assert oracle_counted[0] > page_bytes + tail_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+
+
+def test_backward_page_answers_a_duplicated_id_with_its_newest_row(tmp_path):
+    """A repeated cursor id resolves to the NEWER row, deliberately (review R1-2).
+
+    Ids are ``uuid4().hex`` on the append path, so a repeat means a corrupted or
+    concatenated journal rather than anything the codebase can write. The
+    forward reader answered with whichever occurrence it MET first — the oldest;
+    reading backward meets the newest first, and matching the old answer would
+    mean walking to the file's start whenever an id repeats, giving up the whole
+    optimisation for the one case that is already anomalous. So the newest
+    occurrence is the boundary, and this test pins that rather than leaving it to
+    the direction of the scan. Row order is unaffected and the cursor row is
+    still never returned, so a duplicate cannot make a caller loop.
+    """
+    directory = tmp_path / "dupes"
+    directory.mkdir()
+
+    def _dup_row(content: str) -> str:
+        return TranscriptEntry(
+            "dup", 1.0, ENTRY_MESSAGE, {"role": "user", "content": content}
+        ).to_json()
+
+    written = [
+        _row_line(0),
+        _row_line(1),
+        _row_line(2),
+        _dup_row("dup older"),
+        _row_line(3),
+        _dup_row("dup newer"),
+        _row_line(4),
+    ]
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(written) + "\n", encoding="utf-8")
+
+    # before_id excludes its row: the page ends at the row before the NEWEST dup.
+    before = read_transcript_page(directory, before_id="dup")
+    assert [entry.id for entry in before.entries] == [
+        "row-00000",
+        "row-00001",
+        "row-00002",
+        "row-00003",
+    ]
+    assert before.has_more is False and before.reconciled is False
+    assert "dup" not in {entry.id for entry in before.entries}
+
+    # through_id includes its row: the page's newest row is the NEWER dup.
+    through = read_transcript_page(directory, through_id="dup")
+    assert [entry.id for entry in through.entries] == [
+        "row-00000",
+        "row-00001",
+        "row-00002",
+        "dup",
+        "row-00003",
+        "dup",
+    ]
+    assert json.loads(through.entries[-1].to_json())["payload"]["content"] == "dup newer"
+    assert json.loads(through.entries[3].to_json())["payload"]["content"] == "dup older"
+
+    assert [
+        entry.id for entry in read_transcript_page(directory, before_id="dup", limit=1).entries
+    ] == ["row-00003"]
+
+
 @pytest.mark.asyncio
 async def test_custom_entries_ignored_by_replay(transcript):
     await transcript.append_message(Message.user("hi"))
@@ -569,11 +917,11 @@ async def test_cancelled_write_settles_before_successor_and_publishes_durable_ro
     release = threading.Event()
     original = transcript._write_entries
 
-    def write(rows):
+    def write(rows, *, preserve_mtime: bool = False):
         if rows[0].id == "first":
             started.set()
             assert release.wait(10), "test did not release the disk worker"
-        original(rows)
+        original(rows, preserve_mtime=preserve_mtime)
 
     monkeypatch.setattr(transcript, "_write_entries", write)
     first = asyncio.create_task(transcript.append_message(Message.user("one", id="first")))
@@ -680,7 +1028,7 @@ async def test_replay_suffix_matches_whole_file_parse(tmp_path, shape):
     full = Transcript(directory)
     store = AttachmentStore(directory)
 
-    suffix = read_replay_suffix(directory, checkpoint_type="checkpoint")
+    suffix = read_replay_suffix(directory, checkpoint_types="checkpoint")
     assert _dump(replay_entries(suffix.entries, store)) == _dump(full.build_llm_history())
     assert suffix.checkpoint == full.latest_custom("checkpoint")
     if shape != "no-compaction":
@@ -715,6 +1063,48 @@ async def test_replay_suffix_reports_an_unknown_cursor_instead_of_cutting(tmp_pa
     suffix = read_replay_suffix(directory, through_id="not-a-row")
     assert not suffix.through_present
     assert suffix.bytes_read == (directory / "transcript.jsonl").stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_a_type_that_may_be_absent_never_defeats_the_suffix_stop(tmp_path):
+    """Review R1-2: an opportunistic type must not gate the reader's stop.
+
+    The cold path wants the frontend checkpoint AND the spend record out of one
+    pass. Requiring both meant a pre-ledger journal — which by definition has no
+    spend row — could never satisfy the stop, so the reader walked to the start
+    of the file: measured on the operator's store, session ``28a800c6a783``,
+    4,194,304 bytes became **16,701,655** (the whole 16.7 MB journal) on every
+    cold open, plus the ~1.23x-weight parse it pins.
+
+    The assertion is structural rather than a byte budget: adding a type that is
+    absent must not change how far the reader reads, and a row of that type
+    inside the window must still come out of the same pass.
+    """
+    directory = tmp_path / "sess"
+    await _journal(directory, shape="compaction")
+    size = (directory / "transcript.jsonl").stat().st_size
+
+    required_only = read_replay_suffix(directory, checkpoint_types=("checkpoint",))
+    with_absent = read_replay_suffix(
+        directory,
+        checkpoint_types=("checkpoint",),
+        opportunistic_types=("session_spend.v1",),
+    )
+    assert required_only.bytes_read < size, "the reader must not read the whole journal"
+    assert with_absent.bytes_read == required_only.bytes_read
+    assert "session_spend.v1" not in with_absent.checkpoints
+
+    # And the opportunistic row IS collected when the backward scan passes it —
+    # including from the tail, which is where a per-call record always is.
+    await Transcript(directory).append_custom("session_spend.v1", {"version": 1, "micro": 7})
+    with_row = read_replay_suffix(
+        directory,
+        checkpoint_types=("checkpoint",),
+        opportunistic_types=("session_spend.v1",),
+    )
+    assert with_row.checkpoints["session_spend.v1"] == {"version": 1, "micro": 7}
+    assert with_row.checkpoints["checkpoint"] == {"epoch": "e1"}
+    assert with_row.bytes_read < size + 4096, "a row at the tail must not cost a full read"
 
 
 def test_replay_suffix_absent_journal_is_empty_history(tmp_path):
@@ -946,3 +1336,186 @@ class TestDurableConversationPath:
         assert durable_conversation_path(tmp_path / "absent.jsonl") is False
         torn = self._write(tmp_path, ["{torn", "not json"])
         assert durable_conversation_path(torn) is False
+
+
+@pytest.mark.asyncio
+async def test_search_spend_rows_survive_a_resume(tmp_path, transcript):
+    """A resumed conversation recovers the search spend its tool rows recorded.
+
+    Driven through the REAL persistence path — harness tool-result bookkeeping,
+    encode, file, replay — because what can break is not the read: it is whether
+    ``ToolResult.details`` reaches the row at all, and whether a SECOND session
+    built on the same directory can see it. A test that handed the accessor a
+    hand-made payload would prove neither.
+
+    The spend itself is real money that the model-token accounting never saw
+    (``web_search`` bills separately), so the ledger that displays it is
+    process-wide and starts empty in a new process; this read is the only thing
+    that stands between a resumed session and reporting a search-heavy
+    conversation as free.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_search",
+        content=[TextContent(text="Snippets are intentionally capped.")],
+        details={
+            "provider": "deepseek",
+            "search_cost": {
+                "usd": 0.0031,
+                "basis": "token estimate",
+                "priced_from_usage": False,
+                "session_usd": 0.0031,
+                "session_searches": 1,
+                "provider_searches": 1,
+            },
+        },
+    )
+    await transcript.append_message(Message.tool_result(result))
+    transcript.flush()
+
+    # A SECOND Transcript on the same directory is the resume: nothing is shared
+    # but the file, so the row that comes back is the one that was persisted.
+    resumed = Transcript(tmp_path / "sess")
+    rows = resumed.search_spend_rows()
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "deepseek"
+    assert rows[0]["usd"] == pytest.approx(0.0031)
+    assert rows[0]["basis"] == "token estimate"
+
+    # And through a real Session, which is the accessor the host actually calls
+    # on adopt. ``_make_session`` is the harness this module's siblings use; the
+    # point here is only that the seeding happens at construction and is
+    # available before any turn runs.
+    from tests.unit.session.test_cut_off_turns import _make_session
+
+    session = _make_session(tmp_path / "sess")
+    assert session.restored_search_spend() == tuple(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_pruned_search_row_keeps_its_cost(tmp_path, transcript):
+    """Pruning blanks a tool result's CONTENT, not its cost bookkeeping.
+
+    Compaction blanks hundreds of tool rows on a long conversation, and the
+    spend recovery reads those rows. If a prune took the details with the
+    content, a resumed session would quietly report a fraction of what it spent
+    — with no mark to say so — which is the loss this read exists to prevent.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_search",
+        content=[TextContent(text="a page of snippets")],
+        details={
+            "provider": "tavily",
+            "search_cost": {
+                "usd": 0.0080,
+                "basis": "tavily credits",
+                "priced_from_usage": True,
+            },
+        },
+    )
+    entry = await transcript.append_message(Message.tool_result(result))
+    await transcript.append_prune(entry.id, "[pruned]")
+    await transcript.compact_file(min_reclaim_bytes=0)
+
+    rows = Transcript(tmp_path / "sess").search_spend_rows()
+    assert rows and rows[0]["provider"] == "tavily"
+    assert rows[0]["usd"] == pytest.approx(0.0080)
+    assert "a page of snippets" not in transcript.path.read_text()
+
+
+@pytest.mark.asyncio
+async def test_a_reads_cost_row_is_recovered_with_its_own_ledger_key(tmp_path, transcript):
+    """Resume recovery must find ``read_cost`` rows, and key them as the tool did.
+
+    Round 1's review found the recovery reading only ``search_cost``, so a
+    read-heavy conversation came back with its searches and none of its reads.
+    Round 2's found the replacement deriving the key from a ``provider`` field a
+    read result does not carry, so the restored row landed under ``:read``
+    instead of the live ``deepseek:read`` -- one kind of spend split across two
+    rows on resume.
+
+    Driven through the real persistence path, like the search-row test beside it:
+    what can break is whether ``ToolResult.details`` reaches the row.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_read",
+        content=[TextContent(text="Answer.")],
+        details={
+            "pages": 4,
+            "read_cost": {
+                "ledger_provider": "deepseek:read",
+                "usd": 0.002,
+                "basis": "tokens at list price",
+                "session_usd": 0.002,
+                "session_searches": 0,
+                "session_reads": 1,
+                "reads": 1,
+            },
+        },
+    )
+    await transcript.append_message(Message.tool_result(result))
+    transcript.flush()
+
+    resumed = Transcript(tmp_path / "sess")
+    rows = resumed.search_spend_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "deepseek:read"
+    assert rows[0]["kind"] == "read"
+    assert rows[0]["usd"] == pytest.approx(0.002)
+
+
+@pytest.mark.asyncio
+async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> None:
+    """The cold reader's entry point and the owner's method are ONE rule.
+
+    ``usages_since_newest_shrink`` exists because a cold viewer holds only the
+    journal SUFFIX it read (``read_replay_suffix``), never a ``Transcript`` — and
+    it must still apply the same compaction/prune boundary the owner applies when
+    seeding a status readout. If the two ever drift, one conversation reports two
+    different contexts depending on which surface opened it, and the reading that
+    survives the drift picks the compaction trigger's figure (``Session._last_usage``)
+    for a session the desktop would describe differently.
+
+    Asserted at every boundary state the scan can meet, with the reading list
+    itself pinned so the equality cannot pass on two empty answers.
+    """
+    from local_operator.session.transcript import usages_since_newest_shrink
+
+    def both(transcript: Transcript) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        entries = transcript.entries()
+        return usages_since_newest_shrink(entries), transcript.usages_since_compaction()
+
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_message(Message.user("q1"))
+    await transcript.append_message(Message.assistant("a1", usage=Usage(context_tokens=100_000)))
+    await transcript.append_message(Message.user("q2"))
+    kept = await transcript.append_message(
+        Message.assistant("a2", usage=Usage(context_tokens=200_000))
+    )
+
+    # No shrink yet: every reading in the file is on the live side.
+    module, method = both(transcript)
+    assert [usage["context_tokens"] for usage in module] == [100_000, 200_000]
+    assert module == method
+
+    # A compaction moves the boundary for both readers: readings preceding the
+    # marker describe the pre-pass context.
+    await transcript.append_compaction("summary of q1/a1", kept.id, 300_000)
+    await transcript.append_message(Message.assistant("a3", usage=Usage(context_tokens=300_000)))
+    module, method = both(transcript)
+    assert [usage["context_tokens"] for usage in module] == [300_000]
+    assert module == method
+
+    # A prune moves it again, without a marker of its own.
+    await transcript.append_prune(kept.id, "[pruned]")
+    module, method = both(transcript)
+    assert module == [] and method == module
+
+    # Folding the prune journal away (the on-disk form of the same file) is
+    # semantically invisible: the boundary stays where the prune was.
+    await transcript.compact_file(min_reclaim_bytes=1)
+    module, method = both(Transcript(tmp_path / "sess"))
+    assert module == [] and method == module

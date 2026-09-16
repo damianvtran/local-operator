@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -86,8 +87,7 @@ def reminders(messages) -> list[CustomMessage]:
     return [
         message
         for message in messages
-        if isinstance(message, CustomMessage)
-        and message.custom_type == builtin.TODO_REMINDER_MESSAGE_TYPE
+        if isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
     ]
 
 
@@ -262,7 +262,7 @@ async def test_reminder_leaves_no_trace_in_the_transcript(tmp_path) -> None:
 
     entries = session._transcript.entries()
     assert not any(
-        builtin.TODO_REMINDER_MESSAGE_TYPE in repr(entry) for entry in entries
+        TODO_REMINDER_MESSAGE_TYPE in repr(entry) for entry in entries
     ), "the reminder must never be persisted"
     # Every event shape this session emits is checked by repr, not by one known
     # attribute: a nudge leaking through any field is the failure, not just a
@@ -281,7 +281,7 @@ def _reminder(text: str, fingerprint=None) -> CustomMessage:
     if fingerprint is not None:
         details["fingerprint"] = fingerprint
     return CustomMessage(
-        custom_type=builtin.TODO_REMINDER_MESSAGE_TYPE,
+        custom_type=TODO_REMINDER_MESSAGE_TYPE,
         attribution="system",
         details=details,
     )

@@ -17,6 +17,14 @@ import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
+from local_operator.mcp.auth import (
+    REFRESH_REFUSAL_ENDPOINT,
+    REFRESH_REFUSAL_INFLIGHT,
+    REFRESH_REFUSAL_LOCK,
+    REFRESH_REFUSAL_UNATTRIBUTED,
+    REFRESH_REFUSAL_UNREACHABLE,
+    REFRESH_REFUSAL_UNSENT,
+)
 from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mcp.manager import (
     McpManager,
@@ -51,6 +59,33 @@ class FakeSession:
     owns_runtime = True
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
 
     def __init__(
         self,
@@ -1525,7 +1560,7 @@ class TestAuthRequiredHandling:
 
     Startup and auto-reconnect are non-interactive: when the stored grant
     cannot be refreshed, the connect raises ``McpAuthRequiredError``. The
-    manager turns that into a ``run /mcp login <name>`` message for the toast,
+    manager turns that into a ``/mcp login <name>`` message for the toast,
     and the reconnect loop abandons (an expired grant will not heal by
     retrying) instead of burning the breaker window.
     """
@@ -1580,7 +1615,7 @@ class TestAuthRequiredHandling:
         seen: list[tuple[str, str]] = []
         manager.on_auth_required = lambda name, msg: seen.append((name, msg))
         manager._fire_auth_required("notion", McpAuthRequiredError("https://mcp.notion.com/mcp"))
-        assert seen == [("notion", "run /mcp login notion to authorize")]
+        assert seen == [("notion", "/mcp login notion to authorize")]
 
     def test_fire_auth_required_survives_a_raising_sink(self) -> None:
         """A broken UI hook must not take down the connect machinery."""
@@ -1811,6 +1846,264 @@ class TestAuthRequiredHandling:
             server.server_close()
 
     @pytest.mark.asyncio
+    async def test_transient_refresh_failure_does_not_block_on_auth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contention is NOT an auth failure, and the manager must retry it.
+
+        The decisive property of the coordination contract, measured through the
+        REAL ``streamable_http_client``: when the in-flight coordinator cannot
+        refresh under the lock, it refuses to let the SDK POST the in-memory
+        refresh token unlocked. That refusal does not survive the transport as
+        an exception — the transport runs the request inside anyio cancel
+        scopes, so it arrives as a bare
+        ``CancelledError('Cancelled via cancel scope …')`` — so the provider arms
+        ``REFRESH_CONTENTION`` and ``_connect_server`` re-voices the
+        cancellation from that record.
+
+        Two outcomes are asserted, and they are the difference between "a
+        healthy server on a login prompt" and "a healthy server that retries":
+        the reconnect is re-scheduled with backoff and the server does NOT take
+        an auth block. ``token_posts`` is the same claim measured at the wire —
+        ZERO POSTs to the token endpoint, locked or unlocked.
+        """
+        import json
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import (
+            McpAuthRequiredError,
+            McpRefreshContendedError,
+            McpTokenStorage,
+        )
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+        from tests.unit.mcp.test_auth import FakeAuthStore
+
+        token_posts: list[dict[str, Any]] = []
+
+        class StubServer(BaseHTTPRequestHandler):
+            """Just enough OAuth metadata and MCP endpoint to reach the flow."""
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                return
+
+            def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            @property
+            def _base(self) -> str:
+                assert isinstance(self.server, ThreadingHTTPServer)
+                return f"http://127.0.0.1:{self.server.server_port}"
+
+            def do_GET(self) -> None:
+                if self.path.startswith("/.well-known/oauth-protected-resource"):
+                    self._json(
+                        {"resource": self._base + "/mcp", "authorization_servers": [self._base]}
+                    )
+                elif self.path.startswith("/.well-known/oauth-authorization-server"):
+                    self._json(
+                        {
+                            "issuer": self._base,
+                            "authorization_endpoint": self._base + "/authorize",
+                            "token_endpoint": self._base + "/token",
+                            "registration_endpoint": self._base + "/register",
+                        }
+                    )
+                else:
+                    self._json({"error": "not found"}, status=404)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                if self.path == "/token":
+                    # Every POST here — locked or unlocked — is a failure of the
+                    # claim under test, so record it and answer dead.
+                    token_posts.append(
+                        dict(
+                            __import__("urllib.parse", fromlist=["parse_qsl"]).parse_qsl(
+                                body.decode()
+                            )
+                        )
+                    )
+                    self._json({"error": "invalid_grant"}, status=400)
+                else:
+                    self._json({"error": "unauthorized"}, status=401)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StubServer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/mcp"
+            cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+            store = FakeAuthStore()
+            manager = McpManager(str(tmp_path))
+            manager.auth_store = cast(Any, store)
+            manager._configs["dd"] = cfg
+
+            # An EXPIRED, refreshable stored grant: exactly the state the
+            # coordinator exists to act on. Without an expiry the coordinator
+            # would return early and nothing would be proven.
+            from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+            storage = McpTokenStorage(url, store)
+            await storage.set_client_info(OAuthClientInformationFull(client_id="stub-client"))
+            await storage.set_tokens(
+                OAuthToken(access_token="stale", refresh_token="r-old", expires_in=60)
+            )
+            store.rows[0].data["tokens_obtained_at"] = time.time() - 600
+
+            # A peer process holds the refresh lock: the bounded acquire gives
+            # up, which is the contention this contract is about. Patched on the
+            # module the provider looks the name up on, so the REAL provider
+            # runs — only the lock's outcome is forced.
+            import contextlib as _contextlib
+
+            @_contextlib.asynccontextmanager
+            async def _foreign_held_lock(server_url: str):
+                yield False
+
+            monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", _foreign_held_lock)
+
+            def _leaves(exc: BaseException) -> list[BaseException]:
+                if isinstance(exc, BaseExceptionGroup):
+                    out: list[BaseException] = []
+                    for child in exc.exceptions:
+                        out.extend(_leaves(child))
+                    return out
+                return [exc]
+
+            with pytest.raises(BaseException) as excinfo:
+                await manager._connect_server("dd", cfg)
+            leaves = _leaves(excinfo.value)
+            assert any(isinstance(leaf, McpRefreshContendedError) for leaf in leaves), (
+                "the refused unlocked refresh was not re-voiced from the ledger: "
+                f"{excinfo.value!r}"
+            )
+            assert not any(
+                isinstance(leaf, McpAuthRequiredError) for leaf in leaves
+            ), "contention was flattened into an auth requirement"
+            # And it cost ZERO token POSTs: the SDK's unlocked refresh never ran.
+            assert token_posts == [], f"a refresh POST reached the wire: {token_posts}"
+
+            # The manager arm: a generic failure re-schedules with backoff and
+            # does NOT block on auth (the whole point of a non-auth raise).
+            scheduled = {"called": False}
+            monkeypatch.setattr(
+                manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+            )
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert scheduled["called"] is True
+            assert manager.auth_blocked("dd") is False
+            assert manager.reconnect_suspended("dd") is False
+            assert manager.get_connection_status("dd") != "auth-required"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_dispose_cancellation_is_not_re_voiced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real teardown must stay a teardown, even with a record armed.
+
+        The guard that keeps the re-voice safe: a cancellation the TASK ITSELF
+        was asked for (``cancelling() > 0`` — a dispose, a reload, an epoch
+        change, the user leaving) keeps its priority, and the contention record
+        is discarded rather than believed. Without this, a refusal armed a moment
+        before a disposal would convert the disposal into a reconnect attempt —
+        the retry storm the abandoned-grant arm already guards against.
+
+        Also asserts the record is CONSUMED on that path, so it cannot be
+        attributed to an unrelated cancellation of the same server later.
+        """
+        from local_operator.mcp.auth import REFRESH_CONTENTION
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        parked = asyncio.Event()
+
+        async def park(*_a: Any, **_kw: Any) -> Any:
+            await parked.wait()
+            raise AssertionError("released without being cancelled")
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", park)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        scheduled = {"called": False}
+        monkeypatch.setattr(
+            manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+        )
+
+        # Fresh ledger entries are cleared around every test by the fixture
+        # below; arm one here to prove the guard beats the record.
+        REFRESH_CONTENTION.record(url)
+        task = asyncio.ensure_future(manager._connect_server("dd", cfg))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert scheduled["called"] is False
+        assert manager.auth_blocked("dd") is False
+        assert REFRESH_CONTENTION.pop(url) is None, "the record leaked past the disposal"
+
+    @pytest.mark.asyncio
+    async def test_the_contention_record_is_single_use(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One refusal re-voices ONE cancellation, never two.
+
+        The transport's rewrite of an auth-flow failure is a bare CancelledError
+        with no cancelling count, which is exactly what the abandoned-grant arm
+        sees too — so the record is what distinguishes them, and a record that
+        outlived its own cancellation would turn the NEXT unrelated one into a
+        retry.
+        """
+        from local_operator.mcp.auth import REFRESH_CONTENTION, McpRefreshContendedError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        async def bare_cancel(*_a: Any, **_kw: Any) -> Any:
+            # What the transport delivers: a CancelledError with NO cancelling
+            # count on the task, i.e. not an external cancellation.
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", bare_cancel)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        REFRESH_CONTENTION.record(url)
+        with pytest.raises(McpRefreshContendedError):
+            await manager._connect_server("dd", cfg)
+        # Second attempt, same server, nothing armed: the record really was
+        # single-use — the cancellation is NOT re-voiced as a retry. What it IS
+        # re-voiced as changed with the settle fix: a bare, unarmed cancellation
+        # with no cancelling count is anyio's own delivery (the transport's
+        # reader/writer dying), so ``_connect_server`` now converts it to
+        # ``McpTransportError`` so it is REPORTED instead of dropped by
+        # ``_finish_pending``. The assertion that matters here is the negative
+        # one: it is not a contention retry.
+        from local_operator.mcp.manager import McpTransportError
+
+        with pytest.raises(McpTransportError) as second_attempt:
+            await manager._connect_server("dd", cfg)
+        assert not isinstance(second_attempt.value, McpRefreshContendedError)
+        assert second_attempt.value.url == url
+
+    @pytest.mark.asyncio
     async def test_login_resets_the_breaker_and_scopes_the_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1906,7 +2199,7 @@ class TestAuthChallengeMessaging:
         """Design constraint D1: the toast clamps to the card width and the
         TAIL is what truncates, so the command has to lead."""
         text = McpManager._auth_failure_text("launchdarkly", self._exc())
-        assert text.startswith("run /mcp login launchdarkly")
+        assert text.startswith("/mcp login launchdarkly")
         assert text.count("—") <= 1  # D4: not a chain of dashes
 
     @pytest.mark.asyncio
@@ -1945,7 +2238,7 @@ class TestAuthChallengeMessaging:
     async def test_a_non_auth_failure_is_never_relabelled_as_an_auth_problem(
         self, tmp_path: Path
     ) -> None:
-        """Routing a network outage into "run /mcp login" would be a worse
+        """Routing a network outage into "/mcp login" would be a worse
         error than the opaque one this change replaces. No observed challenge
         means no conversion."""
         from local_operator.mcp.config import MCPHttpServerConfig
@@ -2193,6 +2486,226 @@ class TestChallengeIsBoundToTheTerminalRequest:
         assert await manager.server_supports_oauth_login(cfg) is True
 
 
+class TestTheStartupNetworkSubsetFollowsEveryClear:
+    """R1-2: the network subset is cleared wherever the failure itself is.
+
+    ``_startup_network`` is documented as a subset of ``_startup_failures`` "by
+    construction", and one site wrote ``_startup_failures`` directly instead of
+    going through ``_clear_startup_failure`` — so a server that healed kept its
+    name in the network set, and ``network_failures <= set(failures)`` (the
+    invariant ``mcp_status.all_failures_are_network`` reads) was False for any
+    caller that trusts it. Latent rather than user-visible today: both wiring
+    reads filter by ``name in failures``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_healed_server_leaves_neither_set(self, tmp_path: Path) -> None:
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        manager._configs["remote"] = cfg
+        manager._note_startup_failure("remote", "network: cannot reach srv.example", network=True)
+        assert manager.startup_network_failures() == {"remote"}
+
+        # A real loop: ``_register_connection`` arms the connection watchdog.
+        manager._register_connection(_make_conn("remote", cfg))
+
+        assert manager.startup_failures() == {}
+        assert manager.startup_network_failures() == set()
+        assert manager.startup_network_failures() <= set(manager.startup_failures())
+        await manager.disconnect_all()
+
+
+class TestAnObservedChallengeOutranksTheTransportLabel:
+    """Q1-1: a peer that ANSWERED must not be reported as the network failing.
+
+    QA measured a reachable, answering 401 peer rendering as ``network: no
+    response from <host> (timed out)`` in the majority of 29 runs while the
+    stub's own request log showed the initialize POST had received its 401: the
+    SDK's initialize died inside its own task group, the transport gave up as a
+    bare cancellation, and the watcher's ``begin`` hook had already cleared the
+    challenge the retry never answered. The contract this change carries ("a
+    reachable 401 must not be called a network failure") therefore held only in
+    the minority of runs.
+
+    The transport-failure arm is the only caller that reads the LATENT
+    observation (:attr:`_AuthChallengeWatcher.saw_challenge`); every other
+    classifier keeps F5's last-request rule, which the test below pins on the
+    same watcher state.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=self.URL))
+
+    async def _challenged_then_dark(self) -> Any:
+        """A watcher whose peer answered 401 and whose retry never answered."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401))  # the initialize POST answered
+        await watcher.begin(SimpleNamespace(url=self.URL))  # the retry starts ...
+        return watcher
+
+    def _oauth_capable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the eligibility gate and discovery answer without the network."""
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod.OAUTH_CHALLENGES.clear()
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=True)
+
+        async def discovery(url: str) -> object:
+            return object()
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", discovery)
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: False)
+
+    @pytest.mark.asyncio
+    async def test_the_latent_observation_is_only_read_when_asked_for_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default stays F5's; the transport arm opts in explicitly."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        self._oauth_capable(monkeypatch)
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = await self._challenged_then_dark()
+        assert watcher.status_code is None, "F5: the retry that never answered clears it"
+        assert watcher.saw_challenge == 401
+
+        assert await manager._challenge_error(cfg, watcher) is None
+        exc = await manager._challenge_error(cfg, watcher, prefer_observed=True)
+        assert exc is not None
+        assert exc.status_code == 401
+        assert exc.oauth_available is True
+
+    @pytest.mark.asyncio
+    async def test_the_connect_records_the_auth_failure_not_the_network(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the race QA measured, asserted on the recorded outcome.
+
+        The transport seam is stubbed with the deterministic sequence the real
+        SDK produces (answer 401, retry, die with no second response), so the
+        assertion is about the CLASSIFICATION and needs no socket.
+        """
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import NETWORK_FAILURE_MARKER
+
+        self._oauth_capable(monkeypatch)
+        monkeypatch.setattr("local_operator.mcp.manager.STARTUP_GATE_MS", 1)
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        settled = asyncio.Event()
+        manager.on_startup_settled = settled.set
+
+        async def answering_then_dying(
+            stack: Any,
+            name: str,
+            cfg_: Any,
+            timeout_s: float | None,
+            stderr_log: Any,
+            *,
+            interactive: bool = False,
+            challenge_watcher: Any = None,
+        ) -> ServerConnection:
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(401))
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            # Past the gate, so the failure lands on the deferred path.
+            await asyncio.sleep(0.05)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", answering_then_dying)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        await manager._connect_round({"remote": cfg}, {})
+        await asyncio.wait_for(settled.wait(), timeout=10)
+
+        failures = manager.startup_failures()
+        assert set(failures) == {"remote"}, failures
+        assert failures["remote"] == "/mcp login remote to authorize"
+        assert NETWORK_FAILURE_MARKER not in failures["remote"]
+        assert manager.startup_network_failures() == set()
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_the_attempt_satisfied_stops_winning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2-1: 401 → 200 → transport death must NOT read as an auth failure.
+
+        The latch is bounded by the peer's own answers: an endpoint response that
+        is not a challenge proves this endpoint answers and is satisfied (a 200
+        after a grant is the case that matters), so the earlier 401 must not
+        outlive it. Reproduced on the first cut as ``/mcp login remote to
+        authorize`` with an EMPTY network subset — and, worse, with a durable
+        OAuth-challenge record written for a grant the attempt had just proved
+        good.
+        """
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import (
+            NETWORK_FAILURE_MARKER,
+            _AuthChallengeWatcher,
+        )
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401))  # the peer challenges us ...
+        assert watcher.saw_challenge == 401
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(200))  # ... and the retry is SATISFIED
+        assert watcher.status_code is None
+        assert watcher.saw_challenge is None, "a proven-good answer clears the latch"
+
+        # No challenge, so nothing to classify: this is the path that also
+        # short-circuits BEFORE the durable ``record_oauth_challenge`` write.
+        assert await manager._challenge_error(cfg, watcher, prefer_observed=True) is None
+
+        # And on the real connect path, the same sequence ends in the network
+        # label — with the server counted in the network subset, which is what
+        # "network ⊆ failures by construction" needs to stay meaningful.
+        monkeypatch.setattr("local_operator.mcp.manager.STARTUP_GATE_MS", 1)
+        settled = asyncio.Event()
+        manager.on_startup_settled = settled.set
+
+        async def satisfied_then_dying(
+            stack: Any,
+            name: str,
+            cfg_: Any,
+            timeout_s: float | None,
+            stderr_log: Any,
+            *,
+            interactive: bool = False,
+            challenge_watcher: Any = None,
+        ) -> ServerConnection:
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(401))
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(200))
+            await asyncio.sleep(0.05)  # past the gate: the deferred failure path
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", satisfied_then_dying)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        await manager._connect_round({"remote": cfg}, {})
+        await asyncio.wait_for(settled.wait(), timeout=10)
+
+        failures = manager.startup_failures()
+        assert set(failures) == {"remote"}, failures
+        assert failures["remote"].startswith(NETWORK_FAILURE_MARKER), failures
+        assert manager.startup_network_failures() == {"remote"}
+        await manager.disconnect_all()
+
+
 class TestMcpAuthRecoveryHint:
     """The remedy an MCP auth failure earns, and the one it must never get.
 
@@ -2230,7 +2743,7 @@ class TestMcpAuthRecoveryHint:
         from local_operator.mcp.manager import mcp_auth_recovery_hint
 
         hint = mcp_auth_recovery_hint(
-            "MCP authorization failed", "run /mcp login minerva-qa to authorize"
+            "MCP authorization failed", "/mcp login minerva-qa to authorize"
         )
         assert hint is not None
         assert "/mcp login minerva-qa" in hint
@@ -2303,7 +2816,7 @@ class TestMcpAuthRecoveryHint:
         hostname puts on both sides of the name. That made the loose pass, whose
         documented job is "the fallback for the URL-shaped messages", match
         NOTHING: ``linear``, ``notion``, ``sentry`` and ``minerva-qa`` all went
-        from resolved to ``None``, and every actionable ``run /mcp reauth
+        from resolved to ``None``, and every actionable ``/mcp reauth
         linear`` silently became the generic referral.
 
         Both existing layers missed it because the quoted form asserted above is
@@ -3708,3 +4221,491 @@ class TestAnUnreadableGrantMarkerIsNotAChangedGrant:
         finally:
             await manager.disconnect_all()
             store.close()
+
+
+class TestRefreshRefusalCopy:
+    """The exact RENDERED strings for the refusal reasons and the auth line.
+
+    Round 1 split one message into three truthful sentences and design review
+    round 1 (D1/D2) showed why that was not enough: every one of those sentences
+    opens with ``MCP OAuth token refresh for <full server URL>``, which is ~55
+    of the toast card's 58 content cells, so the distinguishing clause was
+    always the part tail-truncated away and all of them rendered byte-identically
+    at 100 columns and below. The split now lives on the exception as a stable
+    reason CODE and the manager composes the short text from it, so these
+    assertions are made against the RENDERED line at both real card widths —
+    not against the code's idea of the sentence, which is exactly the mistake
+    that let four different refusals look the same.
+
+    Two rounds later the same seam carries the LOCAL shapes (unsent, unattributed)
+    that must never borrow the endpoint's "the server returned no token", and the
+    auth requirement's three pinned lines (D9), which are asserted here as the
+    painted rows rather than as source strings.
+
+    The 44-column case is the tight one and the reason the wording is this
+    short: ``✗ failed: notion — `` spends 19 of the 36 available cells, leaving
+    17 for the reason, so each reason must be DISTINGUISHABLE inside its first
+    17 cells.
+
+    Every pinned row below carries the row's own glyph (design review round 2,
+    D2-2). It is 2 of the card's 58 content cells, and that is the whole reason
+    these strings moved: the row a user reads is ``✗ `` + the copy, so the
+    boundaries are re-derived at the PAINTED width (58 → 56 for the copy, 36 →
+    34) rather than the pre-glyph 58/36 (review round 4, R4-3; round 5, R5-3).
+    Two consequences are pinned deliberately rather than absorbed: the auth
+    family's 57-cell whole row no longer fits the 58-cell card and sheds its
+    reason, and at 44 columns the reauth command's name argument is truncated
+    one cell from the end (the D9 constraint at that width, priced below).
+    """
+
+    URL = "https://mcp.example.com/v1/mcp"
+
+    #: Rendered at 100 columns (58 content cells) and at 44 (36). The row the
+    #: composer returns INCLUDES the card row's own ``✗ `` glyph (D2-2), which is
+    #: why the truncation boundaries sit two cells earlier than they did before
+    #: the glyph was added — measured on the painted row, not shaved to fit.
+    EXPECTED = {
+        REFRESH_REFUSAL_LOCK: (
+            "✗ failed: notion — another session is refreshing",
+            "✗ failed: notion — another session…",
+        ),
+        REFRESH_REFUSAL_INFLIGHT: (
+            "✗ failed: notion — refresh still in progress",
+            "✗ failed: notion — refresh still in…",
+        ),
+        REFRESH_REFUSAL_ENDPOINT: (
+            "✗ failed: notion — the server returned no token",
+            "✗ failed: notion — the server retur…",
+        ),
+        REFRESH_REFUSAL_UNREACHABLE: (
+            "✗ failed: notion — cannot reach the server",
+            "✗ failed: notion — cannot reach the…",
+        ),
+    }
+
+    @staticmethod
+    def _toast_failure_line(reason: str, cells: int, name: str = "notion") -> str:
+        """The failure row the REAL toast composer paints, for ``reason``.
+
+        ``name`` defaults to the 6-cell pseudonym every D9 pin was measured on;
+        the long-name cases pass the server name they are about, because the
+        row's budget depends on its width (D11).
+        """
+        from local_operator.session.mcp_status import McpStartupOutcome
+        from local_operator.tui.widgets.toast import format_mcp_startup
+
+        outcome = McpStartupOutcome(configured=(name,), failures={name: reason})
+        payload = format_mcp_startup(outcome, max_cells=cells)
+        assert payload is not None
+        return payload[0].plain.split("\n")[1]
+
+    def test_the_reason_codes_compose_short_copy_with_no_url_or_internals(self) -> None:
+        """Each code maps to its own sentence, and the sentence is safe to render."""
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        rendered = McpManager._auth_failure_text  # readability
+        texts: dict[str, str] = {}
+        for reason in self.EXPECTED:
+            exc = McpRefreshContendedError(self.URL, reason_code=reason)
+            texts[reason] = rendered("notion", exc)
+
+        assert len(set(texts.values())) == 4, texts
+        for reason, text in texts.items():
+            assert "http" not in text, (reason, text)
+            # The internals the design review named: a user cannot act on either.
+            for jargon in ("lock", "rotation", "token refresh for"):
+                assert jargon not in text, (reason, text)
+            # No promise of a retry: the startup gate schedules none, so a card
+            # that said "retrying" would be untrue at the surface most users see.
+            assert "retry" not in text.lower() and "retrying" not in text.lower(), text
+
+    def test_the_toast_card_renders_every_reason_distinguishably_at_both_widths(self) -> None:
+        """The whole point of the fix, asserted on the painted line.
+
+        A green unit test on ``str(exc)`` is what let this defect through round
+        1: the strings differed, and the CARD did not. So this pins the exact
+        rendered row at 58 cells (a 100-column terminal) and 36 (44 columns) —
+        the row the widget paints, glyph included.
+        """
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        for cells_index, cells in enumerate((58, 36)):
+            lines = []
+            for reason, expected in self.EXPECTED.items():
+                reason_text = McpManager._auth_failure_text(
+                    "notion", McpRefreshContendedError(self.URL, reason_code=reason)
+                )
+                line = self._toast_failure_line(reason_text, cells)
+                assert line == expected[cells_index], (reason, cells, line)
+                lines.append(line)
+            assert len(set(lines)) == 4, (cells, lines)
+
+    def test_an_unknown_reason_code_never_falls_back_to_the_verbose_sentence(self) -> None:
+        """A code this build does not know must still render short and URL-free.
+
+        A newer peer process can write a reason we cannot name. Falling back to
+        ``str(exc)`` there would put the ~55-cell URL preamble back on the card
+        — the defect this mapping exists to remove — so the fallback states only
+        what is true of every refusal in the set.
+        """
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        exc = McpRefreshContendedError(self.URL, reason_code="a-code-from-the-future")
+        text = McpManager._auth_failure_text("notion", exc)
+        assert text == "the refresh did not complete"
+        assert "http" not in text
+        line = self._toast_failure_line(text, 36)
+        assert line == "✗ failed: notion — the refresh did…"
+
+    #: The three auth lines design review round 2 (D9) pinned CHARACTER FOR
+    #: CHARACTER, with the composed toast row each produces at the two widths
+    #: the designer measured (58 content cells for a 100-column terminal, 36 for
+    #: 44). The `run ` wrapper is gone because it cost four cells — exactly the
+    #: shortfall that pushed the reason past the card's clamp at 100 columns and
+    #: cut the server name mid-word at 44 — and the bare slash command is the
+    #: app's own habit for a runnable command (the splash, the usage panel).
+    #: The rows below are the POST-glyph measurements: `unconfirmed` (57 cells
+    #: whole, now 59 with the glyph) sheds its reason at 100 columns, the other
+    #: two keep it, and at 44 the name argument loses its last cell.
+    AUTH_LINE_EXPECTED = {
+        "unconfirmed": (
+            "/mcp reauth notion — refresh unconfirmed",
+            "✗ failed: notion — /mcp reauth notion…",
+            "✗ failed: notion — /mcp reauth noti…",
+        ),
+        "default": (
+            "/mcp reauth notion — sign-in expired",
+            "✗ failed: notion — /mcp reauth notion — sign-in expired",
+            "✗ failed: notion — /mcp reauth noti…",
+        ),
+        "no-grant": (
+            "/mcp login notion to authorize",
+            "✗ failed: notion — /mcp login notion to authorize",
+            "✗ failed: notion — /mcp login notio…",
+        ),
+    }
+
+    #: The two LOCAL refusal reasons (review round 3, M2). Neither may describe a
+    #: request that never went out, so neither may borrow the endpoint wording.
+    LOCAL_REFUSAL_EXPECTED = {
+        REFRESH_REFUSAL_UNSENT: (
+            "✗ failed: notion — no stored token to send",
+            "✗ failed: notion — no stored token…",
+        ),
+        REFRESH_REFUSAL_UNATTRIBUTED: (
+            "✗ failed: notion — the refresh did not complete",
+            "✗ failed: notion — the refresh did…",
+        ),
+    }
+
+    def test_the_three_auth_lines_render_exactly_as_pinned_at_both_widths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D9, asserted on the PAINTED row at 58 and 36 content cells.
+
+        The old assertion pinned the CLIPPED row (``… — run /mcp reauth notion —
+        refresh unconfi…``), which was the finding: the word that says WHY was
+        off the card on the first surface a user reads, and at 44 columns the
+        server name the command hands over was itself cut mid-word.
+        """
+        from local_operator.mcp.auth import (
+            McpAuthRequiredError,
+            McpRefreshUnconfirmedError,
+        )
+
+        cases = {
+            # Unconfirmed carries the reason on the error, so it never looks the
+            # grant up; the other two go through the store lookup, which is
+            # stubbed here rather than read from the developer's machine.
+            "unconfirmed": (McpRefreshUnconfirmedError(self.URL), True),
+            "default": (McpAuthRequiredError(self.URL), True),
+            "no-grant": (McpAuthRequiredError(self.URL), False),
+        }
+        for key, (exc, has_grant) in cases.items():
+            monkeypatch.setattr(
+                "local_operator.mcp.auth.server_has_stored_grant",
+                lambda url, store=None, _g=has_grant: _g,
+            )
+            text, wide, narrow = self.AUTH_LINE_EXPECTED[key]
+            assert McpManager._auth_required_text("notion", exc) == text, key
+            assert text.count("—") <= 1, (key, text)  # D4: not a chain of dashes
+            assert text.startswith("/mcp "), (key, text)
+            assert "run /mcp" not in text, (key, text)
+            assert (
+                self._toast_failure_line(text, 58) == wide
+            ), f"{key}: D9 measured {wide!r} at 100 columns"
+            assert len(wide) <= 58, (key, wide)
+            assert self._toast_failure_line(text, 36) == narrow, (key, narrow)
+            if key != "no-grant":
+                # The D9 constraint at 44 columns, priced for the glyph: the row
+                # spends 2 of its 36 content cells on ``✗ ``, so what survives
+                # whole is the COMMAND VERB (``/mcp reauth`` — typeable with the
+                # name this same row's head carries) while the name's last cell
+                # truncates. The alternative the ladder rejects — dropping to
+                # the bare command to keep the name whole — would cost the row
+                # its server, the D2-3 harm, and is a copy decision for the
+                # design round rather than a pin to shave (review rounds 4/5).
+                assert "/mcp reauth" in narrow, (key, narrow)
+                assert "failed: notion" in narrow, (key, narrow)
+
+    #: The D11 rows, measured on the head that fixes them. Both names are this
+    #: project's own server names: ``minerva-qa`` (10 cells) is the one
+    #: ``test_turn_abandoned.py`` uses, and ``launchdarkly`` (12) the one this
+    #: file already copies. The wide row keeps the whole command and sheds the
+    #: reason; the narrow one is asserted VERBATIM as the base renders it, which
+    #: is the recorded deferral (see the test's docstring). Both were re-measured
+    #: with the row's ``✗ `` glyph in the budget (review rounds 4/5).
+    LONG_NAME_EXPECTED = {
+        "minerva-qa": (
+            "✗ failed: minerva-qa — /mcp reauth minerva-qa…",
+            "✗ failed: minerva-qa — /mcp reauth…",
+        ),
+        "launchdarkly": (
+            "✗ failed: launchdarkly — /mcp reauth launchdarkly…",
+            "✗ failed: launchdarkly — /mcp reaut…",
+        ),
+    }
+
+    def test_a_long_name_sheds_the_reason_rather_than_clipping_the_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Design review round 3, D11: the D9 pin held only for 6-cell names.
+
+        The row is ``failed: <name> — <command> — <reason>`` and the command
+        repeats the name, so it needs ``45 + 2n`` cells against the card's 58
+        and fits only while the name is 6 cells. ``minerva-qa`` and
+        ``launchdarkly`` are 10 and 12, and the clamp ate the END of the line:
+        the REASON at 100 columns (``— refresh unc…``) and the command's own name
+        argument at 44 (``/mcp reauth mi…`` — a command that errors if followed).
+        The budget now decides what is SHED: the command survives whole and the
+        reason is dropped, marked with the ``…`` the 44-column card has always
+        shown (D9 accepted it as marking the shed reason). The reason is the
+        right part to lose — ``/mcp`` and the durable transcript notice carry it
+        whole.
+        """
+        from local_operator.mcp.auth import McpRefreshUnconfirmedError
+
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant", lambda url, store=None: True
+        )
+        for name, (wide, narrow) in self.LONG_NAME_EXPECTED.items():
+            text = McpManager._auth_required_text(name, McpRefreshUnconfirmedError(self.URL))
+            assert text == f"/mcp reauth {name} — refresh unconfirmed", name
+            rendered = self._toast_failure_line(text, 58, name)
+            assert rendered == wide, (name, rendered)
+            # The whole command with its name, and NOTHING of the reason: what
+            # this removes is a half-rendered reason, which the user cannot act
+            # on and which the other two surfaces state in full.
+            assert f"/mcp reauth {name}" in rendered, (name, rendered)
+            assert "refresh" not in rendered and "unconfirmed" not in rendered, rendered
+            assert rendered.count("—") == 1, rendered  # D4: not a chain of dashes
+            assert len(rendered) <= 58, (name, rendered)
+            # At 44 columns the row's head plus the command is ``25 + 2n`` cells
+            # against 36 (the glyph's 2 included), so no composition of this
+            # line fits for names >= 6 without a second row or a different card
+            # shape — both layout decisions this change does not make (D11
+            # resolution 2). The base row is pinned verbatim instead, so a future
+            # regression is visible rather than silent.
+            assert self._toast_failure_line(text, 36, name) == narrow, (name, narrow)
+
+    def test_the_shed_boundary_is_the_sixth_cell_of_the_name(self) -> None:
+        """The boundary the shed starts at, pinned from BOTH sides.
+
+        The rung-1 row is ``47 + 2n`` cells against the card's 58 — 45 for
+        ``failed: <name> — <command-with-name> — <reason>`` plus the row's own
+        ``✗ `` glyph — so ``n <= 5`` is the range where the whole row fits.
+        ``slack`` (5) keeps its reason and is 57 cells; ``notion`` (6) is 59 and
+        sheds it. Both names are real servers in this repo's own config
+        vocabulary, so the boundary is asserted on two names a user would
+        actually read. The glyph moved this boundary one cell left: before it,
+        a 6-cell name still fitted (review rounds 4/5).
+        """
+        kept = self._toast_failure_line("/mcp reauth slack — refresh unconfirmed", 58, "slack")
+        assert kept == "✗ failed: slack — /mcp reauth slack — refresh unconfirmed"
+        assert len(kept) == 57, kept
+        shed = self._toast_failure_line("/mcp reauth notion — refresh unconfirmed", 58, "notion")
+        assert shed == "✗ failed: notion — /mcp reauth notion…"
+        assert len(shed) == 38, shed
+
+    def test_the_local_refusals_never_blame_a_server(self) -> None:
+        """The endpoint copy is false about a request that was never made.
+
+        Review round 3, M2: the exchange returns ``"failed"`` for shapes that
+        produced no request at all (an empty row), and the manager's default
+        mapped that to the endpoint code — "the server returned no token" —
+        which is untrue about the WIRE (nothing was sent) and about the SERVER
+        (it was never asked). Each local shape now carries its own code, and
+        both still fit the 44-column card's 17-cell reason budget (36 content
+        cells minus the row's 19-cell ``✗ failed: notion — `` head).
+        """
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        endpoint = McpManager._auth_failure_text(
+            "notion", McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_ENDPOINT)
+        )
+        rendered: dict[str, str] = {}
+        for reason, (wide, narrow) in self.LOCAL_REFUSAL_EXPECTED.items():
+            text = McpManager._auth_failure_text(
+                "notion", McpRefreshContendedError(self.URL, reason_code=reason)
+            )
+            rendered[reason] = text
+            assert "server" not in text, (reason, text)
+            assert "http" not in text, (reason, text)
+            assert text != endpoint, (reason, text)
+            assert self._toast_failure_line(text, 58) == wide, (reason, wide)
+            assert self._toast_failure_line(text, 36) == narrow, (reason, narrow)
+        assert len(set(rendered.values())) == 2, rendered
+
+    def test_the_log_sentence_still_carries_the_url_and_the_technical_reason(self) -> None:
+        """``str(exc)`` stays verbose for the logs, which is the other half of D1.
+
+        The reason code exists so the COPY can be short; the sentence is not
+        deleted, just moved off the user's surfaces — support needs the URL and
+        the mechanism when reading a log after an incident.
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_REFUSAL_ENDPOINT,
+            REFRESH_REFUSAL_INFLIGHT,
+            REFRESH_REFUSAL_LOCK,
+            REFRESH_REFUSAL_UNATTRIBUTED,
+            REFRESH_REFUSAL_UNREACHABLE,
+            REFRESH_REFUSAL_UNSENT,
+            McpRefreshContendedError,
+        )
+
+        assert str(McpRefreshContendedError(self.URL)) == (
+            f"MCP OAuth token refresh for {self.URL} was skipped: another session "
+            "holds the refresh lock"
+        )
+        assert str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_INFLIGHT)) == (
+            f"MCP OAuth token refresh for {self.URL} did not finish in time; a rotation "
+            "is kept if the response lands"
+        )
+        # A pre-send transport failure is NOT a rejection by the authorization
+        # server: it never reached one (review round 2, minor 1).
+        unreachable = str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNREACHABLE)
+        )
+        assert "unreachable" in unreachable
+        assert "no token was presented" in unreachable
+        assert "rejected" not in unreachable
+        endpoint = str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_ENDPOINT))
+        assert "rejected" not in endpoint
+        # The lock sentence still says the lock: it is the accurate log line.
+        assert "holds the refresh lock" in str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_LOCK)
+        )
+        # The two LOCAL codes say what happened to THEM instead of borrowing
+        # that sentence, which was untrue for both — neither ran into another
+        # session's lock (QA round 3, Q2; review round 4, N4.1 is its sibling in
+        # the proactive site's outcome tuple).
+        unsent = str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNSENT))
+        assert "was not sent" in unsent
+        assert "nothing to present" in unsent
+        assert "holds the refresh lock" not in unsent
+        unattributed = str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNATTRIBUTED)
+        )
+        assert "cannot be attributed" in unattributed
+        assert "holds the refresh lock" not in unattributed
+        # …and the split is log-only by construction: the rendered copy is
+        # composed from the CODE, so neither sentence can reach a user surface.
+        assert (
+            McpManager._auth_failure_text(
+                "notion", McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNSENT)
+            )
+            == "no stored token to send"
+        )
+        assert (
+            McpManager._auth_failure_text(
+                "notion",
+                McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNATTRIBUTED),
+            )
+            == "the refresh did not complete"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unacknowledged_refusal_is_re_voiced_as_an_auth_requirement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-voice: a spent-possibly token must NOT be retried on backoff.
+
+        Contention is transient and retries. A token that may already be spent is
+        the opposite: retrying IS the reuse-detection POST, so this refusal has to
+        arrive as an auth requirement — auth block, actionable toast, abandoned
+        auto-reconnect — while carrying the truthful reason.
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_CONTENTION,
+            REFRESH_REFUSAL_UNCONFIRMED,
+            McpRefreshUnconfirmedError,
+        )
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        async def bare_cancel(*_a: Any, **_kw: Any) -> Any:
+            # Exactly what the transport delivers: a CancelledError with no
+            # cancelling count, i.e. not an external cancellation.
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", bare_cancel)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_UNCONFIRMED)
+        with pytest.raises(McpRefreshUnconfirmedError) as excinfo:
+            await manager._connect_server("dd", cfg)
+        assert excinfo.value.detail == "refresh unconfirmed"
+
+        # The manager arm for an auth requirement: blocked, not retried.
+        scheduled = {"called": False}
+        monkeypatch.setattr(
+            manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+        )
+        # Arm a FRESH record: the connect above consumed the first one (single
+        # use), and a reconnect is its own refused attempt in reality.
+        incidents: list[tuple[str, str]] = []
+        manager.on_incident = lambda name, text: incidents.append((name, text))
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_UNCONFIRMED)
+        # ``_reconnect`` does not re-raise an auth requirement: it blocks on the
+        # grant, abandons the ladder and tells the model why.
+        await manager._reconnect("dd", 0.0, manager._epoch)
+        assert scheduled["called"] is False, "a spent-possibly token must not be retried"
+        assert manager.auth_blocked("dd") is True
+        assert manager.get_connection_status("dd") == "auth-required"
+        assert incidents[-1][1] == (
+            "MCP authorization failed; /mcp reauth dd — refresh unconfirmed"
+        ), incidents
+
+    def test_each_refusal_reason_is_carried_on_the_ledger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason survives the transport with the record, one per refusal.
+
+        Two concurrent connects for the same server can both refuse; the ledger
+        holds one record each, so the second is not silently dropped (that reached
+        ``_reconnect`` as a bare cancellation and killed the reconnect task
+        instead of retrying it).
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_CONTENTION,
+            REFRESH_REFUSAL_ENDPOINT,
+            REFRESH_REFUSAL_INFLIGHT,
+            REFRESH_REFUSAL_LOCK,
+        )
+
+        url = "https://srv.example/mcp/two"
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_LOCK)
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_INFLIGHT)
+
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_LOCK
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_INFLIGHT
+        assert REFRESH_CONTENTION.pop(url) is None
+
+        # A reason is not a boolean: an unarmed server must pop as None, and a
+        # reason must never be confused with the un-armed answer.
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_ENDPOINT)
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_ENDPOINT

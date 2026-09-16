@@ -26,7 +26,7 @@ import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -43,6 +43,7 @@ from local_operator.mobile.attach_client import (
     _RefitReport,
     _text_is_the_bulk_refusal,
 )
+from local_operator.mobile.types import SessionProjection, SubagentRow
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -86,6 +87,30 @@ from tests.unit.session.runtime.test_server import FakeHandle
 #: count rather than the thing that overflows.
 _RESULT_CHARS = 400
 
+#: One payload object per shape, shared BY VALUE across fixture rows.
+#:
+#: These are immutable ``str``, so a shared leaf aliases no state: every event
+#: dict, result dict, content list and block dict is still built per row. That
+#: is what makes the sharing safe here — nothing in this file asserts on
+#: identity (``grep -c 'id('`` is 0, and the only ``is`` comparisons are
+#: ``is None`` on unrelated fields), so no test can distinguish two equal
+#: strings from one. The production boundary rebinds rather than mutates any
+#: payload leaf (``frontend_state._bound_live_result_in_place`` assigns and
+#: rebinds), which a ``str`` cannot be edited through in any case.
+#:
+#: Rebuilding them per row instead cost ~1.47 MB per event — 882 MB across the
+#: 600-event heavy seed, and ~1.5 GB across the 1,000-event all-fields guard —
+#: retained by whichever xdist worker draws these tests, for no assertion.
+#:
+#: Keep them ``str`` and keep them constant. A case that needs a different
+#: width must build its own string locally; ``_payload_event``/``_payload_jobs``
+#: stay parameterised precisely because their callers pass six different widths.
+_IMAGE_B64 = "A" * 1_400_000
+_DETAILS_BLOB = "D" * 50_000
+_SEED_TEXT = "R" * 20_000
+_ALL_FIELDS_TEXT = "e" * 60_000
+_RESULT_TEXT = "x" * _RESULT_CHARS
+
 
 def _catalogue_row(index: int) -> dict[str, Any]:
     """One catalogue row exactly as ``refresh_model_catalogue`` builds it.
@@ -118,7 +143,7 @@ def _event(index: int) -> dict[str, Any]:
         "tool_call_id": f"call_{index:06d}",
         "tool_name": "bash",
         "intent": "Checking something moderately descriptive here",
-        "result": {"content": [{"type": "text", "text": "x" * _RESULT_CHARS}]},
+        "result": {"content": [{"type": "text", "text": _RESULT_TEXT}]},
         "_traj_seq": index,
     }
 
@@ -373,6 +398,14 @@ _BOUNDED_COLLECTION_FIELDS = {
     # budget. Every retained row keeps the identity and outcome a card needs.
     "live_events": "clipped at the wire: end rows capped newest-first, result text budgeted",
     "todos": "the user's own list, written by hand",
+    # One entry per call executing AT ONCE, and a call's entry is popped by its
+    # own `tool_execution_end` while the whole map is cleared at both ends of
+    # the turn. The live population is therefore bounded by the parallel slot
+    # count (`max_parallel_tools`, 8 by default) and cannot grow with
+    # conversation length, turn count or child count — which is the property
+    # this side of the line is for. Its values are `float`s and its keys are
+    # call ids, so even a whole turn's worth is a few hundred bytes.
+    "live_tool_started_at": "one float per call executing now; popped on end, cleared per turn",
     "wakes": "the user's own schedules",
     "mcp_servers": "one row per configured server",
     "slash_capabilities": "one row per SLASH_COMMANDS entry",
@@ -446,6 +479,7 @@ _BOUNDED_JOB_FIELDS = {
     "latest_details": "one progress payload, replaced not appended",
     "usage": "folded by _fold_job_usage_in_place",
     "attempt_aliases": "one id per collapsed resume attempt",
+    "cut_off_cause": "one cause token from the cut-off vocabulary",
 }
 
 #: Row fields bounded by THIS module, each of which the frame guard must
@@ -642,7 +676,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     read_token = str(uuid.uuid4())
     attention_store.publish("session/s1", read_token, "old-result", "complete")
     attention_store.acknowledge("session/s1", read_token)
-    attention = attention_store.publish("session/s1", str(uuid.uuid4()), "new-result", "complete")
+    attention = attention_store.publish(
+        "session/s1",
+        str(uuid.uuid4()),
+        "new-result",
+        "error",
+        reason="R" * 5_000,
+        cause="runtime-killed",
+    )
     assert set(attention) == {
         "conversation_id",
         "completion_token",
@@ -650,7 +691,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "kind",
         "unseen",
         "revision",
+        "reason",
+        "cause",
     }
+    # Published at the store's own cap: the field is one string per
+    # conversation, and the ceiling this fixture exists to police is why it is
+    # capped rather than passed through.
+    from local_operator.session.attention import REASON_WIRE_CHARS
+
+    assert len(attention["reason"]) == REASON_WIRE_CHARS
+    assert attention["cause"] == "runtime-killed"
     assert attention["unseen"] and attention["revision"] == [2, 1]
 
     # Every collection field, filled past anything a real session reaches.
@@ -698,14 +748,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                         "tool_call_id": f"call-{index}",
                         "tool_name": "read",
                         "content": [
-                            {"type": "text", "text": "e" * 60_000},
+                            {"type": "text", "text": _ALL_FIELDS_TEXT},
                             {
                                 "type": "image",
-                                "data": "A" * 1_400_000,
+                                "data": _IMAGE_B64,
                                 "mime_type": "image/png",
                             },
                         ],
-                        "details": {"server_result": {"blob": "D" * 50_000}},
+                        "details": {"server_result": {"blob": _DETAILS_BLOB}},
                         "is_error": False,
                     },
                 },
@@ -719,6 +769,20 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             for index in range(200)
         ],
         "wakes": [],
+        # AT the bound rather than past it, unlike the fields above, because
+        # this one's bound is a real ceiling for the DEFAULT configuration
+        # rather than a clip: the map holds one entry per call executing AT
+        # ONCE, and calls beyond that wait for a slot. That ceiling is
+        # `Guardrails.max_parallel_tools`, whose field is `ge=1` with no upper
+        # bound (`harness/types.py`), so a host that raises it publishes
+        # proportionally more (~43 B per entry, so even 1,000 concurrent calls
+        # is ~43 KB of the line's 1 MiB). 8 is the default a producer actually
+        # runs with and the fixture is deliberately conservative about id
+        # width, so this populates the shipped ceiling rather than a hard
+        # maximum — say "the default" rather than "the largest possible" when
+        # describing it. Ids are the width a provider actually issues rather
+        # than `call-0`.
+        "live_tool_started_at": {f"call_{index:024d}": 1_756_000_000.123456 for index in range(8)},
         "mcp_servers": [
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],
@@ -908,6 +972,368 @@ async def test_attach_succeeds_against_a_session_that_exceeded_the_old_limit(
     finally:
         if remote is not None:
             await remote.dispose()
+        registrant.close()
+
+
+# ---------------------------------------------------------------------------
+# The WELCOME projection: the one frame with a SOFT cap and no check downstream.
+#
+# Everything above bounds what a session SHOULD send. This block covers the
+# family that could not: ``cap_projection_frame`` spends its text tiers and
+# returns the over-limit dict anyway, and ``_send_to`` used to write it raw. A
+# wide enough sibling group therefore produced a line no viewer could read, and
+# the session could not be opened at all (production: 113 frames over the hard
+# limit for one session, max 1,254,516 B, five sidebar latches).
+# ---------------------------------------------------------------------------
+
+#: Production-shaped job ids: 12 hex chars, as ``uuid4().hex[:12]`` builds them.
+#: The LENGTH is load-bearing, not decoration. ``peer_ids`` costs ~16 bytes per
+#: sibling id on the wire, so a 256-wide group of THIS shape crosses the 1 MiB
+#: limit while the same group with ``child-0``-style ids lands ~100 KB lower and
+#: never crosses it — a fixture that quietly stopped reproducing the failing
+#: frame would make the tests below pass for the wrong reason.
+_SIBLING_ID_HEX = 12
+
+
+def _wide_roster_projection(width: int) -> SessionProjection:
+    """A flat sibling group folded by the REAL roster path.
+
+    Built through ``SubagentComms`` + ``ProjectionFold`` rather than by hand:
+    ``peer_ids`` is assigned by the fold from the comms registry, so hand-built
+    rows would carry empty lists and a fixture that no longer reproduces the
+    O(n^2) term at all.
+
+    256 parallel eval children with ``parent_job_id: null`` is the production
+    shape — each row lists the other 255 ids, measured at 1,044,480 B of a
+    1,254,249-byte frame.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.session.session import Session
+
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(width):
+        comms.record_launch(
+            f"{index:0{_SIBLING_ID_HEX}x}",
+            f"osworld-eval-{index}",
+            prompt="Analyse the episode and click the correct element " * 4,
+        )
+    fold = ProjectionFold(SessionProjection(session_id="s1", pid=1))
+    fold.set_subagent_details(comms)
+    projection = fold.projection
+    # Realistic outcome text: the shape that measured multi-MB payloads on the
+    # real session, so the fixture's non-derived part has production weight and
+    # the derived term has to fight for its share of the limit.
+    for row in projection.subagents:
+        row.result_text = "observed the agent fail to click the correct element " * 4
+        row.elapsed_s = 12.5
+    return projection
+
+
+def _derived_graph_bytes(rows: Sequence[SubagentRow]) -> int:
+    """What the O(n^2) roster term costs on the wire, exactly as serialized."""
+    return sum(len(json.dumps(row.peer_ids).encode()) for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The end-to-end claim: this session could not be attached to at all.
+
+    The welcome ``projection`` frame was the one family with a SOFT cap — it
+    spent its text tiers and returned the over-limit dict anyway — and nothing
+    downstream checked it, so this roster wrote a line past the limit. The
+    client's ``readline`` raised over it, its pump died, and every retry died
+    the same way; the operator's report was "it keeps timing out no matter how
+    much I switch back and forth".
+
+    Driven against the REAL server over a REAL socket through the REAL
+    ``AttachedSession.connect`` — the sidebar's own attach path — with every
+    frame the server is about to write recorded, so "no unreadable frame" is
+    asserted on what actually left the handoff point rather than on a size
+    computed here.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    handle._projection = _wide_roster_projection(256)
+
+    # The fixture must still reproduce the fatal frame. Two structural facts do
+    # it: the whole frame is over the limit before any text is counted, and the
+    # derived graph ALONE is ~1 MB — no text tier could have rescued it, which
+    # is why the tier that sheds the graph is the fix. (Measured on the pre-fix
+    # tree for this shape: naive 1,351,271 B, and 1,178,727 B after every text
+    # tier, against a 1,048,576 B limit.)
+    naive = _line_bytes({"op": "projection", "data": handle._projection.to_json()})
+    derived = _derived_graph_bytes(handle._projection.subagents)
+    assert naive > _MAX_LINE_BYTES, (
+        f"the fixture no longer reproduces the unreadable welcome: {naive:,} B is "
+        f"inside the {_MAX_LINE_BYTES:,} B limit"
+    )
+    assert derived > 1_000_000, (
+        "the fixture no longer reproduces WHY this was fatal: without an O(n^2) "
+        f"derived graph ({derived:,} B here) the text tiers could have fitted it"
+    )
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    written: list[dict[str, Any]] = []
+    original_send = registrant._send_to
+
+    async def recording_send(conn, frame):  # noqa: ANN001, ANN202
+        written.append(frame)
+        return await original_send(conn, frame)
+
+    registrant._send_to = recording_send  # type: ignore[assignment]
+    viewer = None
+    try:
+        viewer = await AttachedSession.connect(
+            await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        # The attach IS the assertion: before the fix this raised "owner sent a
+        # frame too large to read" on every attempt.
+        assert not viewer.is_cold
+
+        oversize = [
+            (frame.get("op"), _line_bytes(frame))
+            for frame in written
+            if _line_bytes(frame) > _MAX_LINE_BYTES
+        ]
+        assert not oversize, f"the owner offered the wire an unreadable frame: {oversize}"
+
+        # The roster survived as a roster — the shed tier, not the identity-row
+        # tier, is what should have fitted this frame, and every row keeps the
+        # parent edge the shed fields are derived from.
+        welcome = next(frame for frame in written if frame.get("op") == "projection")
+        rows = welcome["data"]["subagents"]
+        assert len(rows) == 256
+        assert all(row.get("peer_ids") == [] for row in rows)
+        assert all("parent_job_id" in row for row in rows)
+        assert all(row["label"] for row in rows)
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The ceiling's own case, driven through the real attach.
+
+    A roster whose IDENTITY rows are still over the line limit is unfittable by
+    every tier — the labels are what is left once the derived graph is shed — so
+    the cap does exactly what its warning says and returns an over-limit frame.
+    That is the case the ceiling exists for: the welcome is replaced by the
+    identity-only projection, whose whole job is the client's identity check,
+    and the canonical state rides the ``frontend_sync`` that follows on the same
+    connection. The session stays OPENABLE instead of dying on a line nobody can
+    read.
+
+    Driven through ``AttachedSession.connect`` rather than a synthetic peer,
+    because a substitute that cannot satisfy the client's own identity check
+    would not be worth having.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    projection = _wide_roster_projection(256)
+    projection.conversation_name = "osworld"
+    for row in projection.subagents:
+        # Identity rows keep their LABEL: a label this size is what makes the
+        # frame unfittable after every tier has fired.
+        row.label = "osworld-eval-" + "x" * 4_600
+    handle._projection = projection
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    substitutions: list[dict[str, Any]] = []
+    original_readable = registrant._readable_frame
+
+    def recording_readable(conn, frame, size):  # noqa: ANN001, ANN202
+        """Record what the ceiling decided to substitute, if anything."""
+        replacement, close_reason = original_readable(conn, frame, size)
+        if replacement is not None:
+            substitutions.append(replacement)
+        return replacement, close_reason
+
+    registrant._readable_frame = recording_readable  # type: ignore[assignment]
+    viewer = None
+    try:
+        # The precondition, asserted rather than assumed: this roster is over the
+        # line limit even after EVERY cap tier, which is what makes the welcome
+        # unrunnable (the tier-6 identity rows below are what the cap returns).
+        from local_operator.mobile.projection import cap_projection_frame
+
+        capped, degraded = cap_projection_frame(projection)
+        assert degraded is True
+        assert (
+            _line_bytes({"op": "projection", "data": capped}) > _MAX_LINE_BYTES
+        ), "the fixture must be unfittable after every tier, including the shed"
+        assert all("label" in row for row in capped["subagents"])
+
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            viewer = await AttachedSession.connect(
+                await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+            )
+        # The client read a frame it could parse and identify, so the substitute
+        # reached the wire; the identity-only payload is what it was.
+        assert not viewer.is_cold
+        assert substitutions, "the ceiling never ran on the welcome"
+        welcome = substitutions[0]
+        assert welcome["op"] == "projection"
+        assert welcome["data"]["session_id"] == "s1"
+        assert welcome["data"]["conversation_name"] == "osworld"
+        assert welcome["data"]["kind"] == "tui"
+        assert welcome["data"]["subagents"] == []
+        assert welcome["data"]["transcript"] == []
+        assert welcome["data"]["pending"] is None
+        # The WELCOME branch is the one that ran: a repaint would have been
+        # dropped instead (see the family test), and its log line says so.
+        assert "refusing to write an unreadable projection" in caplog.text
+        assert "unreadable projection repaint" not in caplog.text
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_the_send_ceiling_never_writes_an_unreadable_frame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``_send_to`` is the single choke point, so the limit is enforced THERE.
+
+    A cap that is a contract for one family, plus a downstream check for two
+    others, still leaves the next unbounded field free to kill the socket — and
+    the failure presents as a slow owner rather than a bug, which is what made
+    the original defect expensive. So this feeds a synthetic ~2 MiB frame of
+    every family through the real ``_send_to`` over a real socket and asserts on
+    the WIRE, read with a bare reader: whatever the server decided to send, no
+    line may exceed the limit, and each family's decision is the documented one.
+
+    Nothing here depends on a roster shape or a session snapshot: this is the
+    regression guard that survives whatever grows next.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES as limit
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    reader = writer = None
+    try:
+        record = await _record(tmp_path)
+        # A reader limit far above the server's, so a line the peer could not
+        # read is still readable HERE and can be asserted on instead of
+        # raising inside the test.
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=8 * limit
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "daemon"}).encode() + b"\n")
+        await writer.drain()
+        runtime_loop = registrant._loop
+        assert runtime_loop is not None
+
+        async def _send(frame: dict[str, Any]) -> None:
+            # ``start()`` hosts the runtime on its own thread, so the test hops
+            # to that loop the way every other caller of a server coroutine
+            # does.
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(registrant._send_to(conn, frame), runtime_loop)
+            )
+
+        async def _read_line() -> dict[str, Any] | None:
+            raw = await asyncio.wait_for(reader.readline(), timeout=5)
+            if not raw:
+                return None
+            assert len(raw) <= limit, (
+                f"the owner wrote a {len(raw):,}-byte line; the peer's readline raises "
+                f"past {limit:,} B, and the raise killed its pump"
+            )
+            return json.loads(raw.decode())
+
+        welcome = await _read_line()
+        assert welcome is not None and welcome.get("op") in ("projection", "welcome")
+        # The welcome above is the proof the connection is REGISTERED; taking
+        # the server-side handle before it would race the auth frame.
+        conn = next(iter(registrant._clients.values()))
+
+        filler = "x" * (limit + 1_000_000)
+
+        # 1. A reply: somebody is waiting for it, so it arrives as the error
+        #    frame that names the oversize instead of as silence.
+        await _send({"op": "result", "req": 77, "data": {"blob": filler}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "error"
+        assert line.get("req") == 77
+        assert "socket line limit" in str(line.get("message"))
+
+        # 2. Relay traffic: degraded by its own belt at enqueue, degraded again
+        #    here if a future caller bypasses it.
+        await _send(
+            {
+                "op": "frontend_update",
+                "data": {"epoch": "e", "sequence": 1, "changes": {"cwd": filler}},
+            }
+        )
+        line = await _read_line()
+        assert line is not None and line.get("op") == "frontend_update"
+        assert line["data"].get("degraded") is True
+
+        # 3. ``event`` is the family the module docstring records as the one
+        #    that killed a socket outright (1,129,319 bytes from ONE 1 MB
+        #    transcript row), and its stand-in must still be a VALID frame of
+        #    its own op: ``deserialize_event`` requires a ``type``.
+        await _send({"op": "event", "data": {"type": "tool_execution_end", "result": filler}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "event"
+        assert line["data"].get("type") == "notice"
+
+        # 4. A MID-STREAM repaint that cannot fit is dropped, never blanked: no
+        #    canonical sync follows a repaint, so an identity-only payload would
+        #    replace the phone's good state with an empty session and leave the
+        #    daemon's version fence as the only thing standing in the way. (The
+        #    WELCOME case is the one that DOES blank, and it is driven through
+        #    ``AttachedSession.connect`` in the test below.) The ordering here is
+        #    the assertion: the next frame the peer sees is the marker, so the
+        #    repaint produced NO line at all.
+        await _send({"op": "projection", "data": {"session_id": "s1", "subagents": [filler]}})
+        await _send({"op": "result", "req": 91, "data": {"ok": True}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "result"
+        assert line.get("req") == 91
+
+        # 5. An op with no readable substitute is dropped (never written raw),
+        #    and the connection survives it.
+        await _send({"op": "mystery_op", "data": {"blob": filler}})
+        await _send({"op": "result", "req": 92, "data": {"ok": True}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "result"
+        assert line.get("req") == 92
+
+        # 6. The connect-time ``frontend_sync`` PUSH has no ``req``, so there is
+        #    nobody to answer — and a viewer left waiting on a base that never
+        #    comes reports the owner as unresponsive 15 s later, which is the
+        #    misdiagnosis this class of bug is made of. So it closes: the peer
+        #    fails at once, and the ERROR log carries the field-level diagnosis.
+        await _send(
+            {"op": "frontend_sync", "data": {"epoch": "e", "sequence": 0, "snapshot": filler}}
+        )
+        line = await _read_line()
+        assert line is not None and line.get("op") == "error"
+        assert (
+            await _read_line() is None
+        ), "the connection must end rather than leave the viewer waiting out its sync envelope"
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
         registrant.close()
 
 
@@ -1201,7 +1627,7 @@ def test_folding_malformed_receipts_still_prices_identically(
 
 @pytest.mark.asyncio
 async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     """The user must not sit through 15 s of silence for a frame we cannot read.
 
@@ -1215,6 +1641,19 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
 
     Driven against the REAL server over a REAL socket with a genuinely
     oversized frame, because the bug is in how the two halves interact.
+
+    REWRITTEN when ``_send_to`` grew its ceiling. The owner no longer writes the
+    unreadable line at all, so the client's ``OVERSIZED_FRAME_REASON`` is not
+    reachable here any more — and an unfittable connect-time ``frontend_sync``
+    has no ``req``, so there is no requester to answer with an error frame
+    either. The server therefore closes, and the peer's reason is its own
+    disconnect (``attach_client``'s pump default). Both properties this test
+    exists for still hold: the wait ends at once, and it does NOT end in the
+    15 s "owner did not send its state" misdiagnosis that made a hard bug look
+    like a slow owner. The field-level diagnosis moved to the server's ERROR
+    log, so this asserts that line too — losing the copy without gaining the
+    log line would be a net loss of diagnosis, which is what the rewrite must
+    not become.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1228,10 +1667,11 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
     try:
         record = await _record(tmp_path)
         started = asyncio.get_running_loop().time()
-        with pytest.raises(ConnectionError) as caught:
-            await AttachedSession.connect(
-                record, "s1", config_dir=tmp_path, takeover_factory=_never
-            )
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            with pytest.raises(ConnectionError) as caught:
+                await AttachedSession.connect(
+                    record, "s1", config_dir=tmp_path, takeover_factory=_never
+                )
         elapsed = asyncio.get_running_loop().time() - started
 
         # The 15 s sync timeout is the backstop for a silent owner, not the
@@ -1241,11 +1681,19 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
             f"an unreadable frame took {elapsed:.1f}s to report; the connection died "
             "immediately and the wait should have ended with it"
         )
-        # And the reason names what actually happened.
-        assert "too large" in str(caught.value), (
-            f"the failure reported {caught.value!r}, which does not tell the user "
-            "the frame could not be read"
+        # The owner refuses the frame, so this side never sees an overrun — and
+        # what it does see must be the disconnect, not the owner blamed for
+        # being slow.
+        assert str(caught.value) == "owner exited", (
+            f"the failure reported {caught.value!r}; the owner closed the connection "
+            "rather than write an unreadable frame, and that is what the viewer "
+            "must report"
         )
+        # The diagnosis the client can no longer produce.
+        logged = caplog.text
+        assert "frontend_sync does not fit" in logged
+        assert "cwd=1,049" in logged, "the ERROR must name the field that grew"
+        assert f"{_MAX_LINE_BYTES:,}-byte socket line limit" in logged
     finally:
         registrant.close()
 
@@ -2797,11 +3245,11 @@ async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
         # Every payload shape a real turn produces, not just text: an image
         # block alone is over the line limit, and `details` is what the MCP
         # bridge fills. A seed of pure text cannot prove the socket survives.
-        end = _live_end(f"call-{index}", text="R" * 20_000)
+        end = _live_end(f"call-{index}", text=_SEED_TEXT)
         end["result"]["content"].append(
-            {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+            {"type": "image", "data": _IMAGE_B64, "mime_type": "image/png"}
         )
-        end["result"]["details"] = {"server_result": {"blob": "D" * 50_000}}
+        end["result"]["details"] = {"server_result": {"blob": _DETAILS_BLOB}}
         seed.append(end)
     handle._frontend.mutate(jobs=_jobs(200, 500), live_events=seed)
 
@@ -4461,3 +4909,707 @@ async def test_a_junk_scalar_frame_does_not_kill_the_connection(
     finally:
         client.close()
         registrant.close()
+
+
+# ---------------------------------------------------------------------------
+# The live wire's fit pass: oversized frames are REFIT, and the guard becomes
+# the last resort rather than the normal path.
+#
+# The durable transcript solved this shape long ago — a block over
+# ``_ATTACHMENT_FLOOR_BYTES`` moves into the content-addressed store and the row
+# carries ``{"attachment": <digest>, "mime_type": ...}``, which every frontend
+# already resolves. The live event stream was the one route still shipping the
+# base64, and the guard answered it by shedding the WHOLE frame, event included.
+# ---------------------------------------------------------------------------
+
+
+def _wire_image_b64(size: int = 400_000) -> str:
+    """A deterministic inline payload shaped like a page render's base64."""
+    return base64.b64encode(bytes(range(256)) * (size // 256)).decode("ascii")
+
+
+def _wire_image_row(*, images: int, role: str = "tool") -> dict[str, Any]:
+    """One message row carrying ``images`` inline image blocks."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": "PAGE"}]
+    content += [
+        {"type": "image", "data": _wire_image_b64(), "mime_type": "image/png"}
+        for _ in range(images)
+    ]
+    message = {"id": "m1", "role": role, "content": content}
+    if role == "tool":
+        message["tool_call_id"] = "call_image"
+    return message
+
+
+def _wire_image_frame(*, images: int, rows: int = 1, role: str = "tool") -> dict[str, Any]:
+    messages = [_wire_image_row(images=images, role=role) for _ in range(rows)]
+    data: dict[str, Any] = {"type": "history_delta", "messages": messages}
+    if rows == 1:
+        data = {"type": "message_start", "message": messages[0]}
+    return {"op": "event", "data": data}
+
+
+def test_a_user_message_with_three_images_is_referenced_too() -> None:
+    """The pass is generic over content blocks, not a tool-result special case.
+
+    A user row's images ride the same event grade — mobile's multi-attachment
+    prompt path depends on it — so a pass that only knew about
+    ``result.content`` would leave the operator's own pasted pages oversized.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=3, role="user")
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "message_start"
+    images = [block for block in fitted["data"]["message"]["content"] if block["type"] == "image"]
+    assert len(images) == 3
+    assert all("data" not in block and block["attachment"] for block in images)
+
+
+def test_the_notice_is_no_longer_emitted_for_an_image_oversize(caplog: Any) -> None:
+    """The operator-visible banner is what the guard says; it must not be said.
+
+    This is the assertion the operator's screenshot turns into: no ``notice``
+    event, and no ERROR naming the socket limit — because an image oversize is
+    now a payload the wire can carry rather than an alarm.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=3, rows=2)
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    with caplog.at_level(logging.INFO):
+        sendable = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert sendable["data"]["type"] != "notice"
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    # And the fit is announced at INFO with its size and image count, because a
+    # silent rewrite of what the wire carries is exactly what nobody can debug.
+    infos = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+    assert any("attachment store" in line and "image payload(s)" in line for line in infos), infos
+
+
+def test_the_guard_still_degrades_a_genuinely_unfittable_frame() -> None:
+    """The guard keeps its authority: only unfittable frames reach it.
+
+    Two shapes that no refit can help — a pure-text oversize with no payload to
+    move, and a canonical delta whose body is one enormous string. Both must
+    still come back as the honest stand-in, with the sequencing fields the
+    client's gap check depends on.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    text_frame = _oversized_event_frame()
+    assert _line_bytes(text_frame) > _MAX_LINE_BYTES
+    sendable = fit_frame_for_wire(text_frame, _MAX_LINE_BYTES)
+    assert sendable["op"] == "event"
+    assert sendable["data"]["type"] == "notice"
+    assert _line_bytes(sendable) <= _MAX_LINE_BYTES
+
+    update = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e1",
+            "sequence": 7,
+            "changes": {"cwd": "y" * (_MAX_LINE_BYTES + 10)},
+        },
+    }
+    assert _line_bytes(update) > _MAX_LINE_BYTES
+    sendable_update = fit_frame_for_wire(update, _MAX_LINE_BYTES)
+    assert sendable_update["data"]["degraded"] is True
+    assert sendable_update["data"]["epoch"] == "e1"
+    assert sendable_update["data"]["sequence"] == 7
+    FrontendUpdate.model_validate(sendable_update["data"])
+
+
+def test_a_fitting_frame_is_returned_unchanged() -> None:
+    """The common path stays one measure and NO allocation.
+
+    ``is`` rather than equality: a refit that copied every ordinary frame would
+    put an allocation on the hot path for nothing, and the identity is also what
+    tells the caller the frame it handed in is what the wire will carry.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = {"op": "event", "data": {"type": "notice", "text": "hello", "kind": "info"}}
+    assert fit_frame_for_wire(frame, _MAX_LINE_BYTES) is frame
+
+
+def test_a_store_write_failure_falls_back_to_the_notice(monkeypatch: Any) -> None:
+    """A store that cannot be written must never produce a PARTIAL reference.
+
+    ``AttachmentStore.put`` returns ``None`` for a read-only home, a full disk
+    or undecodable input. The frame then keeps its inline payloads and the guard
+    degrades it honestly; the one outcome that must never happen is a reference
+    whose digest resolves to nothing, which renders as an unavailable image on
+    every client at once.
+    """
+    from local_operator.session.attachments import AttachmentStore
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+    from local_operator.session.transcript import ATTACHMENT_KEY
+
+    monkeypatch.setattr(AttachmentStore, "put", lambda self, data, mime: None)
+    frame = _wire_image_frame(images=3, rows=2)
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    sendable = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert sendable["data"]["type"] == "notice"
+    assert ATTACHMENT_KEY not in json.dumps(sendable)
+
+
+def test_the_reference_key_is_the_durable_key() -> None:
+    """One key, so a viewer and a resume cannot disagree about what it means.
+
+    Restating the key in the transport would be the drift #694 was: the durable
+    path and the live path resolving the same concept under two spellings, with
+    one of them silently ignored by pydantic.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+    from local_operator.session.transcript import ATTACHMENT_KEY
+
+    frame = _wire_image_frame(images=3, role="user")
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    images = [block for block in fitted["data"]["message"]["content"] if block["type"] == "image"]
+    assert images
+    for block in images:
+        assert set(block) == {"type", ATTACHMENT_KEY, "mime_type"}
+
+
+def test_referencing_keeps_the_frame_under_the_cap_for_the_worst_case() -> None:
+    """Twelve images in one event: the reference pass scales, the guard does not.
+
+    The residual shape the operator hit is a frame that grows with the payload
+    it carries. References are constant-size, so the fitted frame is smaller by
+    the payload's whole cost rather than by a fixed allowance.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=12)
+    assert _line_bytes(frame) > 4 * _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) < 64 * 1024, _line_bytes(fitted)
+    assert fitted["data"]["type"] == "message_start"
+
+
+def test_the_live_delta_bounds_a_job_rows_free_text() -> None:
+    """A bound at the snapshot boundary alone leaks on every later delta.
+
+    ``sync_wire_payload`` clipped a job row's ``result_text``/``prompt``/
+    ``error_text``; ``FrontendStateStore.mutate``'s jobs path re-serializes the
+    same rows by its own route and applied only the launch-prompt budgets. A
+    child whose result was a whole transcript page therefore rode out unbounded
+    on every live delta while its reconnecting snapshot was clipped — one row is
+    enough to put a delta over the socket line on its own.
+    """
+    from local_operator.session.frontend_state import (
+        JOB_PROMPT_WIRE_CHARS,
+        JOB_RESULT_WIRE_CHARS,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update = store.mutate(
+        jobs=[
+            JobState(
+                id="j1",
+                type="task",
+                status="running",
+                label="child",
+                result_text="R" * 500_000,
+                prompt="P" * 300_000,
+                error_text="E" * 100_000,
+            )
+        ]
+    )
+
+    assert update is not None
+    row = update.changes["jobs"][0]
+    assert len(row["result_text"]) <= JOB_RESULT_WIRE_CHARS + 1
+    assert len(row["prompt"]) <= JOB_PROMPT_WIRE_CHARS + 1
+    assert row["result_text"].endswith("…"), "a clipped preview must read as clipped"
+
+
+def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event(caplog: Any) -> None:
+    """A payload no reference can carry: shed the payload, keep the EVENT.
+
+    The operator's invisible failure was the card that never settled, and the
+    event is what settles it — so a tool result larger than the whole line is
+    bounded in place rather than degraded away. ``LIVE_EVENT_BLOCK_ELIDED_
+    PLACEHOLDER`` is the marker the in-flight seed already uses for the same
+    row, so a live card and a reconnected card elide identically.
+
+    The INFO line is asserted too: the shed stage runs on frames carrying no
+    image payload at all, and "0 image payload(s) moved" in the one log line an
+    operator can find reads as a bug in the fit rather than as the stage that
+    did the work.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = {"op": "event", "data": _live_end("call_text", text="x" * (2 * _MAX_LINE_BYTES))}
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    with caplog.at_level(logging.INFO):
+        fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "tool_execution_end"
+    assert fitted["data"]["tool_call_id"] == "call_text"
+    bounded = fitted["data"]["result"]["content"][0]["text"]
+    assert bounded != "x" * (2 * _MAX_LINE_BYTES)
+    assert bounded.endswith("…"), "a clipped preview must read as clipped"
+    fits = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+    assert not [line for line in fits if "0 image payload(s)" in line], fits
+    assert any("tool result payload(s) bounded" in line for line in fits), fits
+
+
+def _payload_free_tool_end(target_bytes: int) -> dict[str, Any]:
+    """A tool end whose PAYLOAD-FREE form measures ``target_bytes``.
+
+    ``_shed_tool_result_payloads`` measures the frame with every result payload
+    blanked, so the band this fixture needs is a band of EMPTIED sizes.
+    """
+
+    def build(filler: int) -> dict[str, Any]:
+        return {
+            "op": "event",
+            "data": {
+                "type": "tool_execution_end",
+                "tool_call_id": "call_text",
+                "tool_name": "read",
+                "is_error": False,
+                "note": "y" * filler,
+                "result": {
+                    "tool_call_id": "call_text",
+                    "tool_name": "read",
+                    "content": [],
+                    "details": None,
+                    "is_error": False,
+                },
+            },
+        }
+
+    filler = target_bytes
+    for _ in range(80):
+        size = _line_bytes(build(filler))
+        if size == target_bytes:
+            break
+        filler += target_bytes - size
+    return build(filler)
+
+
+def test_the_emptied_card_is_preferred_over_degrading_the_delta() -> None:
+    """A frame inside the reserve band must settle its card, not lose the event.
+
+    The residual share is only affordable when the payload-free frame is more
+    than ``_FIT_SHED_RESERVE_BYTES`` under the line. Below that the bounded form
+    cannot be bought — but the EMPTIED form fits by construction, and returning
+    the original instead degraded a delta that had a settled card available
+    (`degraded: True` on a canonical delta costs the viewer a full re-sync).
+    Reproduced before the fix: emptied forms at 1,045,314 / 1,046,314 /
+    1,047,814 B all fitted, yet the fit returned a 178-byte ``notice``.
+    """
+    from local_operator.session.runtime.server import (
+        _FIT_SHED_RESERVE_BYTES,
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    target = _MAX_LINE_BYTES - _FIT_SHED_RESERVE_BYTES + 1_000
+    frame = _payload_free_tool_end(target)
+    assert _line_bytes(frame) == target, "the fixture is not in the band it claims"
+    frame["data"]["result"]["content"] = [{"type": "text", "text": "x" * (2 * _MAX_LINE_BYTES)}]
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "tool_execution_end", fitted["data"]
+    assert fitted["data"]["tool_call_id"] == "call_text"
+    # The settled card the emptied form gives the viewer.
+    assert fitted["data"]["result"]["content"] == []
+
+
+def test_an_oversized_relay_frame_names_the_field_that_grew(caplog) -> None:
+    """The warning must answer "which field", not only "how big".
+
+    One machine accumulated 44,681 of these lines naming a cause zero times,
+    because the per-frame relay warning printed the op and the byte count while
+    the attribution helper — which existed all along for the connect-time
+    ``frontend_sync`` report — was never called from it. A size that says
+    "4,726,970 bytes" and nothing else cannot be acted on; the reduction it was
+    supposed to aim could not start.
+
+    Also pinned here: the ranking (biggest first) and the honest empty case. A
+    frame whose payload this code does not understand must NOT claim an
+    attribution it does not have, because a wrong field name is worse than none.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    logger_name = "local_operator.session.runtime.server"
+    filler = "x" * (_MAX_LINE_BYTES + 1)
+
+    # A relayed update's payload is `changes`, not the sync's `snapshot`: reading
+    # only `snapshot` is precisely why this warning named nothing.
+    update = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e",
+            "sequence": 1,
+            "changes": {"cwd": filler, "attention": "small"},
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        replaced = relay_frame_or_degraded(update, _MAX_LINE_BYTES)
+    assert replaced is not update
+    # `%d`, not a thousands-separated figure: this message is grepped, and the
+    # existing lines in the operator's log read «1048576-byte».
+    assert "1048576-byte socket line limit" in caplog.text
+    assert "largest fields:" in caplog.text, "the warning must name a field"
+    assert "cwd=" in caplog.text
+    # Ranked by size, so the culprit leads the list rather than the alphabet.
+    assert caplog.text.index("cwd=") < caplog.text.index("attention=")
+
+    # The sync shape still attributes through its own map.
+    caplog.clear()
+    sync = {
+        "op": "frontend_sync",
+        "data": {"epoch": "e", "snapshot": {"transcript": filler, "cwd": "/tmp"}},
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(sync, _MAX_LINE_BYTES)
+    assert "transcript=" in caplog.text
+
+    # And an unrecognised payload still names its biggest key, rather than
+    # falling silent: `data` is the map, so every key of it is a candidate.
+    caplog.clear()
+    unknown = {"op": "frontend_update", "data": {"epoch": "e", "sequence": 2, "blob": filler}}
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(unknown, _MAX_LINE_BYTES)
+    assert "blob=" in caplog.text
+
+    # The shape the log actually showed: the bulk is a SIBLING of `changes`, and
+    # a helper that ranked only the wrapper's children named `jobs` — a 588 B
+    # bystander — for a 2.9 MB frame. A wrong field name is worse than none, so
+    # the sibling must outrank it here.
+    caplog.clear()
+    real = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e",
+            "sequence": 3,
+            "changes": {"jobs": {"n": 1}},
+            "job_trajectory_appends": {"job-1": [{"text": filler}]},
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(real, _MAX_LINE_BYTES)
+    assert "job_trajectory_appends=" in caplog.text
+    assert caplog.text.index("job_trajectory_appends=") < caplog.text.index("jobs=")
+
+    # Nothing to attribute: the warning says so by omission, not by inventing a
+    # field name.
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded({"op": "event", "data": None, "padding": filler}, _MAX_LINE_BYTES)
+    assert "socket line limit" in caplog.text
+    assert "largest fields:" not in caplog.text
+
+
+def test_a_field_named_in_both_a_wrapper_and_a_sibling_keeps_the_larger(caplog) -> None:
+    """A key collision must not silently drop the entry that made the frame big.
+
+    ``largest_frame_fields`` unwraps ``changes``/``snapshot`` so their children are
+    ranked as peers of every other field of ``data``. That trade is the whole
+    point (the bulk of a real oversized frame sits in ``job_trajectory_appends``, a
+    SIBLING of ``changes``), but it means a key can appear twice. First-writer-wins
+    would then name the smaller of the two and point a fix at the wrong field,
+    which is the failure this helper exists to prevent.
+    """
+    from local_operator.session.runtime.server import relay_frame_or_degraded
+
+    filler = "x" * (1 << 20)
+    frame = {
+        "op": "frontend_update",
+        "data": {
+            "changes": {"blob": "small"},
+            "blob": filler,
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+        relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+    assert f"blob={len(json.dumps(filler).encode()):,}B" in caplog.text, caplog.text
+    assert "blob=" + f"{len(json.dumps('small').encode()):,}B" not in caplog.text
+
+
+def _payload_event(index: int, *, payload_chars: int) -> dict[str, Any]:
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": f"call_{index:06d}",
+        "tool_name": "read",
+        "result": {"content": [{"type": "text", "text": "p" * payload_chars}]},
+        "_traj_seq": index,
+    }
+
+
+def _payload_jobs(count: int, rows: int, *, payload_chars: int) -> list[JobState]:
+    return [
+        JobState(
+            id=f"job{index}",
+            type="task",
+            label=f"child {index}",
+            status="running",
+            trajectory=[_payload_event(row, payload_chars=payload_chars) for row in range(rows)],
+        )
+        for index in range(count)
+    ]
+
+
+def _delta_payload(jobs: list[JobState]) -> dict[str, Any]:
+    """Drive the real producer, so these tests measure what the runtime ships."""
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store.subscribe(lambda _update: None)
+    store.mutate(jobs=[])
+    update = store.mutate(jobs=jobs)
+    assert update is not None
+    return update.model_dump(mode="json")
+
+
+def test_a_watched_jobs_burst_is_trimmed_to_the_budget_and_marked_for_reset() -> None:
+    """A WATCHED job's own burst is what produced the 44,681 oversized frames.
+
+    The scope filter is what the delta stream had, and it cannot bound this: the
+    page the viewer is reading is exactly the page whose rows are allowed
+    through. Bounding them is only half the fix — appends EXTEND the viewer's
+    local list, so a short suffix would leave a hole in the middle of a
+    transcript it believes is complete, which is why dropping any row must carry
+    the replacement marker that resets the list to what actually rides.
+    """
+    from local_operator.session.frontend_state import (
+        JOB_TRAJECTORY_FRAME_BUDGET_BYTES,
+        _live_row_cost,
+    )
+
+    # Rows at the producer's 8 KiB tool-text cap: the shape that measured a
+    # 4,390,839-byte frame for 500 of them on the operator's machine.
+    payload = _delta_payload(_payload_jobs(1, 200, payload_chars=8_192))
+    original = payload["job_trajectory_appends"]["job0"]
+    assert len(original) == 200, "the fixture stopped producing a full burst"
+
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    kept = filtered["job_trajectory_appends"]["job0"]
+
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+    assert 0 < len(kept) < len(original), (len(kept), len(original))
+    # Newest rows only, and whole rows: nothing is silently clipped.
+    assert kept == original[len(original) - len(kept) :]
+    assert all(row in original for row in kept)
+    assert sum(_live_row_cost(row) for row in kept) <= JOB_TRAJECTORY_FRAME_BUDGET_BYTES
+    # Without this marker the viewer would keep the rows it had and append a
+    # suffix to them, i.e. show a transcript with its middle missing.
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_an_under_budget_watched_delta_is_returned_unchanged() -> None:
+    """The bound must not cost a copy or a marker on the common delta."""
+    payload = _delta_payload(_payload_jobs(1, 3, payload_chars=512))
+    assert (
+        filter_update_trajectories(payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES)
+        is payload
+    )
+
+
+def test_one_oversize_row_rides_when_the_line_can_carry_it() -> None:
+    """A single 342 KB tool result fits a 1 MiB line.
+
+    The first cut of the budget measured only itself, so a row bigger than it
+    shipped an EMPTY window for that job — hiding an event the socket could have
+    carried (measured against the real producer: frame 343,489 B before and
+    after, and an emptied one in between). The ceiling is the room left under the
+    caller's line limit, measured against the rest of the frame.
+    """
+    payload = _delta_payload(_payload_jobs(1, 1, payload_chars=342_517))
+    original = payload["job_trajectory_appends"]["job0"]
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert filtered["job_trajectory_appends"]["job0"] == original
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+
+
+def test_a_row_larger_than_the_whole_line_is_replaced_by_an_empty_window() -> None:
+    """Past the line limit there is nowhere for a row to ride, and clipping it
+    would render a cut transcript as a complete one. The viewer resets and
+    fetches the page on demand instead."""
+    payload = _delta_payload(_payload_jobs(1, 1, payload_chars=1_500_000))
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert filtered["job_trajectory_appends"]["job0"] == []
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_an_unwatched_burst_cannot_starve_a_watched_sibling_of_budget() -> None:
+    """The budget is spent on what this connection actually receives, so a
+    watched job's rows must survive an unwatched sibling's flood untouched."""
+    payload = _delta_payload(
+        _payload_jobs(1, 3, payload_chars=512)
+        + [
+            JobState(
+                id="job-big",
+                type="task",
+                label="noisy child",
+                status="running",
+                trajectory=[_payload_event(row, payload_chars=8_192) for row in range(200)],
+            )
+        ]
+    )
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert len(filtered["job_trajectory_appends"]["job0"]) == len(
+        payload["job_trajectory_appends"]["job0"]
+    )
+    assert "job-big" not in filtered["job_trajectory_appends"]
+    # Scope-dropping needs no replacement marker: the viewer never had those rows.
+    assert "job-big" not in filtered["job_trajectory_replacements"]
+
+
+def _bulk_frame(*, others_chars: int, row_chars: int, rows: int = 2, todos_chars: int = 0):
+    """A hand-built payload whose non-trajectory bulk is controllable.
+
+    ``others_chars`` stands in for a roster-heavy frame: on a real one that bulk is
+    the job summaries and usage components, which is exactly the case where the
+    room left under the line limit is SMALLER than the appends' soft budget.
+    """
+    payload: dict[str, Any] = {
+        "epoch": "e1",
+        "sequence": 7,
+        "changes": {"jobs": [{"id": "job0", "label": "child"}], "bulk": "z" * others_chars},
+        "job_trajectory_appends": {
+            "job0": [_payload_event(index, payload_chars=row_chars) for index in range(rows)]
+        },
+        "job_trajectory_replacements": [],
+    }
+    if todos_chars:
+        # Spread across jobs, because the producer caps todo payload at 128 KiB
+        # per changed job — a single 680 KB entry is not a shape it can emit.
+        payload["job_todo_updates"] = {
+            f"job{index}": [{"text": "t" * todos_chars}] for index in range(6)
+        }
+    return payload
+
+
+def test_a_near_limit_frame_drops_rows_the_room_cannot_hold() -> None:
+    """The room must bind when it is SMALLER than the soft budget, not only when it
+    is larger.
+
+    Measured by review at the previous head: 800,014 B of non-trajectory payload
+    plus one 250 KB newest row shipped a 1,050,435-byte frame under a
+    1,048,576-byte limit — over the line, i.e. degraded, when dropping the row
+    would have fitted. The soft budget cannot be the floor here: a frame with
+    little room left must ship fewer rows, not overflow.
+    """
+    payload = _bulk_frame(others_chars=800_000, row_chars=250_000)
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+    assert filtered["job_trajectory_appends"]["job0"] == []
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_todos_count_against_the_room_the_appends_may_spend() -> None:
+    """``job_todo_updates`` rides the same frame and is bounded nowhere, so it has
+    to be measured as part of the rest of the payload: excluding it would overstate
+    the room by exactly the todo payload — a bound that does not count what ships,
+    which is the failure this whole area exists to stop."""
+    rows = 24
+    without = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows)
+    with_todos = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows, todos_chars=110_000)
+
+    kept_without = filter_update_trajectories(
+        without, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )["job_trajectory_appends"]["job0"]
+    filtered_with = filter_update_trajectories(
+        with_todos, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    kept_with = filtered_with["job_trajectory_appends"]["job0"]
+
+    assert len(kept_with) < len(kept_without)
+    assert _line_bytes({"op": "frontend_update", "data": filtered_with}) < _MAX_LINE_BYTES
+
+
+def test_a_deep_roster_charges_for_its_own_keys_and_markers() -> None:
+    """The appends object's keys and the marker list ride the same JSON as the rows.
+
+    QA measured the onset on a real deep-roster delta: 200 jobs with 24 KB rows each
+    shipped 1,050,111 B — 1,535 B over the line — because those keys (2,799 B) and
+    markers (2,398 B) were unbudgeted, and the wire pass then repaired the frame by
+    EMPTYING the kept rows' payloads (840,000 → 0 characters of transcript), which is
+    the silent cut this module exists to prevent. Both are charged before any row
+    spends room now, so the frame fits with the rows intact.
+    """
+    jobs, rows_per_job, row_chars = 200, 4, 24_000
+    # Ids the length the runtime actually mints (``uuid4().hex[:12]``): the charge
+    # under test is per job, so a shorter synthetic id would not reach the band
+    # this test exists for (measured by review: 8-char ids made the pre-fix head
+    # fit at 223 B under the line, i.e. this test would not have discriminated).
+    appends = {
+        f"{index:012x}": [
+            _payload_event(row, payload_chars=row_chars) for row in range(rows_per_job)
+        ]
+        for index in range(jobs)
+    }
+    payload = {
+        "epoch": "e1",
+        "sequence": 9,
+        "changes": {"jobs": [{"id": job_id} for job_id in appends]},
+        "job_trajectory_appends": appends,
+        "job_trajectory_replacements": [],
+    }
+    filtered = filter_update_trajectories(
+        payload, appends.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    shipped = _line_bytes({"op": "frontend_update", "data": filtered})
+    assert shipped < _MAX_LINE_BYTES, shipped
+    kept = sum(len(rows) for rows in filtered["job_trajectory_appends"].values())
+    assert kept > 0, "the bound emptied every job's rows to fit a frame the keys cost"
+    assert len(filtered["job_trajectory_replacements"]) == jobs

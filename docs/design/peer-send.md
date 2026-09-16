@@ -371,7 +371,18 @@ harness ones live in `harness/comms.py` / `harness/wake.py`; add
 recommend a new small module `local_operator/session/peer.py` or beside
 `WAKE_PROMPT_MESSAGE_TYPE`; the coder picks per local convention, but it must be
 importable by `session.py`, `projection.py`, `tui/app.py`, and
-`subagent_view.py`).
+`subagent_view.py`). *(Superseded in #1150: the marker was moved to
+`local_operator/harness/message_types.py` instead, and `session/peer.py` was
+deleted. Of the two homes recommended here, the first is why it could not stay
+where it was: the session package is on the runner's denylist, so a marker
+defined in `session/peer.py` left the shared renderer unimportable from an
+episode. The second would have been importable — `harness/wake.py` sits in the
+package `render.py` itself lives in, and `render.py` imports
+`WAKE_PROMPT_MESSAGE_TYPE` from it today at closure 0 — and was rejected for the
+rule stated in `harness/message_types.py` instead: judge the marker's OWNER, and
+a peer marker's owner is the peer feature on the session side, not the wake
+subsystem. Kept here as the design record of what was proposed; do not recreate
+the module.)*
 
 `_peer_custom_message` builds:
 
@@ -968,7 +979,8 @@ Backend/protocol:
   `_peer_custom_message`; add `PEER_MESSAGE_MESSAGE_TYPE` to the custom-type
   allow-list (`~L414`); emit `PeerMessageDeliveredEvent`.
 - `local_operator/session/peer.py` (new) or beside wake constants:
-  `PEER_MESSAGE_MESSAGE_TYPE`.
+  `PEER_MESSAGE_MESSAGE_TYPE`. *(Not built as written: #1150 defined it in
+  `local_operator/harness/message_types.py` and deleted `session/peer.py`.)*
 - `local_operator/harness/types.py`: `PeerMessageDeliveredEvent`.
 - `local_operator/mobile/projection.py`: fold peer custom → entry;
   `ProjectionFold.note_peer_message`.

@@ -1,0 +1,227 @@
+[
+	{
+		"selector": "xai/grok-4.6",
+		"provider": "xai",
+		"model_id": "grok-4.6",
+		"name": "Grok 4.6",
+		"label": "Grok 4.6",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "anthropic/claude-fable-5-1",
+		"provider": "anthropic",
+		"model_id": "claude-fable-5-1",
+		"name": "Claude Fable 5.1",
+		"label": "Claude Fable 5.1",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "zai/glm-5.3",
+		"provider": "zai",
+		"model_id": "glm-5.3",
+		"name": "GLM-5.3",
+		"label": "GLM-5.3",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "xai/grok-4.5",
+		"provider": "xai",
+		"model_id": "grok-4.5",
+		"name": "Grok 4.5",
+		"label": "Grok 4.5",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "anthropic/claude-opus-5",
+		"provider": "anthropic",
+		"model_id": "claude-opus-5",
+		"name": "Claude Opus 5",
+		"label": "Claude Opus 5",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "alibaba-token-plan/glm-5.2",
+		"provider": "alibaba-token-plan",
+		"model_id": "glm-5.2",
+		"name": "GLM-5.2 (Token Plan)",
+		"label": "GLM-5.2 (Token Plan)",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "zai/glm-5.3-flash",
+		"provider": "zai",
+		"model_id": "glm-5.3-flash",
+		"name": "glm-5.3-flash",
+		"label": "zai/glm-5.3-flash",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "deepseek/deepseek-v4-flash-0731",
+		"provider": "deepseek",
+		"model_id": "deepseek-v4-flash-0731",
+		"name": "DeepSeek V4 Flash (2026-07-31)",
+		"label": "DeepSeek V4 Flash (2026-07-31)",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "anthropic/claude-sonnet-5",
+		"provider": "anthropic",
+		"model_id": "claude-sonnet-5",
+		"name": "Claude Sonnet 5",
+		"label": "Claude Sonnet 5",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "xai/grok-4.3",
+		"provider": "xai",
+		"model_id": "grok-4.3",
+		"name": "Grok 4.3",
+		"label": "Grok 4.3",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "kimi/k3-256k",
+		"provider": "kimi",
+		"model_id": "k3-256k",
+		"name": "K3-256k",
+		"label": "K3-256k",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "zai/glm-5.2",
+		"provider": "zai",
+		"model_id": "glm-5.2",
+		"name": "GLM-5.2",
+		"label": "GLM-5.2",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "openai/gpt-6-astra",
+		"provider": "openai",
+		"model_id": "gpt-6-astra",
+		"name": "GPT-6-Astra",
+		"label": "GPT-6-Astra",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "deepseek/deepseek-v4-pro",
+		"provider": "deepseek",
+		"model_id": "deepseek-v4-pro",
+		"name": "DeepSeek V4 Pro",
+		"label": "DeepSeek V4 Pro",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "anthropic/claude-opus-4-8",
+		"provider": "anthropic",
+		"model_id": "claude-opus-4-8",
+		"name": "Claude Opus 4.8",
+		"label": "Claude Opus 4.8",
+		"connected": true,
+		"aggregated": false
+	},
+	{
+		"selector": "openrouter/anthropic/claude-opus-5",
+		"provider": "openrouter",
+		"model_id": "anthropic/claude-opus-5",
+		"name": "Claude Opus 5",
+		"label": "openrouter/anthropic/claude-opus-5",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "radient/z-ai/glm-5.3",
+		"provider": "radient",
+		"model_id": "z-ai/glm-5.3",
+		"name": "Z.ai: GLM 5.3",
+		"label": "radient/z-ai/glm-5.3",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "openrouter/x-ai/grok-4.6",
+		"provider": "openrouter",
+		"model_id": "x-ai/grok-4.6",
+		"name": "SpaceXAI: Grok 4.6",
+		"label": "openrouter/x-ai/grok-4.6",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "radient/anthropic/claude-opus-5",
+		"provider": "radient",
+		"model_id": "anthropic/claude-opus-5",
+		"name": "Claude Opus 5",
+		"label": "radient/anthropic/claude-opus-5",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "openrouter/z-ai/glm-5.3",
+		"provider": "openrouter",
+		"model_id": "z-ai/glm-5.3",
+		"name": "Z.ai: GLM 5.3",
+		"label": "openrouter/z-ai/glm-5.3",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "radient/x-ai/grok-4.6",
+		"provider": "radient",
+		"model_id": "x-ai/grok-4.6",
+		"name": "SpaceXAI: Grok 4.6",
+		"label": "radient/x-ai/grok-4.6",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "openrouter/anthropic/claude-opus-5:batch",
+		"provider": "openrouter",
+		"model_id": "anthropic/claude-opus-5:batch",
+		"name": "Claude Opus 5 (batch)",
+		"label": "openrouter/anthropic/claude-opus-5:batch",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "radient/anthropic/claude-opus-4.8",
+		"provider": "radient",
+		"model_id": "anthropic/claude-opus-4.8",
+		"name": "Anthropic: Claude Opus 4.8",
+		"label": "radient/anthropic/claude-opus-4.8",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "openrouter/x-ai/grok-4.5",
+		"provider": "openrouter",
+		"model_id": "x-ai/grok-4.5",
+		"name": "SpaceXAI: Grok 4.5",
+		"label": "openrouter/x-ai/grok-4.5",
+		"connected": true,
+		"aggregated": true
+	},
+	{
+		"selector": "radient/z-ai/glm-5.3-flash",
+		"provider": "radient",
+		"model_id": "z-ai/glm-5.3-flash",
+		"name": "Z.ai: GLM 5.3 Flash",
+		"label": "radient/z-ai/glm-5.3-flash",
+		"connected": true,
+		"aggregated": true
+	}
+]

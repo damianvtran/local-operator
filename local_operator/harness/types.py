@@ -45,7 +45,15 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -80,6 +88,36 @@ FAULT_KEY = "__fault"
 #: the value must stay a member of ``analytics.model.MODEL_FAULTS``, which is
 #: what a test pins.
 FAULT_INVALID_ARGUMENTS = "invalid_arguments"
+
+#: Key under which a SYNTHETIC tool result records that the OUTPUT LIMIT is why
+#: its call never ran. A harness bookkeeping key like ``FAULT_KEY`` above, and
+#: declared in the same place for the same reason: the loop writes it and a
+#: display surface reads it, so one spelling has to hold for both.
+#:
+#: WHAT IT IS FOR. The text of those results is written for the MODEL, and the
+#: one the length arm appends is prose addressed to it ("Reply with the call
+#: itself, not with an explanation of why it cannot be sent"). The same text is
+#: the tool message the transcript persists, so a resumed row used to paint
+#: model-directed instruction as the operator's own receipt (review round 1,
+#: F2). The row therefore takes its words from
+#: ``harness.rows.output_limit_call_receipt`` instead, and this key is the whole
+#: input to that decision — a surface must key on the MARKER, never on the
+#: wording, so a later reword of the model-facing text cannot change what an
+#: operator reads.
+OUTPUT_LIMIT_KEY = "__output_limit"
+
+#: The output limit cut this call's ARGUMENTS mid-dictation: the raw text is a
+#: JSON fragment that never parsed. Only this arm may tell the model its
+#: arguments were oversize and would be cut again.
+OUTPUT_LIMIT_ARGUMENTS = "arguments"
+
+#: ...or the turn ended at the limit with this call's arguments already
+#: COMPLETE, so the call is intact and simply never ran. The two arms are
+#: different facts and must not be collapsed: asserting the first for a call
+#: whose 43-byte arguments were complete sent the model after a size problem it
+#: did not have while the identical arguments executed fine on the next turn
+#: (review F1 == QA Q1).
+OUTPUT_LIMIT_TURN = "turn"
 
 
 class InvalidToolArgumentsError(ValueError):
@@ -162,14 +200,31 @@ class RenderedStreamError(Exception):
     not import the provider layer — the dependency only runs the other way.
     """
 
-    #: The MACHINE was offline (DNS/route/socket failed before any HTTP), as
-    #: opposed to a provider that answered badly. Declared here, on the base
-    #: class, precisely BECAUSE the harness must not import ``providers``: the
-    #: loop has to tell "the laptop moved between wifi networks" apart from "the
-    #: provider 500ed" to decide whether an interrupted turn may be continued,
-    #: and this attribute is the only channel that does not invert the layering.
-    #: ``providers.failover.ProviderError`` sets it from ``is_connectivity_loss``
-    #: (the single classifier — this is a carrier, never a second definition);
+    #: The provider call was cut off MID-STREAM in a way that re-issuing the
+    #: REMAINDER repairs, as opposed to a provider that answered about the
+    #: request it was given. Declared here, on the base class, precisely BECAUSE
+    #: the harness must not import ``providers``: the loop has to tell "the
+    #: laptop moved between wifi networks" — or "the gateway's upstream host
+    #: died mid-body" — apart from "the provider 500ed" to decide whether an
+    #: interrupted turn may be continued, and this attribute is the only channel
+    #: that does not invert the layering.
+    #:
+    #: The flag has TWO halves and they are stamped in different places, so a
+    #: reader looking for both at construction will not find them:
+    #:
+    #: * The connectivity half is stamped by ``ProviderError.__init__`` itself
+    #:   (``self.connectivity_loss = transport and is_connectivity_loss(self)``)
+    #:   — available at construction, and only when OUR client observed the
+    #:   transport die (see :func:`~local_operator.providers.failover.is_connectivity_loss`).
+    #: * The aggregator half is stamped LATER, by the failover driver's
+    #:   ``_mark_mid_stream_connectivity`` upgrade, which consults
+    #:   ``is_aggregator_upstream_stream_failure`` — and only on the raise site
+    #:   where bytes had already been forwarded, because "the caller has read
+    #:   part of the answer" is the fact that inference turns on. A PRE-delta
+    #:   aggregator 5xx is therefore marked nowhere, here or there, and stays the
+    #:   terminal failure it has always been.
+    #:
+    #: Both classifiers carry one decision rather than defining a second one;
     #: every other stream error keeps the ``False`` default, so a client that
     #: knows nothing about it behaves exactly as before.
     connectivity_loss: bool = False
@@ -366,8 +421,34 @@ class Message(BaseModel):
         return message
 
 
+def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``at_ms`` from a serialized usage while it was never set.
+
+    Every ``Usage`` subclass's own ``@model_serializer`` must route its result
+    through here (see ``session/frontend_state``'s frozen wrappers), because a
+    subclass serializer REPLACES this one rather than composing with it.
+
+    Written as a serializer rather than as field metadata on purpose: a
+    field-level ``exclude_if`` reads better but only exists in pydantic 2.12+,
+    while ``pyproject.toml`` declares ``pydantic>=2.7`` — on 2.7-2.11 it degrades
+    to schema metadata and every usage goes back to carrying ``"at_ms": null``,
+    invisibly, until the attach frame crosses its 1 MiB socket line limit again
+    (review round 1, MINOR 2).
+    """
+    if data.get("at_ms") is None:
+        data.pop("at_ms", None)
+    return data
+
+
 class Usage(BaseModel):
     """Token accounting reported by a provider (or estimated locally)."""
+
+    @model_serializer(mode="wrap")
+    def _serialize_usage_without_unset_stamp(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Serialize normally, then drop a stamp that was never set."""
+        return _omit_unset_usage_stamp(handler(self))
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -404,6 +485,28 @@ class Usage(BaseModel):
     # the provider billed as free) — the same three-way split the TUI's
     # ``None``-vs-``$0.0000`` contract already draws.
     usd_cost: float | None = None
+    # Epoch milliseconds in UTC when the PROVIDER reported this usage. The window
+    # a time-of-use tariff is evaluated in is a property of the CALL, not of when
+    # somebody later read the ledger: a restored session or an attached receipt
+    # priced at view time is wrong by up to 2x in either direction, and this
+    # stamp is the call's own answer. Stamped where a provider response is parsed
+    # (``providers/clients.py``); an aggregate leaves it unset — a turn's folded
+    # total and a child's lifetime total carry their provenance in
+    # ``cost_components`` instead, exactly as they already do for ``usd_cost``
+    # (see ``harness/jobs._merge_accounting_component`` for the one fold that
+    # keeps a stamp, and only while every call it merges shares it).
+    #
+    # SERIALIZATION is load-bearing here, not tidiness: the field is set on every
+    # wire usage and unset on every aggregate, and the attach frame serializes up
+    # to 80,000 usages in its worst-case roster — so a literal ``"at_ms": null``
+    # on each one cost 8 KB of a frame that had 3 KB of headroom and pushed it past
+    # the 1 MiB socket line limit (``tests/unit/session/test_attach_frame_size``).
+    # Unset stamps are dropped by :func:`_omit_unset_usage_stamp` instead. That is
+    # also the honest wire shape — "absent" and "None" mean the same thing to
+    # every reader (``tariff.moment_for`` reads the stamp duck-typed off an object
+    # OR a mapping) — it is still serialized wherever it IS set, so it travels the
+    # wire and the checkpoint, and a legacy transcript's bytes are unchanged.
+    at_ms: int | None = None
     # A record-time table estimate is durable money, but NOT a provider receipt.
     # Keeping the provenance separate lets offline viewers/resumes retain known
     # spend without pretending the provider reported a bill or repricing history.
@@ -644,12 +747,22 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id", "resource")
+    __slots__ = ("surface_id", "resource", "extension_update_notified")
 
     def __init__(self, resource: Any = None) -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # Whether the tool has already spent its ONE line telling the agent that
+        # a newer browser extension exists. It lives HERE, on the host-owned
+        # holder, because the ToolContext is rebuilt at the start of every turn
+        # and a flag stashed on it would reset the next turn — re-billing the
+        # same sentence forever. Read through `getattr` by the tool (see
+        # `_browser_update_note`), deliberately NOT added to
+        # `BrowserSurfaceProtocol`: that protocol is `@runtime_checkable`, so a
+        # new member would make every other implementor fail its isinstance
+        # check for a purely advisory flag.
+        self.extension_update_notified = False
 
 
 @runtime_checkable
@@ -897,6 +1010,17 @@ class ToolContext(BaseModel):
     # Optional and display-only for the same reason ``session_name`` is:
     # identity and authorization continue to use ``session_id``.
     session_name_provider: Callable[[], str] | None = None
+    # The SESSION's own ``provider/model``, as a snapshot taken when this
+    # context was built (its owner re-reads it per turn, so a ``/model`` switch
+    # shows up on the next call).
+    #
+    # Its one consumer is the ``task`` tool's result line, which states the
+    # model each child WILL run on: a child launched with no tier and no role
+    # pin owns no model and inherits this one, and the line has to be able to
+    # say that rather than leaving a blank the reader must interpret. Declared
+    # rather than probed off the launcher's bound session — a tool that has to
+    # read a session off a bound method is a coupling nobody declared.
+    session_model_label: str = ""
     # The DELEGATED-WORK label, set only on a subagent's context: the short
     # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
     #
@@ -1224,6 +1348,18 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     aborted: bool = False
     error: str | None = None
     generation: int = 0
+    #: Why the turn was CUT OFF by something other than a deliberate stop, when
+    #: that is what happened. ``cut_off_cause`` is the machine token
+    #: (``incidents.CUT_OFF_CAUSES``); ``cut_off`` is its rendered operator
+    #: sentence, carried so a viewer can name the cause without re-deriving it
+    #: from the vocabulary. Both default to ``""``, which is also what an OLD
+    #: runtime produces — and ``AgentEvent`` is ``extra="allow"``, so an old
+    #: viewer that has never heard of these fields keeps them as extras and
+    #: never fails validation. That is the whole backwards-compatibility story
+    #: here: no ``PROTOCOL_VERSION`` bump is needed for an additive field on a
+    #: frame old readers already accept.
+    cut_off: str = ""
+    cut_off_cause: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
@@ -1371,6 +1507,26 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     Additive on purpose. An older runtime never sets it and every consumer
     keeps today's behaviour; an older viewer receiving it ignores it, because
     ``AgentEvent`` allows extra fields.
+
+    ``dictation_complete`` marks the LAST frame of a call's dictation — the one
+    the producer cannot send again, because the step's stream has ended. It
+    exists because a composing row is a PREDICTION that a call exists, and the
+    producer used to announce the prediction's beginning and then only one of
+    its three endings (the call starts; it is queued behind a sibling's
+    execution group and starts much later; it never runs at all). A call
+    composed in a batch that ends with ``wait(wait_ms=1800000)`` ahead of an
+    ``exclusive`` sibling therefore kept a row saying ``composing…`` — with a
+    ticking clock — for the sibling's whole half-hour, which is exactly how it
+    was reported. The frame carries the final ``argument_bytes`` (not merely the
+    last reported one) so the row it settles keeps the size it really reached.
+
+    ``not_run_reason`` is the never-run ending, bounded to one clipped line (the
+    wire and the seed both budget text, and this rides both), and set only on a
+    call parked at planning or skipped by steering. Those calls deliberately
+    have no ``tool_execution_start``/``_end`` — the API server matches tool
+    records by id, and a synthetic start would claim the tool ran — so the
+    compose surface is the only one that announced them and the only one that
+    can honestly settle them.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
@@ -1379,6 +1535,8 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     argument_bytes: int = 0
     intent: str | None = None
     supersedes_tool_call_id: str | None = None
+    dictation_complete: bool = False
+    not_run_reason: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
@@ -1387,6 +1545,34 @@ class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     tool_name: str
     args: dict[str, Any] = Field(default_factory=dict)
     intent: str | None = None
+    #: The WALL-CLOCK instant this call began executing, stamped by the
+    #: producer because no consumer can recover it afterwards.
+    #:
+    #: Without it a frontend has only its own arrival instant, and the only
+    #: frontend that notices is one that attaches to work already in flight —
+    #: a sidebar switch back to a conversation whose tool is still running, a
+    #: re-attach, a `/resume` onto a live turn. Those widgets are constructed
+    #: at the switch, so the live row's elapsed clock restarts there and counts
+    #: up from a zero belonging to the viewer rather than to the call: the
+    #: reported frame was a `bash` row reading `27s` and this event's true
+    #: start being half an hour earlier.
+    #:
+    #: ``None`` is a REAL answer rather than a missing value to be defaulted.
+    #: The field is additive, so every event an older runtime produced lacks
+    #: it, and a consumer that substituted its own fold or arrival instant
+    #: would print an age it invented — exactly the failure the widgets' blank
+    #: column exists to refuse. Consumers withhold the clock instead.
+    #:
+    #: Epoch rather than monotonic on purpose: this value crosses a process
+    #: boundary (``live_events`` is serialized onto the attach wire), and a
+    #: monotonic reading is not comparable across processes. It does NOT cross
+    #: the durable boundary: ``FrontendSessionState.checkpoint()`` strips the
+    #: folded map, so a resumed session never sees a stamp and withholds, which
+    #: is why absence above is described as a real answer rather than an
+    #: oversight. Readers convert the AGE once and then tick on their own
+    #: monotonic clock, so a later system-clock adjustment cannot move a
+    #: counter that is already running.
+    started_at_epoch: float | None = None
 
 
 class ToolExecutionUpdateEvent(AgentEvent[Literal["tool_execution_update"]]):
@@ -1887,6 +2073,90 @@ class ModelSpec(BaseModel):
     # guess: compatibility providers may serve the same model id while exposing
     # only chat/completions.
     supports_responses_api: bool = False
+    # DeepSeek's THINKING MODE refuses requests that do not carry the
+    # conversation's reasoning back. The provider answers HTTP 400 "The
+    # `reasoning_content` in the thinking mode must be passed back to the API",
+    # the operator's sessions record it as
+    # ``[session incident (deepseek/deepseek-flash)]``, and it kills a turn
+    # hundreds of messages deep.
+    #
+    # What is MEASURED, live against ``api.deepseek.com/v1`` (2026-09-12,
+    # ``deepseek-flash``, thinking on): the request rebuilt from the transcript
+    # at the point of failure (491 messages, 230 assistant turns, 66 of them
+    # with no ``reasoning_content``) is REFUSED, and the same body with a
+    # non-blank ``reasoning_content`` on every assistant turn is ACCEPTED --
+    # repeatedly, for both that session and a minimal synthetic tool loop. A
+    # body whose assistant turns all carry a blank value is accepted on one
+    # shape where the same body with the keys absent is refused, which is what
+    # moved the harness to send a real sentence rather than a blank -- but that
+    # single shape is NOT evidence about the rule in general (the accepted
+    # key-less bodies in the counter-shapes below are why), and this field does
+    # not conclude one.
+    #
+    # The exact server-side rule is NOT fully characterised, and this field does
+    # not claim to encode it. Requests that omit the echo are accepted in other
+    # shapes -- adding a trailing user turn to the failing body answered 200,
+    # and tool-call ids copied from a reply the endpoint itself generated
+    # answered 200 where the same ids with one character changed answered 400 --
+    # which reads like server-side state (leniency for its own ids, or a prefix
+    # effect) rather than a syntactic property of the body. Filling every blank
+    # assistant turn is therefore a SUPERSET of what the failing shapes need: it
+    # is measured-safe on the shapes that are refused, and on the shapes that
+    # are accepted it changes nothing but those turns.
+    #
+    # The turns with nothing to carry back are ordinary, which is what makes the
+    # harness unable to satisfy the demand out of its own history: the model
+    # produced no reasoning at all (no ``usage.reasoning_tokens``) on ~29% of the
+    # assistant turns in the session that reported this (``9daa47ece7ad``, 66 of
+    # 230 turns in the request built at the point of failure), and a turn whose
+    # native payload was dropped -- by an edit, a truncation/abort, or a model,
+    # endpoint or credential-scope change (see ``providers.replay``) -- has none
+    # either. So the fix is compliance at the wire layer rather than better
+    # capture.
+    #
+    # Derived from the model id at ``ModelSpec`` construction (see
+    # ``_derive_deepseek_thinking_contract``) and, on the builder's path, in
+    # ``build_model_spec`` — whichever runs, the SAME rule in
+    # ``model.configure.reasoning_echo_required`` answers, so no wire client has
+    # to recognise a model name. It is set for the DeepSeek-hosted thinking-mode
+    # family -- which is a property of the WEIGHTS, so it is set on every route
+    # that can serve them, the aggregator routes included -- and it stays off for
+    # the legacy ``deepseek-chat`` / ``deepseek-reasoner`` rows.
+    #
+    # **``None`` is "no caller stated a value", not a third state on the wire.**
+    # The default is tri-state for one measured reason: a STATED ``False`` has to
+    # survive a round trip, and a plain ``bool`` default cannot distinguish "this
+    # spec says no echo" from "nobody filled the field" the moment a persister
+    # dumps with ``exclude_defaults=True`` -- the ``False`` IS the default, so it
+    # is dropped, and re-validating what is left derives the echo back on for a
+    # route whose caller deliberately said otherwise. With ``None`` as the
+    # default, ``False`` is no longer equal to it and survives the dump (pinned by
+    # ``test_a_defaults_excluding_dump_survives_a_stated_false``).
+    #
+    # No VALIDATED spec carries ``None``: the construction hook resolves it to the
+    # rule's answer, so every reader may treat this as a bool. Only a value that
+    # bypassed the hook (``model_construct``, a ``model_copy`` that writes
+    # ``None`` itself) can read as ``None``, which is the same falsy answer an
+    # unstated spec would get.
+    #
+    # It is NOT route-keyed, and an earlier revision's decision to key it on
+    # the direct ``deepseek`` hosting was wrong on its own evidence. That
+    # revision excluded OpenRouter's route to the same weights on the strength
+    # of ONE 200: measured there, the SAME body the direct route answers 200 to
+    # on one attempt answers 400 to on another, so a 200 is not a property of
+    # the route -- and re-measured 2026-09-13, the provider that served that
+    # 200 was ``Together``, one of THIRTEEN endpoints OpenRouter lists for
+    # ``deepseek/deepseek-v4.1-flash``. DeepSeek's own endpoint is on that list
+    # (with the others: DeepInfra, Fireworks, Morph, Together, SiliconFlow,
+    # Modal, Wafer, Parasail, GMICloud, Io Net, Novita, Venice), the default
+    # routing load-balances across them, and only the vendor's own runs this
+    # validator -- so a conversation can be served by a lenient host on one turn
+    # and refused on the next, with nothing in the request to tell them apart.
+    # A capability the app can neither predict nor verify per request must fall
+    # the safe way: the echo is one short sentence per assistant turn, measured
+    # accepted on that route as well, where being wrong the other way kills a
+    # turn hundreds of messages deep.
+    requires_reasoning_echo: bool | None = None
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     # ``None`` means OMIT: send no key at all and let the vendor's own default
     # apply. That is now the common case rather than an exotic one — most
@@ -1937,6 +2207,42 @@ class ModelSpec(BaseModel):
     # knowledge out of the widgets — the division ``model.effort`` claims in its
     # own docstring and which those two sites were quietly breaking.
     reasoning_default_effort: str | None = None
+    # Provider REASONING-BOUNDARY MARKERS this model's chat template emits at
+    # the HEAD of the content channel, in the order they may appear. An EMPTY
+    # tuple -- the default, and what every unlisted model gets -- means the
+    # harness strips nothing from a reply, which is the ordinary case.
+    #
+    # **What this is.** MiniMax M3 through OpenRouter splits one model turn
+    # across two wire channels: the reasoning text arrives as
+    # ``reasoning_content`` and the answer as ``content``. The template's
+    # closing boundary token (``</mm:think>``) is emitted at the JOINT -- the
+    # opening half stays on the reasoning channel and only the closing half
+    # leaks into ``content``. So the reply the harness assembles is not prose
+    # and not model output at all: it is a template artifact welded to the
+    # front of a byte-perfect action batch. Measured over the sealed MiniMax
+    # campaign (329 rejection artifacts, 40 of which publish their reply text;
+    # counted 2026-09-12): 17 replies carried the token, all 17 at offset 0, all
+    # 17 CLOSING tags, zero opening tags -- an authorship signature no model
+    # prose can produce.
+    #
+    # **Why it is declared here rather than stripped at the call site.** The
+    # frontier this file already draws: no wire client, widget or runner
+    # recognises a model name, so a template token must be derived once, in
+    # ``build_model_spec``, and READ by the code that needs it. A hardcoded
+    # ``</mm:think>`` in the reply assembler would be a model-name check wearing
+    # a string literal, and it would silently mangle the first model whose
+    # prose legitimately starts with that text.
+    #
+    # **Why only the HEAD and only an exact token.** The strip is the one place
+    # in the reply path that can rewrite what the model sent, so its licence is
+    # kept as narrow as the evidence: a declared token at the very start of the
+    # assembled reply, removed whole. Nothing is searched for, nothing is
+    # removed from the middle, and a token inside a string value or behind a
+    # character of prose is left alone and judged as the bytes it is. Extracting
+    # the first balanced JSON object from prose -- the other way to rescue these
+    # replies -- remains refused for the reason ``_decode_leading_json`` gives:
+    # it can execute a batch the model never sent.
+    reasoning_boundary_markers: tuple[str, ...] = ()
     # Whether this ROUTE can serve this model at the provider's fast tier, and
     # whether the user has asked it to. Same division of labour as the effort
     # pair above, and for the same reason: the wire clients need "do I send the
@@ -1971,6 +2277,162 @@ class ModelSpec(BaseModel):
     # than treat this as authoritative.
     display_name: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_deepseek_thinking_contract(cls, data: Any) -> Any:
+        """Derive the DeepSeek thinking-mode ECHO from the model id itself.
+
+        ``build_model_spec`` derived ``requires_reasoning_echo`` as a local, so a
+        ``ModelSpec`` built any other way took the field default -- echo off, which
+        is the HTTP 400 this capability exists to prevent ("The
+        `reasoning_content` in the thinking mode must be passed back to the
+        API"). Measured in the field: 76 sessions carry that refusal wording, and
+        the incidents continue past the release that shipped the derivation. A
+        spec built by any path OTHER than the builder is what this hook removes.
+
+        Deriving it here rather than asking every construction site to remember is
+        the point: a capability that has to be REMEMBERED at each site is one that
+        will be dropped at the next one, and the failure is silent until a user's
+        turn dies hundreds of messages deep. The rule itself is IMPORTED from
+        ``model.configure.reasoning_echo_required`` and never restated -- two
+        copies of a family regex drift, and then the builder and a directly-built
+        spec disagree about the same model, which is the defect this method
+        removes rather than moves.
+
+        **Only the echo.** The effort LADDER is deliberately NOT derived here,
+        and that was a review finding rather than a preference: the ladder is not
+        only a wire input, it is what decides whether the status band paints an
+        effort segment at all (``tui/widgets/status_line.py``), and the cold
+        viewer and the desktop draft preview render specs built by this path -- so
+        filling it here moved a rendered surface (a new ``auto`` segment) for a
+        backend resilience fix. It also left the ladder with two owners, since
+        ``build_model_spec`` resolves it from the provider's own LISTING first and
+        no construction hook can see a listing. The ladder therefore keeps its one
+        owner, ``build_model_spec``, and no behaviour here depends on it: the
+        harness-side recovery in ``harness/loop.py`` re-sends with the echo filled
+        and needs no rung -- verified live on the worst case, capability off AND
+        ladder empty.
+
+        **Runs only for a spec being BUILT from a model id**, which is what makes
+        it "cannot be dropped by omission" rather than "cannot be stated at all":
+
+        * a mapping (``ModelSpec(provider=..., model_id=...)``,
+          ``model_validate({...})``, the wire) is filled in only when it does not
+          carry a value, so a caller that never heard of the capability -- or a
+          spec rebuilt from a record written before it existed -- still lands on
+          the right answer;
+        * a value the caller DID state is left alone, because that is a statement
+          rather than an omission. ``None`` means "unstated" (see the field's own
+          docstring for why the default is tri-state), so both an absent key and
+          an explicit ``None`` get the rule's answer;
+        * an existing spec INSTANCE is not rewritten at all. Pydantic re-runs an
+          ``after``-mode validator against a nested instance in place, which is
+          why this is a ``before``-mode one: the instrument that reproduces the
+          pre-fix body (``scripts/deepseek_reasoning_echo_probe.py``) and the
+          loop's own regression tests state "this spec does not carry the echo",
+          and a construction hook that overwrote them would delete the
+          measurement rather than fix the bug. A spec only ever becomes an
+          instance by passing through this hook first, so nothing is lost by
+          trusting it.
+
+        Scoped so nothing else moves. ``reasoning_echo_required`` is False for
+        every family but the DeepSeek thinking one (the legacy ``deepseek-chat`` /
+        ``deepseek-reasoner`` rows and a local user-operated server included), and
+        it answers only for a spec that stated nothing -- so no route, and no
+        caller with an opinion, can have behaviour changed here.
+        """
+        if not isinstance(data, Mapping):
+            return data
+        if data.get("requires_reasoning_echo") is not None:
+            return data
+        provider = data.get("provider")
+        model_id = data.get("model_id")
+        if not isinstance(provider, str) or not isinstance(model_id, str):
+            # An incomplete or non-string pair is the caller's problem to
+            # report, and duplicating pydantic's error here would only make the
+            # message worse.
+            return data
+        # Function-local: ``model.configure`` imports this module at module
+        # scope, so a top-level import here would be a cycle.
+        from local_operator.model.configure import reasoning_echo_required
+
+        # Resolve the tri-state unconditionally, so no validated spec carries
+        # ``None`` and every reader may treat the field as a bool.
+        return {
+            **data,
+            "requires_reasoning_echo": reasoning_echo_required(provider, model_id),
+        }
+
+
+#: The most tokens ONE model call may generate, reasoning included.
+#:
+#: ``ModelSpec.max_output_tokens`` is the ceiling a PROVIDER publishes, which is
+#: a model capability and not the budget of a single turn: an aggregator states
+#: "this model can emit 943,718 tokens" for a 1M-window model -- 90% of that
+#: window -- and a request that named no ask of its own carried that capability
+#: verbatim, so every call asked for it. Measured on the OSWorld arm, ONE
+#: decision returned ``output_tokens=97189`` with ``reasoning_tokens=95098`` and
+#: ``stop=stop``, 35 of 410 calls exceeded 16K, and the mean call took ~52 s. The
+#: TUI shared the defect -- same request contract, same capability-shaped ask --
+#: which is why the bound belongs in the contract rather than at the two call
+#: sites that happened to be measured.
+#:
+#: The NUMBER is chosen so that a normal turn cannot become more truncatable than
+#: it was before the bound existed, and the operator's own ledger
+#: (``~/.local-operator/analytics.db``, 876,719 recorded calls) is what says
+#: where that line is: 430 calls ever emitted more than 16,384 output tokens, and
+#: 300 of those are ordinary calls in 127 ordinary sessions (91 conversations,
+#: rolling each session up to its root the way the rollup does) -- which is why a
+#: benchmark-sized ceiling was the wrong number for every other interface; 2
+#: ordinary calls exceeded 65,536, both ``anthropic/claude-opus-5`` at exactly its
+#: own 128,000 published ceiling, i.e. already truncated by the provider; NONE
+#: exceeded 131,072. So 131,072 is the smallest round ceiling no ordinary turn
+#: has ever crossed, while the capability-shaped asks that ARE the defect are cut
+#: 4-8x (943,718 -> 131,072 on muse-spark, 1,041,903 -> 131,072 on gpt-4.1,
+#: 524,288 -> 131,072 on kimi-k3).
+#:
+#: This is a POLICY, not a wire limit, and not a benchmark rule: the OSWorld arm
+#: declares its own, much smaller, ceiling at its decision call
+#: (``evaluation/runner/provider_client.py``), because 16,384 is the reference
+#: agent's cap and a statement about THAT arm's requests. The wire clamp in
+#: ``providers.clients._effective_max_tokens`` is untouched by all of this: it
+#: still lowers the ask to whatever the window can actually fund, and it still
+#: refuses a prompt that leaves no room for a usable reply.
+#:
+#: Lowering it is a deliberate act, not a default: name a
+#: ``ChatRequest.max_tokens`` (a host bounding a model or a workflow that does
+#: not need a long answer) or pass ``ceiling`` to :func:`turn_output_budget`.
+DEFAULT_TURN_OUTPUT_TOKENS = 131_072
+
+
+def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
+    """The ``max_tokens`` a request carries when its caller names none.
+
+    ONE number, decided in ONE place -- with one exception, stated here rather
+    than left implicit: for a request that names nothing of its own,
+    ``providers.clients._effective_max_tokens`` prefers a provider's OWN
+    published default where it documents one (DeepSeek's effort ladder of
+    8K/64K/64K/128K) over this ceiling. That is a provider-native ASK and not a
+    second policy: it only ever lowers the ask, it applies only to the request
+    that named nothing, and an ask the caller named is untouched by both.
+
+    Model-aware only in the NARROWING direction. A model that publishes a
+    smaller ceiling (MiniMax M3's 8K) keeps it, because that is a real provider
+    limit; a model that publishes a LARGER one is NOT raised back to it, because
+    raising the ask to an advertised capability is what let a single DeepSeek
+    decision run to 97,189 output tokens (95,098 of them reasoning). A spec that
+    publishes no cap at all (``0`` is "no data", not "unlimited") gets the
+    policy ceiling: a turn with no bound is the defect this exists to remove.
+
+    ``ceiling`` is the override -- ``None`` or a non-positive value means
+    :data:`DEFAULT_TURN_OUTPUT_TOKENS`. It is the hook a configuration key would
+    feed, but see AGENTS.md ("Adding a configuration key") before wiring one:
+    a key that only exists in the code that reads it is invisible to /settings.
+    """
+    limit = DEFAULT_TURN_OUTPUT_TOKENS if ceiling is None or ceiling <= 0 else int(ceiling)
+    advertised = int(getattr(model, "max_output_tokens", 0) or 0)
+    return min(limit, advertised) if advertised > 0 else limit
+
 
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
@@ -1981,7 +2443,25 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
-    max_tokens: int | None = None
+    # The generation bound for THIS call. Left ``None`` it is filled from
+    # :func:`turn_output_budget` by the validator at the end of this class, so a
+    # request built anywhere in the harness is bounded without the caller having
+    # to remember -- see :data:`DEFAULT_TURN_OUTPUT_TOKENS` for the number and
+    # the measurement behind it. An explicit value WINS: errands name a
+    # deliberate small one (``Session.ERRAND_MAX_TOKENS``, 1024 for titling) and
+    # the compaction summariser names its own.
+    #
+    # ``0`` is REJECTED (``ge=1``), and that is a correction rather than a
+    # tightening. It used to mean "ask the provider for no cap", but the four
+    # wire builders never agreed on what an absent cap is -- the OpenAI-shaped
+    # and Google bodies omit the key, while Anthropic's API REQUIRES one -- and
+    # on a model that advertises a cap it did not mean "no cap" at all: the
+    # clamp fell back to the advertised capability and put 943,718 back on the
+    # wire, re-creating the very ask this contract exists to remove (QA round 1,
+    # Q4). A caller that wants the provider's own default gets it by naming
+    # nothing, which is also what keeps DeepSeek's published effort ladder
+    # reachable (review m1 / QA Q3).
+    max_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = None
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
@@ -2001,6 +2481,35 @@ class ChatRequest(BaseModel):
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
+    # "Keep this conversation on the host that served it." Only the
+    # OpenAI-compatible CHAT wire consumes this (``OpenAICompatClient._build_
+    # body`` turns it into ``provider.order``); every other wire ignores it.
+    #
+    # It rides on the REQUEST rather than on the session for the same reason
+    # ``prompt_cache_key`` does: the wire client is rebuilt per route-key
+    # inside the failover driver, so client-held state cannot survive a call,
+    # while the request is what failover CLONES for each retry — so the pin
+    # follows a retry to the same host for free.
+    #
+    # Only OpenRouter populates it today. Its default route is price-weighted
+    # load balancing across many upstream hosts, and each switch is a cold
+    # prompt cache; the session records the host that served the last turn and
+    # asks for it again. An unrecognized entry is silently ignored by
+    # OpenRouter (verified: 200 + default routing), so a stale pin degrades to
+    # today's behaviour rather than failing the call.
+    provider_affinity: str | None = None
+    # Hosts this conversation has RETIRED: they served warm turns and returned
+    # no prefix reuse, so pinning to them is worse than churn (measured: one
+    # upstream cached 38% of same-host turns while its peers managed 99%, and
+    # the misses billed at full input price, 33x a cache read).
+    #
+    # Rendered as `provider.ignore`, which is a HARD filter — verified live
+    # that it composes with `order` (the ignored host is never attempted while
+    # the ordered host still serves). That hardness is why the set is bounded;
+    # see ``SessionStreamFn.MAX_RETIRED_PROVIDERS``. Sorted by the producer so
+    # the body stays byte-stable across turns, which matters for a field that
+    # rides in front of a cached prefix.
+    provider_avoid: list[str] = Field(default_factory=list)
     #: Coarse context-size hint for optional cache TTL, never wire content.
     #: The host seeds this from its last Usage; SessionStreamFn replaces it
     #: with the counted prefix plus estimated appended content when possible.
@@ -2063,7 +2572,10 @@ class ChatRequest(BaseModel):
     #:    so an auth failure on a title would re-point the turn's account.
     #:    *Denied in* ``stream_with_failover``: ``retry.enabled = False``, which
     #:    also removes the fallback chain and the backoff budget — every
-    #:    rotation path sits behind it.
+    #:    rotation path sits behind it. The one exception is the errand's
+    #:    single auth re-resolve, which deliberately does NOT rotate: it
+    #:    re-reads the pool with the rejected bearer hidden and only spends a
+    #:    second wire attempt when that read yields a different bearer.
     #: 3. ``SessionStreamFn`` consumes a pending message boundary to classify
     #:    auto-effort. Whoever arrives first spends it, so a naming call would
     #:    freeze the turn's effort from ITS prompt and emit an "auto effort"
@@ -2095,28 +2607,112 @@ class ChatRequest(BaseModel):
     #:    ``get_api_key`` → ``AuthStore._resolve``: no ``block_credential``, no
     #:    ``_set_sticky`` write and none cleared.
     #:
-    #: So an isolated request gets exactly ONE attempt on the model it names:
-    #: no fallback chain, no sticky route read or written, no credential
-    #: rotation, no backoff sleep, no preflight, no boundary classification, no
-    #: routing decision taken by its credential resolve, and not the session's
-    #: cache key. It still resolves credentials under the session id, so that
-    #: READ lands on the same account the turn is on whenever that account is
-    #: usable, which is the point. What it cannot do is take the turn anywhere:
-    #: if its own resolve finds the sticky credential's refresh broken it may
-    #: serve ITSELF from a sibling, but the sticky pointer and the block list
-    #: come out of the call exactly as they went in, so the turn's next resolve
-    #: still lands where it did before. A successful OAuth refresh does persist
-    #: the rotated token, which is that account's own bookkeeping rather than a
-    #: decision about where requests go. It fails fast and alone, which is what
-    #: lets the caller swallow the failure (see
-    #: ``session.naming.generate_title``) without the turn ever knowing a second
-    #: call happened.
+    #: So an isolated request gets at most TWO AUTH attempts on the model it
+    #: names, and the second only in one case: the bearer it was handed was
+    #: rejected outright (401/403) and a read-only re-resolve that hides that
+    #: rejected ROW produces a different bearer. (Auth attempts, because the
+    #: pre-existing fast-mode-refusal re-ask is not gated on the retry budget
+    #: and can add one same-key attempt at standard speed ahead of this one.)
+    #: Deployment reality widened the original
+    #: one-attempt rule: pools contain stale keys, the pick is a hash of the
+    #: session id, and the turn beside the errand rotates past the dead row on
+    #: its own — so without the re-resolve, every naming call for such a
+    #: session would fail forever while the conversation itself stayed healthy.
+    #: The errand spends one extra request only in that auth case. Everything
+    #: else holds: no fallback chain, no sticky route read or written, no
+    #: credential rotation, no backoff sleep, no preflight, no boundary
+    #: classification, no routing decision taken by its credential resolve,
+    #: and not the session's cache key. It still resolves credentials under
+    #: the session id, so that READ lands on the same account the turn is on
+    #: whenever that account is usable, which is the point. What it cannot do
+    #: is take the turn anywhere: if its own resolve finds the sticky
+    #: credential's refresh broken it may serve ITSELF from a sibling, but the
+    #: sticky pointer and the block list come out of the call exactly as they
+    #: went in, so the turn's next resolve still lands where it did before. A
+    #: successful OAuth refresh does persist the rotated token, which is that
+    #: account's own bookkeeping rather than a decision about where requests
+    #: go. It fails fast and alone, which is what lets the caller swallow the
+    #: failure (see ``session.naming.generate_title``) without the turn ever
+    #: knowing a second call happened.
     #:
     #: Enforced in three places, tested in three: ``stream_with_failover``
     #: (1, 2, and the retry budget), ``SessionStreamFn.__call__`` (3, 4, 5) and
     #: the read-only resolve (6). That the naming call actually SETS this flag
     #: is tested separately, over a real ``Session`` and a capturing stream fn.
     isolated: bool = False
+
+    @model_validator(mode="after")
+    def _bound_generation(self) -> "ChatRequest":
+        """Give every request a generation bound, from the one policy.
+
+        Here rather than at the loop's construction and the benchmark's, because
+        those are two of N interfaces that build a ``ChatRequest`` and the defect
+        is a request that carried the provider's capability as its own ask, not a
+        mistake in either of them: whichever
+        site is missed next re-opens it silently. Filling it at the contract makes
+        a turn without a cap unrepresentable.
+
+        The loop's construction (``harness/loop.py``, ``_model_turn``) and the
+        benchmark's (``evaluation/runner/provider_client.py``, ``decide``) are
+        the two that matter today; this covers both and the subset of hosts,
+        errands and side channels that build their own.
+        """
+        if self.max_tokens is None:
+            self.max_tokens = turn_output_budget(self.model)
+            self._max_tokens_from_policy = True
+        return self
+
+    def with_model(self, spec: "ModelSpec") -> "ChatRequest":
+        """This request aimed at a DIFFERENT model, with its bound re-derived.
+
+        The one production path that changes the model under an already-built
+        request is failover (``providers/failover.py``), and it did
+        ``model_copy(update={"model": spec})`` -- which cannot re-run the
+        validator, by design. So the bound did not follow the swap: a 131,072
+        bound copied onto a fallback publishing 4,096 asked above that model's
+        published ceiling (a 400 from the provider where main re-read the spec),
+        and a request built against a small model kept the small ask on a large
+        fallback where a fresh request would carry the contract's own. Both
+        directions are wrong for the same reason, and this is the fix for both:
+        a policy FILLED bound is re-derived against the new spec, an ask the
+        caller NAMED is carried untouched.
+
+        The marker survives the copy (pydantic copies private attributes), so a
+        request that has been through two hops is still recognisably
+        policy-bounded on the third rather than silently becoming a named ask.
+
+        The re-derivation runs through :func:`turn_output_budget` with no
+        ``ceiling``, and so does the ``mode="after"`` validator on
+        :class:`ChatRequest`. Those two are the only call sites that derive a
+        bound from a spec, and ``turn_output_budget``'s own docstring invites a
+        configuration key to feed ``ceiling``. When that key lands, BOTH have
+        to be threaded with it: threading the validator alone would leave a
+        failover hop re-deriving the unconfigured 131,072 and silently
+        discarding the bound the hop exists to respect (review R2-n3).
+        """
+        update: dict[str, Any] = {"model": spec}
+        if self._max_tokens_from_policy:
+            update["max_tokens"] = turn_output_budget(spec)
+        return self.model_copy(update=update)
+
+    #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
+    #: because the caller named nothing, False when a caller named a value --
+    #: including the errands' deliberate small asks. It is what
+    #: :meth:`with_model` needs to tell a bound that must follow the model from
+    #: an ask that must not be touched, and what
+    #: ``providers.clients._effective_max_tokens`` needs to tell "nobody asked"
+    #: from "the harness bounded it" when it prefers a provider's own default.
+    _max_tokens_from_policy: bool = PrivateAttr(default=False)
+
+    @property
+    def max_tokens_from_policy(self) -> bool:
+        """Whether ``max_tokens`` is the harness's bound rather than an ask.
+
+        A read-only view of the private marker above, for the wire clamp, which
+        lives in another module and must not reach into a private attribute to
+        answer a question the contract can answer itself.
+        """
+        return self._max_tokens_from_policy
 
 
 class StreamStartEvent(BaseModel):
@@ -2148,6 +2744,29 @@ class StreamTextDelta(BaseModel):
     delta: str
 
 
+class StreamReasoningDelta(BaseModel):
+    """A fragment of the provider's private reasoning channel.
+
+    Reasoning has always been COLLECTED -- the OpenAI-compatible wire client
+    accumulates ``reasoning_content``/``reasoning`` to replay it in later
+    requests -- but it was never SURFACED, so a turn that spent its whole
+    output budget thinking looked identical to a client that dropped what it
+    was handed. That ambiguity is not academic: a rejection of "the model
+    emitted nothing" cannot be distinguished from "we discarded the model's
+    output" without it, and the two call for opposite responses (re-prompt the
+    model / fix the client).
+
+    Emitted on the reasoning channel only. It is deliberately NOT reasoning
+    rendered anywhere user-visible: private reasoning never enters the
+    transcript or the model-visible context, and no consumer is required to
+    act on this event. It exists so a caller that wants to know whether the
+    model produced anything can ask.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    delta: str
+
+
 class StreamToolCallDelta(BaseModel):
     type: Literal["tool_call_delta"] = "tool_call_delta"
     index: int
@@ -2166,6 +2785,20 @@ class StreamEndEvent(BaseModel):
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None
+    #: The upstream host an aggregator actually routed this call to, as the
+    #: aggregator's own DISPLAY NAME (OpenRouter's ``provider`` chunk field:
+    #: "AtlasCloud", "Z.AI", "Google AI Studio"). Verbatim on purpose — the
+    #: display name is what an ``order`` entry accepts, and slug-normalising it
+    #: is wrong for 13 of 106 providers (``Z.AI`` is ``z-ai``, ``AtlasCloud``
+    #: is ``atlas-cloud``), so there is no table to keep in sync.
+    #:
+    #: Deliberately NOT ``provider_payload``: that dict is persisted per
+    #: message and is the substrate for native replay and compaction, so a
+    #: routing hint written there becomes transcript content. And deliberately
+    #: on the END event, not the start: the start event is the acceptance
+    #: boundary, and a stream that dies mid-way must not move the pin onto a
+    #: host that did not actually serve a turn.
+    served_provider: str | None = None
     #: The provider's own words about an abnormal end. For ``refusal`` this is
     #: the refusal message (or a line naming the provider's terminal marker when
     #: it sent no prose). Refusals used to be mapped onto ``stop``, which ended
@@ -2191,6 +2824,10 @@ class StreamModelEvent(BaseModel):
 StreamEvent = (
     StreamStartEvent
     | StreamTextDelta
+    # Beside the text delta it is the sibling of: one channel carries the
+    # answer, the other carries the work behind it, and a consumer that
+    # ignores this one sees exactly the stream it saw before.
+    | StreamReasoningDelta
     | StreamToolCallDelta
     | StreamUsageEvent
     | StreamEndEvent

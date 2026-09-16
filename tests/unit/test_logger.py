@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.logger import (
+    _CHATTY_WIRE_CLIENTS,
     CLI_LOG_FORMAT,
     DEFAULT_LOG_FORMAT,
     LOG_BACKUP_COUNT,
@@ -31,6 +32,7 @@ from local_operator.logger import (
     _restore_fd_stderr,
     configure_cli_logging,
     configure_console_logging,
+    configure_file_logging,
     current_log_file,
     file_logging,
 )
@@ -535,3 +537,124 @@ def test_file_logging_leaves_fd2_alone_when_no_log_file(
         assert _fd_identity(2) == before
 
     assert _fd_identity(2) == before
+
+
+def test_configure_file_logging_bounds_the_file_and_quiets_the_wire_clients(
+    log_home: Path,
+) -> None:
+    """A child with no terminal must log to a BOUNDED file, without the wire noise.
+
+    Field report: the relay's log grew to 420 MB on the operator's machine, in
+    which 557,352 records were one line per HTTP request from the wire clients and
+    45,581 were frame-limit records; the file reached 420 MB because nothing
+    rotated it. The cause was the runtime child's
+    ``logging.basicConfig(level=INFO, filename=...)``: the root level handed to
+    the libraries, and an unbounded ``FileHandler`` nothing rotated. The child
+    writes to its OWN file now — bounding a file means renaming it, and the
+    daemon's ``mobile.log`` is a launchd ``StandardOutPath`` it appends to through
+    an fd it never reopens (see ``paths.runtime_log_path``) — and
+    ``lop mobile logs`` reads both, which is why the helper takes a path rather
+    than assuming this package's console log.
+    """
+    target = log_home.parent / "runtime.log"
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    saved_client_levels = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}
+    try:
+        installed = configure_file_logging(path=target, level=logging.INFO)
+        assert installed == target
+        assert len(root.handlers) == 1
+        handler = root.handlers[0]
+        # Bounded — the property the unbounded handler it replaces lacked, and
+        # the one that decides whether a chatty child costs 10 MiB or the disk.
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        assert handler.maxBytes == LOG_MAX_BYTES
+        assert handler.backupCount == LOG_BACKUP_COUNT
+        assert Path(handler.baseFilename) == target
+        # Our own records survive at the level the caller asked for...
+        assert root.level == logging.INFO
+        logging.getLogger("local_operator.test.file_logging").info("kept")
+        assert "kept" in target.read_text(encoding="utf-8")
+        # ...and a per-request client does not, at ANY caller level.
+        for name in _CHATTY_WIRE_CLIENTS:
+            assert logging.getLogger(name).level >= logging.WARNING, name
+    finally:
+        for handler in list(root.handlers):
+            handler.close()
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        for name, level in saved_client_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_the_wire_client_list_names_both_httpx_distributions() -> None:
+    """`httpx` and `httpx2` are two distributions of one library, both shipped.
+
+    The MCP client imports `httpx2`, whose logger is named after that
+    distribution, so a list that pinned only `httpx` left the actual emitter of
+    6.9M request records at the root level. Pinning one and not the other is
+    exactly the kind of near-miss this asserts against.
+    """
+    assert "httpx" in _CHATTY_WIRE_CLIENTS
+    assert "httpx2" in _CHATTY_WIRE_CLIENTS
+
+
+def test_every_rotated_file_is_private_not_only_the_first(log_home: Path) -> None:
+    """A rotation creates the next file itself, so the mode must be re-applied.
+
+    ``_open_rotating_handler`` chmods the file it opens, but
+    ``RotatingFileHandler`` opens every subsequent file through the same private
+    opener — the one place a long-lived writer could drift back to umask-created
+    0644 on a file that carries prompt and error text (a reviewer measured exactly
+    that: five rotations, every file 0644).
+    """
+    import os
+
+    with file_logging(max_bytes=2_000, backup_count=3) as rotated:
+        assert rotated == log_home
+        payload = "y" * 512
+        for index in range(40):
+            logging.getLogger("local_operator.test.rotation.modes").warning("%d %s", index, payload)
+
+    files = sorted(log_home.parent.glob(f"{LOG_FILE_NAME}*"))
+    assert len(files) > 1, [path.name for path in files]
+    modes = {path.name: oct(path.stat().st_mode & 0o777) for path in files}
+    assert all(mode == "0o600" for mode in modes.values()), modes
+    os.stat(log_home)  # the live file exists under its own name, not only as a backup
+
+
+def test_quiet_wire_clients_holds_regardless_of_the_console_level() -> None:
+    """The daemon's pin must not be a side effect of the level it configures.
+
+    ``configure_console_logging`` quietens the wire clients only through the level
+    it is handed, so a supervised daemon whose stderr is a launchd log file pins
+    them explicitly. This pins that the explicit call holds even at a level that
+    would otherwise restore one record per HTTP request — the trap being that a
+    future ``configure_console_logging(level=INFO)`` there looks reasonable and
+    re-creates the flood.
+    """
+    from local_operator.logger import _CHATTY_WIRE_CLIENTS, quiet_wire_clients
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    saved_clients = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}
+    try:
+        configure_console_logging(level=logging.DEBUG)
+        # The trap, measured rather than asserted in prose: the console call alone
+        # leaves them at DEBUG, one record per request.
+        assert all(logging.getLogger(name).level == logging.DEBUG for name in _CHATTY_WIRE_CLIENTS)
+        quiet_wire_clients()
+        assert all(
+            logging.getLogger(name).level == logging.WARNING for name in _CHATTY_WIRE_CLIENTS
+        )
+    finally:
+        for name, level in saved_clients.items():
+            logging.getLogger(name).setLevel(level)
+        for open_handler in list(root.handlers):
+            open_handler.close()
+            root.removeHandler(open_handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)

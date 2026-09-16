@@ -15,13 +15,16 @@ The two that matter most, and why:
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
+from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
 
@@ -40,6 +43,7 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+    from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -63,6 +67,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_MODE,
     )
     from local_operator.tools.builtin import BASH_SHELL_DEFAULT
+    from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
         DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
@@ -100,6 +105,11 @@ def _consumer_defaults() -> dict[str, object]:
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        # The registry restates this empty string rather than importing the
+        # reader (an import edge from the CLI's settings layer into the TUI for
+        # one empty string), so THIS is what stops the two drifting — the same
+        # guard `tui.theme` gets for the same reason.
+        "desktop.launch_command": DESKTOP_LAUNCH_COMMAND_DEFAULT,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,
@@ -107,6 +117,10 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
+        # The reader's own fallback, which is also what every unrecognised
+        # shape resolves to — so the page cannot advertise a default the
+        # delegating model's tier picker disagrees with.
+        "subagents.model_choice": DEFAULT_MODEL_CHOICE,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
         "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_
@@ -121,6 +135,12 @@ def _consumer_defaults() -> dict[str, object]:
         # constant exists to compare against, and inventing one would be a
         # third restatement), so the registry default and DEFAULT_CONFIG must
         # not be allowed to disagree.
+        # Not a wire key: its consumer is ``SessionStreamFn._affinity_enabled``,
+        # which reads the settings mapping directly. Guarded against the shipped
+        # config block for the same reason as the rows below.
+        "providers.openrouter.provider_affinity": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["provider_affinity"]
+        ),
         "providers.openrouter.sort": DEFAULT_CONFIG.values["providers"]["openrouter"]["sort"],
         "providers.openrouter.order": DEFAULT_CONFIG.values["providers"]["openrouter"]["order"],
         "providers.openrouter.only": DEFAULT_CONFIG.values["providers"]["openrouter"]["only"],
@@ -332,6 +352,11 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     local_providers.validate_endpoint_setting: "http://127.0.0.1:9/v1",
     local_providers.model_overrides: '{"round-trip-probe":{"context_window":8192}}',
     settings_io._validate_openrouter_max_price: '{"prompt": 1, "completion": 2}',
+    # The desktop launcher is validated for EXECUTABILITY, not shape (UX round
+    # 1, U4), so the probe has to name a command that can really be run here.
+    # `sys.executable` is one on every machine the suite runs on; an invented
+    # name would be refused by the very check this sample exists to satisfy.
+    settings_io._validate_desktop_launch_command: f"{sys.executable} --open-session {{session}}",
 }
 
 
@@ -602,7 +627,14 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 13
+    assert len(defaults) == 14
+    # STILL None with all 14 defaults present, including the ON-by-default
+    # ``provider_affinity``. That is the point of asserting it here: that key is
+    # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is
+    # deliberately NOT read by this resolver — so turning it on must not make
+    # the shipped config start emitting a ``provider`` object. The pin reaches
+    # the wire through ``ChatRequest.provider_affinity`` instead, per request,
+    # only once a host has actually served a turn.
     assert _openrouter_provider_preferences({"providers": {"openrouter": defaults}}) is None
 
 
@@ -1226,3 +1258,409 @@ def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, cand
     with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
+
+
+class TestTheModelEffortRow:
+    """The ``model_effort`` row: the birth-default reasoning level for new sessions.
+
+    Registered rather than read-only because ``/settings`` is where a user
+    discovers what is configurable and ``lop config edit`` resolves names out of
+    the same registry (AGENTS.md, "Adding a configuration key"). Its value space
+    is the shared FIXED vocabulary rather than anything model-derived — a paint
+    must not resolve a model, and the CLI must work with no model configured —
+    and an unsupported rung is exactly what the clamp at session build is for,
+    not a reason to hide rungs.
+    """
+
+    def test_the_row_is_a_fixed_vocabulary_enum(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert setting.kind is Kind.ENUM
+        assert setting.path == ("model_effort",)
+        assert setting.section == "model"
+        assert setting.default == ""
+        # Deliberately NOT a `choices_source` (which would need a model) and NOT
+        # `empty_unsets` ("" is a real choice here — `auto`, the model's own
+        # default — rather than a deletion).
+        assert setting.choices_source is None
+        assert setting.empty_unsets is False
+        labels = [choice.label for choice in setting.resolved_choices]
+        assert labels[0] == "auto"
+        assert labels[1:] == list(EFFORT_ORDER)
+        assert setting.resolved_choices[0].value == ""
+
+    def test_every_rung_carries_a_description(self) -> None:
+        """The page's expanded list wants a three-argument Choice per member.
+
+        The help dict's lookup falls back to an empty description on purpose
+        (a KeyError at import would take the whole CLI down for a missing
+        sentence), so the loud failure for a rung added without one belongs
+        HERE."""
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        for choice in setting.resolved_choices:
+            assert choice.description, choice
+
+    def test_a_level_round_trips_through_the_facade(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        assert settings_io.read_setting(manager, setting) == "high"
+
+    def test_the_empty_value_is_accepted_as_no_opinion(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        settings_io.write_setting(manager, setting, "")
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_an_off_vocabulary_value_is_refused(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        with pytest.raises(ValueError):
+            settings_io.write_setting(manager, setting, "turbo")
+
+
+class TestConfigEditAcceptsAnEnumLabel:
+    """``lop config edit`` must accept a choice's displayed LABEL.
+
+    It matched the typed text against the choice VALUES only, which left two
+    documented words unreachable: ``model_effort auto`` (the stored ``""``) was
+    rejected outright, and ``model_effort none`` — a real rung of
+    ``EFFORT_ORDER`` — was converted to Python ``None`` by the generic value
+    guess before ``write_setting`` ever saw it. The guard maps a label to its
+    value before that guess, and only for ENUM settings.
+
+    It lives in this file because it is really about the registry's
+    LABEL→VALUE pair, which is this module's subject; the command is just the
+    keyboard for it.
+    """
+
+    @pytest.mark.parametrize(
+        ("typed", "stored"),
+        [
+            ("auto", ""),
+            ("none", "none"),
+            ("HIGH", "high"),
+        ],
+    )
+    def test_a_label_is_stored_as_its_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        typed: str,
+        stored: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="model_effort", value=typed))
+        assert code == 0, capsys.readouterr()
+        assert ConfigManager(tmp_path).get_config_value("model_effort") == stored
+
+
+class TestConfigEditEchoesTheTypedLabel:
+    """``lop config edit <enum key> <label>`` reports the word the user used.
+
+    The receipt printed the STORED value, which for an ENUM is a wire form, not
+    vocabulary: ``model_effort auto`` stores ``""``, so the confirmation read
+    "Successfully updated model_effort to " — the user typed a word and the
+    answer named nothing (design review D8). The same blank met every other
+    member whose value is empty (the ``providers.openrouter.*`` "default" rows),
+    and members whose label is not their value at all proposed a third spelling
+    (``display.nerd_icons auto`` stores ``None``).
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "typed", "echoed"),
+        [
+            ("model_effort", "auto", "auto"),
+            ("model_effort", "none", "none"),
+            ("model_effort", "HIGH", "high"),
+            ("display.nerd_icons", "auto", "auto"),
+        ],
+    )
+    def test_the_label_is_what_comes_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        key: str,
+        typed: str,
+        echoed: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key=key, value=typed))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert f"Successfully updated {key} to {echoed}" in out, out
+
+    def test_a_value_that_matched_no_label_still_echoes_what_was_stored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The other half: a value the schema accepts WITHOUT being a label is
+        echoed as stored, so nothing about the normalising path moved.
+
+        ``display.time_format`` stores ``12h`` while its label is ``12-hour``, so
+        the typed word matches no label and must fall through to the stored form
+        (a label lookup that swallowed this case would print ``12-hour`` for a
+        config that holds ``12h`` — the same class of lie the stored-value echo
+        exists to prevent, mirrored)."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="display.time_format", value="12h"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated display.time_format to 12h" in out, out
+
+
+class TestTheModelRowsHelpBudget:
+    """The three ``model`` rows' help must survive an 80-column footer.
+
+    The detail line for a row that is not at its default is
+    ``<help> · default: —``, measured at 74 usable cells at 80 columns, and the
+    ladder SHEDS the whole sentence rather than trimming it — so a help one cell
+    too long disappears entirely in exactly the state (an off-default row) where
+    the user is reading it. The new ``model_effort`` row shipped at 68 and was
+    the only one of the three to shed (design review D4); the cells went to the
+    row's own meaning instead, because the cell renders the unset value as ``—``
+    and the word ``auto`` is otherwise visible only inside the expansion (D5).
+    """
+
+    @pytest.mark.parametrize("key", ["hosting", "model_name", "model_effort"])
+    def test_the_help_fits_with_the_default_clause(self, key: str) -> None:
+        setting = settings_io.resolve_key(key)
+        assert setting is not None
+        assert setting.help
+        assert cell_len(f"{setting.help} · default: —") <= 74, setting.help
+
+    def test_the_effort_help_says_what_the_resting_cell_means(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert "Unset" in setting.help and "model's default" in setting.help, setting.help
+
+    def test_the_effort_help_keeps_headroom_for_another_word(self) -> None:
+        """D10: the first cut sat EXACTLY on the 74-cell detail budget, so one
+        more word anywhere — in the help, in the ladder's ` · default: —`
+        suffix — would shed the whole sentence in the state the sentence exists
+        for, with no warning on the frame.
+
+        Three cells of margin is the floor this pins: enough that a later edit
+        has to notice, not so much that the sentence has to lose a word it needs.
+        """
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        # `cell_len`, like every other width in this round: the composed line
+        # carries an em dash and a middot, so a character count is not a cell
+        # count (review round 3, NIT-1). It measures the same today.
+        assert cell_len(f"{setting.help} · default: —") <= 71, setting.help
+
+
+class TestTheSubagentModelChoiceRow:
+    """``subagents.model_choice``'s default, and the caller it must NOT gate.
+
+    Two obligations of the same key. The first is the registry's ordinary one,
+    already covered by ``_consumer_defaults`` and asserted here by name so a
+    reader of the ROW can find the pairing: the page's default and the reader's
+    fallback are the same member. The second is the boundary the key must not
+    cross — it stops a delegating MODEL spending on another model, so a caller
+    that cannot be shown to be a model is the operator and may name a tier.
+    """
+
+    def test_the_row_ships_the_readers_own_fallback(self) -> None:
+        from local_operator.harness.subagent import (
+            DEFAULT_MODEL_CHOICE,
+            MODEL_CHOICE_OPERATOR,
+        )
+
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert setting.default == DEFAULT_MODEL_CHOICE == MODEL_CHOICE_OPERATOR
+
+    def test_an_operator_side_pin_is_accepted_without_a_validation_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``/v1/desktop/profiles`` and the operator's own surfaces build
+        ``AgentParams`` directly, with no advertised schema behind them.
+
+        An absent context cannot be evidence of a model, so the pin is allowed —
+        the same direction the vanished-tier branch takes, and the reason a role
+        pinned to a tier keeps working under the shipped default. The tier has to
+        be CONFIGURED for the call to be valid at all: the policy gate is what
+        this asserts, and the ``model_choice`` key deliberately does not touch
+        ``effort_tier_rejection``'s ordinary "no such tier" refusal.
+        """
+        from local_operator.tools.agent_tool import AgentParams
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        (config_dir / "config.yml").write_text(
+            "values:\n  subagents:\n    models:\n      hi: anthropic/claude-opus-5\n"
+        )
+
+        params = AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        )
+        assert params.effort == "hi"
+
+    def test_the_model_choice_row_states_the_decision_and_fits_its_choices(self) -> None:
+        """U1 and D1's halves, pinned as facts rather than as wording.
+
+        U1: the help described the CAPABILITY ("Lets a delegating model swap a
+        child onto a configured model tier"), so at the shipped default it read
+        backwards — the resting state of the row claimed the picker was open.
+        It now says what the row DECIDES, which is true at either value, and
+        names the operator's own route to a pin (a role's profile), because the
+        model-side pin is refused on purpose.
+
+        D1: both choice descriptions are sized to the EXPANDED row — the only
+        place they render — and the bounds below are measured on a RENDERED
+        FRAME at 100 columns: 26 cells for the default's row (its ``(default)``
+        marker and the expansion's own marker cost the rest) and 40 for the
+        other. The pair this replaced measured 93 and 120 painted cells, so
+        "role pins still apply" and "different, costlier model" — the two
+        consequences the row exists to state — were clipped at every width the
+        page is measured at. Bounds, not the strings: this copy is sized against
+        a column, and the next person may find better words for the same cells.
+        """
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert "swap a child" not in setting.help
+        assert "pins" in setting.help and "profile" in setting.help
+        by_value = {choice.value: choice for choice in setting.choices}
+        assert cell_len(by_value["operator"].description) <= 26
+        assert cell_len(by_value["model"].description) <= 40
+        assert "inherits" in by_value["operator"].description
+        assert "costlier model" in by_value["model"].description
+
+    @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
+    def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
+        """The two facts the incident proved these rows were missing.
+
+        A deliberate tier pin read as harmless: nothing said a child on it RUNS,
+        and is billed, at that model's rates, and nothing pointed at the row that
+        decides who may pick one. Both are pinned here because the sentence is
+        one string — a later edit that trims either half for width drops the
+        fact, not a word.
+        """
+        setting = settings_io.resolve_key(f"subagents.models.{tier}")
+        assert setting is not None
+        assert "Bills at that model's rates" in setting.help
+        # "empty inherits" rather than "empty keeps the parent's": the shorter
+        # verb is the one the rest of this change uses ("inherits this session's
+        # model"), and it buys the 8 cells that let the KEY PATH stay on the line
+        # at 100 columns — the frame the evidence is captured on.
+        assert "empty inherits" in setting.help
+        # Names the row instead of its position: registry order is
+        # max_running, model_choice, lo, med, hi, so "row above" points `med` at
+        # `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
+        assert "See subagents.model_choice" in setting.help
+        # ...and they FIT beside the row's own key path at 100 columns, which is
+        # the width the /settings evidence frames are captured at. The detail
+        # line sheds the WHOLE help once it and the key no longer fit
+        # (``settings_view``'s shed ladder), so an edit that buys words here
+        # loses the billing fact in exactly the state the row is read in.
+        #
+        # 72 is the frame-derived budget, not a round number: the row is 94
+        # cells, `subagents.models.hi` is 19 and the separator 3, leaving 72 for
+        # the help — and 73 is precisely the width the review caught shedding
+        # the key path (95 cells against 94), so a bound of 74 would admit the
+        # string this assertion exists to prevent.
+        assert cell_len(setting.help) <= 72, setting.help
+
+
+# ---------------------------------------------------------------------------
+# Which half of a rejection is the user's input (design round 2, D16; QA
+# round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+def _value_rejection(value: str, advice: str) -> str:
+    """The string this module's executable validator would build, verbatim."""
+    return f"{value}{settings_io.REJECTION_VALUE_SEP}{advice}"
+
+
+@pytest.mark.parametrize("advice", settings_io._VALUE_REJECTION_ADVICE)
+def test_a_value_shaped_rejection_splits_at_its_advice(advice: str) -> None:
+    """Both halves come back, whatever the VALUE looks like.
+
+    The head is a ``shlex`` token, so it can contain spaces (a quoted path), the
+    separator itself, or non-ASCII — none of which a token count or a
+    first-separator ``partition`` can be trusted with. The advice is the anchor:
+    it is written once, in this module, and the message ends with it.
+    """
+    for value in (
+        "/usr/local/bin/local-operator-ui",
+        "/Applications/Local Operator Canary.app/Contents/MacOS/local-operator-ui",
+        "/tmp/od — d/has/the/separator/inside-it",
+        "/tmp/ünïcøde/launcher",
+    ):
+        message = _value_rejection(value, advice)
+        assert settings_io.split_value_rejection(message) == (value, advice), message
+        # ...and the copy length the page's 80x24 budget is pinned to.
+        assert cell_len(advice) <= 74, cell_len(advice)
+
+
+def test_a_prose_notice_is_not_a_value_rejection() -> None:
+    """The page keeps the HEAD of these, so recognising them matters.
+
+    Each opens with the phrase that says what happened — the part a shed would
+    remove — while carrying the same separator in the same position a value
+    rejection does. "A message that uses the separator opts in" is true of the
+    PRODUCER, not of the character sequence.
+    """
+    for message in (
+        f"config.yml is unreadable, nothing was written{settings_io.REJECTION_VALUE_SEP}"
+        "ValueError: values is not a mapping at line 3 column 1",
+        f"could not save{settings_io.REJECTION_VALUE_SEP}/tmp/c.yml has an unexpected structure "
+        "that needs repairing before this page can write to it",
+        f"chain needs a first hop{settings_io.REJECTION_VALUE_SEP}expected provider/model",
+        "this setting is retired and cannot be changed",
+        f"/usr/local/bin/nope{settings_io.REJECTION_VALUE_SEP}does not exist",
+    ):
+        assert settings_io.split_value_rejection(message) is None, message
+
+
+def test_the_real_validator_is_what_marks_the_shape(tmp_path, monkeypatch) -> None:
+    """The check the renderer relies on, driven through the producer itself.
+
+    ``desktop.launch_command`` is the only setting whose rejection interpolates
+    the user's input, and the ONLY reason the renderer may shed its head. A
+    validator that stopped ending in ``ADVICE_*`` — a copy edit, a new clause —
+    would silently turn the line back into the plain clip D11 removed, so the
+    link is asserted here rather than assumed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    setting = settings_io.BY_KEY["desktop.launch_command"]
+    quoted = (
+        '"/Applications/Local Operator Canary.app/Contents/MacOS/local-operator-ui"'
+        " --open-session {session}"
+    )
+    problem = settings_io.validate(setting, quoted)
+    assert problem is not None
+    split = settings_io.split_value_rejection(problem)
+    assert split is not None, problem
+    value, advice = split
+    # The value is the shlex-parsed first word INCLUDING the spaces the quotes
+    # protected, which is exactly what a token-count predicate got wrong.
+    assert value == quoted.split('"')[1], value
+    assert " " in value
+    assert advice == settings_io.ADVICE_NOT_FOUND, advice

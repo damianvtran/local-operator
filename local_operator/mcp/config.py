@@ -40,7 +40,11 @@ class MCPAuthConfig(BaseModel):
     """Auth block mirroring the canonical MCP auth config.
 
     ``apikey`` is accepted for shape parity but not implemented — put API keys
-    in stdio ``env`` or remote ``headers`` instead.
+    in stdio ``env`` or remote ``headers`` instead, as ``${NAME}`` references:
+    a literal secret in those fields is refused by the desktop writer and is
+    never resolved into the transport by anyone else either. The reference is
+    substituted at connect time from the credential store (see
+    :mod:`local_operator.mcp.secret_refs` and ``docs/mcp.md``).
     """
 
     model_config = ConfigDict(extra="allow")

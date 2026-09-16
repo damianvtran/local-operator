@@ -291,6 +291,16 @@ class ModelRequestPayload(ProtocolModel):
     # records them so cache behaviour is auditable offline.
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
+    #: The reasoning effort the request was BUILT with, when the client can
+    #: report one. Defaulted, like the two fields above and for the same reason:
+    #: a bundle written before this field existed still validates, and a client
+    #: with no effort ladder (the scripted and historic clients, most routes)
+    #: records nothing rather than inventing a rung. Present so an attempt that
+    #: was retried one rung LOWER after an empty output-limit truncation is
+    #: legible in the evidence: the step-down is otherwise invisible, and the
+    #: campaign reads these bundles to decide whether the retry recovered the
+    #: episode or merely delayed the failure.
+    reasoning_effort: StrictIdentifier | None = None
 
 
 class ModelResponsePayload(ProtocolModel):
@@ -304,6 +314,21 @@ class ModelResponsePayload(ProtocolModel):
     cache_read_tokens: SafeCount = 0
     cache_write_tokens: SafeCount = 0
     tool_call_count: SafeCount
+    #: How many DECLARED provider reasoning-boundary markers the reply assembly
+    #: stripped from the head of the reply before it was judged
+    #: (``strip_reasoning_boundary_markers``; the declaration lives on
+    #: ``ModelSpec.reasoning_boundary_markers``). Defaulted, so every bundle
+    #: written before this field existed still validates and reads as zero --
+    #: which is what those runs meant: nothing was stripped, because nothing
+    #: could be.
+    #:
+    #: Written on EVERY attempt, accepted ones included. The strip exists to
+    #: convert a refused reply into an accepted one, so a counter that only
+    #: appeared on refusals would be invisible in exactly the runs where the
+    #: tolerance works; and a run of zeros here is a real measurement -- the
+    #: provider stopped emitting the token, or stopped sending the model that
+    #: carries it -- that no other field can express.
+    stripped_reply_markers: SafeCount = 0
     redacted_response: EvidenceArtifactRef | None = None
 
 

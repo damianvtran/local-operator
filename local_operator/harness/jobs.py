@@ -268,6 +268,20 @@ def _merge_accounting_component(
     total.reasoning_tokens += component.reasoning_tokens
     if component.context_tokens is not None:
         total.context_tokens = component.context_tokens
+    # The moment survives a merge only while EVERY call folded into this row
+    # agrees on it (review round 1, MINOR 3). A row carrying a member's stamp is
+    # a claim that the whole subtree ran in that window, and it is false as soon
+    # as one member ran in another: a peak call plus an off-peak call summed onto
+    # the peak one's stamp was priced 0.60 where the truth is 0.45, and nothing
+    # on the row said so. Agreement keeps the exactness a single-window subtree
+    # genuinely has; disagreement drops to the aggregate's documented fallback
+    # (the wall clock), which is what a turn's own folded total already does and
+    # what the design table calls near-exact for a live child. Driving the price
+    # from ``cost_components`` — the other way to keep each call in its own
+    # window — is not available here by construction: this fold strips them, and
+    # that is what bounds a deep roster's summary.
+    if component.at_ms != total.at_ms:
+        total.at_ms = None
     if mode == "reported":
         total.usd_cost = (total.usd_cost or 0.0) + (receipt or 0.0)
     elif mode == "estimated":
@@ -386,11 +400,32 @@ class AsyncJob(BaseModel):
     # its relay (``harness/subagent.py``), read by the TUI's subagent panel and
     # by parent-side cost aggregation.
     #
-    # The CHILD session's ``provider/model_id``, captured once when the child
-    # is built. Read off the child, never off the parent: ``run_subagent``
-    # takes a ``model_spec`` override, and a child running on a different
-    # model is exactly the fact this records.
+    # The CHILD session's ``provider/model_id``. Written in TWO phases, and the
+    # split is what lets a row that has not started yet still be truthful:
+    # ``run_subagent`` stamps it at REGISTRATION from the spec the launch
+    # resolved (a tier or a role pin), or from the PARENT's label when the
+    # child owns no model and inherits — an absent label there would be
+    # ambiguous between "inherits" and "nobody knows", and the ``task`` result
+    # line the parent model reads has to say which. The runner then OVERWRITES
+    # it from the built child (``effective_model_label``), and that write wins:
+    # a restored provider fallback is the model actually being called, and
+    # ``_accumulate_usage`` prices usage off this field.
     model_label: str | None = None
+    # Whether a TIER or ROLE PIN chose that model, as opposed to the child
+    # inheriting the session's own. Written once, at REGISTRATION, from the spec
+    # the launch resolved (``model_spec is not None``), and never overwritten:
+    # it is an ATTRIBUTION, not a model, so the runner's later label write (a
+    # restored provider fallback, above) does not change whose choice it was.
+    #
+    # It cannot be inferred downstream, and the ``task`` result line is why it
+    # exists: that line used to decide between "on <model>" and "on this
+    # session's model (<model>)" by comparing labels, which reads a tier that
+    # happens to resolve to the session's OWN model as an inherit. That is not
+    # hypothetical — every tier in the operator's config resolved to their
+    # session's model for a while, and the line then told the delegating model
+    # the child had inherited when a pin had in fact been accepted. ``None`` is
+    # "not recorded" and the reader falls back to comparing labels.
+    owns_model: bool | None = None
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same
@@ -444,6 +479,16 @@ class AsyncJob(BaseModel):
     # missing task because a reader must be able to tell "this session started
     # it" from "a previous session did" without consulting the task table.
     restored: bool = False
+    #: Why a RESTORED row reads the way it does — ``"owner-lost"`` for a child
+    #: whose parent's process ended under it. Derived on every restore from the
+    #: roster records and the child's own journal (see
+    #: ``session/restored_rows.py``), never read from disk.
+    #:
+    #: DELIBERATELY ABSENT from ``_ROSTER_ROW_FIELDS``: the sidecar's rows are
+    #: validated by STRICT ``extra="forbid"`` models, so persisting a field an
+    #: older owner does not know would make it drop the whole row at resume — a
+    #: worse degradation than losing the cause. It costs nothing to re-derive.
+    cut_off_cause: str = ""
     # The subagent ROLE this job runs ("task", "scout", ...) and the effort
     # TIER it was launched with ("lo"/"med"/"hi"), stamped at REGISTRATION
     # beside ``prompt`` — a queued job that never starts must still be able to

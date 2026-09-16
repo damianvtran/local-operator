@@ -177,7 +177,6 @@ async def start_exec_control(
     import asyncio
 
     from local_operator.paths import config_dir
-    from local_operator.session.runtime import registry
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import (
         ServingSessionHandle,
@@ -215,7 +214,14 @@ async def start_exec_control(
         session_id=record.session_id,
         pid=record.pid,
         port=record.control_port,
-        record_path=str(registry.record_path(record.pid, config_dir())),
+        # The file this run ACTUALLY published, read off the runtime rather than
+        # recomputed from a second `config_dir()` read: the record's directory
+        # is fixed when the runtime starts, but `_serve` yields at
+        # `asyncio.start_server` before it builds the publisher, so a config dir
+        # that moves during that window makes a recomputed path name a
+        # `<pid>.json` no runtime wrote — and this path is the correlation
+        # handle a supervisor is handed (QA round 2, Q2).
+        record_path=str(runtime.record_path),
         supervised=supervised,
     )
 

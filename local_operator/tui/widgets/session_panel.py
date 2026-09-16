@@ -36,7 +36,7 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -55,16 +55,30 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
+from local_operator.session.spend import SessionSpend
+from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
+    UNKNOWN_COST_CELL,
+    MoneyFigure,
+    SearchSpendSnapshot,
+    combined_spend,
+    cost_label,
+    cost_note_rungs,
+    format_usd_exact,
+)
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
     METRIC_TOKENS,
+    _CostLike,
     append_cost,
     format_cost,
     format_percent,
     format_tokens,
     proportion_bar,
     scope_needs_cost_legend,
+    search_component_text,
+    search_spend_section,
     section_header,
     semantic_style,
 )
@@ -148,6 +162,30 @@ class SessionDiagnostics:
     #: transcript-restoration concept it has no way to know about (and which the
     #: desktop HTTP route that also consumes it has no notion of).
     spend_is_floor: bool = False
+    #: The session's OWN durable spend, exactly as the ``session_spend.v1``
+    #: record carries it, or ``None`` when the session has no record (a
+    #: pre-ledger conversation). The band rounds this by design — the figure is
+    #: 4-6 cells wide there — so ``/session`` is where the EXACT micro-USD is
+    #: readable, which is what makes a rounded reading honest rather than
+    #: lossy: the reader can always ask for the whole number.
+    spend_micro: int | None = None
+    #: The record's knowledge state as a word (``exact``/``partial``/``floor``/
+    #: ``unknown``), so the reconciliation row can say WHICH deficit it is
+    #: describing rather than re-deriving one from the band's mark.
+    spend_knowledge: str = ""
+    #: This session's web-search spend, frozen, or ``None`` when the host has no
+    #: search ledger to read (a test double, a reduced facade). App state read
+    #: from the process-wide ledger rather than session state, which is why it
+    #: arrives at the call site beside ``spend_is_floor`` rather than from
+    #: ``capture``.
+    #:
+    #: A different ledger from everything else on this screen: ``SessionReport``
+    #: and every figure in it come off the persisted analytics ledger, while this
+    #: is ``web_search``'s own in-memory total -- a search is not a model call
+    #: and the model accounting never saw it. Held as its own section rather than
+    #: folded into ``Est. cost`` for that reason: the two are separately truthful
+    #: and a merged row could state neither.
+    search_spend: SearchSpendSnapshot | None = None
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -156,6 +194,19 @@ class SessionDiagnostics:
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)
         model = session.effective_model
+        # ``restored_spend`` is the DURABLE record, and only that: it answers
+        # ``None`` for a session with no record on disk. The live accumulator is
+        # deliberately NOT a fallback for these two fields (review R2-1): a
+        # pre-ledger session's accumulator holds a SEEDED lower bound, so
+        # printing it under a row named "Record total" showed an unmarked,
+        # exact-looking figure for the same state the band marks ``≥`` — two
+        # surfaces disagreeing about one sum. The band owns that state; this
+        # screen simply has nothing durable to add until a record exists.
+        restored_spend = getattr(session, "restored_spend", None)
+        # ``cast`` because the declaration lives on ``SessionProtocol`` while this
+        # probe is duck-typed: pyright sees ``object`` here, and the ``callable``
+        # guard is the actual runtime contract.
+        spend = cast("SessionSpend | None", restored_spend()) if callable(restored_spend) else None
         return cls(
             session_id=session.session_id,
             name=session.conversation_name,
@@ -168,6 +219,23 @@ class SessionDiagnostics:
             context_is_estimate=getattr(state, "context_is_estimate", None),
             generation=getattr(state, "generation", None),
             epoch=getattr(state, "epoch", None),
+            # The MONEY decides whether a row exists, never the call counts:
+            # ``has_money`` is ``micro > 0``, and a record can hold a turn-end
+            # remainder with ``calls == 0`` (QA round 2, Q3 -- the round-1 gate on
+            # ``calls`` hid exactly that money on both surfaces). An UNKNOWN
+            # record still gets its row, because "we cannot state this" is a fact
+            # worth printing; a record holding nothing at all gets none, matching
+            # the band's no-cell behaviour instead of ``$0.00``.
+            spend_micro=(
+                spend.micro
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else None
+            ),
+            spend_knowledge=(
+                spend.knowledge().value
+                if spend is not None and (spend.has_money or spend.unknown_money)
+                else ""
+            ),
         )
 
 
@@ -798,6 +866,14 @@ def build_session_report(
         body.header("Loading usage records")
         body.note("Reading the local ledger. Esc or q cancels.")
         body.note("No model request is made.")
+        # Drawn on the loading frame too, and before the blank the ledger sections
+        # would have added: search spend is not awaiting that read, so holding it
+        # back would make the one number on this screen that is already final the
+        # only one that appears late. The blank goes ABOVE the block for the same
+        # reason every settled section has one -- without it the section header
+        # abuts the loading notes and reads as a fourth note about the ledger.
+        body.blank()
+        _draw_search_spend(body, runtime)
         return body.to_text()
 
     aggregate = report.aggregate
@@ -820,8 +896,52 @@ def build_session_report(
     else:
         _draw_recorded_usage(body, report, runtime, gauge, width, metric)
 
+    _draw_search_spend(body, runtime)
     _draw_runtime_and_scope(body, report, runtime)
     return body.to_text()
+
+
+def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
+    """This session's search spend, as its own attributed block.
+
+    Drawn from the RUNTIME snapshot rather than from ``report``, so it survives
+    a frame whose ledger read failed or found nothing: it is not in that ledger
+    (see :class:`SessionDiagnostics.search_spend`), and a session that spent
+    money on retrieval must not read as free because a different read broke.
+
+    Nothing at all is drawn when the session has no searches, which is the
+    ordinary case for most sessions, and matches the screen's rule of shedding a
+    row whose only content is the absence of a problem.
+    """
+    snapshot = runtime.search_spend
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # READS has money to show, and guarding on searches drew nothing here while
+    # the band above kept the figure.
+    if snapshot is None or not snapshot.count:
+        return
+    body.extend(
+        search_spend_section(
+            snapshot,
+            body.width,
+            # ``bars: operations`` follows the convention every sibling table on
+            # this screen already keeps (``bars: tokens``, ``bars: cost``): the
+            # section meta states what its bar is a share OF. Without it the
+            # eight cells count operations while the column beside them counts
+            # dollars, and on a row where the two point in opposite directions --
+            # twenty free searches beside one paid one -- the reader has to infer
+            # the scale (design review D3).
+            meta="this session · live",
+            note=(
+                # Rewritten with the combined headline: the old note told the reader
+                # this screen kept the two apart, which stopped being true the moment
+                # ``Est. cost`` above started including the search half. A note that
+                # contradicts the row it explains is worse than no note.
+                "Read from the live search ledger, plus any rows recovered from this "
+                "conversation's transcript on resume. The Est. cost row above includes "
+                "this money and names it; the status band shows the same combined figure."
+            ),
+        )
+    )
 
 
 def _gauge_row(runtime: SessionDiagnostics) -> _BarRow | None:
@@ -966,14 +1086,44 @@ def _draw_recorded_usage(
         # tree figure that looks like the own figure it replaced. Every rung
         # still says the scope; the narrow ones trade the breakdown for it,
         # which is the right thing to lose last.
+        # The figure is the session's WHOLE money: model plus retrieval, combined
+        # in ONE place (``costs.combined_spend``) so this screen, ``/analytics``
+        # and the band cannot report three different totals for one session. The
+        # ladder keeps a rung that names the search half at every width, because
+        # the reader must be able to tell a combined figure from a model-only one
+        # -- the failure this row had (the band folded search in, this row did
+        # not, and this is the row a person reads first).
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
+        )
+        ladder = (
+            f"{own} own · {subs} subagents",
+            f"{own} + {subs} subagents",
+            "incl. subagents",
+        )
+        search_note = search_component_text(runtime.search_spend)
+        if search_note:
+            # Appended rather than always present: a session that never searched
+            # must not carry a search clause, which reads as a claim about
+            # retrieval that did not happen.
+            #
+            # The clause drops its own ``incl.`` on a rung that already opens with
+            # one (round-2 design D12): ``incl. subagents · incl. $0.0049 search``
+            # read as a repetition rather than a scope list, where the widest rung
+            # already sounds right (``$0.39 own · $0.98 subagents · incl. …``).
+            def _joined(rung: str) -> str:
+                clause = (
+                    search_note.removeprefix("incl. ") if rung.startswith("incl.") else search_note
+                )
+                return f"{rung} · {clause}"
+
+            ladder = tuple(_joined(rung) for rung in ladder) + (search_note,)
         body.kv(
-            "Est. cost",
-            format_cost(subtree),
-            notes=(
-                f"{own} own · {subs} subagents",
-                f"{own} + {subs} subagents",
-                "incl. subagents",
-            ),
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=ladder,
         )
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
@@ -987,8 +1137,20 @@ def _draw_recorded_usage(
             "other sections are this session only."
         )
     else:
-        note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
-        body.kv("Est. cost", format_cost(subtree), note)
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
+        )
+        # Laddered for the same reason the descendants branch above is (round-1
+        # MAJOR-2): one flat string was cropped mid-note at 60-80 columns, and
+        # the part it lost was the search component this row exists to name.
+        search_note = search_component_text(runtime.search_spend)
+        body.kv(
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=cost_note_rungs(spend, search_component=search_note),
+        )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:
@@ -996,6 +1158,91 @@ def _draw_recorded_usage(
             f"{report.missing_usage_calls:,} requests missing usage · "
             f"{report.unknown_usage_calls:,} unknown"
         )
+    # THE EXACT FIGURE, on demand. The band has 4-6 cells and must round; this
+    # screen has room, so the RECORD's own integer micro-USD is readable here to
+    # the micro-dollar -- which is what makes the band's rounding a convenience
+    # rather than a loss. ``μ$`` in the note says the unit outright, because
+    # ``$1.897843`` invites the reader to wonder whether the last digits are
+    # cents or noise. Labelled "Record" and not "Ledger": this screen IS the
+    # ledger, and two rows calling different sums by the same name is how a
+    # reader concludes one of them is wrong.
+    #
+    # A record can be a LOWER BOUND -- a persisted ``floor: true`` record, or any
+    # ``partial`` one -- so the row wears the same mark the band does, from the
+    # same constant, and names the state in its note (review R2-1). An exact
+    # record is unmarked, because a mark on a whole figure is the same lie in the
+    # other direction.
+    if runtime.spend_micro is not None:
+        bound = runtime.spend_knowledge in {"floor", "partial"}
+        state = runtime.spend_knowledge or "unknown"
+        micro_text = f"{runtime.spend_micro:,} μ$"
+        if state == "unknown":
+            # §8.2: nothing priceable is ``$—``, never ``$0.00``. It carries no
+            # mark and no micro rung either, because ``≥$—`` is a contradiction
+            # -- there is no figure for a bound to qualify (QA round 1, Q1). The
+            # spelling is the band's own constant, so the two cannot drift.
+            body.kv(
+                "Record total",
+                UNKNOWN_COST_CELL,
+                notes=("nothing priceable · this session", "this session"),
+            )
+        else:
+            body.kv(
+                "Record total",
+                f"{LOWER_BOUND_MARK if bound else ''}{format_usd_exact(runtime.spend_micro)}",
+                notes=(
+                    f"{state} · {micro_text} · this session",
+                    f"{micro_text} · this session",
+                    "this session",
+                ),
+            )
+        # RECONCILIATION, as a row rather than a prose apology, and as a row the
+        # GRID owns (design round 1, D2): the first version drew it with
+        # ``body.note``, so its money landed at column 21 where every other value
+        # sits at 24 and the reader's eye had no column to follow. The record and
+        # the ledger count different events -- the ledger sees naming calls,
+        # asides and failed attempts the turn rows never carry, and it is the only
+        # observer that can see a call whose persist was lost -- so naming the
+        # difference is the honest move, while quietly switching either figure for
+        # the other would hide the one signal that says a write was dropped.
+        # Q4: with an UNKNOWN record there is nothing sound to compare against —
+        # the row above says "we cannot state this figure", so signing a Δ against
+        # it would silently substitute ``$0.000000`` for the unknown and report the
+        # ledger's whole sum as a difference from it. The ledger keeps its own row;
+        # only the difference is withheld.
+        ledger = report.aggregate
+        ledger_micro = getattr(ledger, "cost_micro", None) if ledger is not None else None
+        if (
+            state != "unknown"
+            and ledger is not None
+            and ledger.cost_is_known
+            and isinstance(ledger_micro, int)
+        ):
+            # BOTH figures are printed from their exact integer micro-USD, and the
+            # Δ is their exact difference, so the arithmetic on screen checks out
+            # (D3). The first version printed the ledger at 2dp and the Δ from the
+            # unrounded value, so 1.897843 - 1.20 could not produce +0.6984.
+            delta_micro = runtime.spend_micro - ledger_micro
+            # R2-4: the sign alone was ambiguous -- "Δ +0.500750 vs the record"
+            # on the Ledger row left the reader to guess which operand was
+            # subtracted from which. The word names the minuend, so the sign has
+            # a direction without the reader reconstructing it.
+            delta_text = (
+                f"record {'+' if delta_micro >= 0 else '-'}{abs(delta_micro) / 1_000_000:.6f}"
+            )
+            body.kv(
+                # ONE name for one figure (D2): "all calls" is the SCOPE and lives
+                # in the notes, where the ledger's own vocabulary names the sum.
+                "Ledger total",
+                format_usd_exact(ledger_micro),
+                notes=(
+                    f"Δ {delta_text} vs this row · all calls",
+                    f"Δ {delta_text}",
+                    "all calls",
+                ),
+            )
+        elif ledger is not None and ledger.cost_is_known:
+            body.kv("Ledger total", format_cost(ledger), notes=("all calls",))
     if runtime.spend_is_floor:
         # Reconcile the band's ≥ against this screen's figure instead of copying
         # the mark over. They measure different deficits (see
@@ -1037,7 +1284,18 @@ def _draw_recorded_usage(
     # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
     # own scope has no reason to report, and omitting it here would put that
     # mark on screen with its footnote suppressed.
-    scopes = [aggregate, subtree, *report.by_model.values(), *report.by_purpose.values()]
+    # The search-spend block's own marks are NOT in this list: it draws its
+    # footnote beside itself (``search_spend_section``), because the screens that
+    # render the block are not always the screens that render these totals --
+    # `/session`'s loading frame draws the block with no totals at all -- and a
+    # footnote here would both miss that frame and sit far from the marks on
+    # `/analytics`.
+    scopes: list[_CostLike] = [
+        aggregate,
+        subtree,
+        *report.by_model.values(),
+        *report.by_purpose.values(),
+    ]
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()

@@ -14,13 +14,13 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import (
     CustomMessage,
     Message,
     StreamEndEvent,
     StreamTextDelta,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.transcript import Transcript
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 
@@ -343,7 +343,7 @@ async def test_a_busy_turn_wake_and_a_hub_aside_mark_an_arrival(tmp_path):
     parked `wait` slept through both for its whole budget — up to an hour.
     Each must mark, under its own kind, so the woken tool can say why.
     """
-    from local_operator.harness.comms import HUB_MESSAGE_TYPE
+    from local_operator.harness.message_types import HUB_MESSAGE_TYPE
     from local_operator.harness.wake import (
         WAKE_PROMPT_MESSAGE_TYPE,
         DueWake,

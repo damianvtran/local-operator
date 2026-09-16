@@ -112,6 +112,190 @@ def toast_max_width(terminal_width: int) -> int:
     )
 
 
+#: The separator between a failure line's COMMAND and the reason that trails
+#: it. ``McpManager._auth_required_text`` is the one composer that builds this
+#: shape (``/mcp reauth notion — refresh unconfirmed``): the command first, so a
+#: clamp can only ever eat the tail (design review D1/D4/D9), then `` — `` and
+#: the reason.
+_FAILURE_REASON_SEP = " — "
+
+#: The lead of the transport family's copy (``manager.NETWORK_FAILURE_MARKER``).
+#: Mirrored rather than imported: this widget renders an outcome and must not
+#: reach into the SDK-backed MCP manager module for a string. Two facts make it
+#: a reliable signal rather than a guess — the manager only ever composes it
+#: WITH a host (its hostless stdio copy is asserted never to contain it), and
+#: it is the same spelling the durable notice and the ``/mcp`` row print, which
+#: is what makes one marker legible across all three surfaces (design reviews
+#: D1-6).
+#: The lead-ins a transport phrase puts before the host it names, in the order the
+#: manager's own phrase table composes them (``_TRANSPORT_DETAIL_TEXT``: the
+#: tokens are unreachable, timeout, dns, tls, closed). The order itself carries
+#: no meaning — no lead is a prefix of another, so the first match is the only
+#: match — but keeping it aligned makes the mirror reviewable side by side with
+#: the table, and ``test_the_transport_phrases_and_the_host_mirror_agree`` pins
+#: that every phrase in that table resolves its host through this tuple rather
+#: than trusting either side to remember (review round 5, R5-1/R5-2).
+#: WHY they are listed rather than searching the whole phrase for the server's
+#: name: a short name (``net``, ``reach``, ``or``) occurs in the layer wording
+#: itself, so a substring test drops the head for a server the phrase never names
+#: — the D2-3 harm one step over (review round 4, R4-4).
+_HOST_LEADS = (
+    "cannot reach ",
+    "no response from ",
+    "cannot resolve ",
+    "TLS handshake with ",
+    "the connection to ",
+)
+
+
+def _phrase_host(text: str) -> str | None:
+    """The host a transport phrase names, or ``None`` when it names none.
+
+    ``None`` is also the answer for a phrase this table does not know, and the
+    caller keeps the head there: naming the server twice is a smaller sin than
+    naming it not at all.
+    """
+    for lead in _HOST_LEADS:
+        _, marker, tail = text.partition(lead)
+        if marker:
+            # The host is the first token after the lead. What follows it is the
+            # phrase's own tail (``(timed out)``, ``failed``, ``closed``).
+            return tail.split(" ", 1)[0].strip() or None
+    return None
+
+
+_NETWORK_MARKER = "network: "
+
+#: The failure glyph, mirrored from the notice spine (``NoticeBlock``'s ``error``
+#: arm) rather than imported: this widget composes from an OUTCOME and does not
+#: reach into the transcript widget, and the mirror is pinned by test. It marks
+#: every row of the failure card, which is what stops a row of it being read as
+#: the continuation of the transcript row it floats over (design round 2, D2-2).
+_TOAST_FAILURE_GLYPH = "✗"
+
+#: What a failure line must LEAD with for its tail to be a droppable REASON.
+#: Deliberately the command prefix rather than "the text contains a dash": the
+#: no-OAuth-endpoint challenge line (``notion rejected our credentials (401) —
+#: set its API key or headers``) is a diagnostic whose second clause is half of
+#: the statement, and it is explicitly out of this change's scope (design review
+#: D10), so it must keep rendering exactly as it does today.
+_COMMAND_LEAD = "/mcp "
+
+
+def _network_group_line(names: list[str], max_cells: int) -> str:
+    """``network: a, b`` — the shared-cause footer — or a COUNT when names do not fit.
+
+    The marker, not ``failed (network): ``: the durable notice and the ``/mcp``
+    row both print ``network: …``, so a reader who learns the marker from either
+    one met a differently-shaped label here (design review D1-6). One spelling,
+    and the head line above already states the failure (``MCP: 0 of 3 servers
+    up``), so dropping the word costs nothing.
+
+    The COUNT is the narrow-width fallback, and it is deliberate: the marker
+    takes cells the names used to have, so the old clamp truncated the payload
+    to nothing (measured at 28 columns, ``failed (network): l…`` where the base
+    fitted ``failed: linear, not…``). The marker is the signal this change
+    exists to add and the part that must survive; the names are still carried
+    whole by the durable notice and by ``/mcp``, so a group that does not fit is
+    reported as its count rather than as a one-letter ghost of a list (design
+    review D1-3).
+    """
+    labelled = _NETWORK_MARKER + ", ".join(names)
+    if cell_len(labelled) <= max_cells:
+        return labelled
+    counted = f"{_NETWORK_MARKER}{len(names)} {_plural(len(names), 'server')}"
+    if cell_len(counted) <= max_cells:
+        return counted
+    # Not even the count fits: keep the marker and clamp the count, so the
+    # shared cause still reads as the shared cause.
+    return truncate_cells(counted, max(1, max_cells))
+
+
+def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
+    """``failed: <name> — <text>``, composed against the card's real budget.
+
+    WHY a composer rather than the bare clamp that used to sit here: this row is
+    ``failed: `` + name + `` — `` + the failure text, and the auth text names the
+    server a SECOND time inside its command. The unconfirmed form is therefore
+    ``45 + 2n`` cells for an ``n``-cell name against the card's 58 content cells
+    (``60 - TOAST_PADDING_CELLS``, at any terminal 66 cells or wider), so it fits
+    while ``n <= 6`` and the clamp then eats whatever sits at the END of the line
+    — which for ``minerva-qa`` (10 cells) was 7 cells of the REASON at 100
+    columns, and for ``launchdarkly`` (12) the command's own name argument at 44
+    (design review round 3, D11: measured rows ``failed: minerva-qa — /mcp reauth
+    minerva-qa — refresh unc…`` and ``failed: launchdarkly — /mcp reauth…``, the
+    latter a command that errors if the user follows it).
+
+    So the budget decides what gets SHED, not merely where the string is cut:
+
+    * **Transport lines drop the head** — a ``network:`` line already names its
+      server BY HOST, so ``failed: linear — network: cannot reach
+      linear.example.com`` stacked two colons and said ``linear`` twice inside
+      57 cells. The host is the identity the user acts on, so the head goes and
+      the phrase keeps both the layer and the server (design review D1-2) — but
+      only while the host really does carry the name: ``jira`` at
+      ``https://mcp.acme.com/mcp`` names no part of itself in the phrase, so the
+      head is kept there and the row reads ``failed: jira — network: cannot reach
+      mcp.acme.com``, which is a pairing rather than the doubling D1-2 objected
+      to (design review D2-3) — decided on the HOST the phrase names, not on the
+      raw phrase: the gate asks :func:`_phrase_host` for the token after the
+      layer's lead-in, so a short name that happens to appear in the wording
+      itself (``net``, ``reach``, ``or``) is not mistaken for a name the host
+      carries (review round 4, R4-4). The hostless stdio copy has no host and
+      therefore keeps the head, which is why the marker (only ever composed WITH
+      a host) is what selects this rung.
+    * **Rung 1** — the whole row, whenever it fits. Two cells narrower than the
+      corpus design review D9 verified: the detail row now opens on its own glyph
+      (D2-2), and that glyph comes out of the same budget, so at the default
+      58-cell card the 57-cell D9 row no longer fits rung 1. Measured, the copy
+      that goes is the two cells of ``— `` (the row is 55 cells where it was 57,
+      while the budget is 56 — the *shortfall* is one cell) and the ellipsis moves
+      into their place, ``…(401) —…`` → ``…(401)…``. The pinned rows are
+      re-measured at the painted width rather than left describing the pre-glyph
+      one (review round 4, R4-3; round 5, R5-3).
+    * **Rung 2** — the command, marked as having shed the reason. The reason is
+      the right part to lose: it is the only piece that is not a command the
+      user has to be able to type, and ``/mcp`` plus the durable transcript
+      notice both carry it whole. The ``…`` is the same cue the 44-column card
+      has always shown (D9 accepted it as marking the shed reason);
+    * **Rung 3** — the command alone, for the widths where even the mark does
+      not fit (a 51-cell terminal has a 43-cell card, exactly the width of
+      ``failed: minerva-qa — /mcp reauth minerva-qa``). Without this rung the
+      clamp cut the name's last character — the same D11 defect, one cell over.
+    * **Backstop** — the clamp, for a text that is not a command-with-reason
+      (every plain diagnostic, the D10 challenge line, a 200-cell error) and for
+      a name so long that not even the command fits on the row. Never worse than
+      the behaviour it replaces.
+
+    The D11 fall-through is 2 cells WIDER than it was, for the same reason, and
+    that is a recorded COST rather than a claim of parity: at a 44-cell card the
+    detail budget is 42 cells, so the row now reads
+    ``failed: minerva-qa — /mcp reauth minerva-…`` — the command's own name
+    argument truncated, a command that errors if followed — where before the
+    glyph it showed ``failed: minerva-qa — /mcp reauth minerva-qa…`` whole. The
+    rungs above are unchanged and the boundary simply moved (46/45 where it was
+    44/43); what is NOT true any more is that the fall-through keeps the base's
+    pixels at 8+ cell names on that card. A future maintainer weighing a glyph
+    on this row should read this paragraph as priced: 2 cells is exactly one
+    character of the name argument at the tight end.
+    """
+    if text.startswith(_NETWORK_MARKER) and name.lower() in (_phrase_host(text) or "").lower():
+        # Case-insensitive on purpose: the host is lower-cased by the SDK/HTTP
+        # layer while a configured name need not be, and a name that differs only
+        # in case is still the name the user reads twice.
+        return truncate_cells(text, max(1, max_cells))
+    label = f"failed: {name} — "
+    full = label + text
+    if cell_len(full) <= max_cells:
+        return full
+    if text.startswith(_COMMAND_LEAD) and _FAILURE_REASON_SEP in text:
+        command = text.split(_FAILURE_REASON_SEP, 1)[0]
+        for shed in (f"{label}{command}…", f"{label}{command}"):
+            if cell_len(shed) <= max_cells:
+                return shed
+    return truncate_cells(full, max_cells)
+
+
 def format_mcp_startup(
     outcome: McpStartupOutcome,
     max_cells: int = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS,
@@ -161,18 +345,57 @@ def format_mcp_startup(
 
     if outcome.failures:
         names = sorted(outcome.failures)
+        # The detail row carries its own glyph too (see where it is appended), so it
+        # is composed against the same 2 cells the head already pays — otherwise a
+        # row sized to the full budget would wrap and take the card to three rows.
+        detail_budget = max(1, max_cells - 2)
         if len(names) == 1:
             # Says FAILED, like the multi-server variant: `gh — command not
             # found: gh` never named the state, so the reader had to infer which
-            # server the head line meant and read the name twice to do it. Both
-            # variants now open on the same word, which is what makes the second
-            # line scannable as a failure list rather than as prose.
-            detail = f"failed: {names[0]} — {outcome.failures[names[0]]}"
+            # server the head line meant and read the name twice to do it. The
+            # transport single-failure line is the one exception and it is
+            # deliberate: its text opens on the marker (``network: …``) and
+            # already names its server by host, which is why
+            # :func:`_fit_failure_line` drops the head for that family (design
+            # review D1-2). Every other family still opens on ``failed: ``.
+            detail = _fit_failure_line(names[0], outcome.failures[names[0]], detail_budget)
         else:
-            detail = "failed: " + ", ".join(names)
+            # Multiple failures are a LIST, and when they share one cause the
+            # list is the wrong shape: naming nine servers that all say the same
+            # thing buries the one fact the user can act on, which is that the
+            # machine's connection is what is broken. So a group that is ENTIRELY
+            # connectivity is labelled once instead — ``network: a, b`` keeps the
+            # names (the user may care which servers are dark) while stating the
+            # shared cause up front, in the SAME spelling the durable notice and
+            # ``/mcp`` print. The marker is longer than ``failed: ``, so it spends
+            # the same fixed budget: the clamp still truncates, and when even the
+            # names cannot survive the clamp the line falls back to the count
+            # (``network: 3 servers``) rather than to a one-letter ghost of a
+            # name. The single-failure path above deliberately does NOT take this
+            # branch — its text is the full ``network: …`` line, which already
+            # names the network.
+            if outcome.all_failures_are_network:
+                detail = _network_group_line(names, detail_budget)
+            else:
+                detail = truncate_cells("failed: " + ", ".join(names), detail_budget)
         text.append("\n")
+        # Every row of the card carries its own glyph, head and detail alike.
+        # WHY the detail row needs one: the card FLOATS over the transcript, so a
+        # row of it lands on a transcript row — measured at stand-down, the
+        # notice's first row (``…linear.example.com — /mcp``) kept its dash under
+        # the card's fill and the row read as ONE sentence:
+        # ``…linear.example.com — network: linear, notion, slack`` (design round 2,
+        # D2-2). A glyph at the card's left edge is the boundary that cannot be
+        # read as a continuation of whatever it abuts, whatever width the row
+        # under it happens to be; the alternative fixes (moving the card into the
+        # screen's inset, or reserving rows for it) either clip the card or are
+        # the layout reflow the toast LAYER exists to avoid.
         text.append(
-            truncate_cells(detail, max(1, max_cells)),
+            f"{_TOAST_FAILURE_GLYPH} ",
+            style=Style(color=theme_mod.semantic_color("danger")),
+        )
+        text.append(
+            detail,
             style=Style(color=theme_mod.semantic_color("danger")),
         )
 
