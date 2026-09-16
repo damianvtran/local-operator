@@ -6939,7 +6939,10 @@ async def test_mcp_logout_empty_state_distinguishes_no_oauth_server_from_none_st
         ):
             await _type_into_editor(pilot, app, "/mcp logout ")
             assert editor.picker.suggestions() == []
-            assert "/mcp add" in editor.picker._notice, editor.picker._notice
+            # The command that actually WRITES the auth block, per design round
+            # 3's D7: `/mcp add <name> <url>` cannot, so it is not the step this
+            # names.
+            assert "lop mcp add --oauth" in editor.picker._notice, editor.picker._notice
             assert "no stored credential" not in editor.picker._notice
 
 
@@ -6954,8 +6957,10 @@ async def test_mcp_logout_picker_says_when_the_config_layer_is_unreadable() -> N
 
     The loader is called twice on this path — once by `oauth_server_names` and
     once by the URL mapping — so the failure is staged on the SECOND call, which
-    is the only shape that reaches the branch at all (a first-call failure is
-    answered by the names guard above it).
+    is the only shape that reaches the branch at all. A FIRST-call failure never
+    gets here: the names guard above turns it into an empty list with no notice
+    whatsoever, which the design round recorded as its own follow-up (review
+    round 3, NIT-2 — the earlier wording said "answered", which overstated it).
     """
     from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
 
