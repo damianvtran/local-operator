@@ -4243,23 +4243,7 @@ class ServingSessionHandle(SessionHandle):
         # name.
         names: list[str] = []
         manager = getattr(session, "mcp_manager", None)
-        if manager is None:
-            # NO MANAGER IS NOT AN EMPTY ROSTER, and only the boot record can
-            # tell the states apart — the read ``_mcp_status`` makes for the
-            # same reason, whose docstring this one follows. Discovery that
-            # RAISED never assigns ``mcp_manager``; it records the exception on
-            # ``mcp_startup`` instead, and that session is a machine which HAS
-            # an MCP setup that could not be read. That is where "no MCP
-            # servers configured." is least true and most damaging, so answer
-            # with the failure instead of denying the setup. The other states
-            # keep the old answer: a not-yet-wired session carries no boot
-            # record yet, and an unimportable MCP package deliberately records
-            # an EMPTY outcome, because a host that never used MCP must not be
-            # told MCP is broken.
-            failure = _mcp_boot_failure(session)
-            if failure is not None:
-                return SlashResult(kind="notice", text=failure, style="warning")
-        else:
+        if manager is not None:
             try:
                 names = list(manager.get_all_server_names())
             except Exception:  # noqa: BLE001 — a listing must never raise
@@ -4273,9 +4257,27 @@ class ServingSessionHandle(SessionHandle):
                     text="could not read this session's MCP server list.",
                     style="warning",
                 )
-        if not names:
-            return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
-        return SlashResult(kind="block", data={"type": "mcp"})
+        if names:
+            return SlashResult(kind="block", data={"type": "mcp"})
+        # AN EMPTY ROSTER IS THE QUESTION — not an absent manager (QA round 1,
+        # Q2). ``discover_and_load_mcp_tools`` does NOT raise for a discovery
+        # failure: it catches, logs, and returns the manager alongside a
+        # synthetic error entry, which ``session_factory`` keys as ``discovery``
+        # (``mcp/__init__.py:145-149``). So the state a user actually reaches
+        # has a MANAGER whose roster came back empty and a boot record that says
+        # why. Keying this on ``manager is None`` missed exactly that state and
+        # answered "no MCP servers configured." there too — the sentence this
+        # listing exists to stop saying. The boot record is the only thing that
+        # can tell an empty roster from an unread one, and it is what
+        # ``tui.app._mcp_status`` reads for the same reason.
+        failure = _mcp_boot_failure(session)
+        if failure is not None:
+            return SlashResult(kind="notice", text=failure, style="warning")
+        # Genuinely empty, and honestly said: either no boot record at all (the
+        # wiring has not run yet) or an outcome the wiring records as EMPTY on
+        # purpose because the MCP package would not import — a host that never
+        # used MCP must not be told MCP is broken.
+        return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
 
     def _grant_notice(self, text: str, kind: str) -> None:
         """Report a settled MCP grant to every front end watching this session.
