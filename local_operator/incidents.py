@@ -190,17 +190,31 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             # "provider error" used to sit here and is DELIBERATELY GONE. It was
             # never a provider's wording: it is the KIND LABEL this harness puts
             # in front of every wrapped transport failure
-            # (``ProviderError.__str__`` -> "transient provider error: ..."),
-            # so it classified the harness's own sentence rather than the
-            # failure's evidence. Sitting in the ``provider`` rule, which is
-            # ordered AHEAD of ``network``, it swallowed every status-less
-            # transport failure before the network rule was consulted —
-            # including the 2026-09-15 connect failure, whose card told the
-            # operator the provider was failing server-side when the machine
-            # could not open a socket at all. The rule keeps the tokens a
-            # PROVIDER writes about ITSELF (5xx statuses, upstream, gateway),
-            # which is what "genuine 5xx/upstream failures stay on ``provider``"
-            # means; a harness-authored label must not decide a category.
+            # (``ProviderError.__str__`` -> "transient provider error: ..."), an
+            # always-present prefix that classified the harness's own sentence
+            # instead of the failure's evidence, from a rules position ordered
+            # AHEAD of `network` — which is how a pre-connect failure on
+            # 2026-09-15 came to be reported to the operator as the provider
+            # failing server-side.
+            #
+            # Removing it on its own left a real hole, caught in agent review
+            # round 1 (R1-1): the label was the ONLY matcher for 5xx statuses
+            # outside the four enumerated above — 501, 505-510, Cloudflare's
+            # 52x, nginx's 597 — because those four DIGITS were doing work they
+            # could not carry, and for a status-less transport class whose name
+            # carries no connection-ish wording ("transient provider error:
+            # ReadError"). All of those fell through to `unknown`, whose
+            # `Incident.render` omits the `suggested action:` line ENTIRELY —
+            # strictly less than the model was told before this PR, which is the
+            # opposite of the change's purpose. Two token families close the
+            # hole, and neither is the label:
+            #   - "http 5", a STATUS-SHAPED token. The harness's own rendering
+            #     makes it unambiguous — ``ProviderError.__str__`` writes
+            #     "(HTTP <status>)" — so the enumerated digits above are now
+            #     examples rather than the coverage;
+            #   - the transport CLASS NAMES on the `network` rule below, which is
+            #     where a status-less socket failure belongs.
+            "http 5",
         ),
     ),
     (
@@ -230,6 +244,19 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "can't assign requested address",
             "cannot assign requested address",
             "eaddrnotavail",
+            # The httpx/httpcore transport CLASS NAMES, which
+            # ``wrap_transport_error`` puts verbatim into the message
+            # ("<ClassName>: <detail>") and which are routinely raised with an
+            # EMPTY detail (``httpx.ReadError('')`` is what a TCP RST mid-body
+            # surfaces as). With no message and no status there is no other
+            # token to match, and agent review R1-1 measured exactly that: a
+            # status-less transport failure used to be caught by the harness's
+            # own "provider error" label and, once the label was removed,
+            # classified `unknown` with no hint at all.
+            "readerror",
+            "writeerror",
+            "closeerror",
+            "protocolerror",  # covers RemoteProtocolError and LocalProtocolError
         ),
     ),
     ("mcp", ("mcp", "model context protocol", "tool bridge", "circuit breaker")),
@@ -272,15 +299,17 @@ _HINTS: dict[str, str] = {
     "wait for the user.",
     "provider": "The provider is failing server-side: a retry may work; if it "
     "repeats, suggest switching model or provider.",
-    # Rewritten after the 2026-09-15 incident, where a PRE-CONNECT connect
-    # failure landed on this hint and told the operator to switch provider —
-    # advice that cannot help when the machine has no working network, and the
-    # reason the operator concluded failover itself was broken. The category
-    # now covers both halves of a connection failure, so the hint names the
-    # machine first and the mid-stream case second.
-    "network": "This machine could not reach the network (or the connection died "
-    "mid-stream): retrying is usually right; if it repeats, check this "
-    "machine's connectivity rather than switching provider.",
+    # Rewritten twice. The first version named the machine, which was right for
+    # the pre-connect case this PR is about but WRONG for the rest of the
+    # category: a refused or reset connection is a TCP RST from the far end,
+    # which proves this machine's network works, and the failover layer
+    # deliberately treats it as an ordinary transient so a dead local provider
+    # keeps its rotation and fallback walk (agent review R1-2). The category has
+    # to speak for both halves, so the hint does.
+    "network": "A connection failure. If the far end refused or reset it, it did "
+    "answer — retrying or switching target is reasonable. If this machine could "
+    "not reach the network at all, retrying is usually right, and a repeat means "
+    "checking this machine's connectivity rather than switching provider.",
     "mcp": "An MCP server is unavailable: its tools are gone until it reconnects. "
     "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "
